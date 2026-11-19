@@ -336,6 +336,31 @@ def test_the_evaluation_section_sets_the_sandboxes_that_one_process_holds_at_onc
     assert service_config_from_mapping(resolved).evaluation_max_sandboxes == sandboxes
 
 
+@pytest.mark.parametrize(("on_stop", "valid"), [(None, True), ("requeue", True), ("finish", True), ("drain", False)])
+def test_the_evaluation_section_sets_what_a_stopping_process_does_with_its_rollouts(on_stop, valid) -> None:
+    evaluation = {} if on_stop is None else {"on_stop": on_stop}
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": evaluation})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"evaluation\.on_stop must be one of requeue, finish"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).evaluation_on_stop == (on_stop or "requeue")
+
+
+@pytest.mark.parametrize(("archive_bytes", "valid"), [(2 * 1024**3, True), (0, False), (True, False)])
+def test_the_data_section_sets_the_largest_task_archive_body(archive_bytes, valid) -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "data": {"max-task-archive-bytes": archive_bytes}})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"data\.max_task_archive_bytes"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).max_task_archive_bytes == archive_bytes
+    default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
+    assert default.max_task_archive_bytes == 512 * 1024**2
+
+
 @pytest.mark.parametrize(("jobs", "valid"), [(4, True), (0, False), (True, False)])
 def test_the_training_section_sets_the_jobs_that_one_process_runs_at_once(jobs, valid) -> None:
     resolved = translate_layout({"reef": {"token": "t"}, "training": {"max_jobs": jobs}})

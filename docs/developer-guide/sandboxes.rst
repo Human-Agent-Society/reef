@@ -76,6 +76,23 @@ sandbox, ``lifecycle={"on_timeout": "kill"}``. The argument asks the service to
 delete the sandbox at the end of its lifetime. Harbor's own class sends no
 such argument, so a self-hosted service can pause the sandbox instead.
 
+The class also builds a task's Dockerfile differently in two ways:
+
+- E2B's Dockerfile parser drops ``COPY --chmod``. The class adds a ``chmod``
+  after each such copy, so the files keep their modes.
+- AgentENV's E2B template builds refuse every COPY step. With
+  ``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class builds the Dockerfile with
+  ``aenv build`` instead (``reef.execution.sandbox.agentenv_build``). BuildKit
+  then builds it with Docker's semantics, multi-stage builds included. Before a
+  build, the class reads the template's status. It uses a ready template, waits
+  for a build that another trial runs, and deletes a failed template before it
+  builds again. A template that stays ``waiting`` for three minutes has no build
+  behind it, for example after an ``aenv build`` was killed, so the class also
+  deletes it and builds again. A build or a status read that the AgentENV API
+  refuses with 429, 502, 503 or 504 is tried again until the environment's build
+  timeout. An AgentENV worker answers 429 when it already runs as many builds as
+  it takes at once.
+
 Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
 gives it to each in-process trial and to each environment build. That covers
 the generator's runs, the evaluation rollouts and the training rollouts. A

@@ -9,9 +9,12 @@ sandbox at most an hour when it is created, so a session that runs longer
 asks for the hour again before it ends (:class:`SandboxKeeper`).
 
 ``KillOnTimeoutE2BEnvironment`` reuses Harbor's E2B environment for task trials. It requests deletion at timeout,
-so AgentENV deletes an abandoned sandbox instead of pausing it. The shared ``environment_config`` selects this
-class for Reef's Harbor rollouts and generator checks through ``import_path``. A standalone Harbor trial that
-selects only ``e2b`` uses Harbor's own class.
+so AgentENV deletes an abandoned sandbox instead of pausing it. It also keeps the file modes of a task's
+``COPY --chmod``, which E2B's Dockerfile parser ignores (:func:`dockerfile_with_copy_modes`). On AgentENV, whose E2B
+template builds take no files, ``REEF_E2B_DOCKERFILE_BUILD=aenv`` makes it build a task's Dockerfile with
+``aenv build`` (:mod:`reef.execution.sandbox.agentenv_build`). The shared
+``environment_config`` selects this class for Reef's Harbor rollouts and generator checks through ``import_path``.
+A standalone Harbor trial that selects only ``e2b`` uses Harbor's own class.
 
 A service can keep a sandbox's ports private and return a traffic access token for them. An :class:`E2BSession`
 then sends that token with each request to the sandbox's relays (:meth:`E2BSession.tunnel_headers`).
@@ -22,7 +25,13 @@ requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 
 from __future__ import annotations
 
+import io
 import logging
+import math
+import os
+import posixpath
+import re
+import shlex
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -34,6 +43,13 @@ from harbor.environments.e2b import E2BEnvironment
 from harbor.models.task.config import NetworkMode
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from reef.execution.sandbox.agentenv_build import (
+    AgentEnvTemplates,
+    DockerfileBuild,
+    dockerfile_build,
+    dockerfile_sets_start_command,
+    ensure_aenv_template,
+)
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
@@ -64,6 +80,69 @@ SANDBOX_MAX_TIMEOUT_S = 3600
 SANDBOX_RENEW_MARGIN_S = 300
 #: The header that carries a sandbox's traffic access token to a port of a private sandbox.
 TRAFFIC_ACCESS_TOKEN_HEADER = "e2b-traffic-access-token"
+#: The end of the template alias of a task whose Dockerfile has ``--chmod``. Harbor's class builds that template
+#: without the modes, so Reef's class does not use a template that Harbor's class built.
+COPY_MODES_TEMPLATE_SUFFIX = "__copy-modes"
+#: The end of the template alias that ``aenv build`` builds, so that it never names a template of E2B's template API,
+#: which AgentENV builds without the task's files.
+AENV_TEMPLATE_SUFFIX = "__aenv"
+
+
+def dockerfile_with_copy_modes(dockerfile: str, context_dir: Path) -> str:
+    """``dockerfile`` with each ``--chmod`` of a COPY or ADD done by a ``chmod`` after it.
+
+    E2B's Dockerfile parser ignores ``--chmod``, so a copied file keeps the mode that it has in the build context.
+    In a task, that can make a root-only file readable, or remove the setuid bit of a wrapper. In the result, each
+    COPY or ADD with ``--chmod=MODE`` has no ``--chmod``, and a RUN after it sets MODE as Docker does. It sets MODE
+    on each copied file. For a copied directory, it runs ``chmod -R`` on the destination, which also changes files
+    that were in that destination before. The RUN runs as root. When an earlier USER names another user, the result
+    sets ``USER root`` before the RUN and that user again after it.
+
+    ``context_dir`` is the build context: it tells a file source from a directory source. A source with a glob
+    pattern is each path that matches it. All other lines keep their text. A Dockerfile without ``--chmod`` is
+    returned unchanged.
+    """
+    # Harbor's e2b extra installs dockerfile-parse, which E2B's own parser also uses.
+    from dockerfile_parse import DockerfileParser
+
+    lines = dockerfile.splitlines(keepends=True)
+    user = "root"
+    for instruction in DockerfileParser(fileobj=io.BytesIO(dockerfile.encode())).structure:
+        if instruction["instruction"] == "USER":
+            user = instruction["value"].strip()
+            continue
+        mode_flag = re.search(r"(?:^|\s)--chmod=(\S+)", instruction["value"])
+        if instruction["instruction"] not in ("COPY", "ADD") or mode_flag is None:
+            continue
+        arguments = " ".join(
+            (instruction["value"][: mode_flag.start()] + instruction["value"][mode_flag.end() :]).split()
+        )
+        paths = [argument for argument in shlex.split(arguments) if not argument.startswith("--")]
+        destination = paths[-1]
+        sources: list[Path] = []
+        for pattern in paths[:-1]:
+            if any(character in pattern for character in "*?["):
+                sources.extend(sorted(context_dir.glob(pattern)))
+            else:
+                sources.append(context_dir / pattern)
+        into_directory = destination.endswith("/") or len(sources) > 1
+        mode = shlex.quote(mode_flag.group(1))
+        commands = []
+        for source in sources:
+            if source.is_dir():
+                commands.append(f"chmod -R {mode} {shlex.quote(destination)}")
+            elif into_directory:
+                commands.append(f"chmod {mode} {shlex.quote(posixpath.join(destination, source.name))}")
+            else:
+                commands.append(f"chmod {mode} {shlex.quote(destination)}")
+        chmod_run = f"RUN {' && '.join(commands)}\n"
+        as_root = user.split(":")[0] in ("root", "0")
+        chmod_lines = chmod_run if as_root else f"USER root\n{chmod_run}USER {user}\n"
+        # The instruction's lines become the new text; the later lines keep their places in ``lines``.
+        lines[instruction["startline"]] = f"{instruction['instruction']} {arguments}\n{chmod_lines}"
+        for index in range(instruction["startline"] + 1, instruction["endline"] + 1):
+            lines[index] = ""
+    return "".join(lines)
 
 
 def template_alias(adapter: str, version: str) -> str:
@@ -339,14 +418,93 @@ class E2BSession(RemoteSession):
 
 
 class KillOnTimeoutE2BEnvironment(E2BEnvironment):
-    """Harbor's ``E2BEnvironment`` whose sandbox is created with ``lifecycle={"on_timeout": "kill"}``.
+    """Harbor's ``E2BEnvironment`` whose sandbox is created with ``lifecycle={"on_timeout": "kill"}``, and whose
+    template keeps the modes of ``COPY --chmod``.
 
-    Values: those of ``E2BEnvironment``. Harbor makes one from a trial's environment config, so the template, the
-    sandbox's lifetime (``sandbox_timeout_secs``), its metadata, its startup environment and its network options are
-    the parent's, and ``type()`` is ``e2b``.
+    Values: those of ``E2BEnvironment``. Harbor makes one from a trial's environment config, so the sandbox's lifetime
+    (``sandbox_timeout_secs``), its metadata, its startup environment and its network options are the parent's, and
+    ``type()`` is ``e2b``. ``dockerfile_build`` is the value of ``REEF_E2B_DOCKERFILE_BUILD`` when it was made. The
+    template is the parent's, with two differences for a task that builds its image from a Dockerfile:
+
+    - With ``dockerfile_build`` ``aenv``, ``aenv build`` builds the template on the AgentENV deployment
+      (``reef.execution.sandbox.agentenv_build``), and its alias ends with ``AENV_TEMPLATE_SUFFIX``.
+    - Else, when the Dockerfile has ``--chmod``, the template is built from ``dockerfile_with_copy_modes`` of it, and
+      its alias ends with ``COPY_MODES_TEMPLATE_SUFFIX``.
+
     Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
-    as its ``import_path``. ``start`` creates the sandbox with ``_create_sandbox``, and ``stop`` deletes it, as before.
+    as its ``import_path``. ``start`` builds a missing template with ``_create_template``, creates the sandbox with
+    ``_create_sandbox``, and ``stop`` deletes it, as before.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.dockerfile_build = dockerfile_build(os.environ)
+        # Harbor builds the template from the task's image when it has one; then the Dockerfile is not read.
+        if self.task_env_config.docker_image:
+            return
+        if self.dockerfile_build == "aenv":
+            self._template_name += AENV_TEMPLATE_SUFFIX
+            return
+        dockerfile = self._environment_definition_path.read_text()
+        if dockerfile_with_copy_modes(dockerfile, self.environment_dir) != dockerfile:
+            self._template_name += COPY_MODES_TEMPLATE_SUFFIX
+
+    @property
+    def builds_with_aenv(self) -> bool:
+        """Whether ``aenv build`` builds this trial's template: the task builds from a Dockerfile, and
+        ``REEF_E2B_DOCKERFILE_BUILD`` is ``aenv``."""
+        return self.dockerfile_build == "aenv" and not self.task_env_config.docker_image
+
+    @override
+    async def _does_template_exist(self) -> bool:
+        # An AgentENV alias can name a template that is still building or that failed. ``ensure_aenv_template`` in
+        # ``_create_template`` reads its status and returns at once for a ready template.
+        if self.builds_with_aenv:
+            return False
+        return await super()._does_template_exist()
+
+    # Harbor 0.25.0's template build, with two changes: with ``builds_with_aenv``, ``aenv build`` builds the template;
+    # else the Dockerfile is ``dockerfile_with_copy_modes`` of the task's Dockerfile. The decorator is Harbor's retry
+    # policy. The parity test in tests/sandbox/test_task_environment.py compares the build with Harbor's for a
+    # Dockerfile without ``--chmod``.
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    @override
+    async def _create_template(self) -> None:
+        if self.builds_with_aenv:
+            dockerfile = self._environment_definition_path.read_text()
+            cpus = self._effective_cpus
+            build = DockerfileBuild(
+                context_dir=self.environment_dir,
+                dockerfile=self._environment_definition_path,
+                alias=self._template_name,
+                cpu_count=None if cpus is None else int(cpus),
+                memory_mb=self._effective_memory_mb,
+                timeout_seconds=min(max(math.ceil(self.task_env_config.build_timeout_sec), 1), 86400),
+                start_command=dockerfile_sets_start_command(dockerfile),
+            )
+            await ensure_aenv_template(AgentEnvTemplates.from_environ(os.environ), build)
+            return
+        # Keep this optional SDK import inside template creation.
+        from e2b import AsyncTemplate, Template
+
+        image = self.task_env_config.docker_image
+        if image:
+            template = Template().from_image(image=image)
+        else:
+            dockerfile = dockerfile_with_copy_modes(
+                self._environment_definition_path.read_text(), self.environment_dir
+            )
+            template = Template(file_context_path=str(self.environment_dir)).from_dockerfile(
+                dockerfile_content_or_path=dockerfile
+            )
+        # Harbor leaves out a resource that the task does not set; None is E2B's default for both.
+        cpus = self._effective_cpus
+        await AsyncTemplate.build(
+            template=template,
+            alias=self._template_name,
+            cpu_count=None if cpus is None else int(cpus),
+            memory_mb=self._effective_memory_mb,
+        )
 
     # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The body is
     # Harbor's create call with one more argument, and the decorator is Harbor's retry policy, because Harbor's
@@ -370,11 +528,14 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
 
 __all__ = [
+    "AENV_TEMPLATE_SUFFIX",
+    "COPY_MODES_TEMPLATE_SUFFIX",
     "TRAFFIC_ACCESS_TOKEN_HEADER",
     "E2BExecutor",
     "E2BSession",
     "KillOnTimeoutE2BEnvironment",
     "SandboxKeeper",
+    "dockerfile_with_copy_modes",
     "ensure_template",
     "template_alias",
 ]

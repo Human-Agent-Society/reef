@@ -679,6 +679,7 @@ def build_dispatcher(
                     ),
                     agent_host=settings.evaluation_agent_host,
                     slots=settings.evaluation_max_sandboxes,
+                    on_stop=settings.evaluation_on_stop,
                 )
             )
         if (
@@ -811,6 +812,7 @@ def build_app(
                 Path(settings.artifact_cache_dir) / "imports",
             ),
             harness_inference_url=settings.harness_inference_url,
+            max_task_archive_bytes=settings.max_task_archive_bytes,
         )
     except BaseException:
         with suppress(Exception):

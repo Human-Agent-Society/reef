@@ -30,7 +30,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -50,11 +50,12 @@ from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import QueueWorker, WorkerStoppedError
+from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
-from reef.harness.harbor.agent import tree_agent, trial_directory
+from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
@@ -73,6 +74,9 @@ SERVE_WAIT_S = 12 * 3600.0
 SERVE_POLL_S = 1.0
 #: The seconds between two checks of a running trial's lease.
 LEASE_CHECK_S = 1.0
+#: What a stopping evaluation worker does with the rollouts that it runs: ``requeue`` cancels each one and gives it
+#: back to the queue, where another worker starts it again; ``finish`` takes no new rollout and finishes each one.
+ON_STOP_CHOICES = ("requeue", "finish")
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
 #: The directory of a trial's verifier directory where the verifier writes its own model calls and trajectories: the
@@ -119,19 +123,26 @@ class TreeHarness:
     """A harness tree that a rollout runs, read from an artifact item.
 
     Values: ``adapter`` is the name of an adapter, ``api`` the API dialect of the model calls, and ``files`` maps
-    each path of the tree to its text. Purpose: control reads it once when it accepts an evaluation, so that each
-    rollout runs the same tree; a worker runs it.
+    each path of the tree to its text. ``env`` maps the name of each variable that the agent's commands get to its
+    value; its token limits, when it sets them, are positive integers (``token_limits``). Purpose: control reads it
+    once when it accepts an evaluation, so that each rollout runs the same tree; a worker runs it.
     """
 
     adapter: str
     api: str
     files: Mapping[str, str]
+    env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_text(self.adapter, "adapter")
         require_text(self.api, "api")
         if not isinstance(self.files, Mapping):
             raise TypeError("files is a mapping of paths to text")
+        if not isinstance(self.env, Mapping) or not all(
+            isinstance(name, str) and name and isinstance(value, str) for name, value in self.env.items()
+        ):
+            raise TypeError("env maps non-empty variable names to text")
+        token_limits(self.env)
 
     def policy_harness(self) -> PolicyHarness:
         """The harness side of the policy: the adapter, with the tree rendered with no model binding."""
@@ -149,14 +160,19 @@ class TreeHarness:
             files_dir=directory / "rendered",
             timeout=TREE_AGENT_TIMEOUT_S,
             bridge=bridge,
+            env=self.env,
         )
 
     def to_json(self) -> dict[str, JsonValue]:
-        return {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
+        value: dict[str, JsonValue] = {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
+        if self.env:
+            value["env"] = dict(self.env)
+        return value
 
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> TreeHarness:
-        return cls(value["adapter"], value["api"], value["files"])
+        # A rollout stored before a tree harness had an env has none.
+        return cls(value["adapter"], value["api"], value["files"], value.get("env", {}))
 
 
 @dataclass(frozen=True)
@@ -583,8 +599,12 @@ class EvaluationRolloutWorker(QueueWorker):
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
-    address at which a task's container reaches this host. Every failed rollout is retried: a trial fails for reasons
-    outside its input, such as a sandbox that did not start.
+    address at which a task's container reaches this host. ``on_stop`` is one of ``ON_STOP_CHOICES``: what ``stop``
+    does with the rollouts that run. With ``requeue``, ``stop`` cancels each one and gives it back to the queue; with
+    ``finish``, it takes no new rollout and returns when each running one has finished, so a process that a scale-down
+    or a deploy stops loses no work in its grace period. A failed rollout is retried: a trial fails for reasons
+    outside its input, such as a sandbox that did not start. A rollout of a harness tree whose task needs what the
+    tree's agent does not give it (``task_agent_tools``) fails for good.
 
     Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
     """
@@ -602,7 +622,10 @@ class EvaluationRolloutWorker(QueueWorker):
         agent_host: str = DEFAULT_AGENT_HOST,
         poll_seconds: float = 0.5,
         slots: int = 1,
+        on_stop: str = "requeue",
     ) -> None:
+        if on_stop not in ON_STOP_CHOICES:
+            raise ValueError(f"on_stop must be one of {', '.join(ON_STOP_CHOICES)}, not {on_stop!r}")
         super().__init__(
             queue,
             EVALUATIONS_QUEUE,
@@ -615,6 +638,9 @@ class EvaluationRolloutWorker(QueueWorker):
         self.lab = lab
         self.trial_observer = trial_observer
         self.agent_host = agent_host
+        self.on_stop = on_stop
+        #: The event that cancels the running rollouts: the worker's stop with ``requeue``, never with ``finish``.
+        self.rollouts_cancelled = self.stopped if on_stop == "requeue" else threading.Event()
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         score, rewards, error = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
@@ -629,7 +655,7 @@ class EvaluationRolloutWorker(QueueWorker):
         self.queue.append(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
         deadline = time.monotonic() + SERVE_WAIT_S
         while time.monotonic() < deadline:
-            if self.stopped.is_set():
+            if self.rollouts_cancelled.is_set():
                 raise WorkerStoppedError
             if lease_lost.is_set():
                 raise WorkLeaseLostError("the evaluation worker lost its lease")
@@ -649,6 +675,15 @@ class EvaluationRolloutWorker(QueueWorker):
         (``verifier_rewards``), and the reason of a failed score (None for a scored rollout). ``attempt`` is the
         1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
         task_directory = self.endpoints.task_directory(rollout)
+        if rollout.tree is not None:
+            # A retry runs the same task with the same tree, so a task that asks for what the tree's agent cannot
+            # give fails for good, before its candidate is served.
+            tools = task_agent_tools(get_adapter(rollout.tree.adapter), task_directory)
+            if tools:
+                raise ItemFailedError(
+                    f"task {rollout.task_name!r} needs {', '.join(tools)}, which adapter {rollout.tree.adapter!r} "
+                    "does not give its agent"
+                )
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
         bridged = rollout.tree is not None and rollout.environment != "docker"
@@ -679,7 +714,7 @@ class EvaluationRolloutWorker(QueueWorker):
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                result = asyncio.run(run_while_held(runner, request, lease_lost, self.stopped))
+                result = asyncio.run(run_while_held(runner, request, lease_lost, self.rollouts_cancelled))
             finally:
                 calls.close()
             # The trial directory is under ``work``, so read it before the block removes it.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from contextlib import closing
 from dataclasses import dataclass
@@ -19,28 +20,37 @@ from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import (
+    MAX_TASK_DIRECTORY_ENTRIES,
+    MAX_TASK_FILE_BYTES,
+    MAX_TASK_FILES,
+    FilesDigest,
     GenerationState,
     LocalTaskFileStore,
     StoredTask,
     TaskCandidate,
     TaskConflictError,
+    TaskLimitError,
     TaskStoreError,
     files_digest,
+    task_file_order,
+    task_limit_errors,
 )
 
 
 def generated(name: str, *, instruction: str = "", sources: tuple[str, ...] = ("record-1",)) -> HarborTask:
     return HarborTask(
         name=name,
-        instruction=instruction or f"Solve {name}.",
-        tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-        environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        files={
+            "instruction.md": instruction or f"Solve {name}.",
+            "tests/test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n",
+            "environment/Dockerfile": "FROM python:3.12-slim\n",
+            "solution/hint.txt": "look closer",
+        },
         config={
             "verifier": {"timeout_sec": 30},
             "environment": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
         },
         metadata={"designer_record_id": "designer-1"},
-        solution={"hint.txt": "look closer"},
         source_agent_record_ids=sources,
     )
 
@@ -324,6 +334,115 @@ def test_the_local_file_store_keeps_binary_files_by_digest(tmp_path):
         assert (Path(archived) / digest / "image-task" / "environment" / "data.bin").exists()
         with pytest.raises(TaskStoreError, match="no files"):
             files.path("math", digest)
+
+
+def tricky_task(root: Path) -> Path:
+    """A task directory whose names sort differently as strings and as path parts, with empty files and directories."""
+    source = root / "tricky-task"
+    for name, content in {
+        "a-b": b"dash",
+        "a.b": b"dot",
+        "a b": b"space",
+        "_x": b"",
+        "a/b": b"nested",
+        "a/b-c/d": b"deeper",
+        "a/b.c": b"",
+        "a0/z": b"zero",
+        "\u00e9t\u00e9.md": b"accents",
+        "z/empty.txt": b"",
+        "big.bin": bytes(range(256)) * 13,
+    }.items():
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        (source / name).write_bytes(content)
+    (source / "empty-dir").mkdir()
+    (source / "a" / "empty" / "deeper").mkdir(parents=True)
+    return source
+
+
+def test_files_digest_keeps_its_value_and_a_stream_of_files_gives_the_same_digest(tmp_path, monkeypatch):
+    source = tricky_task(tmp_path)
+    # The digest of this tree before ``FilesDigest``: stored digests stay valid.
+    expected = "3ddb08ecfba184b01aaa63d827e7f315bcac4236af0eabc84774ef597b1b099a"
+    assert files_digest(source) == expected
+    monkeypatch.setattr("reef.storage.tasks.DIGEST_CHUNK_BYTES", 5)
+    assert files_digest(source) == expected
+    # The order of rglob is the order of the path parts: "a/b" comes before "a-b".
+    files = sorted(
+        (path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file()), key=task_file_order
+    )
+    assert files[:3] == ["_x", "a/b", "a/b-c/d"] and files.index("a/b.c") < files.index("a b") < files.index("a-b")
+    digest = FilesDigest("tricky-task")
+    for name in files:
+        content = (source / name).read_bytes()
+        digest.add_file(name, len(content))
+        for start in range(0, len(content), 1000):
+            digest.update(content[start : start + 1000])
+    assert digest.hexdigest() == expected
+    # Empty directories add nothing; the directory name is part of the digest.
+    assert FilesDigest("empty").hexdigest() == hashlib.sha256(b"empty").hexdigest()
+
+
+def test_files_digest_refuses_files_out_of_order_or_of_another_size():
+    digest = FilesDigest("task")
+    digest.add_file("b", 2)
+    digest.update(b"x")
+    with pytest.raises(TaskStoreError, match="1 bytes before its size"):
+        digest.add_file("c", 0)
+    with pytest.raises(TaskStoreError, match="past the size"):
+        digest.update(b"yz")
+    with pytest.raises(TaskStoreError, match="1 bytes before its size"):
+        digest.hexdigest()
+    digest.update(b"y")
+    for name in ("b", "a", "a-b/c"):
+        with pytest.raises(TaskStoreError, match="does not come after b"):
+            digest.add_file(name, 0)
+    for name in ("", "/abs", "c//d", "c/../d", "./c"):
+        with pytest.raises(TaskStoreError, match="not a relative path"):
+            digest.add_file(name, 0)
+    with pytest.raises(TaskStoreError, match="non-negative"):
+        digest.add_file("c", -1)
+
+
+def test_task_limits_count_files_sizes_and_the_entries_of_each_directory():
+    assert task_limit_errors([("instruction.md", 10), ("tests", None), ("tests/test.sh", MAX_TASK_FILE_BYTES)]) == []
+    many = [(f"environment/assets/{index}.png", 1) for index in range(MAX_TASK_DIRECTORY_ENTRIES + 1)]
+    top = [(f"file-{index}", 1) for index in range(MAX_TASK_DIRECTORY_ENTRIES)]
+    nested = [(f"data/{index // 9000}/{index}", 0) for index in range(MAX_TASK_FILES - len(many) - len(top))]
+    # The top directory holds 10,000 files, "huge", "environment" and "data", which no entry gives. A path given
+    # twice counts once.
+    huge = ("huge", MAX_TASK_FILE_BYTES + 1)
+    errors = task_limit_errors([huge, *many, *top, *nested, huge])
+    assert [(error.code, error.path) for error in errors] == [
+        ("file_too_large", "huge"),
+        ("too_many_entries", ""),
+        ("too_many_entries", "environment/assets"),
+        ("too_many_files", ""),
+    ]
+    assert [error.message for error in errors] == [
+        "huge has 500,000,000,001 bytes. The limit is 500,000,000,000 bytes.",
+        "The task directory has 10,003 entries. The limit is 10,000.",
+        "environment/assets has 10,001 entries. The limit is 10,000.",
+        "The task has 100,001 files. The limit is 100,000.",
+    ]
+    for entries, reason in (([("../x", 1)], "not a relative path"), ([("x", -1)], "non-negative")):
+        with pytest.raises(ValueError, match=reason):
+            task_limit_errors(entries)
+    with pytest.raises(ValueError, match="code"):
+        TaskLimitError("too_big", "x", "x is too big.")  # type: ignore[arg-type]
+
+
+def test_the_local_file_store_contains_a_complete_directory_by_partition_digest_and_name(tmp_path):
+    source = tricky_task(tmp_path)
+    with closing(LocalTaskFileStore(tmp_path / "files")) as files:
+        digest = files_digest(source)
+        assert not files.contains("data/acme", digest, "tricky-task")
+        assert files.write("data/acme", source) == digest
+        assert files.contains("data/acme", digest, "tricky-task")
+        assert not files.contains("data/acme", digest, "other-task")
+        assert not files.contains("data/other", digest, "tricky-task")
+        assert not files.contains("data/acme", "0" * 64, "tricky-task")
+        with pytest.raises(ValueError, match="not a files digest"):
+            files.contains("data/acme", "../" + digest, "tricky-task")
 
 
 @dataclass(frozen=True)

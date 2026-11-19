@@ -38,6 +38,8 @@ sessions: {format: pi-session-jsonl, path: sessions}
 # never carries a provider. maxTokens is Reef's reply budget rather than pi's
 # own default of 16384: a reasoning model spends that on its reasoning and
 # answers with no text, which ends the turn with nothing written.
+# contextWindow is the binding's window (REEF_CONTEXT_WINDOW, else the model
+# metadata's, else 128000), where pi compacts.
 model:
   openai:
     - target: models
@@ -49,6 +51,7 @@ model:
             baseUrl: "{base_url}/v1"
             models:
               - id: "{model}"
+                contextWindow: "{context_window}"
                 maxTokens: "{max_output_tokens}"
     - target: agent
       data:
@@ -64,6 +67,7 @@ model:
             baseUrl: "{base_url}/v1"
             models:
               - id: "{model}"
+                contextWindow: "{context_window}"
                 maxTokens: "{max_output_tokens}"
     - target: agent
       data:
@@ -79,6 +83,7 @@ model:
             baseUrl: "{base_url}"
             models:
               - id: "{model}"
+                contextWindow: "{context_window}"
                 maxTokens: "{max_output_tokens}"
     - target: agent
       data:

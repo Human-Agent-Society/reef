@@ -4,6 +4,7 @@ the environment config of a trial with Reef's E2B environment class."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import stat
 import sys
@@ -126,12 +127,16 @@ TASK_SETTING = "from-the-task"
 """
 
 
-def harbor_e2b_environments(tmp_path: Path, agent: dict[str, object] | None = None) -> dict[str, object]:
+def harbor_e2b_environments(
+    tmp_path: Path,
+    agent: dict[str, object] | None = None,
+    dockerfile: str = "FROM python:3.12-slim\nWORKDIR /app\n",
+) -> dict[str, object]:
     """Reef's E2B environment and Harbor's, made by Harbor's factory for one task as a trial makes them.
 
     ``reef`` has the config of ``environment_config`` for the Harbor agent config ``agent``; ``harbor`` has the same
     config without its ``import_path``, which is Harbor's own class. Both have the same session, trial environment and
-    network allowlist.
+    network allowlist. The task's environment has ``dockerfile`` and a file ``tool``.
     """
     from harbor.environments.factory import EnvironmentFactory
     from harbor.models.task.config import NetworkMode, NetworkPolicy
@@ -141,7 +146,8 @@ def harbor_e2b_environments(tmp_path: Path, agent: dict[str, object] | None = No
 
     task_path = tmp_path / "task"
     (task_path / "environment").mkdir(parents=True)
-    (task_path / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\nWORKDIR /app\n")
+    (task_path / "environment" / "Dockerfile").write_text(dockerfile)
+    (task_path / "environment" / "tool").write_text("#!/bin/sh\n")
     (task_path / "tests").mkdir()
     (task_path / "tests" / "test.sh").write_text("#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n")
     (task_path / "instruction.md").write_text("Write nothing.\n")
@@ -226,3 +232,131 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
     assert harbor_call["timeout"] == 120 + 900 + 300 + 3600 and "lifecycle" not in harbor_call
     # Every argument of Harbor's call, and one more: delete the sandbox at its timeout, never pause it.
     assert calls["reef"][-1] == {**harbor_call, "lifecycle": {"on_timeout": "kill"}}
+
+
+@pytest.mark.unit
+def test_a_dockerfile_for_e2b_sets_the_modes_of_copy_chmod_with_chmod(tmp_path: Path) -> None:
+    pytest.importorskip("dockerfile_parse")
+    from reef.execution.sandbox.e2b import dockerfile_with_copy_modes
+
+    (tmp_path / "target" / "samples").mkdir(parents=True)
+    for name in ("real", "a.bin", "b.bin", "samples/one"):
+        (tmp_path / "target" / name).write_text("")
+    dockerfile = (
+        "# syntax=docker/dockerfile:1\n"
+        "FROM ubuntu:24.04\n"
+        "COPY --chmod=0500 target/real /opt/target/.real\n"
+        "COPY --chmod=0644 target/samples/ /opt/target/samples/\n"
+        "USER solver:solver\n"
+        "COPY --chown=solver --chmod=4755 \\\n"
+        "    target/*.bin /opt/bin/\n"
+        "COPY target/real /app/real\n"
+    )
+    assert dockerfile_with_copy_modes(dockerfile, tmp_path) == (
+        "# syntax=docker/dockerfile:1\n"
+        "FROM ubuntu:24.04\n"
+        "COPY target/real /opt/target/.real\n"
+        "RUN chmod 0500 /opt/target/.real\n"
+        # A copied directory gets the mode with everything in it, as Docker's BuildKit sets it.
+        "COPY target/samples/ /opt/target/samples/\n"
+        "RUN chmod -R 0644 /opt/target/samples/\n"
+        "USER solver:solver\n"
+        # Each file of the pattern is in the destination directory. Only root can set the setuid bit.
+        "COPY --chown=solver target/*.bin /opt/bin/\n"
+        "USER root\n"
+        "RUN chmod 4755 /opt/bin/a.bin && chmod 4755 /opt/bin/b.bin\n"
+        "USER solver:solver\n"
+        "COPY target/real /app/real\n"
+    )
+    # A Dockerfile without --chmod is the same text.
+    plain = "FROM ubuntu:24.04\n\nCOPY target/real /app/real\nUSER solver\n"
+    assert dockerfile_with_copy_modes(plain, tmp_path) == plain
+
+
+@pytest.mark.unit
+def test_reefs_e2b_template_is_harbors_and_keeps_the_modes_of_copy_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox.e2b import COPY_MODES_TEMPLATE_SUFFIX
+
+    def recording(builds: dict[str, dict[str, object]], name: str) -> staticmethod:
+        async def build(**options: object) -> None:
+            template = options.pop("template")
+            builds[name] = {**options, "steps": json.loads(e2b.Template.to_json(template))["steps"]}
+
+        return staticmethod(build)
+
+    def built(environments: dict[str, object]) -> dict[str, dict[str, object]]:
+        builds: dict[str, dict[str, object]] = {}
+        for name, environment in environments.items():
+            monkeypatch.setattr(e2b.AsyncTemplate, "build", recording(builds, name))
+            # The private Harbor method that Reef's class overrides; ``start`` calls it for a missing template.
+            asyncio.run(environment._create_template())
+        return builds
+
+    # Without --chmod, Reef's class builds Harbor's template, with the task's resources, under Harbor's alias.
+    plain = built(harbor_e2b_environments(tmp_path / "plain"))
+    assert plain["reef"] == plain["harbor"]
+    assert (plain["reef"]["cpu_count"], plain["reef"]["memory_mb"]) == (2, 4096)
+
+    dockerfile = "FROM python:3.12-slim\nUSER solver\nCOPY --chmod=0500 tool /opt/tool\n"
+    environments = harbor_e2b_environments(tmp_path / "modes", dockerfile=dockerfile)
+    modes = built(environments)
+    # Harbor's class drops the mode. Reef's class sets it as root, under an alias of its own.
+    assert modes["reef"]["alias"] == modes["harbor"]["alias"] + COPY_MODES_TEMPLATE_SUFFIX
+    assert environments["reef"]._template_name == modes["reef"]["alias"]
+    steps = [(step["type"], step["args"]) for step in modes["reef"]["steps"]]
+    assert steps[steps.index(("USER", ["solver"])) + 1 :] == [
+        ("COPY", ["tool", "/opt/tool", "", ""]),
+        ("USER", ["root"]),
+        ("RUN", ["chmod 0500 /opt/tool"]),
+        ("USER", ["solver"]),
+        # E2B's default directory for a Dockerfile without WORKDIR.
+        ("WORKDIR", ["/home/user"]),
+    ]
+    assert not any(step["type"] == "RUN" for step in modes["harbor"]["steps"])
+
+
+@pytest.mark.unit
+def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example/")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    dockerfile = "FROM debian AS build\nRUN make\nFROM python:3.12-slim\nCOPY --chmod=0500 tool /opt/tool\n"
+    environments = harbor_e2b_environments(tmp_path, dockerfile=dockerfile)
+    reef, harbor = environments["reef"], environments["harbor"]
+    calls: list[tuple[AgentEnvTemplates, DockerfileBuild]] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        calls.append((templates, build))
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+    # The alias is its own: an E2B template build of AgentENV, without the task's files, never answers for it.
+    assert reef._template_name == harbor._template_name + reef_e2b.AENV_TEMPLATE_SUFFIX
+    # Reef's class always reads the alias's state itself; AgentENV's alias check also answers for a failed build.
+    assert asyncio.run(reef._does_template_exist()) is False
+    asyncio.run(reef._create_template())
+    templates, build = calls[0]
+    assert templates == AgentEnvTemplates("https://api.agentenv.example", "key")
+    environment_dir = tmp_path / "task" / "environment"
+    # The Dockerfile as the task wrote it: BuildKit builds the stages and sets the mode. The task's resources and
+    # build time limit; no start command, as the last stage has none.
+    assert build == DockerfileBuild(
+        context_dir=environment_dir,
+        dockerfile=environment_dir / "Dockerfile",
+        alias=reef._template_name,
+        cpu_count=2,
+        memory_mb=4096,
+        timeout_seconds=120,
+        start_command=False,
+    )
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "kaniko")
+    with pytest.raises(ValueError, match="REEF_E2B_DOCKERFILE_BUILD must be one of e2b, aenv"):
+        harbor_e2b_environments(tmp_path / "other", dockerfile=dockerfile)

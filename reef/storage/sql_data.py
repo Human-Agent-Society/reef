@@ -13,6 +13,9 @@ when it is at least ``CREATE_SEGMENT_BYTES``. ``maintain`` moves the rest into s
 ``PACK_BYTES`` of it, merges the segments of small writes (``merge_small_segments``), and deletes the segments
 that no row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused
 ones.
+
+A delete moves the item's row from ``data_item`` into ``data_deleted_item``, and a restore moves it back. A deleted
+item keeps its trajectory node and its segment line until a purge removes its row.
 """
 
 from __future__ import annotations
@@ -82,6 +85,7 @@ from reef.storage.data import (
     MAX_QUERY_LIMIT,
     SET_KEYS,
     DataStore,
+    DeletedItem,
     ItemConflictError,
     ItemGroup,
     ItemKind,
@@ -92,6 +96,7 @@ from reef.storage.data import (
     ScenarioArchivedError,
     ScenarioHold,
     StoredItem,
+    check_deleted_listing,
     check_filters,
     check_groups,
     check_hold,
@@ -106,7 +111,7 @@ from reef.storage.data import (
     replaced_task_digest,
     replaced_trajectory_digest,
 )
-from reef.storage.item_kinds import task_partition
+from reef.storage.item_kinds import TaskFilesReference, task_partition
 from reef.storage.schema_upgrades import SchemaStep, upgrade_schema
 from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
@@ -212,12 +217,32 @@ def node_of_scenario_call(nodes: Table) -> ColumnElement[bool]:
     return nodes.c.scenario.not_like(literal_column("'%/%'"))
 
 
+def item_columns() -> list[Column[Any]]:
+    """New columns of an item row but ``sequence``, which ``data_item`` and ``data_deleted_item`` both have."""
+    return [
+        Column("owner", Text, nullable=False),
+        Column("item_id", Text, nullable=False),
+        Column("kind", String(16), nullable=False),
+        Column("digest", String(64), nullable=False),
+        Column("metadata_json", Text, nullable=False),
+        Column("content_json", Text, nullable=True),
+        Column("message_field", Text, nullable=True),
+        Column("request_type", String(16), nullable=True),
+        Column("segment_id", Text, nullable=True),
+        Column("segment_offset", BigInteger, nullable=True),
+        Column("segment_length", BigInteger, nullable=True),
+    ]
+
+
 def data_tables(
     metadata: MetaData, *, sqlite: bool
-) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table]:
+) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table, Table]:
     """Define ``data_item``, ``data_item_use``, ``data_record_node``, ``data_segment``, ``data_job_directory``,
-    ``data_scenario``, ``data_record_loss``, ``data_collection``, ``data_scenario_hold`` and ``data_item_set`` in
-    ``metadata``. ``data_item_set`` has one row for each set that an item is in (``held_sets``): the owner, the
+    ``data_scenario``, ``data_record_loss``, ``data_collection``, ``data_scenario_hold``, ``data_item_set`` and
+    ``data_deleted_item`` in ``metadata``. ``data_deleted_item`` has the columns of ``data_item`` and
+    ``deleted_at``, one row per deleted item (``DataStore.delete``): the row that the item had, and the time of the
+    delete in seconds since the epoch. Its ``sequence`` is the item's, not a new one. ``data_item_set`` has one row
+    for each set that an item is in (``held_sets``): the owner, the
     set's kind and name, and the item's sequence and ID. It changes with the item's metadata in one transaction.
     ``data_scenario_hold`` has one row per hold of a set by a scenario of an owner, with the set's kind and name and
     the hold's split (``DataStore.hold``); a scenario can hold one benchmark in both splits. ``data_collection`` has one row
@@ -252,17 +277,7 @@ def data_tables(
         "data_item",
         metadata,
         sequence,
-        Column("owner", Text, nullable=False),
-        Column("item_id", Text, nullable=False),
-        Column("kind", String(16), nullable=False),
-        Column("digest", String(64), nullable=False),
-        Column("metadata_json", Text, nullable=False),
-        Column("content_json", Text, nullable=True),
-        Column("message_field", Text, nullable=True),
-        Column("request_type", String(16), nullable=True),
-        Column("segment_id", Text, nullable=True),
-        Column("segment_offset", BigInteger, nullable=True),
-        Column("segment_length", BigInteger, nullable=True),
+        *item_columns(),
         UniqueConstraint("owner", "item_id"),
         Index("data_item_by_segment", "owner", "segment_id"),
         Index("data_item_by_kind", "owner", "kind", "sequence"),
@@ -374,7 +389,18 @@ def data_tables(
         PrimaryKeyConstraint("owner", "kind", "name", "sequence"),
         Index("data_item_set_by_item", "owner", "item_id"),
     )
-    return items, uses, nodes, segments, job_directories, generations, losses, collections, holds, item_sets
+    deleted = Table(
+        "data_deleted_item",
+        metadata,
+        Column("sequence", BigInteger, nullable=False),
+        *item_columns(),
+        Column("deleted_at", Float, nullable=False),
+        PrimaryKeyConstraint("owner", "item_id"),
+        Index("data_deleted_item_by_sequence", "owner", "sequence"),
+        Index("data_deleted_item_by_segment", "owner", "segment_id"),
+        Index("data_deleted_item_by_time", "deleted_at"),
+    )
+    return items, uses, nodes, segments, job_directories, generations, losses, collections, holds, item_sets, deleted
 
 
 class UsesWithHeldSets(SchemaStep):
@@ -593,6 +619,15 @@ class RetentionIndexes(SchemaStep):
         ).create(connection, checkfirst=True)
 
 
+class DeletedItems(SchemaStep):
+    """Version 6 to 7 of the data tables: a delete keeps the item in ``data_deleted_item``, which ``upgrade_schema``
+    makes, empty. The step moves no row. The version changes all the same, so that an earlier Reef refuses the
+    tables: it would delete the segments that only deleted items use."""
+
+    def apply(self, connection: Connection, schema: str | None) -> None:
+        return None
+
+
 #: The steps of the data tables, in the order of their versions: step ``n`` upgrades version ``n``.
 DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (
     UsesWithHeldSets(),
@@ -600,11 +635,20 @@ DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (
     ItemSets(),
     UseItemSequences(),
     RetentionIndexes(),
+    DeletedItems(),
 )
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def deleted_item(row: RowMapping) -> DeletedItem:
+    """The ``DeletedItem`` of a row of ``data_deleted_item``, without content."""
+    return DeletedItem(
+        StoredItem(row["sequence"], row["owner"], row["item_id"], json.loads(row["metadata_json"]), row["digest"]),
+        float(row["deleted_at"]),
+    )
 
 
 def scenarios_of(metadata: Iterable[Mapping[str, Any]]) -> set[str]:
@@ -650,7 +694,7 @@ class SQLDataStore(DataStore):
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
@@ -667,6 +711,7 @@ class SQLDataStore(DataStore):
             self.collections_table,
             self.holds_table,
             self.item_sets_table,
+            self.deleted_table,
         ) = tables
         self.task_files = task_files
         self.segments = segments
@@ -1812,6 +1857,25 @@ class SQLDataStore(DataStore):
                 .with_for_update(of=items)
             ).all()
             connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario))
+            deleted = self.deleted_table
+            # A scenario name is in the text of each metadata that names it, so the condition reads fewer rows.
+            named = connection.execute(
+                select(deleted.c.item_id, deleted.c.metadata_json).where(
+                    deleted.c.owner == owner, deleted.c.metadata_json.contains(json.dumps(scenario), autoescape=True)
+                )
+            ).all()
+            rewritten = []
+            for item_id, text in named:
+                metadata = json.loads(text)
+                if metadata["scenarios"].pop(scenario, None) is not None:
+                    rewritten.append({"row_item_id": item_id, "metadata_json": canonical_json(metadata)})
+            if rewritten:
+                connection.execute(
+                    update(deleted)
+                    .where(deleted.c.owner == owner, deleted.c.item_id == bindparam("row_item_id"))
+                    .values(metadata_json=bindparam("metadata_json")),
+                    rewritten,
+                )
             if not rows:
                 return 0
             values = []
@@ -1827,7 +1891,7 @@ class SQLDataStore(DataStore):
             )
             return len(rows)
 
-    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
+    def replace_task(self, owner: str, item_id: str, files: Path | TaskFilesReference) -> StoredItem:
         check_owner(owner)
         with self.transaction() as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
@@ -1838,7 +1902,7 @@ class SQLDataStore(DataStore):
             self.lock_uses(connection, owner, [metadata])
             row = self.rows(connection, owner, [item_id], lock=True)[item_id]
             stored = StoredItem(row["sequence"], owner, item_id, metadata, row["digest"])
-            digest = replaced_task_digest(owner, stored, directory, self.task_files)
+            digest = replaced_task_digest(owner, stored, files, self.task_files)
             if digest == stored.digest:
                 return stored
             items = self.items_table
@@ -1913,11 +1977,15 @@ class SQLDataStore(DataStore):
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
+        items, deleted = self.items_table, self.deleted_table
         with self.transaction() as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
             if row is None:
                 return False
-            self.lock_uses(connection, owner, [json.loads(row["metadata_json"])])
+            # A deleted item with the same ID goes for good, and its record's node is released under its lock too.
+            earlier = list(self.deleted_rows(connection, owner, [item_id]).values())
+            self.lock_uses(connection, owner, [json.loads(found["metadata_json"]) for found in [row, *earlier]])
+            self.purge_rows(connection, owner, earlier)
             connection.execute(
                 delete(self.uses_table).where(self.uses_table.c.owner == owner, self.uses_table.c.item_id == item_id)
             )
@@ -1926,14 +1994,131 @@ class SQLDataStore(DataStore):
                     self.item_sets_table.c.owner == owner, self.item_sets_table.c.item_id == item_id
                 )
             )
+            names = [column.name for column in items.columns]
             connection.execute(
-                delete(self.items_table).where(
-                    self.items_table.c.owner == owner, self.items_table.c.item_id == item_id
+                insert(deleted).from_select(
+                    [*names, "deleted_at"],
+                    select(*items.columns, literal(time.time(), Float)).where(
+                        items.c.owner == owner, items.c.item_id == item_id
+                    ),
                 )
             )
-            if row["message_field"] is not None:
-                self.trajectory_nodes(owner).release(connection, [int(row["sequence"])])
+            connection.execute(delete(items).where(items.c.owner == owner, items.c.item_id == item_id))
         return True
+
+    def deleted_rows(self, connection: Connection, owner: str, item_ids: Sequence[str]) -> dict[str, RowMapping]:
+        """The rows of ``data_deleted_item`` of ``item_ids`` by item ID."""
+        deleted = self.deleted_table
+        found: dict[str, RowMapping] = {}
+        for batch in batches(list(dict.fromkeys(item_ids))):
+            statement = select(deleted).where(deleted.c.owner == owner, deleted.c.item_id.in_(batch))
+            found.update({row["item_id"]: row for row in connection.execute(statement).mappings()})
+        return found
+
+    def purge_rows(self, connection: Connection, owner: str, rows: Sequence[RowMapping]) -> None:
+        """Delete the rows ``rows`` of ``data_deleted_item`` of ``owner`` and release their trajectory nodes. The
+        caller holds the locks of the scenarios of their metadata (``scenarios_of``)."""
+        deleted = self.deleted_table
+        for batch in batches([row["item_id"] for row in rows]):
+            connection.execute(delete(deleted).where(deleted.c.owner == owner, deleted.c.item_id.in_(batch)))
+        self.trajectory_nodes(owner).release(
+            connection, [int(row["sequence"]) for row in rows if row["message_field"] is not None]
+        )
+
+    def deleted_items(
+        self, owner: str, *, kind: ItemKind | None = None, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[DeletedItem, ...]:
+        check_deleted_listing(owner, kind, before, limit)
+        deleted = self.deleted_table
+        statement = select(
+            deleted.c.sequence,
+            deleted.c.owner,
+            deleted.c.item_id,
+            deleted.c.metadata_json,
+            deleted.c.digest,
+            deleted.c.deleted_at,
+        ).where(deleted.c.owner == owner)
+        if kind is not None:
+            statement = statement.where(deleted.c.kind == kind)
+        if before is not None:
+            statement = statement.where(deleted.c.sequence < before)
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(statement.order_by(deleted.c.sequence.desc()).limit(limit)).mappings().all()
+        return tuple(deleted_item(row) for row in rows)
+
+    def read_deleted(self, owner: str, item_ids: Sequence[str]) -> tuple[DeletedItem, ...]:
+        check_owner(owner)
+        with self.transaction(read_only=True) as connection:
+            rows = self.deleted_rows(connection, owner, item_ids)
+        return tuple(deleted_item(rows[item_id]) for item_id in dict.fromkeys(item_ids) if item_id in rows)
+
+    def restore(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
+        check_owner(owner)
+        wanted = list(dict.fromkeys(item_ids))
+        if not wanted:
+            return ()
+        items, deleted = self.items_table, self.deleted_table
+        with self.transaction() as connection:
+            rows = self.deleted_rows(connection, owner, wanted)
+            missing = [item_id for item_id in wanted if item_id not in rows]
+            if missing:
+                raise ItemNotFoundError(f"{owner!r} has no deleted item {missing[0]!r}")
+            metadata = {item_id: json.loads(rows[item_id]["metadata_json"]) for item_id in wanted}
+            holds = self.lock_uses(connection, owner, metadata.values())
+            # The archive of a scenario rewrites the metadata of deleted items under the scenario's lock.
+            if {
+                item_id: json.loads(row["metadata_json"])
+                for item_id, row in self.deleted_rows(connection, owner, wanted).items()
+            } != metadata:
+                raise ItemConflictError("a deleted item changed while it was being restored; try again")
+            taken = [item_id for batch in batches(wanted) for item_id in self.rows(connection, owner, batch)]
+            if taken:
+                raise ItemConflictError(f"{owner!r} stores an item {taken[0]!r}, so its deleted item cannot come back")
+            names = [column.name for column in items.columns]
+            for batch in batches(wanted):
+                chosen = (deleted.c.owner == owner, deleted.c.item_id.in_(batch))
+                connection.execute(
+                    insert(items).from_select(names, select(*(deleted.c[name] for name in names)).where(*chosen))
+                )
+                connection.execute(delete(deleted).where(*chosen))
+            restored = {item_id: (int(rows[item_id]["sequence"]), metadata[item_id]) for item_id in wanted}
+            self.write_uses(connection, owner, restored, holds)
+            self.insert_sets(connection, owner, restored)
+        return tuple(deleted_item(rows[item_id]).item for item_id in wanted)
+
+    def purge(self, owner: str, item_id: str) -> bool:
+        check_owner(owner)
+        with self.transaction() as connection:
+            row = self.deleted_rows(connection, owner, [item_id]).get(item_id)
+            if row is None:
+                return False
+            self.lock_scenarios(connection, owner, scenarios_of([json.loads(row["metadata_json"])]))
+            self.purge_rows(connection, owner, [row])
+        return True
+
+    def purge_deleted(self, time: float) -> int:
+        deleted = self.deleted_table
+        with self.transaction(read_only=True) as connection:
+            found = connection.execute(
+                select(deleted.c.owner, deleted.c.item_id).where(deleted.c.deleted_at < time).order_by(deleted.c.owner)
+            ).all()
+        by_owner: dict[str, list[str]] = {}
+        for owner, item_id in found:
+            by_owner.setdefault(owner, []).append(item_id)
+        purged = 0
+        for owner, item_ids in by_owner.items():
+            for batch in batches(item_ids):
+                with self.transaction() as connection:
+                    # A restore or a purge can take a row first.
+                    rows = [
+                        row for row in self.deleted_rows(connection, owner, batch).values() if row["deleted_at"] < time
+                    ]
+                    self.lock_scenarios(
+                        connection, owner, scenarios_of(json.loads(row["metadata_json"]) for row in rows)
+                    )
+                    self.purge_rows(connection, owner, rows)
+                    purged += len(rows)
+        return purged
 
     def waiting_content(self) -> tuple[tuple[Table, ColumnElement[int], ColumnElement[bool]], ...]:
         """For the items and for the nodes: the table, the content bytes of a row, and the condition of the rows
@@ -2122,18 +2307,21 @@ class SQLDataStore(DataStore):
         self.delete_unused_segments()
 
     def delete_unused_segments(self) -> int:
-        """Delete each segment older than ``UNUSED_SEGMENT_SECONDS`` that no item or node uses; return the count.
+        """Delete each segment older than ``UNUSED_SEGMENT_SECONDS`` that no item, deleted item or node uses; return
+        the count.
 
-        New rows only use new segments, so a segment that is old and unused stays unused.
+        New rows only use new segments, so a segment that is old and unused stays unused. A restore moves a row
+        with its segment line, so a segment that a deleted item uses stays used until the purge.
         """
         if self.segments is None:
             return 0
-        segment, items, nodes = self.segment_table, self.items_table, self.nodes_table
+        segment, items, nodes, deleted = self.segment_table, self.items_table, self.nodes_table, self.deleted_table
         with self.transaction() as connection:
             unused = connection.execute(
                 select(segment.c.owner, segment.c.segment_id).where(
                     segment.c.created_at < time.time() - UNUSED_SEGMENT_SECONDS,
                     ~exists().where(items.c.owner == segment.c.owner, items.c.segment_id == segment.c.segment_id),
+                    ~exists().where(deleted.c.owner == segment.c.owner, deleted.c.segment_id == segment.c.segment_id),
                     ~exists().where(nodes.c.owner == segment.c.owner, nodes.c.segment_id == segment.c.segment_id),
                 )
             ).all()

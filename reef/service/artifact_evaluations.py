@@ -24,14 +24,15 @@ other runtime.
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Literal, cast, overload
 
 from reef.artifact.artifact import Artifact
@@ -49,11 +50,14 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
     harness_item,
+    harness_item_config,
+    harness_item_env,
     mean_score,
 )
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import TrajectoryBuilder
 from reef.core.trajectory_index import TrajectoryIndex
+from reef.core.values import deep_merge
 from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -65,7 +69,8 @@ from reef.evaluation.rollout_worker import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tools
+from reef.harness.adapters.parts import PLACEHOLDER
+from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
 from reef.service.collections import collection_tasks
@@ -255,6 +260,58 @@ def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now
             rollouts = [item for name in task_names for item in by_task.get(name, ())]
             benchmarks.append({"benchmark": benchmark, **_counts(rollouts, len(task_names))})
     return {**counts, "eta_seconds": eta, "benchmarks": benchmarks}
+
+
+#: The most ended evaluations whose progress one ``EndedProgress`` keeps.
+ENDED_PROGRESS_ENTRIES = 10_000
+
+
+class EndedProgress:
+    """The progress of ended evaluations, so that a list of evaluations does not read their rollouts again.
+
+    Values: ``entries`` maps the key ``(scenario, evaluation_id, finished_at)`` of an ended evaluation to its
+    ``evaluation_progress``, computed from rollouts that had all ended (``rollout_ended``). It holds at most
+    ``ENDED_PROGRESS_ENTRIES`` keys, in the order of their last use. ``lock`` guards ``entries`` for the threads of
+    concurrent routes.
+
+    The rollouts of an ended evaluation stay ended until a retry or a resume reopens the evaluation, and its next end
+    gives it a new ``finished_at``. So a key describes one run of the evaluation, and its progress does not change.
+    An entry outlives the queue's deletion of the rollouts after their retention: the list then shows the progress
+    that they gave, not null.
+
+    Operations: ``read(scenario, stored)`` is the entry of ``stored``'s key, or None when ``stored`` runs or has no
+    entry. ``add(scenario, stored, items, progress)`` keeps ``progress`` under ``stored``'s key when ``stored`` ended
+    and every one of ``items``, its rollouts, ended; else it keeps nothing. Above ``ENDED_PROGRESS_ENTRIES``, the
+    least recently used key goes.
+
+    Purpose: ``ArtifactEvaluations.status_json`` reads an entry before it reads an evaluation's rollouts, and adds
+    one after it computed the progress of an ended evaluation.
+    """
+
+    def __init__(self) -> None:
+        self.entries: OrderedDict[tuple[str, str, float], dict[str, JsonValue]] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def read(self, scenario: str, stored: StoredEvaluation) -> dict[str, JsonValue] | None:
+        if stored.finished_at is None:
+            return None
+        key = (scenario, stored.evaluation_id, stored.finished_at)
+        with self.lock:
+            progress = self.entries.get(key)
+            if progress is not None:
+                self.entries.move_to_end(key)
+            return progress
+
+    def add(
+        self, scenario: str, stored: StoredEvaluation, items: Sequence[WorkItem], progress: dict[str, JsonValue]
+    ) -> None:
+        # A cancel stores the ended evaluation before it ends the rollouts: a reader in between keeps nothing.
+        if stored.finished_at is None or not all(rollout_ended(item) for item in items):
+            return
+        with self.lock:
+            self.entries[(scenario, stored.evaluation_id, stored.finished_at)] = progress
+            if len(self.entries) > ENDED_PROGRESS_ENTRIES:
+                self.entries.popitem(last=False)
 
 
 def rollout_work(rollout: EvaluationRollout) -> NewWork:
@@ -667,7 +724,7 @@ class ArtifactEvaluations:
     Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts
     to the evaluation service's workers. ``sources`` reads the harness tree of an artifact item. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
     scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
-    end.
+    end. ``ended_progress`` keeps the progress of ended evaluations for ``status_json``.
 
     Purpose: the evaluation routes call ``start``, ``cancel``, ``retry``, ``resume``, ``get``, ``newest``,
     ``rollouts_json``, ``calls_json``, ``call_json``, ``trajectories_json``, ``exported_rollouts`` and
@@ -689,6 +746,7 @@ class ArtifactEvaluations:
         self.new_artifacts = new_artifacts
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
+        self.ended_progress = EndedProgress()
         self.reader: threading.Thread | None = None
 
     def open(self) -> None:
@@ -954,12 +1012,22 @@ class ArtifactEvaluations:
             raise ValueError(f"the eval split of the imported tasks holds no task of the collection {name!r}")
         return EvaluationCollection(name, stored.average, benchmarks)
 
-    def tree_harness(self, scenario: str, item_id: str, api: str, tasks: Sequence[str]) -> TreeHarness:
+    def tree_harness(
+        self,
+        scenario: str,
+        item_id: str,
+        api: str,
+        env: Mapping[str, str],
+        config: Mapping[str, Mapping[str, Any]],
+    ) -> TreeHarness:
         """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
-        dialect ``api`` on the Harbor task directories ``tasks``.
+        dialect ``api``, whose agent's commands get the variables ``env``. Each object of ``config`` merges into the
+        tree's ``config/<target>.json`` of its config target, as a tree's own config would.
 
-        Raise ``ValueError`` when the item is not a tree that a task's container can run, or when a task needs what
-        the tree's agent does not give it.
+        Raise ``ValueError`` when the item is not a tree that a task's container can run, when the tree with
+        ``config`` fails the adapter's validation, such as for a key that Reef's model binding writes, or when
+        ``env`` sets a token limit that is not a positive integer. The tasks are not read
+        here: each rollout checks its own task against the tree's agent (``EvaluationRolloutWorker.score``).
         """
         owner = self.dispatcher.scenario_owner(scenario)
         if owner is None:
@@ -987,18 +1055,23 @@ class ArtifactEvaluations:
             raise ValueError(f"adapter {adapter!r} cannot run in a task's container")
         if api not in descriptor.model_binding:
             raise ValueError(f"adapter {adapter!r} cannot call this runtime's API dialect {api!r}")
-        for task in tasks:
-            tools = task_agent_tools(descriptor, Path(task))
-            if tools:
-                raise ValueError(
-                    f"task {task!r} needs {', '.join(tools)}, which adapter {adapter!r} does not give its agent"
-                )
         files = self.sources.open(uri)
         tree = HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()})
         validation = validate_tree(tree, descriptor)
         if not validation.passed:
             raise ValueError(f"the harness tree of item {item_id!r} fails validation: {validation.message()}")
-        harness = TreeHarness(adapter, api, tree.files)
+        if config:
+            configured = dict(tree.files)
+            for target, data in config.items():
+                path = descriptor.layout.parts["config"].path.replace(PLACEHOLDER, target)
+                configured[path] = (
+                    json.dumps(deep_merge(json.loads(configured.get(path, "{}")), data), indent=2) + "\n"
+                )
+            tree = HarnessTree(configured)
+            validation = validate_tree(tree, descriptor)
+            if not validation.passed:
+                raise ValueError(f"the harness config fails validation: {validation.message()}")
+        harness = TreeHarness(adapter, api, tree.files, env)
         # Rendering now refuses a bad tree here, and not at the end of the evaluation.
         harness.policy_harness()
         return harness
@@ -1058,15 +1131,13 @@ class ArtifactEvaluations:
         names = sampled
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
-        if item is None:
-            tree = None
-        else:
-            # Only a harness tree is checked against the task files, and only against the tasks that it runs. A
-            # remote task file store downloads them, so the read does not hold the scenario's lock.
-            with self.dispatcher.locked_scenario(scenario) as current:
-                samples = self.dispatcher.storage.sample_store(scenario, current.store)
-            directories = [str(path) for path in (() if samples is None else samples.task_paths(names))]
-            tree = self.tree_harness(scenario, item, api, directories)
+        tree = (
+            None
+            if item is None
+            else self.tree_harness(
+                scenario, item, api, harness_item_env(request.harness), harness_item_config(request.harness)
+            )
+        )
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
         request = replace(request, task_names=names, collection=collection)
@@ -1347,24 +1418,17 @@ class ArtifactEvaluations:
     def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
         ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the rollouts
-        of these evaluations only, not those of the scenario's other evaluations."""
-        rollouts = {
-            stored.evaluation_id: found
-            for stored in evaluations
-            if (found := self.results.rollouts(stored.evaluation_id, scenario))
-        }
+        of these evaluations only, not those of the scenario's other evaluations, and not those of an ended
+        evaluation whose progress ``ended_progress`` keeps."""
         now = time.time()
-        return [
-            {
-                **stored.to_json(),
-                "progress": (
-                    evaluation_progress(stored, rollouts[stored.evaluation_id], now)
-                    if stored.evaluation_id in rollouts
-                    else None
-                ),
-            }
-            for stored in evaluations
-        ]
+        views: list[dict[str, object]] = []
+        for stored in evaluations:
+            progress = self.ended_progress.read(scenario, stored)
+            if progress is None and (items := self.results.rollouts(stored.evaluation_id, scenario)):
+                progress = evaluation_progress(stored, items, now)
+                self.ended_progress.add(scenario, stored, items, progress)
+            views.append({**stored.to_json(), "progress": progress})
+        return views
 
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations of ``scenario``, newest first."""

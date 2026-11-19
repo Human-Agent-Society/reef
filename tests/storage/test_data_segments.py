@@ -195,10 +195,26 @@ def test_maintain_deletes_only_segments_that_no_row_uses(open_store, monkeypatch
         assert len(segment_files(tmp_path)) == 2
         store.delete("acme", "t1")
         store.maintain()
+        # A deleted item keeps its segment until the purge.
+        assert len(segment_files(tmp_path)) == 2
+        assert store.purge("acme", "t1")
+        store.maintain()
         assert len(segment_files(tmp_path)) == 1
         assert [item.item_id for item in store.query("acme")] == ["t3"]
         with store.transaction() as connection:
             assert connection.scalar(select(func.count()).select_from(store.segment_table)) == 1
+
+
+def test_a_restored_item_reads_its_content_from_the_segment_that_its_delete_kept(open_store, monkeypatch, tmp_path):
+    monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+    with closing(open_store()) as store:
+        (created,) = store.create("acme", [trajectory("t1", "one")])
+        store.delete("acme", "t1")
+        store.maintain()
+        assert len(segment_files(tmp_path)) == 1
+        store.restore("acme", ["t1"])
+        assert store.read("acme", "t1").content == {**ATIF, "steps": [{"step_id": 1, "message": "one"}]}
+        assert store.read("acme", "t1").digest == created.digest
 
 
 def test_a_store_without_segments_refuses_to_guess_moved_content(open_store):

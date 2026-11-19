@@ -16,6 +16,12 @@ def require_text(value: object, name: str) -> str:
     return value
 
 
+def require_integer(value: object, name: str, *, minimum: int = 0) -> None:
+    """Raise ``ValueError`` naming ``name`` unless ``value`` is an integer from ``minimum``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} is an integer from {minimum}")
+
+
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
     """``base`` with ``overlay`` merged in: nested objects merge key by key, every other value of ``overlay`` wins."""
     merged = dict(base)
@@ -25,4 +31,4 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-__all__ = ["JsonValue", "deep_merge", "require_text"]
+__all__ = ["JsonValue", "deep_merge", "require_integer", "require_text"]

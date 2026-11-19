@@ -41,6 +41,7 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
+from reef.core.trajectories import CONVERSATION_FIELDS
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import (
@@ -1094,7 +1095,9 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
     )
     records = scored["extra"]["reef"]["records"]
     assert [record["agent_record_id"] for record in records] == ["e1:2:0:3:0", "e1:2:0:3:2"]
-    assert records[0]["created_at"] == 30.0 and records[0]["payload"]["response"]["choices"][0]["message"]["content"]
+    # Each record is the call's summary: its time and its settings, without the conversation that the steps hold.
+    assert records[0]["created_at"] == 30.0
+    assert not CONVERSATION_FIELDS & set(records[0]["payload"])
     # The second call repeats the first exchange, so the stitched steps hold each message once.
     assert [step["message"] for step in scored["steps"]] == ["solve add", "ls", "a.txt", "cat a.txt"]
     running = replace(item, state="running", ended_at=None, result=None, worker_id="w", lease_expires_at=9.0)
@@ -1261,7 +1264,8 @@ class TreeCallingLab(TaskLab):
         assert import_path == "reef.harness.harbor.agent:TreeAgent"
         kwargs = cast(dict[str, Any], agent["kwargs"])
         self.overrides = overrides
-        self.agent = TreeAgent(self.logs, **kwargs)
+        # Harbor gives the agent the config's env as extra_env.
+        self.agent = TreeAgent(self.logs, extra_env=cast(dict[str, str], agent.get("env") or {}), **kwargs)
         files = Path(kwargs["files_dir"])
         self.rendered = {str(path.relative_to(files)): path.read_text() for path in files.rglob("*") if path.is_file()}
         body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "solve"}]}).encode()
@@ -1327,14 +1331,22 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             activated: list[str] = []
             evaluations.results.activate = lambda scenario, request: activated.append(request.artifact_id)
             item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
-            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            harness = {
+                "item": item_id,
+                "env": {"REEF_MAX_OUTPUT_TOKENS": "8192", "TASK_MODE": "fast"},
+                "config": {"primary": {"defaultTools": []}},
+            }
+            body = {"artifact_id": artifact_id, "harness": harness}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
             assert activated == [], "a score with a harness from an item activates nothing"
 
         assert answer["state"] == "finished", answer
-        assert answer["request"]["harness"] == {"item": item_id}
+        assert answer["request"]["harness"] == harness
+        assert lab.agent is not None and lab.agent.extra_env["TASK_MODE"] == "fast", "the agent's commands get the env"
+        assert '"maxTokens": 8192' in lab.rendered["pi-agent/models.json"], "the env sets the binding's reply budget"
+        assert json.loads(lab.rendered["plugin/settings.json"]) == {"defaultTools": []}, "the config merges in"
         evaluation = answer["policy_evaluation"]
         assert evaluation["harness"]["base"] == "pi"
         assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
@@ -1380,6 +1392,13 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
         ({"adapter": "missing"}, "unknown harness adapter"),
         ({"adapter": "native"}, "cannot run in a task's container"),
         ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
+        ({"env": {"REEF_CONTEXT_WINDOW": "big"}}, "REEF_CONTEXT_WINDOW must be a positive number of tokens"),
+        ({"env": {"TOKEN": "${REEF_TOKEN}"}}, "text values without ${"),
+        ({"env": {"1BAD": "x"}}, "maps variable names"),
+        ({"config": {"primary": "x"}}, "maps config target names to JSON objects"),
+        ({"config": {"missing": {}}}, "declares no config target 'missing'"),
+        ({"config": {"models": {"providers": {"evil": {}}}}}, "the harness config fails validation"),
+        ({"config": {"primary": {"defaultTools": ["bash"]}}}, "the harness config fails validation"),
     ],
 )
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
@@ -1394,9 +1413,10 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
             await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
             uri = options.pop("uri", harness_tree(tmp_path / "tree"))
             environment = options.pop("environment", "docker")
+            extra = {key: options.pop(key) for key in ("env", "config") if key in options}
             body = {
                 "artifact_id": artifact_id,
-                "harness": {"item": tree_item(dispatcher, uri, **options)},
+                "harness": {"item": tree_item(dispatcher, uri, **options), **extra},
                 "environment": environment,
             }
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
@@ -1406,9 +1426,7 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
 
 
 @pytest.mark.integration
-def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_refused(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_an_item_of_another_owner_and_automatic_settings_are_refused(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
 
     async def run() -> None:
@@ -1425,13 +1443,6 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
             settings = {"artifact_evaluation": {"harness": {"item": item_id}}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=settings)
             assert response.status == 400 and "not an artifact item" in await response.text()
-
-            monkeypatch.setattr(
-                "reef.service.artifact_evaluations.task_agent_tools", lambda descriptor, task: ("mcp_servers",)
-            )
-            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
-            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
-            assert response.status == 400 and "mcp_servers" in await response.text()
 
     asyncio.run(run())
 
@@ -1509,6 +1520,67 @@ def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_report
             stopped = [row for row in rows if row["error"] == FAILURES_ERROR]
             assert answer["progress"]["cancelled"] == len(stopped)
             assert len(stopped) + [row["state"] for row in rows].count("waiting") == 2
+
+    asyncio.run(run())
+
+
+def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+    read_rollouts = evaluations.results.rollouts
+    reads: list[str] = []
+
+    def counted_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+        reads.append(evaluation_id)
+        return read_rollouts(evaluation_id, scenario)
+
+    monkeypatch.setattr(evaluations.results, "rollouts", counted_rollouts)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, accepted["evaluation_id"])
+            assert ended["progress"]["scored"] == 2
+
+            reads.clear()
+            for _ in range(2):
+                listed = (await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json())[
+                    "evaluations"
+                ]
+                assert listed[0]["progress"] == ended["progress"]
+            assert reads == []
+
+    asyncio.run(run())
+
+
+def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Path) -> None:
+    # A cancel stores the failed evaluation before it ends the rollouts; a reader in between sees a running rollout.
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            running = evaluations.results.rollouts(accepted["evaluation_id"], "s")
+            stored = replace(
+                evaluations.get("s", accepted["evaluation_id"]), state="failed", error="x", finished_at=1e10
+            )
+            evaluations.ended_progress.add("s", stored, running, {"ended": 0})
+            assert evaluations.ended_progress.read("s", stored) is None
 
     asyncio.run(run())
 

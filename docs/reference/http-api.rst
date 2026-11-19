@@ -66,9 +66,9 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/trajectories``                                                                   | create trajectory items from JSON Lines           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz of Harbor tasks   |
+| ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz, or by reference  |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                                                      | replace a task item's files                       |
+| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                                                      | replace a task item's files, or by reference      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data``                                                                                 | the owner's items, in arrival order               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -80,7 +80,13 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/metadata``                                                                       | patch the metadata of items                       |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/data/{id}``                                                                         | delete one item                                   |
+| ``DELETE /reef/namespaces/{owner}/data/{id}``                                                                         | delete one item; restore it for 30 days           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/deleted-items``                                                                        | the owner's deleted items, newest first           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/deleted-items/restore``                                                               | restore deleted items                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/deleted-items/{id}``                                                                | purge one deleted item for good                   |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/{id}/archive``                                                                    | one item to download: a task's files as tar.gz,   |
 |                                                                                                                       | another item's content as JSON                    |
@@ -471,8 +477,11 @@ The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
 not mean a training step has finished. Identical retries return the existing
 receipt, including after capacity eviction; reusing the ID with different content
 returns HTTP 409. Authentication failures return 401 and invalid envelopes,
-report schemas or references return 400. Scenario selection comes only from
-headers; envelope fields other than the three shown above are rejected.
+report schemas or references return 400. An inference record with an image also
+returns 400 when the deployment's recipes include a weight-training recipe,
+because training renders text only; a batch then stores nothing. Scenario
+selection comes only from headers; envelope fields other than the three shown
+above are rejected.
 
 ``request_type`` may be ``inference`` or ``report``. Inference payloads follow
 the selected recipe's recorded-input contract: native provider request fields
@@ -654,6 +663,11 @@ returns 409. A line that is not an ATIF document returns 400 and names the
 line. ``POST /reef/namespaces/{owner}/data`` refuses a trajectory; it creates
 record items only.
 
+When the deployment's recipes include a weight-training recipe, Reef first
+refuses a trajectory or a record item with an image, also one that names no
+scenario, because training renders text only. The refusal returns 400, names
+the item, and stores nothing.
+
 Before Reef stores the items, it checks each scenario that they name. The
 scenario must have the owner, and its recipe must train on the items:
 
@@ -680,12 +694,39 @@ scenario that does not exist yet when the scenario opens.
 Create task items
 ~~~~~~~~~~~~~~~~~
 
-Send a gzip-compressed tar archive to ``POST
-/reef/namespaces/{owner}/data/tasks`` with ``Content-Type:
-application/gzip``. Each top-level entry is one Harbor task directory, named
-by its task name: a lowercase letter or a digit, then lowercase letters,
-digits, ``.``, ``_`` and ``-``. The task name is the item's ID. The query
-parameter ``metadata`` is the JSON metadata of every task of the archive:
+``POST /reef/namespaces/{owner}/data/tasks`` creates one task item for each
+Harbor task directory. The task name is the item's ID: a lowercase letter or a
+digit, then lowercase letters, digits, ``.``, ``_`` and ``-``. A request
+holds 1 to 1000 tasks. The request has one of two forms:
+
+- An archive (``Content-Type: application/gzip``). The data service unpacks
+  the archive and copies each task directory into the task file store.
+- A reference (``Content-Type: application/json``). The client wrote each task
+  directory into the task file store itself. The data service copies no file.
+  Use this form for a task that is too large for an archive.
+
+Every task must be within the limits on its files. The module
+``reef.storage.tasks`` defines them, so a client can check a task before it
+sends it (``task_limit_errors``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Limit
+     - Value
+   * - Size of one file
+     - 500 GB (``MAX_TASK_FILE_BYTES``)
+   * - Entries, files and directories, directly in one directory
+     - 10,000 (``MAX_TASK_DIRECTORY_ENTRIES``)
+   * - Files in one task
+     - 100,000 (``MAX_TASK_FILES``)
+   * - Size of one task
+     - no limit
+
+In the archive form, each top-level entry of the gzip-compressed tar archive
+is one task directory, named by its task name. The query parameter
+``metadata`` is the JSON metadata of every task of the archive:
 
 .. code:: bash
 
@@ -697,35 +738,73 @@ parameter ``metadata`` is the JSON metadata of every task of the archive:
      -H 'Content-Type: application/gzip' \
      --data-binary @tasks.tar.gz
 
-The response is the same as for trajectory items, in name order. Reef
-returns:
+The data service writes the body to a local file before it unpacks it. The
+setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see
+`The data section <configuration.rst#the-data-section>`__). The files of one
+archive unpack to at most 8 GiB; create larger tasks in the reference form.
+Harbor's task loader must accept each task directory.
+
+In the reference form, first write each task directory into the owner's
+partition of the task file store, in the layout of the deployment's
+``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner
+``<owner>`` is ``data/<owner>``. The directory has the task name as its name.
+Compute its digest with ``reef.storage.tasks.FilesDigest``, or with
+``files_digest`` for a local directory. Then send the task names and digests
+as JSON. ``metadata`` is optional, as in the archive form:
+
+.. code:: bash
+
+   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks" \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"tasks": [{"name": "sum-391", "digest": "<files digest>"}],
+          "metadata": {"scenarios": {"my-agent": "train"}}}'
+
+For each task, the task file store must hold a complete directory with that
+name and digest in the owner's partition (``TaskFileStore.contains``). The
+item then gets that digest. The data service does not run Harbor's task
+loader on a reference: the client that wrote the files checks them.
+
+Both forms return the same response as for trajectory items, with the items in
+name order. Reef returns:
 
 - 400, and stores nothing, for an archive that is not tar.gz, a link or a
   device in it, a path outside its task directories, a file at the top level,
-  a name that is not a task name, more than 1000 tasks or 10,000 entries, more
-  than 256 MiB unpacked, a directory that Harbor's task loader refuses, or
-  metadata that is not a JSON object of kind ``task``;
-- 413 for a body larger than 256 MiB;
+  a task over a limit of the table above, or a directory that Harbor's task
+  loader refuses;
+- 400, and stores nothing, for a reference body that is not
+  ``{"tasks": [{"name", "digest"}], "metadata"}``, or a digest that is not 64
+  lowercase hexadecimal digits;
+- 400, and stores nothing, for a name that is not a task name, more than 1000
+  tasks, or metadata that is not a JSON object of kind ``task``;
+- 404, and stores nothing, for a reference to a task directory that the
+  owner's partition does not hold;
 - 409, and stores nothing, for a task name that the owner holds with other
   files. To change the files of a task, replace them (below);
+- 413 for an archive body larger than ``data.max-task-archive-bytes``;
 - 415 for another content type.
 
 Replace a task's files
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Send the task's new directory, as a gzip-compressed tar archive of that one
-directory, to ``PUT /reef/namespaces/{owner}/data/tasks/{id}`` with
-``Content-Type: application/gzip``. The directory has the item's ID as its
-name:
+``PUT /reef/namespaces/{owner}/data/tasks/{id}`` gives the task item ``id``
+new files. The new task directory has the item's ID as its name. The request
+has the same two forms as a create:
 
-.. code:: bash
+- An archive of that one directory (``Content-Type: application/gzip``):
 
-   tar -czf sum-391.tar.gz -C /data/benchmark/tasks sum-391
-   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks/sum-391" \
-     -X PUT \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/gzip' \
-     --data-binary @sum-391.tar.gz
+  .. code:: bash
+
+     tar -czf sum-391.tar.gz -C /data/benchmark/tasks sum-391
+     curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks/sum-391" \
+       -X PUT \
+       -H "Authorization: Bearer $REEF_TOKEN" \
+       -H 'Content-Type: application/gzip' \
+       --data-binary @sum-391.tar.gz
+
+- A reference (``Content-Type: application/json``) to a directory that the
+  client wrote into the owner's partition of the task file store:
+  ``{"digest": "<files digest>"}``.
 
 The item keeps its ID, metadata and splits. Each evaluation attempt reads
 the task's current files, so a new evaluation and a retry of a started one
@@ -737,8 +816,9 @@ task reads it again. The same files again change nothing.
 The response is ``{"owner", "item", "synced"}``, without content. Reef
 returns 400, and changes nothing, for an archive of no task or of several, a
 directory with another name, a directory that Harbor's task loader refuses,
-or an item that is not a task; 404 for an unknown item; 413 and 415 as for a
-create.
+a reference body that is not ``{"digest"}``, or an item that is not a task;
+404 for an unknown item or a reference to a directory that the owner's
+partition does not hold; 413 and 415 as for a create.
 
 Record items
 ~~~~~~~~~~~~
@@ -938,7 +1018,8 @@ Read, query, update and delete items
   ``{"owner", "id", "deleted": true, "synced"}``. The scenarios that used a
   trajectory or a task lose its copy. A record stays in the record store of the
   scenario that made it. The item of an artifact that a scenario made returns 400 while
-  the scenario exists, because the next copy would make it again.
+  the scenario exists, because the next copy would make it again. Reef keeps the
+  deleted item for 30 days, so you can restore it (`Restore deleted items`_).
 
 An unknown ID returns 404. A deployment without a data store returns 503.
 An item that leaves a scenario keeps its train counts there, so ``auto`` does
@@ -959,6 +1040,36 @@ GET of ``.../data/imports/<x>`` or ``.../data/exports/<x>`` reads a transfer.
 So GET cannot read an item whose ID ends in ``/archive``, or whose ID is
 ``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment. Give such
 items other IDs.
+
+Restore deleted items
+~~~~~~~~~~~~~~~~~~~~~
+
+A delete does not remove an item at once. Reef keeps it as a deleted item of
+its owner for 30 days, and then purges it. A deleted item is in no listing,
+set, scenario or read of the routes above. A new item can take its ID.
+
+- ``GET /reef/namespaces/{owner}/deleted-items?kind=&before=&limit=`` lists
+  the owner's deleted items, newest item first by ``sequence``: ``{"owner",
+  "items", "next"}``. Each item is ``{"id", "sequence", "digest", "metadata",
+  "deleted_at", "purge_at"}``, without content. ``deleted_at`` and
+  ``purge_at`` are seconds since the epoch. ``kind`` keeps one kind of item.
+  ``before`` and ``limit`` page the items as in the item query; ``next`` is the
+  ``before`` of the next page, or null after the last item.
+- ``POST /reef/namespaces/{owner}/deleted-items/restore`` takes ``{"ids":
+  [...]}``, 1 to 1000 IDs, and restores the items, all or none. An item comes
+  back with its ``sequence``, metadata and content, and in its sets. Reef checks
+  its ``scenarios`` as for a create call. Each scenario that uses it again
+  reads it again, also through a held set. The response is ``{"owner",
+  "items", "synced"}``, without content. An ID without a deleted item returns
+  404. An ID that the owner uses for an item again returns 409.
+- ``DELETE /reef/namespaces/{owner}/deleted-items/{id}`` purges one deleted
+  item for good and returns ``{"owner", "id", "purged": true}``. An ID without
+  a deleted item returns 404.
+
+The archive of a scenario removes it from the ``scenarios`` of the deleted
+items too. A reader that pages items with ``after`` and is past the
+``sequence`` of a restored item does not see it again; a scenario reads it
+again through its uses.
 
 Benchmarks and collections
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1283,7 +1394,18 @@ The body takes these fields:
   Reef's sandbox relay and Harbor's exec, also for a task with several compose
   services (RFC #986). Reef refuses a task that declares MCP servers or skills. This
   evaluation does not reach the activation rule, and an automatic evaluation
-  cannot use an item.
+  cannot use an item. ``{"item": "<item id>", "env": {"NAME": "value"}}``
+  also gives each command of the agent these variables. A name is a shell
+  variable name, and a value is text without ``${``. ``REEF_CONTEXT_WINDOW``
+  and ``REEF_MAX_OUTPUT_TOKENS`` also set the model's token limits in the
+  rendered tree, each a positive number of tokens (`Token limits
+  <../developer-guide/harness-adapters.rst#token-limits>`__). A Harbor agent
+  takes variables in its own ``env`` key. ``"config": {"<target>": {...}}``
+  merges each JSON object into the tree's ``config/<target>.json``, as if the
+  tree held it. The tree with the config must pass the adapter's validation
+  (`Config checks <../developer-guide/harness-adapters.rst#config-checks>`__),
+  so the config sets no key that Reef's model binding writes. Reef refuses the
+  evaluation with 400 otherwise.
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.
@@ -1608,7 +1730,9 @@ without a 200 call has no trajectory.
 - Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
   the call's record ID (`Evaluation calls`_), and its
   ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
-  body plus ``response``, the response body.
+  body without the conversation, the tools and the response
+  (``call_summary``), such as ``model`` and ``chat_template_kwargs``. The
+  steps hold the conversation.
 - ``extra.reef.reward`` is the rollout's score for each trajectory of the
   attempt that was scored: the last attempt of a finished rollout. It is null
   for every other attempt, and for a failed score.

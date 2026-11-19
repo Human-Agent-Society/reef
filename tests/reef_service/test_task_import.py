@@ -27,9 +27,11 @@ IMAGE = bytes(range(256))
 
 
 def harbor_task(root: Path, name: str, port: int, *, instruction: str = "") -> Path:
-    """A Harbor task directory with a binary file, which Reef's own task reader would refuse."""
+    """A Harbor task directory with a binary file added after Reef wrote it, which Reef's own task reader refuses."""
     task = task_for(name, "record-1", port)
-    directory = write_harbor_task(replace(task, instruction=instruction) if instruction else task, root)
+    if instruction:
+        task = replace(task, files={**task.files, "instruction.md": instruction})
+    directory = write_harbor_task(task, root)
     (directory / "environment" / "image.png").write_bytes(IMAGE)
     return directory
 

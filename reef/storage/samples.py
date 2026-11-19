@@ -18,7 +18,6 @@ import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import batched
 from pathlib import Path
@@ -27,7 +26,6 @@ from typing import Any, Literal, cast
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.storage.data import (
     MAX_QUERY_LIMIT,
-    TASK_PATH_READERS,
     DataStore,
     ItemConflictError,
     ItemUse,
@@ -265,27 +263,6 @@ class SampleStore:
         uses.sort(key=lambda use: use.sequence)
         return tuple(stored for batch in batched(uses, MAX_QUERY_LIMIT) for stored in self.stored(batch))
 
-    def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
-        """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
-
-        It gives the directories that ``read`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
-        the task file store at the same time. An ID of a trajectory, or of an item that the scenario does not use,
-        gives no directory.
-        """
-        items = sorted(
-            (
-                item
-                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
-                for item in self.data.read_many(
-                    self.owner, list(self.data.item_splits(self.owner, self.scenario, batch)), content=False
-                )
-                if item.kind == "task"
-            ),
-            key=lambda item: item.sequence,
-        )
-        with ThreadPoolExecutor(max_workers=TASK_PATH_READERS) as readers:
-            return tuple(readers.map(self.data.task_path, items))
-
     def stored(self, uses: Sequence[ItemUse]) -> tuple[StoredSample, ...]:
         """The samples of the uses ``uses`` that are trajectories or tasks, with their train counts."""
         samples = [use for use in uses if use.item.kind in SAMPLE_KINDS]
@@ -358,8 +335,8 @@ class TrainerSamples:
     component that its commits name, or ``""`` for the only trainer of a scenario.
 
     Purpose: ``SampleStore.for_trainer`` makes it. The trainer's pipeline (``PipelineContext.samples``) and its stages
-    read the samples that the trainer trains on, save the samples that its stages make, and read the records that
-    they consumed.
+    read the samples that the trainer trains on, save the samples that its stages make, end the use of the ones that
+    should no longer train, and read the records that they consumed.
     """
 
     store: SampleStore
@@ -433,6 +410,27 @@ class TrainerSamples:
             new += 1
         store.state.consume_records(trainer, record_ids)
         return new
+
+    def delete_samples(self, sample_ids: Sequence[str]) -> None:
+        """End the scenario's use of the samples ``sample_ids`` that the stages of ``trainer`` made, so that no later
+        job takes them. The items stay in the data store with their train counts. An ID that the scenario does not
+        use changes nothing. Raise ``ValueError``, and change nothing, for a sample that the stages of ``trainer`` did
+        not make: an upload, an imported task, or another trainer's sample."""
+        store = self.store
+        items = [
+            item
+            for item in store.data.read_many(store.owner, sample_ids, content=False)
+            if store.scenario in item.scenarios
+        ]
+        others = sorted(
+            item.item_id
+            for item in items
+            if (origin := store.own_origin(item)) is None or origin["component"] != self.trainer
+        )
+        if others:
+            raise ValueError(f"the stages of trainer {self.trainer!r} did not make the samples {others}")
+        if items:
+            store.data.update(store.owner, [item.item_id for item in items], {"scenarios": {store.scenario: None}})
 
     def consumed_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` consumed."""

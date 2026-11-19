@@ -73,7 +73,9 @@ pi's ``adapter.yaml``, shortened:
        format that reads it
    * - ``model``
      - config templates per dialect (``openai``, ``responses``,
-       ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
+       ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``,
+       and the token limits ``{context_window}`` and ``{max_output_tokens}``
+       (`Token limits`_)
    * - ``run.task``
      - the headless command (``{task}``, ``{root}``) and its variables;
        optionally ``skills``, the directory under the root where the agent
@@ -127,8 +129,9 @@ How Reef runs an agent
        needs an adapter with ``run.task.skills``: Reef copies the task's
        skills there before the tree, so the tree's file wins on one path. A
        task that sets ``environment.mcp_servers`` needs an adapter with
-       ``run.task.mcp`` (`Task MCP servers`_). An evaluation refuses a task
-       that needs what the adapter does not give its agent. The verifier can read the run as ATIF in
+       ``run.task.mcp`` (`Task MCP servers`_). The rollout of a task that
+       needs what the adapter does not give its agent fails with no retry,
+       and the other rollouts run. The verifier can read the run as ATIF in
        ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
      - an npm, uv or git ``install``, ``run.task.skills``,
        ``run.task.mcp``
@@ -507,6 +510,47 @@ refuse its agent's other routes, such as a fallback model, a second provider
 or a proxy, and ``tests/harness/test_harness_model_route.py`` lists them.
 The checks read the config only; a tool that builds its own request can
 still name another model.
+
+Token limits
+~~~~~~~~~~~~
+
+A binding template can give the agent the model's token limits:
+
+- ``{context_window}``: the context window in tokens. It is the run's
+  ``REEF_CONTEXT_WINDOW``, else the window in the endpoint's model metadata,
+  else 128000.
+- ``{max_output_tokens}``: the reply budget in tokens. It is the run's
+  ``REEF_MAX_OUTPUT_TOKENS``, else 32000.
+
+An agent compacts its history before the context window fills. Without a
+window, opencode never compacts, and a long run fails at the endpoint's
+limit. The bindings use the limits as follows:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 43 43
+
+   * - Adapter
+     - Context window
+     - Reply budget
+   * - ``opencode``
+     - ``limit.context`` of each model, always
+     - ``limit.output`` of each model, always
+   * - ``pi``
+     - ``contextWindow`` of each model, always
+     - ``maxTokens`` of each model, always
+   * - ``codex``
+     - ``context_window`` of the model's catalog entry, only with the
+       endpoint's model metadata or ``REEF_CONTEXT_WINDOW``. Without either,
+       Codex keeps its own handling of a model it does not know, and the
+       entry claims no reasoning.
+     - not written
+
+The other adapters write neither limit.
+
+A harness item's ``env`` sets the two variables for an artifact evaluation
+(``POST /reef/scenarios/{scenario}/evaluations``). Reef refuses a value that
+is not a positive integer.
 
 Adapter steps
 ~~~~~~~~~~~~~

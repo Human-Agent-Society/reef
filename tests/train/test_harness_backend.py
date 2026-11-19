@@ -409,9 +409,11 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
 def test_a_run_of_a_task_directory_gives_the_method_the_task_instruction(tmp_path: Path) -> None:
     task = HarborTask(
         name="fix-the-build",
-        instruction="Fix the build, then run the tests.\n",
-        tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-        environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        files={
+            "instruction.md": "Fix the build, then run the tests.\n",
+            "tests/test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n",
+            "environment/Dockerfile": "FROM python:3.12-slim\n",
+        },
     )
     directory = write_harbor_task(task, tmp_path / "tasks")
     record = RunRecord("e1", PI_SEED.checksum(), str(directory), "key", 0, "context", 1, RolloutScore.scored(1.0))

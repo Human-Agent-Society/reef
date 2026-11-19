@@ -27,6 +27,7 @@ from reef.evaluation.rollout_worker import (
     EvaluationRollout,
     EvaluationRolloutWorker,
     RolloutCalls,
+    TreeHarness,
     evaluation_call,
     reply_summary,
     rollout_item_id,
@@ -275,6 +276,37 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     assert worker.run_once() is False
 
 
+class ServingRefusedWorker(EvaluationRolloutWorker):
+    """A worker that fails the test when it asks to serve a candidate."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        raise AssertionError("a rollout that cannot run serves no candidate")
+
+
+class ToolTaskEndpoints(OpenEndpoints):
+    """Endpoints whose task asks its agent for an SSE MCP server."""
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = super().task_directory(rollout)
+        (task / "task.toml").write_text(
+            '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
+        )
+        return task
+
+
+@pytest.mark.unit
+def test_a_tree_rollout_whose_task_needs_what_the_agent_lacks_fails_for_good_before_serving(tmp_path):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(rollout(), agent=None, tree=TreeHarness("codex", "openai-responses", {}))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServingRefusedWorker(queue, ToolTaskEndpoints(tmp_path), worker_id="evaluation-1")
+
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert failed.state == "failed" and failed.attempt_count == 1
+    assert failed.error == "task 'add' needs mcp_servers, which adapter 'codex' does not give its agent"
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("path", "reply", "expected"),
@@ -446,3 +478,51 @@ def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops
     with pytest.raises(error):
         asyncio.run(run_while_held(EndlessRunner(), "request", events["lease_lost"], events["stopped"]))
     assert cancelled.is_set()
+
+
+class HeldLab(CalledThenFailedLab):
+    """A ``TaskLab`` whose trial makes one model call, as ``CalledThenFailedLab``, then runs until ``released`` is
+    set, and ends with the reward 1. ``started`` is set once the call has an answer."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.released = threading.Event()
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        self.started.set()
+        while not self.released.is_set():
+            await asyncio.sleep(0.01)
+        return RolloutRow(rewards={"reward": 1.0}, error=None, trial_uri=None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("on_stop", "state", "error"), [("requeue", "queued", "the worker stopped"), ("finish", "finished", None)]
+)
+def test_a_stopping_worker_requeues_or_finishes_the_rollouts_that_it_runs(
+    tmp_path, monkeypatch, on_stop, state, error
+):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = HeldLab()
+    worker = ServedWorker(
+        queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab, slots=2, on_stop=on_stop
+    )
+    assert worker.run_once() is True
+    assert lab.started.wait(10)
+    # The rollout ends only when the lab lets it, so a worker that cancels it stops first.
+    threading.Timer(0.3, lab.released.set).start()
+    worker.stop()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == (state, error)
+    if on_stop == "finish":
+        assert item.result == {"score": 1.0, "rewards": {"reward": 1.0}, "error": None}
+
+
+@pytest.mark.unit
+def test_a_worker_refuses_an_unknown_stop():
+    with pytest.raises(ValueError, match="on_stop must be one of requeue, finish, not 'drain'"):
+        ServedWorker(memory_coordination().work_queue, UnreachableEndpoints(), worker_id="w", on_stop="drain")

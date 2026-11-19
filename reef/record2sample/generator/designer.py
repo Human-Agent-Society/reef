@@ -241,8 +241,9 @@ def checked_harbor_files(value: object, label: str) -> dict[str, str]:
             raise DesignerReplyError(f"the reply's {label} names a file the task cannot hold: {path!r}")
         if not isinstance(text, str):
             raise DesignerReplyError(f"the reply's {label}/{path} must be text")
+    files = {path: text.replace("\r\n", "\n") for path, text in value.items()}
     try:
-        files = checked_files(label, {path: text.replace("\r\n", "\n") for path, text in value.items()})
+        checked_files({f"{label}/{path}": text for path, text in files.items()})
     except HarborTaskError as exc:
         raise DesignerReplyError(f"the reply's {label}: {exc}") from exc
     return files

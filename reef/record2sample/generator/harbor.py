@@ -244,15 +244,14 @@ def reply_errors(reply: HarborReply) -> list[str]:
 
 
 def content_hash(task: HarborTask) -> str:
-    """Sixteen hex digits over the instruction and the files, without task.toml or the hint, for deduplication."""
+    """Sixteen hex digits over the task's files, without task.toml or the hint, for deduplication."""
     digest = hashlib.sha256()
-    digest.update(task.instruction.encode("utf-8"))
-    for label, files in (("environment", task.environment), ("tests", task.tests), ("solution", task.solution)):
-        for path in sorted(files):
-            if label == "solution" and path == "hint.txt":
-                continue
-            digest.update(f"\0{label}/{path}\0".encode())
-            digest.update(files[path].encode("utf-8"))
+    for path in sorted(task.files):
+        if path == "solution/hint.txt":
+            continue
+        content = task.files[path]
+        digest.update(f"\0{path}\0".encode())
+        digest.update(content.encode("utf-8") if isinstance(content, str) else content)
     return digest.hexdigest()[:16]
 
 
@@ -280,11 +279,12 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
     reply = task.reply
     # The hint sits beside the reference solution, which Harbor never mounts for the agent.
     solution = {**reply.solution, "hint.txt": reply.hint + "\n"} if reply.hint else dict(reply.solution)
+    files = {"instruction.md": reply.instruction}
+    for directory, tree in (("tests", reply.tests), ("environment", reply.environment), ("solution", solution)):
+        files.update({f"{directory}/{path}": text for path, text in tree.items()})
     return HarborTask(
         name=task.name,
-        instruction=reply.instruction,
-        tests=dict(reply.tests),
-        environment=dict(reply.environment),
+        files=files,
         config={
             "agent": {"timeout_sec": agent_timeout_s},
             # The verifier reads state a Dockerfile may have kept from the agent's user.
@@ -292,7 +292,6 @@ def harbor_task(task: GeneratedHarborTask, *, agent_timeout_s: int = DEFAULT_AGE
             "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 2048, "gpus": 0, "network_mode": "no-network"},
         },
         metadata=metadata,
-        solution=solution,
         source_agent_record_ids=(task.source_record_id,),
     )
 
