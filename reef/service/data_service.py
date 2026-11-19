@@ -11,6 +11,7 @@ data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` i
 
 from __future__ import annotations
 
+import itertools
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -97,9 +98,10 @@ class DataImport(DataJob):
     Values: ``dispatcher`` is the dispatcher whose data store holds the items and whose ``data`` queue holds the
     import; ``sources`` reads the URIs that imports name. ``run(item)`` takes an import item that a worker holds
     (``item.worker_id`` is set) and returns ``{items}``, the count it stored. It raises ``ValueError`` when no worker
-    holds ``item``, and as ``run_import`` for files it cannot import. For a trajectory import it adds ``{items}``, the
-    count stored so far, to the progress of ``item`` after each transaction, and ``WorkLeaseLostError`` stops it when
-    its worker no longer holds ``item``; the items of its earlier transactions stay.
+    holds ``item``, and as ``run_import`` for files it cannot import. For a trajectory import, progress entry ``n``
+    of ``item`` is ``{items}``, the count stored after transaction ``n``: each attempt reports the same entries, so a
+    retry adds only those that an earlier attempt did not. ``WorkLeaseLostError`` stops it when its worker no longer
+    holds ``item``; the items of its earlier transactions stay.
 
     Purpose: ``data_jobs`` makes it; ``DataWorker`` runs each ``data_import`` item with it.
     """
@@ -111,7 +113,16 @@ class DataImport(DataJob):
         self.sources = sources
 
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        return run_import(DataAccess.of(self.dispatcher), self.sources, item)
+        worker_id = item.worker_id
+        if worker_id is None:
+            raise ValueError(f"no worker holds the import {item.id}")
+        data = DataAccess.of(self.dispatcher)
+        numbers = itertools.count()
+
+        def report_stored(stored: int) -> None:
+            data.queue.append_progress(DATA_QUEUE, item.id, worker_id, {"items": stored}, number=next(numbers))
+
+        return run_import(data, self.sources, item.payload, report_stored)
 
 
 class DataExport(DataJob):

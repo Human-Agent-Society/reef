@@ -32,7 +32,7 @@ import uuid
 import zlib
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -45,7 +45,7 @@ from reef.service.data import (
     DataAccess,
     create_task_directories,
     create_trajectory_items,
-    trajectory_line,
+    jsonl_trajectories,
 )
 from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFoundError, StoredItem, check_owner
 from reef.storage.data_queue import DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
@@ -120,20 +120,19 @@ def transfer_json(item: WorkItem) -> dict[str, Any]:
     }
 
 
-def run_import(data: DataAccess, sources: ArtifactSources, item: WorkItem) -> dict[str, JsonValue]:
-    """Import the files at the ``uri`` of the held import ``item`` as items of its ``owner``; return ``{items}``, the
-    count.
+def run_import(
+    data: DataAccess, sources: ArtifactSources, payload: Mapping[str, Any], report_stored: Callable[[int], None]
+) -> dict[str, JsonValue]:
+    """Import the files at ``payload["uri"]`` as items of ``payload["owner"]``; return ``{items}``, the count.
 
     A trajectory import checks every line before it stores an item: it raises ``ValueError`` as
-    ``trajectory_batches`` and stores nothing. Then it stores the items one transaction at a time, and adds
-    ``{items}``, the count stored so far, to the item's progress after each transaction. An ``ItemConflictError``
-    with a stored item, or another refusal of ``create_trajectory_items``, stops it there and keeps the items of the
-    earlier transactions. ``WorkLeaseLostError`` stops it when its worker no longer holds the item.
+    ``trajectory_batches`` and stores nothing. Then it stores the items one transaction at a time, and calls
+    ``report_stored`` with the count stored so far after each transaction. An ``ItemConflictError`` with a stored
+    item, another refusal of ``create_trajectory_items``, or an error of ``report_stored`` stops it there and keeps
+    the items of the earlier transactions. The batches are the same in each run over the same files, and storing an
+    item again with the same content changes nothing, so a run again stores only what an earlier run did not.
     """
-    payload: Mapping[str, Any] = item.payload
     owner, uri, metadata = payload["owner"], payload["uri"], payload["metadata"]
-    if item.worker_id is None:
-        raise ValueError(f"no worker holds the import {item.id}")
     with tempfile.TemporaryDirectory(prefix="reef-data-import-") as work:
         root = Path(work) / "files"
         root.mkdir()
@@ -160,55 +159,44 @@ def run_import(data: DataAccess, sources: ArtifactSources, item: WorkItem) -> di
         # Pass 1 checks every line and keeps no batch, so that a bad line fails the import before it stores an item.
         deque(trajectory_batches(files), maxlen=0)
         stored = 0
-        for number, batch in enumerate(trajectory_batches(files)):
+        for batch in trajectory_batches(files):
             create_trajectory_items(data, owner, batch, metadata, wait=False)
             stored += len(batch)
-            data.queue.append_progress(
-                DATA_QUEUE, item.id, item.worker_id, {"items": stored}, number=len(item.progress) + number
-            )
+            report_stored(stored)
         return {"items": stored}
 
 
 def trajectory_batches(files: Sequence[Path]) -> Iterator[list[tuple[str, Mapping[str, Any]]]]:
-    """The ATIF documents of the JSON Lines ``files`` in order, each with its item ID (``trajectory_line``).
-
-    A file whose name ends in ``.gz`` is gzip. A blank line is skipped. A batch ends at ``MAX_ITEMS_PER_CREATE``
-    documents, or at the line that brings its lines to ``MAX_IMPORT_BATCH_CHARACTERS`` characters. Raise
-    ``ValueError`` as ``trajectory_line``, for a ``session_id`` on an earlier line of any file, and for a file that
-    is not UTF-8 or not complete gzip.
+    """The ATIF documents of the JSON Lines ``files`` in order, each with its item ID (``jsonl_trajectories``), in
+    batches. A batch ends at ``MAX_ITEMS_PER_CREATE`` documents, or at the line that brings its lines to
+    ``MAX_IMPORT_BATCH_CHARACTERS`` characters. Raise ``ValueError`` as ``jsonl_trajectories`` and
+    ``trajectory_file_lines``.
     """
-    # The file of each session_id so far, to name it when a later line repeats the session_id.
-    files_by_id: dict[str, str] = {}
     batch: list[tuple[str, Mapping[str, Any]]] = []
     characters = 0
-    for path in files:
-        source = path.name
-        # gzip reads an empty file as an empty text without an error, but a complete gzip file has a header.
-        if source.endswith(".gz") and path.stat().st_size == 0:
-            raise ValueError(f"{source} is not UTF-8 text or not complete gzip: it is empty")
-        try:
-            with (
-                gzip.open(path, "rt", encoding="utf-8") if source.endswith(".gz") else path.open(encoding="utf-8")
-            ) as lines:
-                for number, line in enumerate(lines, start=1):
-                    if not line.strip():
-                        continue
-                    item_id, document = trajectory_line(line, source, number)
-                    if item_id in files_by_id:
-                        raise ValueError(
-                            f"{source} line {number}: session_id {item_id!r} is on an earlier line"
-                            f" of {files_by_id[item_id]}"
-                        )
-                    files_by_id[item_id] = source
-                    batch.append((item_id, document))
-                    characters += len(line)
-                    if len(batch) == MAX_ITEMS_PER_CREATE or characters >= MAX_IMPORT_BATCH_CHARACTERS:
-                        yield batch
-                        batch, characters = [], 0
-        except (UnicodeDecodeError, EOFError, zlib.error, gzip.BadGzipFile) as exc:
-            raise ValueError(f"{source} is not UTF-8 text or not complete gzip: {exc}") from exc
+    texts = ((path.name, trajectory_file_lines(path)) for path in files)
+    for item_id, document, line_characters in jsonl_trajectories(texts):
+        batch.append((item_id, document))
+        characters += line_characters
+        if len(batch) == MAX_ITEMS_PER_CREATE or characters >= MAX_IMPORT_BATCH_CHARACTERS:
+            yield batch
+            batch, characters = [], 0
     if batch:
         yield batch
+
+
+def trajectory_file_lines(path: Path) -> Iterator[str]:
+    """The lines of the JSON Lines file at ``path``, which is gzip when its name ends in ``.gz``. Raise
+    ``ValueError`` for a file that is not UTF-8 text or not complete gzip."""
+    compressed = path.name.endswith(".gz")
+    # gzip reads an empty file as an empty text without an error, but a complete gzip file has a header.
+    if compressed and path.stat().st_size == 0:
+        raise ValueError(f"{path.name} is not UTF-8 text or not complete gzip: it is empty")
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") if compressed else path.open(encoding="utf-8") as lines:
+            yield from lines
+    except (UnicodeDecodeError, EOFError, zlib.error, gzip.BadGzipFile) as exc:
+        raise ValueError(f"{path.name} is not UTF-8 text or not complete gzip: {exc}") from exc
 
 
 def run_export(data: DataAccess, writers: ArchiveWriters, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
@@ -372,6 +360,7 @@ __all__ = [
     "run_import",
     "start_transfer",
     "trajectory_batches",
+    "trajectory_file_lines",
     "transfer_json",
     "transfer_status",
 ]

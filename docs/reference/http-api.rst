@@ -1222,10 +1222,10 @@ The status is ``{"id", "kind", "state", "request", "progress", "result",
   ``failed``.
 - ``request`` is the body that started the transfer.
 - ``progress`` is ``{"items"}`` after a trajectory import stores its first
-  transaction: the count of items that the attempt stored so far. It is
-  ``null`` before that, and for a task import and an export. A retry counts
-  again from the start. While its check pass runs, ``progress`` still shows
-  the attempt before.
+  transaction: the count of items stored so far. It is ``null`` before
+  that, and for a task import and an export. A retry stores the same
+  transactions again, which changes no item, and ``progress`` does not go
+  back: it changes only when the retry stores more than the attempts before.
 - ``result`` is set when the transfer finished: ``{"items"}``, the item count,
   for an import, and ``{"items", "bytes"}`` for an export.
 - ``error`` tells why a run failed.

@@ -30,12 +30,14 @@ from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import DefaultStart, FileDownload
+from reef.artifact.sources import ArtifactSources
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service import data_transfer
 from reef.service.app import create_app
-from reef.storage.data_queue import DATA_QUEUE
+from reef.service.data_service import DataImport
+from reef.storage.data_queue import DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.component import TrainingJob
 from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE, job_kind, job_payload
@@ -188,6 +190,31 @@ def test_a_trajectory_import_checks_every_line_then_stores_and_reports_one_batch
         assert stored == ["t1", "t2", "t3", "t4", "t5", "x1", "x2", "x3"]
 
     served(dispatcher, check)
+
+
+def test_a_retried_trajectory_import_stores_and_reports_nothing_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two lines fill a batch.
+    monkeypatch.setattr(data_transfer, "MAX_IMPORT_BATCH_CHARACTERS", 2 * len(trajectory_lines("t1")) - 1)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.jsonl").write_bytes(trajectory_lines("t1", "t2", "t3", "t4", "t5"))
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    job = DataImport(dispatcher, ArtifactSources.from_setting(()))
+    payload = {"owner": "acme", "uri": source.as_uri(), "metadata": {"kind": "trajectory"}}
+    try:
+        # The test takes the item itself, as two workers one after the other.
+        dispatcher.workers.stop()
+        dispatcher.queue.append(NewWork(DATA_QUEUE, "import-1", "acme", DATA_IMPORT_KIND, payload))
+        for worker_id in ("w1", "w2"):
+            item = dispatcher.queue.take(DATA_QUEUE, worker_id, [DATA_IMPORT_KIND])
+            assert item is not None and job.run(item) == {"items": 5}
+            dispatcher.queue.give_back(DATA_QUEUE, item.id, worker_id)
+        progress = dispatcher.queue.read(DATA_QUEUE, "import-1").progress
+        assert [entry["items"] for entry in progress] == [2, 4, 5]
+    finally:
+        dispatcher.close()
 
 
 def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp_path: Path) -> None:
