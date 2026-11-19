@@ -43,6 +43,7 @@ from typing import Any, ClassVar, Self, override
 from harbor.environments.e2b import E2BEnvironment
 from harbor.models.task.config import NetworkMode
 from harbor.models.task.task import Task
+from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
 from harbor.models.trial.paths import TrialPaths
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -531,29 +532,42 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
 
 async def build_task_template(task_path: Path) -> str:
-    """Build the template of the ``e2b`` trials of the task directory ``task_path`` when it does not exist, and
-    return its alias.
+    """Build each template of the ``e2b`` trials of the task directory ``task_path`` that does not exist, and return
+    the alias of the template of the task's environment.
 
-    The template is the one that ``KillOnTimeoutE2BEnvironment.start`` builds for a trial of the task: the same alias,
-    the task's resources and the task's build time limit. A trial after this call finds the template and does not
-    build it. So a caller that builds each task's template before its trials keeps the build out of the trials'
-    environment start limit. With ``REEF_E2B_DOCKERFILE_BUILD`` ``aenv``, a build waits for a free AgentENV builder
-    until the task's build time limit (``ensure_aenv_template``). Raise what the build raises, such as
+    The templates are the ones that a trial of the task builds: the template of the task's environment, which
+    ``KillOnTimeoutE2BEnvironment.start`` builds before the agent, and the template of each separate verifier
+    environment of the task or of its steps, which the trial builds after the agent. Each has the alias, the
+    resources and the build time limit that it has in a trial. A trial after this call finds the templates and does
+    not build them. So a caller that builds each task's templates before its trials keeps the builds out of the
+    trials' environment start limits. With ``REEF_E2B_DOCKERFILE_BUILD`` ``aenv``, a build waits for a free AgentENV
+    builder until its build time limit (``ensure_aenv_template``). Raise what a build raises, such as
     ``TimeoutError`` at that limit.
     """
     task = Task(task_path)
+    environments = [(task.paths.environment_dir, task.config.environment)]
+    for step in task.config.steps or [None]:
+        verifier = resolve_verifier_environment_definition(task.config, task.paths, step)
+        if verifier is not None:
+            environments.append((verifier.directory, verifier.config))
+    aliases: list[str] = []
     with tempfile.TemporaryDirectory(prefix="reef-template-") as trial_directory:
-        environment = KillOnTimeoutE2BEnvironment(
-            environment_dir=task.paths.environment_dir,
-            environment_name=task.short_name,
-            session_id=f"{task.short_name}__template",
-            trial_paths=TrialPaths(Path(trial_directory)),
-            task_env_config=task.config.environment,
-        )
-        # Harbor's ``start`` without the sandbox: these protected methods are the template part of it.
-        if not await environment._does_template_exist():
-            await environment._create_template()
-    return environment._template_name
+        for environment_dir, environment_config in environments:
+            environment = KillOnTimeoutE2BEnvironment(
+                environment_dir=environment_dir,
+                environment_name=task.short_name,
+                session_id=f"{task.short_name}__template",
+                trial_paths=TrialPaths(Path(trial_directory)),
+                task_env_config=environment_config,
+            )
+            # A verifier environment that is the task's environment has the task environment's template.
+            if environment._template_name in aliases:
+                continue
+            # Harbor's ``start`` without the sandbox: these protected methods are the template part of it.
+            if not await environment._does_template_exist():
+                await environment._create_template()
+            aliases.append(environment._template_name)
+    return aliases[0]
 
 
 __all__ = [

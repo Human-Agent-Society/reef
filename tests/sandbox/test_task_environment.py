@@ -388,6 +388,49 @@ def test_a_task_template_built_before_the_trials_is_the_template_of_a_trial(
 
 
 @pytest.mark.unit
+def test_the_template_of_a_separate_verifier_environment_is_built_before_the_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    from harbor.models.task.task import Task
+    from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
+    from harbor.models.trial.paths import TrialPaths
+
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    trial = harbor_e2b_environments(tmp_path)["reef"]
+    task_path = tmp_path / "task"
+    (task_path / "task.toml").write_text(
+        E2B_TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+    )
+    (task_path / "tests" / "Dockerfile").write_text("FROM python:3.12-slim\nCOPY test.sh /tests/test.sh\n")
+    builds: list[DockerfileBuild] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        builds.append(build)
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+    assert asyncio.run(reef_e2b.build_task_template(task_path)) == trial._template_name
+    # The verifier's template is the one that the trial's separate verifier environment builds after the agent.
+    task = Task(task_path)
+    verifier = resolve_verifier_environment_definition(task.config, task.paths)
+    assert verifier is not None
+    verifier_environment = reef_e2b.KillOnTimeoutE2BEnvironment(
+        environment_dir=verifier.directory,
+        environment_name=task.short_name,
+        session_id="t__verifier",
+        trial_paths=TrialPaths(tmp_path / "verifier"),
+        task_env_config=verifier.config,
+    )
+    assert [build.alias for build in builds] == [trial._template_name, verifier_environment._template_name]
+    assert builds[1].context_dir == task_path / "tests"
+
+
+@pytest.mark.unit
 def test_a_task_template_that_exists_is_not_built_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
