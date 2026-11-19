@@ -93,6 +93,14 @@ The class also builds a task's Dockerfile differently in two ways:
   timeout. An AgentENV worker answers 429 when it already runs as many builds as
   it takes at once.
 
+A trial builds a missing template inside its environment start limit. A wait
+for a free AgentENV builder then counts against that limit. To keep the build
+out of the trials, a deployment can call
+``reef.execution.sandbox.e2b.build_task_template(task_path)`` for each task
+before its trials. It builds the template that a trial of the task would build,
+with the same alias, resources and build timeout, and returns the alias. A
+trial after it finds the template ready.
+
 Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
 gives it to each in-process trial and to each environment build. That covers
 the generator's runs, the evaluation rollouts and the training rollouts. A
