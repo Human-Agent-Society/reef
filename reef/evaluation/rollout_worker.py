@@ -27,12 +27,12 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from reef_client.serve import CapturedTurn
 
@@ -54,7 +54,7 @@ from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedEr
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
-from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
@@ -72,6 +72,9 @@ DEFAULT_AGENT_HOST = "host.docker.internal"
 SERVE_WAIT_S = 12 * 3600.0
 #: The wait between two reads of a serve item, in seconds.
 SERVE_POLL_S = 1.0
+#: The longest time that a rollout on e2b waits for its task's template before its trial. An AgentENV builder builds
+#: one template at a time, so a template can wait hours for a free builder when many tasks are new.
+TEMPLATE_WAIT_S = 6 * 3600.0
 #: The seconds between two checks of a running trial's lease.
 LEASE_CHECK_S = 1.0
 #: What a stopping evaluation worker does with the rollouts that it runs: ``requeue`` cancels each one and gives it
@@ -571,20 +574,21 @@ class RolloutCalls(CaptureObserver):
         self.writer.shutdown(wait=True)
 
 
-async def run_while_held(
-    runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event, stopped: threading.Event
-) -> TaskRollout:
-    """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` or ``stopped`` is set first,
-    cancel the run, so that Harbor stops the trial and its sandbox. Then raise ``WorkLeaseLostError`` for
-    ``lease_lost``: a client cancelled the rollout, or another worker took it. Raise ``WorkerStoppedError`` for
-    ``stopped`` alone: the worker stops, and the rollout goes back to the queue. A process that ends with a trial
-    still running leaves the trial's sandbox running, so a stopping worker does not wait for the trial."""
-    run = asyncio.ensure_future(runner.run_rollouts_async([request], asyncio.Semaphore(1)))
+Result = TypeVar("Result")
+
+
+async def run_while_held(work: Awaitable[Result], lease_lost: threading.Event, stopped: threading.Event) -> Result:
+    """Run ``work`` of a rollout and return its result. When ``lease_lost`` or ``stopped`` is set first, cancel
+    ``work``, so that Harbor stops a trial and its sandbox, or a template build stops. Then raise
+    ``WorkLeaseLostError`` for ``lease_lost``: a client cancelled the rollout, or another worker took it. Raise
+    ``WorkerStoppedError`` for ``stopped`` alone: the worker stops, and the rollout goes back to the queue. A process
+    that ends with a trial still running leaves the trial's sandbox running, so a stopping worker does not wait for
+    the trial."""
+    run = asyncio.ensure_future(work)
     while not lease_lost.is_set() and not stopped.is_set():
         done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
         if done:
-            [result] = run.result()
-            return result
+            return run.result()
     run.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await run
@@ -684,6 +688,13 @@ class EvaluationRolloutWorker(QueueWorker):
                     f"task {rollout.task_name!r} needs {', '.join(tools)}, which adapter {rollout.tree.adapter!r} "
                     "does not give its agent"
                 )
+        if rollout.environment == "e2b":
+            # The trial builds a missing template inside its task's environment start limit, and an AgentENV builder
+            # builds one template at a time. So a trial that waited for a builder failed with no model call. The
+            # worker builds the template first, with no such limit; the trial then only starts a sandbox from it.
+            asyncio.run(
+                run_while_held(self.build_task_template(rollout, task_directory), lease_lost, self.rollouts_cancelled)
+            )
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
         bridged = rollout.tree is not None and rollout.environment != "docker"
@@ -714,7 +725,13 @@ class EvaluationRolloutWorker(QueueWorker):
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                result = asyncio.run(run_while_held(runner, request, lease_lost, self.rollouts_cancelled))
+                [result] = asyncio.run(
+                    run_while_held(
+                        runner.run_rollouts_async([request], asyncio.Semaphore(1)),
+                        lease_lost,
+                        self.rollouts_cancelled,
+                    )
+                )
             finally:
                 calls.close()
             # The trial directory is under ``work``, so read it before the block removes it.
@@ -743,6 +760,29 @@ class EvaluationRolloutWorker(QueueWorker):
                 # The rollout's item finishes with this score, so the item has no error; keep the reason in the result.
                 return score, None, result.error
             return score, verifier_rewards(result.rewards), None
+
+    async def build_task_template(self, rollout: EvaluationRollout, task_directory: Path) -> None:
+        """Make the e2b template of the task of ``rollout``, at ``task_directory``, ready: build it when it is
+        missing, or wait for the build that another rollout started (``build_task_template`` of Reef's e2b sandbox).
+        A build that found no free builder in the task's build time limit (``TimeoutError``) waits again, at most
+        ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the rollout is retried. Any
+        other failure of the build fails the attempt in the same way."""
+        # The e2b extra is optional, and only a rollout on e2b needs it.
+        from reef.execution.sandbox.e2b import build_task_template
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TEMPLATE_WAIT_S
+        while True:
+            try:
+                await build_task_template(task_directory)
+                return
+            except TimeoutError as error:
+                if loop.time() >= deadline:
+                    raise ReefError(
+                        f"the template of task {rollout.task_name!r} was not ready after {TEMPLATE_WAIT_S:.0f} s: "
+                        f"{error}"
+                    ) from error
+                logger.info("the template of task %r is not ready; waiting again: %s", rollout.task_name, error)
 
     def observe_trial(self, rollout: EvaluationRollout, trial: EvaluationTrial) -> None:
         """Give ``trial`` of ``rollout`` to the trial observer, when there is one. Its failure is logged, and the

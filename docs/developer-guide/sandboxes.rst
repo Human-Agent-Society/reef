@@ -94,12 +94,19 @@ The class also builds a task's Dockerfile differently in two ways:
   it takes at once.
 
 A trial builds a missing template inside its environment start limit. A wait
-for a free AgentENV builder then counts against that limit. To keep the build
-out of the trials, a deployment can call
-``reef.execution.sandbox.e2b.build_task_template(task_path)`` for each task
-before its trials. It builds the template that a trial of the task would build,
+for a free AgentENV builder then counts against that limit.
+``reef.execution.sandbox.e2b.build_task_template(task_path)`` keeps the build
+out of the trial. It builds the template that a trial of the task would build,
 with the same alias, resources and build timeout, and returns the alias. A
 trial after it finds the template ready.
+
+- An evaluation rollout on ``e2b`` calls it before its candidate is served and
+  before its trial. When the build finds no free builder within the build
+  timeout, the rollout waits again, for at most six hours in all. Then the
+  attempt fails, and the rollout is tried again as for any other failure. The
+  rollout holds its worker slot while it waits.
+- A deployment can also call it for each task before an evaluation, so that
+  most rollouts find their templates ready.
 
 Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
 gives it to each in-process trial and to each environment build. That covers
