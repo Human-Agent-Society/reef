@@ -7,10 +7,13 @@ a scenario.
 - An import (``data_import``) reads the files at a URI with the deployment's source readers (``ArtifactSources``)
   and stores them as items of the owner with the request's metadata. For ``kind: task`` each Harbor task directory
   becomes a task item: the URI's root when it holds ``task.toml``, else each directory under the root that holds
-  one. For ``kind: trajectory`` each ``*.jsonl`` file at the root holds one ATIF document a line, and each line
-  becomes a trajectory item named after its ``session_id``. The items are stored in transactions of at most
-  ``MAX_ITEMS_PER_CREATE``, so an import that fails can leave the items of its earlier transactions. It checks and stores the items as an upload does, and asks control to sync the scenarios
-  without waiting.
+  one. For ``kind: trajectory`` each ``*.jsonl`` file and each gzip ``*.jsonl.gz`` file at the root holds one ATIF
+  document a line, and each line becomes a trajectory item named after its ``session_id``. The import reads, checks
+  and stores one transaction at a time (``trajectory_batches``): it holds the documents of one transaction and the
+  ``session_id`` of each item so far. After each transaction it adds ``{items}``, the count stored so far, to the
+  progress of its work item. An import that fails, for example at a bad line, keeps the items of its earlier
+  transactions. It checks and stores the items as an upload does, and asks control to sync the scenarios without
+  waiting.
 - An export (``data_export``) writes the items that the request names, or that match its ``kind`` and ``scenario``,
   to a tar.gz at a URI (``ArchiveWriters``). The archive holds ``manifest.jsonl``, one line ``{id, kind, metadata,
   path}`` for each item, and each item at its ``path``: ``items/<n>.json`` for the content of a trajectory or a
@@ -20,13 +23,14 @@ a scenario.
 
 from __future__ import annotations
 
+import gzip
 import json
 import tarfile
 import tempfile
 import uuid
+import zlib
 from abc import ABC, abstractmethod
-from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -39,7 +43,7 @@ from reef.service.data import (
     DataAccess,
     create_task_directories,
     create_trajectory_items,
-    jsonl_trajectories,
+    trajectory_line,
 )
 from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFoundError, StoredItem, check_owner
 from reef.storage.data_queue import DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
@@ -49,6 +53,11 @@ from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 TRANSFER_KINDS = {"imports": DATA_IMPORT_KIND, "exports": DATA_EXPORT_KIND}
 #: The item kinds that an import creates.
 IMPORT_ITEM_KINDS = ("task", "trajectory")
+#: The files of trajectories that an import reads at the root of its URI: JSON Lines, and gzip JSON Lines.
+TRAJECTORY_FILE_SUFFIXES = (".jsonl", ".jsonl.gz")
+#: An import ends a transaction at ``MAX_ITEMS_PER_CREATE`` items, or at the line that brings its lines to this
+#: many characters.
+MAX_IMPORT_BATCH_CHARACTERS = 32 * 1024 * 1024
 
 
 def start_transfer(data: DataAccess, owner: str, segment: str, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -95,21 +104,28 @@ def transfer_status(data: DataAccess, owner: str, segment: str, transfer_id: str
 
 
 def transfer_json(item: WorkItem) -> dict[str, Any]:
-    """A transfer as JSON: ``{id, kind, state, request, result, error}``."""
+    """A transfer as JSON: ``{id, kind, state, request, progress, result, error}``. ``progress`` is the last progress
+    entry of the item, or None when it has none."""
     request = {key: value for key, value in item.payload.items() if key != "owner"}
     return {
         "id": item.id,
         "kind": item.kind,
         "state": item.state,
         "request": request,
+        "progress": dict(item.progress[-1]) if item.progress else None,
         "result": None if item.result is None else dict(item.result),
         "error": item.error,
     }
 
 
-def run_import(data: DataAccess, sources: ArtifactSources, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
-    """Import the files at ``payload["uri"]`` as items of ``payload["owner"]``; return ``{items}``, the count."""
+def run_import(data: DataAccess, sources: ArtifactSources, item: WorkItem) -> dict[str, JsonValue]:
+    """Import the files at the ``uri`` of the held import ``item`` as items of its ``owner``; return ``{items}``, the
+    count. A trajectory import adds ``{items}``, the count stored so far, to the item's progress after each
+    transaction. ``WorkLeaseLostError`` stops it when its worker no longer holds the item."""
+    payload: Mapping[str, Any] = item.payload
     owner, uri, metadata = payload["owner"], payload["uri"], payload["metadata"]
+    if item.worker_id is None:
+        raise ValueError(f"no worker holds the import {item.id}")
     with tempfile.TemporaryDirectory(prefix="reef-data-import-") as work:
         root = Path(work) / "files"
         root.mkdir()
@@ -130,21 +146,56 @@ def run_import(data: DataAccess, sources: ArtifactSources, payload: Mapping[str,
                 directories = [root.rename(Path(work) / name)]
             create_task_directories(data, owner, directories, metadata, wait=False)
             return {"items": len(directories)}
-        files = sorted(root.glob("*.jsonl"))
+        files = sorted(path for path in root.iterdir() if path.name.endswith(TRAJECTORY_FILE_SUFFIXES))
         if not files:
-            raise ValueError(f"{uri} holds no *.jsonl file of trajectories at its root")
-        documents = []
-        for path in files:
-            with path.open(encoding="utf-8") as lines:
-                documents.extend(jsonl_trajectories(lines, path.name))
-        repeated = sorted(
-            item_id for item_id, count in Counter(item_id for item_id, _ in documents).items() if count > 1
-        )
-        if repeated:
-            raise ValueError(f"{uri} holds the session_ids {repeated} in more than one file")
-        for start in range(0, len(documents), MAX_ITEMS_PER_CREATE):
-            create_trajectory_items(data, owner, documents[start : start + MAX_ITEMS_PER_CREATE], metadata, wait=False)
-        return {"items": len(documents)}
+            raise ValueError(f"{uri} holds no *.jsonl or *.jsonl.gz file of trajectories at its root")
+        stored = 0
+        for number, batch in enumerate(trajectory_batches(files)):
+            create_trajectory_items(data, owner, batch, metadata, wait=False)
+            stored += len(batch)
+            data.queue.append_progress(
+                DATA_QUEUE, item.id, item.worker_id, {"items": stored}, number=len(item.progress) + number
+            )
+        return {"items": stored}
+
+
+def trajectory_batches(files: Sequence[Path]) -> Iterator[list[tuple[str, Mapping[str, Any]]]]:
+    """The ATIF documents of the JSON Lines ``files`` in order, each with its item ID (``trajectory_line``).
+
+    A file whose name ends in ``.gz`` is gzip. A blank line is skipped. A batch ends at ``MAX_ITEMS_PER_CREATE``
+    documents, or at the line that brings its lines to ``MAX_IMPORT_BATCH_CHARACTERS`` characters. Raise
+    ``ValueError`` as ``trajectory_line``, for a ``session_id`` on an earlier line of any file, and for a file that
+    is not UTF-8 or not complete gzip.
+    """
+    # The file of each session_id so far, to name it when a later line repeats the session_id.
+    files_by_id: dict[str, str] = {}
+    batch: list[tuple[str, Mapping[str, Any]]] = []
+    characters = 0
+    for path in files:
+        source = path.name
+        try:
+            with (
+                gzip.open(path, "rt", encoding="utf-8") if source.endswith(".gz") else path.open(encoding="utf-8")
+            ) as lines:
+                for number, line in enumerate(lines, start=1):
+                    if not line.strip():
+                        continue
+                    item_id, document = trajectory_line(line, source, number)
+                    if item_id in files_by_id:
+                        raise ValueError(
+                            f"{source} line {number}: session_id {item_id!r} is on an earlier line"
+                            f" of {files_by_id[item_id]}"
+                        )
+                    files_by_id[item_id] = source
+                    batch.append((item_id, document))
+                    characters += len(line)
+                    if len(batch) == MAX_ITEMS_PER_CREATE or characters >= MAX_IMPORT_BATCH_CHARACTERS:
+                        yield batch
+                        batch, characters = [], 0
+        except (UnicodeDecodeError, EOFError, zlib.error, gzip.BadGzipFile) as exc:
+            raise ValueError(f"{source} is not UTF-8 text or not complete gzip: {exc}") from exc
+    if batch:
+        yield batch
 
 
 def run_export(data: DataAccess, writers: ArchiveWriters, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
@@ -307,6 +358,7 @@ __all__ = [
     "run_export",
     "run_import",
     "start_transfer",
+    "trajectory_batches",
     "transfer_json",
     "transfer_status",
 ]

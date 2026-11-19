@@ -101,7 +101,7 @@ class DataImport(DataJob):
         self.sources = sources
 
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        return run_import(DataAccess.of(self.dispatcher), self.sources, item.payload)
+        return run_import(DataAccess.of(self.dispatcher), self.sources, item)
 
 
 class DataExport(DataJob):

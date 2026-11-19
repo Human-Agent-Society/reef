@@ -4,6 +4,7 @@ and control's cancel of a job and the contract's capabilities."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import io
 import json
 import tarfile
@@ -32,6 +33,7 @@ from reef.artifact.repository import DefaultStart, FileDownload
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
+from reef.service import data_transfer
 from reef.service.app import create_app
 from reef.storage.data_queue import DATA_QUEUE
 from reef.storage.work_queue import NewWork
@@ -128,6 +130,46 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         assert dispatcher.queue.read(DATA_QUEUE, missing_id).attempt_count == 1
         refused = await client.post(f"{DATA}/imports", headers=AUTH, json={"uri": "x", "metadata": {"kind": "task"}})
         assert refused.status == 400
+
+    served(dispatcher, check)
+
+
+def test_a_trajectory_import_reads_gzip_files_and_stores_and_reports_one_batch_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two lines fill a batch.
+    monkeypatch.setattr(data_transfer, "MAX_IMPORT_BATCH_CHARACTERS", 2 * len(trajectory_lines("t1")) - 1)
+    sources = {name: tmp_path / name for name in ("good", "repeated", "broken")}
+    for source in sources.values():
+        source.mkdir()
+    (sources["good"] / "a.jsonl").write_bytes(trajectory_lines("t1", "t2", "t3"))
+    (sources["good"] / "b.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("t4", "t5")))
+    (sources["repeated"] / "a.jsonl").write_bytes(trajectory_lines("u1", "u2", "u3"))
+    (sources["repeated"] / "b.jsonl").write_bytes(trajectory_lines("u4", "u1"))
+    (sources["broken"] / "a.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("v1"))[:-8])
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    async def check(client: TestClient) -> None:
+        statuses = {}
+        for name, source in sources.items():
+            response = await client.post(
+                f"{DATA}/imports", headers=AUTH, json={"uri": source.as_uri(), "metadata": {"kind": "trajectory"}}
+            )
+            assert (await response.json())["progress"] is None
+            statuses[name] = await finished(client, f"{DATA}/imports/{(await response.json())['id']}")
+        assert statuses["good"]["result"] == {"items": 5} and statuses["good"]["progress"] == {"items": 5}
+        progress = dispatcher.queue.read(DATA_QUEUE, statuses["good"]["id"]).progress
+        assert [entry["items"] for entry in progress] == [2, 4, 5]
+        # A session_id on an earlier line fails the import for good, and keeps the batches before it.
+        repeated = statuses["repeated"]
+        assert repeated["state"] == "failed" and repeated["progress"] == {"items": 4}, repeated
+        assert "b.jsonl line 2: session_id 'u1' is on an earlier line of a.jsonl" in repeated["error"]
+        assert dispatcher.queue.read(DATA_QUEUE, repeated["id"]).attempt_count == 1
+        broken = statuses["broken"]
+        assert broken["state"] == "failed" and "a.jsonl.gz is not UTF-8 text or not complete gzip" in broken["error"]
+        listing = await (await client.get(DATA, headers=AUTH)).json()
+        stored = sorted(item["id"] for item in listing["items"])
+        assert stored == ["t1", "t2", "t3", "t4", "t5", "u1", "u2", "u3", "u4"]
 
     served(dispatcher, check)
 

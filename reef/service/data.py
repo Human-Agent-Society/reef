@@ -206,24 +206,32 @@ def create_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     return store_items(data, owner, items)
 
 
-def jsonl_trajectories(lines: Iterable[str], source: str) -> list[tuple[str, Mapping[str, Any]]]:
-    """The ATIF documents of the JSON Lines ``lines``, in order, each with its item ID: its ``session_id``.
+def trajectory_line(line: str, source: str, number: int) -> tuple[str, Mapping[str, Any]]:
+    """The ATIF document of ``line``, line ``number`` of ``source``, with its item ID: its ``session_id``.
 
-    A blank line is skipped. Raise ``ValueError``, naming ``source`` and the line, for a line that is not a JSON
-    object or not an ATIF document, a document without a ``session_id`` that ``check_item_id`` takes, or a
-    ``session_id`` that an earlier line has.
+    Raise ``ValueError``, naming ``source`` and the line, for a line that is not a JSON object or not an ATIF
+    document, or a document without a ``session_id`` that ``check_item_id`` takes.
+    """
+    try:
+        document = json.loads(line)
+        TrajectorySample(document)
+        return check_item_id(document.get("session_id")), document
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{source} line {number}: {exc}") from exc
+
+
+def jsonl_trajectories(lines: Iterable[str], source: str) -> list[tuple[str, Mapping[str, Any]]]:
+    """The ATIF documents of the JSON Lines ``lines``, in order, each with its item ID (``trajectory_line``).
+
+    A blank line is skipped. Raise ``ValueError`` as ``trajectory_line``, and for a ``session_id`` that an earlier
+    line has.
     """
     documents: list[tuple[str, Mapping[str, Any]]] = []
     seen: set[str] = set()
     for number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
-        try:
-            document = json.loads(line)
-            TrajectorySample(document)
-            item_id = check_item_id(document.get("session_id"))
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise ValueError(f"{source} line {number}: {exc}") from exc
+        item_id, document = trajectory_line(line, source, number)
         if item_id in seen:
             raise ValueError(f"{source} line {number}: session_id {item_id!r} is on an earlier line")
         seen.add(item_id)
@@ -708,5 +716,6 @@ __all__ = [
     "restore_items",
     "set_listing",
     "store_items",
+    "trajectory_line",
     "update_items",
 ]

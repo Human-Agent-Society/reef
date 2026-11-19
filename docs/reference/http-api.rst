@@ -1214,12 +1214,17 @@ data service worker:
   /reef/namespaces/{owner}/data/exports/{id}`` read the status. An unknown
   ID, or the ID of another owner's transfer, returns 404.
 
-The status is ``{"id", "kind", "state", "request", "result", "error"}``:
+The status is ``{"id", "kind", "state", "request", "progress", "result",
+"error"}``:
 
 - ``kind`` is ``data_import`` or ``data_export``.
 - ``state`` is ``queued``, ``assigned``, ``running``, ``finished`` or
   ``failed``.
 - ``request`` is the body that started the transfer.
+- ``progress`` is ``{"items"}`` after a trajectory import stores its first
+  transaction: the count of items that the attempt stored so far. A retry
+  counts again from the start. ``progress`` is ``null`` before the first
+  transaction, and for a task import and an export.
 - ``result`` is set when the transfer finished: ``{"items"}``, the item count,
   for an import, and ``{"items", "bytes"}`` for an export.
 - ``error`` tells why a run failed.
@@ -1234,11 +1239,14 @@ adds. It finds the items as follows:
   named after the last segment of the URI's path. Otherwise each directory
   directly under the root that holds ``task.toml`` is one task, named after
   the directory.
-- ``trajectory``: each ``*.jsonl`` file at the root holds one ATIF document a
-  line, as the upload takes them. Each document's ``session_id`` is its item
-  ID; two documents of the import never share one. Reef stores the items in
-  transactions of at most 1000, so an import that fails can leave the items of
-  its earlier transactions. Reef reads no other file.
+- ``trajectory``: each ``*.jsonl`` file and each gzip ``*.jsonl.gz`` file at
+  the root holds one ATIF document a line, as the upload takes them. Each
+  document's ``session_id`` is its item ID; two documents of the import never
+  share one. Reef reads no other file. Reef reads the files in name order. It
+  reads, checks and stores one transaction at a time, of at most 1000 items
+  and about 32 MiB of lines, so it holds one transaction in memory. An import
+  that fails, for example at a bad line or at a ``session_id`` that an earlier
+  line has, keeps the items of its earlier transactions.
 
 The import checks and stores the items as the create routes do. It does not
 wait for the syncs of the scenarios that it touched.
