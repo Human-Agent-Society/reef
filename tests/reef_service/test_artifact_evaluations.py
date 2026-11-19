@@ -64,6 +64,7 @@ from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
     CANCELLED_ERROR,
+    FAILURE_CHECK_ROLLOUTS,
     FAILURES_ERROR,
     READ_CALLS,
     STOPPED_ERROR,
@@ -1035,13 +1036,15 @@ def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_pat
             body = {
                 "artifact_id": artifact_id,
                 "harness": {"name": "terminus-2"},
-                "rollouts_per_task": 6,
+                # Exactly ``FAILURE_CHECK_ROLLOUTS`` rollouts: the stop comes after the last one ends, so it cancels none
+                # that the loop below has not failed yet.
+                "rollouts_per_task": FAILURE_CHECK_ROLLOUTS // 2,
                 "max_failed_fraction": 0.5,
             }
             accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
-            for item in queue.items(EVALUATIONS_QUEUE, scenario="s"):
-                queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            for _ in range(FAILURE_CHECK_ROLLOUTS):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
                 queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox refused the task", retryable=False)
             assert (await finished(client, accepted["evaluation_id"]))["state"] == "failed"
 
