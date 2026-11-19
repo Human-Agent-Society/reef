@@ -31,6 +31,7 @@ import tempfile
 import uuid
 import zlib
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,9 +157,8 @@ def run_import(data: DataAccess, sources: ArtifactSources, item: WorkItem) -> di
         files = sorted(path for path in root.iterdir() if path.name.endswith(TRAJECTORY_FILE_SUFFIXES))
         if not files:
             raise ValueError(f"{uri} holds no *.jsonl or *.jsonl.gz file of trajectories at its root")
-        # Pass 1 checks every line and drops each batch, so that a bad line fails the import before it stores an item.
-        for _ in trajectory_batches(files):
-            pass
+        # Pass 1 checks every line and keeps no batch, so that a bad line fails the import before it stores an item.
+        deque(trajectory_batches(files), maxlen=0)
         stored = 0
         for number, batch in enumerate(trajectory_batches(files)):
             create_trajectory_items(data, owner, batch, metadata, wait=False)
@@ -183,6 +183,9 @@ def trajectory_batches(files: Sequence[Path]) -> Iterator[list[tuple[str, Mappin
     characters = 0
     for path in files:
         source = path.name
+        # gzip reads an empty file as an empty text without an error, but a complete gzip file has a header.
+        if source.endswith(".gz") and path.stat().st_size == 0:
+            raise ValueError(f"{source} is not UTF-8 text or not complete gzip: it is empty")
         try:
             with (
                 gzip.open(path, "rt", encoding="utf-8") if source.endswith(".gz") else path.open(encoding="utf-8")

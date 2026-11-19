@@ -92,7 +92,17 @@ class ArtifactCopy(DataJob):
 
 
 class DataImport(DataJob):
-    """Imports the files at the item's URI, which ``sources`` reads (``run_import``)."""
+    """Imports the files at the URI of a ``data_import`` item as items of its owner (``run_import``).
+
+    Values: ``dispatcher`` is the dispatcher whose data store holds the items and whose ``data`` queue holds the
+    import; ``sources`` reads the URIs that imports name. ``run(item)`` takes an import item that a worker holds
+    (``item.worker_id`` is set) and returns ``{items}``, the count it stored. It raises ``ValueError`` when no worker
+    holds ``item``, and as ``run_import`` for files it cannot import. For a trajectory import it adds ``{items}``, the
+    count stored so far, to the progress of ``item`` after each transaction, and ``WorkLeaseLostError`` stops it when
+    its worker no longer holds ``item``; the items of its earlier transactions stay.
+
+    Purpose: ``data_jobs`` makes it; ``DataWorker`` runs each ``data_import`` item with it.
+    """
 
     kind = DATA_IMPORT_KIND
 

@@ -139,7 +139,7 @@ def test_a_trajectory_import_checks_every_line_then_stores_and_reports_one_batch
 ) -> None:
     # Two lines fill a batch.
     monkeypatch.setattr(data_transfer, "MAX_IMPORT_BATCH_CHARACTERS", 2 * len(trajectory_lines("t1")) - 1)
-    sources = {name: tmp_path / name for name in ("good", "repeated", "bad", "broken", "conflict")}
+    sources = {name: tmp_path / name for name in ("good", "repeated", "bad", "broken", "empty", "conflict")}
     for source in sources.values():
         source.mkdir()
     (sources["good"] / "a.jsonl").write_bytes(trajectory_lines("t1", "t2", "t3"))
@@ -149,6 +149,8 @@ def test_a_trajectory_import_checks_every_line_then_stores_and_reports_one_batch
     (sources["bad"] / "a.jsonl").write_bytes(trajectory_lines("w1", "w2", "w3"))
     (sources["bad"] / "b.jsonl").write_bytes(trajectory_lines("w4") + b'{"session_id": "w5"}\n')
     (sources["broken"] / "a.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("v1"))[:-8])
+    (sources["empty"] / "a.jsonl").write_bytes(trajectory_lines("y1"))
+    (sources["empty"] / "b.jsonl.gz").write_bytes(b"")
     (sources["conflict"] / "a.jsonl").write_bytes(trajectory_lines("x1", "x2", "x3"))
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
@@ -171,6 +173,7 @@ def test_a_trajectory_import_checks_every_line_then_stores_and_reports_one_batch
             "repeated": "b.jsonl line 2: session_id 'u1' is on an earlier line of a.jsonl",
             "bad": "b.jsonl line 2: trajectory must have an ATIF schema_version",
             "broken": "a.jsonl.gz is not UTF-8 text or not complete gzip",
+            "empty": "b.jsonl.gz is not UTF-8 text or not complete gzip: it is empty",
         }
         for name, error in errors.items():
             status = statuses[name]
