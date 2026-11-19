@@ -95,10 +95,14 @@ The class also builds a task's Dockerfile differently in two ways:
 
 A trial builds a missing template inside its environment start limit. A wait
 for a free AgentENV builder then counts against that limit.
-``reef.execution.sandbox.e2b.build_task_template(task_path)`` keeps the build
-out of the trial. It builds the template that a trial of the task would build,
-with the same alias, resources and build timeout, and returns the alias. A
-trial after it finds the template ready.
+``reef.execution.sandbox.e2b.build_task_template(task_path)`` keeps the builds
+out of the trial. It builds the templates that a trial of the task would build,
+with the same aliases, resources and build timeouts: the template of the task's
+environment, and the template of each separate verifier environment of the
+task or of its steps. A trial builds a verifier template only after its agent
+ends, so a late build there loses the agent's work. The function returns the
+alias of the task environment's template. A trial after it finds the templates
+ready.
 
 - An evaluation rollout on ``e2b`` calls it before its candidate is served and
   before its trial. When the build finds no free builder within the build
