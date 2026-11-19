@@ -156,7 +156,11 @@ def register_data_routes(
         owner = request.match_info["owner"]
 
         def create() -> dict[str, Any]:
-            return create_trajectory_items(data, owner, jsonl_trajectories(text.splitlines(), "the body"), metadata)
+            documents = [
+                (item_id, document)
+                for item_id, document, characters in jsonl_trajectories([("the body", text.splitlines())])
+            ]
+            return create_trajectory_items(data, owner, documents, metadata)
 
         return web.json_response(await asyncio.to_thread(create), status=201)
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -206,29 +206,33 @@ def create_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     return store_items(data, owner, items)
 
 
-def jsonl_trajectories(lines: Iterable[str], source: str) -> list[tuple[str, Mapping[str, Any]]]:
-    """The ATIF documents of the JSON Lines ``lines``, in order, each with its item ID: its ``session_id``.
+def jsonl_trajectories(texts: Iterable[tuple[str, Iterable[str]]]) -> Iterator[tuple[str, Mapping[str, Any], int]]:
+    """The ATIF documents of the JSON Lines ``texts``, each ``(source, lines)``, in order: for each line, its item ID
+    (its ``session_id``), its document and its count of characters. The direct upload and the import both read
+    trajectories with it.
 
-    A blank line is skipped. Raise ``ValueError``, naming ``source`` and the line, for a line that is not a JSON
+    A blank line is skipped. Raise ``ValueError``, naming the source and the line, for a line that is not a JSON
     object or not an ATIF document, a document without a ``session_id`` that ``check_item_id`` takes, or a
-    ``session_id`` that an earlier line has.
+    ``session_id`` that an earlier line of any source has.
     """
-    documents: list[tuple[str, Mapping[str, Any]]] = []
-    seen: set[str] = set()
-    for number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            document = json.loads(line)
-            TrajectorySample(document)
-            item_id = check_item_id(document.get("session_id"))
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise ValueError(f"{source} line {number}: {exc}") from exc
-        if item_id in seen:
-            raise ValueError(f"{source} line {number}: session_id {item_id!r} is on an earlier line")
-        seen.add(item_id)
-        documents.append((item_id, document))
-    return documents
+    # The source of each session_id so far, to name it when a later line of another source repeats the session_id.
+    sources_by_id: dict[str, str] = {}
+    for source, lines in texts:
+        for number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                document = json.loads(line)
+                TrajectorySample(document)
+                item_id = check_item_id(document.get("session_id"))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValueError(f"{source} line {number}: {exc}") from exc
+            if item_id in sources_by_id:
+                earlier = sources_by_id[item_id]
+                of_source = "" if earlier == source else f" of {earlier}"
+                raise ValueError(f"{source} line {number}: session_id {item_id!r} is on an earlier line{of_source}")
+            sources_by_id[item_id] = source
+            yield item_id, document, len(line)
 
 
 def create_trajectory_items(
