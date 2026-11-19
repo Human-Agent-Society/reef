@@ -35,6 +35,7 @@ from reef.evaluation.rollout_worker import (
     verifier_output,
 )
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
+from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
@@ -465,19 +466,78 @@ def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     cancelled = threading.Event()
 
-    class EndlessRunner:
-        async def run_rollouts_async(self, requests, slots):
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
+    async def endless_trial():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
     events = {"lease_lost": threading.Event(), "stopped": threading.Event()}
     threading.Timer(0.1, events[event].set).start()
     with pytest.raises(error):
-        asyncio.run(run_while_held(EndlessRunner(), "request", events["lease_lost"], events["stopped"]))
+        asyncio.run(run_while_held(endless_trial(), events["lease_lost"], events["stopped"]))
     assert cancelled.is_set()
+
+
+def e2b_rollout() -> EvaluationRollout:
+    return replace(rollout(), environment="e2b")
+
+
+class TemplateBuilds:
+    """A stand-in for ``build_task_template`` of Reef's e2b sandbox: each call takes the next of ``outcomes``, an
+    exception to raise or None for a ready template, and keeps the task directory in ``paths``."""
+
+    def __init__(self, *outcomes: Exception | None) -> None:
+        self.outcomes = list(outcomes)
+        self.paths: list[Path] = []
+
+    async def __call__(self, task_path: Path) -> str:
+        self.paths.append(task_path)
+        outcome = self.outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return "add__0123456789ab__aenv"
+
+
+@pytest.mark.unit
+def test_a_rollout_on_e2b_waits_again_for_a_template_that_found_no_free_builder(monkeypatch, tmp_path):
+    pytest.importorskip("e2b")
+    builds = TemplateBuilds(TimeoutError("the template was waiting after 600 s"), None)
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
+    worker = ServedWorker(memory_coordination().work_queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w")
+    asyncio.run(worker.build_task_template(e2b_rollout(), tmp_path / "add"))
+    assert builds.paths == [tmp_path / "add", tmp_path / "add"]
+
+
+@pytest.mark.unit
+def test_a_rollout_on_e2b_fails_when_its_template_is_not_ready_in_time(monkeypatch, tmp_path):
+    pytest.importorskip("e2b")
+    monkeypatch.setattr("reef.evaluation.rollout_worker.TEMPLATE_WAIT_S", 0.0)
+    builds = TemplateBuilds(TimeoutError("the template was waiting after 600 s"))
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
+    worker = ServedWorker(memory_coordination().work_queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w")
+    with pytest.raises(ReefError, match="the template of task 'add' was not ready after 0 s"):
+        asyncio.run(worker.build_task_template(e2b_rollout(), tmp_path / "add"))
+
+
+class UnservedWorker(EvaluationRolloutWorker):
+    """A worker that fails the test when it serves a candidate."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        raise AssertionError("the candidate was served before the template was ready")
+
+
+@pytest.mark.unit
+def test_a_rollout_on_e2b_builds_its_template_before_its_candidate_and_trial(monkeypatch, tmp_path):
+    pytest.importorskip("e2b")
+    builds = TemplateBuilds(AgentEnvBuildError("aenv build of add failed with exit code 1"))
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    worker = UnservedWorker(memory_coordination().work_queue, endpoints, worker_id="w")
+    with pytest.raises(AgentEnvBuildError):
+        worker.score(e2b_rollout(), threading.Event(), 1)
+    assert builds.paths == [endpoints.task_directory(e2b_rollout())]
 
 
 class HeldLab(CalledThenFailedLab):
