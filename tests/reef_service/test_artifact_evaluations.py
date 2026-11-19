@@ -947,6 +947,75 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("limit", [3, None])
+def test_a_resume_can_change_max_concurrent_rollouts(tmp_path: Path, limit: int | None) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    def not_final() -> list[WorkItem]:
+        return [item for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if not item.final]
+
+    async def queued_rollouts(count: int) -> list[WorkItem]:
+        # A rollout enters the queue when the results thread settles the evaluation after a rollout ended.
+        for _ in range(200):
+            if len(not_final()) == count:
+                return not_final()
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the queue did not hold {count} rollouts that are not final")
+
+    async def taken() -> WorkItem:
+        for _ in range(200):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            if item is not None:
+                return item
+            await asyncio.sleep(0.05)
+        raise AssertionError("no rollout entered the queue")
+
+    async def run() -> None:
+        # No worker runs: the test takes each rollout and ends it.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 2,
+                "max_concurrent_rollouts": 1,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            await queued_rollouts(1)
+            first = await taken()
+            queue.start(EVALUATIONS_QUEUE, first.id, "w")
+            assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
+
+            # A refused body changes nothing.
+            for refused in (
+                {"max_concurrent_rollouts": 0},
+                {"max_concurrent_rollouts": True},
+                {"rollouts_per_task": 1},
+            ):
+                assert (await client.post(f"{route}/resume", headers=AUTH, json=refused)).status == 400
+            answer = await (await client.get(route, headers=AUTH)).json()
+            assert (answer["state"], answer["request"]["max_concurrent_rollouts"]) == ("failed", 1)
+
+            # The cancelled rollout and the three that never started run at the new limit.
+            resumed = await client.post(f"{route}/resume", headers=AUTH, json={"max_concurrent_rollouts": limit})
+            assert resumed.status == 202, await resumed.text()
+            assert (await resumed.json())["request"]["max_concurrent_rollouts"] == limit
+            running = 4 if limit is None else limit
+            await queued_rollouts(running)
+            for value in (1.0, 0.0, 1.0, 1.0):
+                item = await taken()
+                assert len(not_final()) <= running
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
+            answer = await finished(client, accepted["evaluation_id"])
+            assert (answer["state"], answer["mean_score"]) == ("finished", 0.75)
+            assert answer["request"]["max_concurrent_rollouts"] == limit
+
+    asyncio.run(run())
+
+
 def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_path: Path, monkeypatch) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue

@@ -164,14 +164,18 @@ def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEva
 
     async def retry(request: web.Request) -> web.Response:
         evaluation_id = request.match_info["evaluation_id"]
-        stored = await asyncio.to_thread(evaluations.retry, request.match_info["scenario"], evaluation_id)
+        # The body is optional: an empty one runs the rollouts again with the same request.
+        changes = await read_object(request) if request.body_exists else {}
+        stored = await asyncio.to_thread(evaluations.retry, request.match_info["scenario"], evaluation_id, changes)
         if stored is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(stored.to_json(), status=202)
 
     async def resume(request: web.Request) -> web.Response:
         evaluation_id = request.match_info["evaluation_id"]
-        stored = await asyncio.to_thread(evaluations.resume, request.match_info["scenario"], evaluation_id)
+        # The body is optional: an empty one runs the rollouts again with the same request.
+        changes = await read_object(request) if request.body_exists else {}
+        stored = await asyncio.to_thread(evaluations.resume, request.match_info["scenario"], evaluation_id, changes)
         if stored is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(stored.to_json(), status=202)
