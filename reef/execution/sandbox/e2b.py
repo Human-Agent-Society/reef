@@ -32,6 +32,7 @@ import os
 import posixpath
 import re
 import shlex
+import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -41,6 +42,8 @@ from typing import Any, ClassVar, Self, override
 
 from harbor.environments.e2b import E2BEnvironment
 from harbor.models.task.config import NetworkMode
+from harbor.models.task.task import Task
+from harbor.models.trial.paths import TrialPaths
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from reef.execution.sandbox.agentenv_build import (
@@ -527,6 +530,32 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
         )
 
 
+async def build_task_template(task_path: Path) -> str:
+    """Build the template of the ``e2b`` trials of the task directory ``task_path`` when it does not exist, and
+    return its alias.
+
+    The template is the one that ``KillOnTimeoutE2BEnvironment.start`` builds for a trial of the task: the same alias,
+    the task's resources and the task's build time limit. A trial after this call finds the template and does not
+    build it. So a caller that builds each task's template before its trials keeps the build out of the trials'
+    environment start limit. With ``REEF_E2B_DOCKERFILE_BUILD`` ``aenv``, a build waits for a free AgentENV builder
+    until the task's build time limit (``ensure_aenv_template``). Raise what the build raises, such as
+    ``TimeoutError`` at that limit.
+    """
+    task = Task(task_path)
+    with tempfile.TemporaryDirectory(prefix="reef-template-") as trial_directory:
+        environment = KillOnTimeoutE2BEnvironment(
+            environment_dir=task.paths.environment_dir,
+            environment_name=task.short_name,
+            session_id=f"{task.short_name}__template",
+            trial_paths=TrialPaths(Path(trial_directory)),
+            task_env_config=task.config.environment,
+        )
+        # Harbor's ``start`` without the sandbox: these protected methods are the template part of it.
+        if not await environment._does_template_exist():
+            await environment._create_template()
+    return environment._template_name
+
+
 __all__ = [
     "AENV_TEMPLATE_SUFFIX",
     "COPY_MODES_TEMPLATE_SUFFIX",
@@ -535,6 +564,7 @@ __all__ = [
     "E2BSession",
     "KillOnTimeoutE2BEnvironment",
     "SandboxKeeper",
+    "build_task_template",
     "dockerfile_with_copy_modes",
     "ensure_template",
     "template_alias",

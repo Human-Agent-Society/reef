@@ -360,3 +360,49 @@ def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "kaniko")
     with pytest.raises(ValueError, match="REEF_E2B_DOCKERFILE_BUILD must be one of e2b, aenv"):
         harbor_e2b_environments(tmp_path / "other", dockerfile=dockerfile)
+
+
+@pytest.mark.unit
+def test_a_task_template_built_before_the_trials_is_the_template_of_a_trial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    trial = harbor_e2b_environments(tmp_path)["reef"]
+    builds: list[DockerfileBuild] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        builds.append(build)
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+    alias = asyncio.run(reef_e2b.build_task_template(tmp_path / "task"))
+    asyncio.run(trial._create_template())
+    # The build before the trials is the trial's own: the same alias, resources and build time limit.
+    assert alias == trial._template_name
+    assert builds[0] == builds[1]
+
+
+@pytest.mark.unit
+def test_a_task_template_that_exists_is_not_built_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+
+    monkeypatch.delenv("REEF_E2B_DOCKERFILE_BUILD", raising=False)
+    trial = harbor_e2b_environments(tmp_path)["reef"]
+    built: list[str] = []
+
+    async def exists(environment: reef_e2b.KillOnTimeoutE2BEnvironment) -> bool:
+        return True
+
+    async def create(environment: reef_e2b.KillOnTimeoutE2BEnvironment) -> None:
+        built.append(environment._template_name)
+
+    monkeypatch.setattr(reef_e2b.E2BEnvironment, "_does_template_exist", exists)
+    monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "_create_template", create)
+    assert asyncio.run(reef_e2b.build_task_template(tmp_path / "task")) == trial._template_name
+    assert built == []
