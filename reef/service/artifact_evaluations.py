@@ -604,8 +604,10 @@ class EvaluationResults:
             # two settles at once add it once.
             waiting = len(request.task_names) * request.rollouts_per_task - len(items)
             retry_waiting = [item for item in items if rollout_waits(item)]
-            if (waiting > 0 or retry_waiting) and request.max_concurrent_rollouts is not None:
-                free = request.max_concurrent_rollouts - sum(not item.final for item in items)
+            if waiting > 0 or retry_waiting:
+                # A retry or a resume can remove the limit while rollouts wait: then each one goes to the queue.
+                limit = request.max_concurrent_rollouts
+                free = waiting + len(retry_waiting) if limit is None else limit - sum(not item.final for item in items)
                 for item in retry_waiting[: max(free, 0)]:
                     self.queue.retry(EVALUATIONS_QUEUE, item.id)
                     self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
@@ -829,7 +831,9 @@ class ArtifactEvaluations:
                     self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
         return cancelled
 
-    def retry(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
+    def retry(
+        self, scenario: str, evaluation_id: str, changes: Mapping[str, object] | None = None
+    ) -> StoredEvaluation | None:
         """Run the failed rollouts of the evaluation ``evaluation_id`` of ``scenario`` once more, and return the
         evaluation, which runs (RFC #1340); None when the scenario has no such evaluation.
 
@@ -838,11 +842,14 @@ class ArtifactEvaluations:
         (``rollout_cancelled``): a retry leaves it, and the rollouts that never started, to ``resume``. After a retry
         of a cancelled or stopped evaluation, the evaluation fails with that error again once the failed rollouts end.
 
-        ``EvaluationStateConflictError`` for an evaluation with no failed rollout. ``run_again`` gives the rest.
+        ``EvaluationStateConflictError`` for an evaluation with no failed rollout. ``run_again`` gives the rest,
+        and what ``changes`` can hold.
         """
-        return self.run_again(scenario, evaluation_id, resumes=False)
+        return self.run_again(scenario, evaluation_id, resumes=False, changes=changes)
 
-    def resume(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
+    def resume(
+        self, scenario: str, evaluation_id: str, changes: Mapping[str, object] | None = None
+    ) -> StoredEvaluation | None:
         """Run the rollouts of the evaluation ``evaluation_id`` of ``scenario`` that a cancel or a stop ended
         (``rollout_cancelled``), and start the rollouts that never started, and return the evaluation, which runs;
         None when the scenario has no such evaluation.
@@ -851,11 +858,18 @@ class ArtifactEvaluations:
         rollouts keep their failures: ``retry`` runs them again.
 
         ``EvaluationStateConflictError`` for an evaluation with no rollout that a cancel or a stop ended and no
-        rollout that never started. ``run_again`` gives the rest.
+        rollout that never started. ``run_again`` gives the rest, and what ``changes`` can hold.
         """
-        return self.run_again(scenario, evaluation_id, resumes=True)
+        return self.run_again(scenario, evaluation_id, resumes=True, changes=changes)
 
-    def run_again(self, scenario: str, evaluation_id: str, *, resumes: bool) -> StoredEvaluation | None:
+    def run_again(
+        self,
+        scenario: str,
+        evaluation_id: str,
+        *,
+        resumes: bool,
+        changes: Mapping[str, object] | None = None,
+    ) -> StoredEvaluation | None:
         """Run once more the rollouts of the evaluation ``evaluation_id`` of ``scenario`` that ``resume`` (when
         ``resumes``) or ``retry`` chooses, and return the evaluation, which runs; None when the scenario has no such
         evaluation.
@@ -867,14 +881,27 @@ class ArtifactEvaluations:
         runs again, without its result or its error. When the rollouts are final, ``EvaluationResults`` ends the
         evaluation as it ends a first run, and gives a finished one to the activation rule.
 
-        ``EvaluationStateConflictError`` for an evaluation with no rollout to run again, and for an ended one whose
+        ``changes`` is None or empty to keep the evaluation's request, or holds only ``max_concurrent_rollouts``: a
+        positive int, or None for no limit. The evaluation then keeps that limit from now on, for these rollouts and
+        for each rollout that waits. A lower limit stops no rollout that runs: fewer rollouts start until the
+        rollouts that are not final are fewer than the limit.
+
+        ``ValueError`` for any other ``changes``. ``EvaluationStateConflictError`` for an evaluation with no rollout
+        to run again, and for an ended one whose
         rollouts the queue no longer keeps (``WorkQueue.delete_final``).
         """
+        changes = {} if changes is None else changes
+        if set(changes) - {"max_concurrent_rollouts"}:
+            raise ValueError("a retry or a resume of an evaluation can change only max_concurrent_rollouts")
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.read(evaluation_id)
             if stored is None:
                 return None
             request = stored.request
+            if "max_concurrent_rollouts" in changes:
+                # ``replace`` checks the new limit before any change, so that a refused one changes nothing.
+                limit = cast(int | None, changes["max_concurrent_rollouts"])
+                request = replace(request, max_concurrent_rollouts=limit)
             total = len(request.task_names) * request.rollouts_per_task
             items = self.results.rollouts(evaluation_id, scenario)
             ended = stored.state in ("finished", "failed")
@@ -906,6 +933,15 @@ class ArtifactEvaluations:
                 ]
                 if not again:
                     raise EvaluationStateConflictError(f"evaluation {evaluation_id!r} has no failed rollout")
+            if request.max_concurrent_rollouts != stored.request.max_concurrent_rollouts:
+                # The settles that follow read the new limit from the store.
+                stored = current.store.evaluations.limit_rollouts(evaluation_id, request.max_concurrent_rollouts)
+                logger.info(
+                    "evaluation %s of %s runs at most %s rollouts at once",
+                    evaluation_id,
+                    scenario,
+                    request.max_concurrent_rollouts,
+                )
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             reopened = current.store.evaluations.reopen(evaluation_id) if ended else stored

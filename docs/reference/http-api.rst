@@ -1609,9 +1609,9 @@ the same way:
   stopped in its run does not continue from where it stopped.
 - Its earlier attempts stay, so its ``attempt_count`` goes on and the calls of
   each attempt stay readable.
-- Both keep ``max_concurrent_rollouts``. When the evaluation has fewer free
-  places than rollouts to run, the others are ``waiting`` and go back to the
-  queue as earlier rollouts end.
+- Both keep ``max_concurrent_rollouts``, unless the body changes it. When the
+  evaluation has fewer free places than rollouts to run, the others are
+  ``waiting`` and go back to the queue as earlier rollouts end.
 - A rollout that has a score keeps it. A rollout that has not ended stays as
   it is.
 - An evaluation that runs goes on, with those rollouts in the queue again.
@@ -1619,6 +1619,25 @@ the same way:
 - When the rollouts are final, Reef ends the evaluation as it ends a first
   run: it stores the scores, and it gives a finished evaluation to the
   scenario's activation rule, which can activate the artifact.
+
+The body is optional. With no body, or ``{}``, the evaluation keeps its
+request. ``{"max_concurrent_rollouts": 8}`` changes the most rollouts of the
+evaluation that run at once, and ``{"max_concurrent_rollouts": null}``
+removes the limit. The value is a positive integer or ``null``, as in a start
+request. The evaluation keeps the new value in its ``request`` for the rest of
+its run, also for the rollouts that wait:
+
+.. code-block:: bash
+
+   curl -X POST \
+       -H "Authorization: Bearer $REEF_TOKEN" \
+       -H 'Content-Type: application/json' \
+       -d '{"max_concurrent_rollouts": 8}' \
+       "$REEF_URL/reef/scenarios/$SCENARIO/evaluations/$EVALUATION_ID/resume"
+
+A higher limit sends more waiting rollouts to the queue at once. A lower limit
+does not stop a rollout that runs. Fewer rollouts start until the rollouts that
+are not final are fewer than the limit.
 
 A retry of a cancelled or stopped evaluation does not run its cancelled
 rollouts and does not start its other rollouts. When the failed rollouts end,
@@ -1631,7 +1650,9 @@ again.
 
 ``retry`` returns 409 for an evaluation with no failed rollout. ``resume``
 returns 409 for an evaluation with no cancelled rollout and no rollout that
-never started. Both return 409 for an ended evaluation whose rollouts Reef no
+never started. Both return 400, and change nothing, for a body with another
+key or with a ``max_concurrent_rollouts`` that is not a positive integer or
+``null``. Both return 409 for an ended evaluation whose rollouts Reef no
 longer keeps: Reef deletes the rollouts of an ended evaluation after their
 retention. An unknown scenario or evaluation returns 404. Control answers
 both routes.
