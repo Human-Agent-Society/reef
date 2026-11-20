@@ -278,9 +278,9 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
-            assert runtime.serve_scenarios == ["s"] * 10 and runtime.applied.count("s") >= 10, (
-                "inference serves the candidate with the scenario's serving config"
-            )
+            assert (
+                runtime.serve_scenarios == ["s"] * 10 and runtime.applied.count("s") >= 10
+            ), "inference serves the candidate with the scenario's serving config"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",
