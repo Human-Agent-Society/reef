@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
@@ -95,6 +96,30 @@ def test_a_work_queue_that_an_earlier_reef_made_gets_the_later_indexes(backend, 
 
 
 @pytest.mark.unit
+def test_prefix_state_counts_include_only_the_requested_items_and_top_level_boolean_marker(open_coordination):
+    queue = open_coordination().queue
+    for item_id, scenario, kind in (
+        ("e:1", "s", "rollout"),
+        ("e:2", "s", "rollout"),
+        ("e:3", "s", "rollout"),
+        ("e:4", "other", "rollout"),
+        ("e:5", "s", "template"),
+        ("other:1", "s", "rollout"),
+    ):
+        queue.append(NewWork("q", item_id, scenario, kind, {}))
+    queue.take("q", "worker", ["rollout"])
+    queue.finish("q", "e:1", "worker", {})
+    queue.write_metadata("q", "e:1", "waits", True)
+    queue.write_metadata("q", "e:2", "nested", {"waits": True})
+    queue.write_metadata("q", "e:3", "waits", 1)
+
+    assert queue.prefix_state_counts("q", scenario="s", kind="rollout", id_prefix="e:", marker="waits") == {
+        "finished": (1, "e:1", True),
+        "queued": (2, "e:3", False),
+    }
+    assert {item.id for item in queue.read_items("q", ["e:3", "missing", "e:1"])} == {"e:3", "e:1"}
+
+
 def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_coordination):
     queue = open_coordination().queue
     for item_id in ("rollout:e1:0", "rollout:e1:1", "rollout:e10:0", "rollout:e1;0", "Rollout:e1:2"):
@@ -189,6 +214,29 @@ def test_an_expired_lease_returns_the_item_and_a_late_worker_loses_it(open_coord
     assert again.worker_id == "w2" and again.attempt_count == 2
     # The last attempt expires too: no attempts are left, so the item fails.
     assert [item.state for item in queue.requeue_expired(now=100)] == ["failed"]
+
+
+@pytest.mark.unit
+def test_a_new_attempt_with_the_same_worker_id_fences_checkpoint_writes(open_coordination):
+    queue = open_coordination().queue
+    queue.append(job("a"))
+    first = queue.take("jobs", "worker", ["training_job:tinker"])
+    queue.requeue_expired(now=time.time() + 60)
+    replacement = queue.take("jobs", "worker", ["training_job:tinker"])
+
+    with pytest.raises(WorkLeaseLostError):
+        queue.write_metadata("jobs", "a", "content", "first", lease=("worker", first.attempt_count))
+    with pytest.raises(WorkLeaseLostError):
+        queue.append_progress("jobs", "a", "worker", {"content": "first"}, number=0, attempt=first.attempt_count)
+    assert queue.read("jobs", "a").metadata == {}
+    assert queue.read("jobs", "a").progress == ()
+
+    saved = queue.write_metadata("jobs", "a", "content", "new", lease=("worker", replacement.attempt_count))
+    assert saved.metadata["content"] == "new"
+    saved = queue.append_progress(
+        "jobs", "a", "worker", {"content": "new"}, number=0, attempt=replacement.attempt_count
+    )
+    assert saved.progress == ({"content": "new"},)
 
 
 @pytest.mark.unit
