@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import replace
 from typing import Any, Literal
 
 from sqlalchemy import (
@@ -38,7 +38,6 @@ from reef.storage.evaluations import (
     StoredEvaluation,
 )
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
-from reef.storage.work_queue import NewWork
 
 
 def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -131,7 +130,7 @@ class SQLEvaluationStore(EvaluationStore):
                     "start_id": start.start_id,
                     "evaluation_id": evaluation_id,
                     "fingerprint": start.fingerprint,
-                    "first_work_json": json.dumps(asdict(start.first_work), ensure_ascii=True),
+                    "first_work_json": start.first_work_json,
                 },
             ):
                 raise EvaluationStartConflictError("start_id is already stored")
@@ -147,7 +146,7 @@ class SQLEvaluationStore(EvaluationStore):
             )
         return stored
 
-    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, NewWork | None] | None:
+    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, str | None] | None:
         table, starts = self.table.table, self.starts.table
         with self.database._transaction(write=False) as connection:
             row = (
@@ -163,10 +162,9 @@ class SQLEvaluationStore(EvaluationStore):
             return None
         if row["fingerprint"] != fingerprint:
             raise EvaluationStartConflictError("start_id already names a different evaluation request")
-        first_work_json = row["first_work_json"]
-        return stored_evaluation(row), None if first_work_json is None else NewWork(**json.loads(first_work_json))
+        return stored_evaluation(row), row["first_work_json"]
 
-    def pending_starts(self) -> tuple[tuple[str, NewWork], ...]:
+    def pending_starts(self) -> tuple[tuple[str, str], ...]:
         starts = self.starts.table
         with self.database._transaction(write=False) as connection:
             rows = connection.execute(
@@ -174,19 +172,16 @@ class SQLEvaluationStore(EvaluationStore):
                     self.starts.condition(), starts.c.first_work_json.is_not(None)
                 )
             ).all()
-        return tuple(
-            (evaluation_id, NewWork(**json.loads(first_work_json))) for evaluation_id, first_work_json in rows
-        )
+        return tuple((evaluation_id, first_work_json) for evaluation_id, first_work_json in rows)
 
-    def pending_start(self, evaluation_id: str) -> NewWork | None:
+    def pending_start(self, evaluation_id: str) -> str | None:
         starts = self.starts.table
         with self.database._transaction(write=False) as connection:
-            first_work_json = connection.execute(
+            return connection.execute(
                 select(starts.c.first_work_json).where(
                     self.starts.condition(), starts.c.evaluation_id == evaluation_id
                 )
             ).scalar_one_or_none()
-        return None if first_work_json is None else NewWork(**json.loads(first_work_json))
 
     def complete_start(self, evaluation_id: str) -> None:
         starts = self.starts.table

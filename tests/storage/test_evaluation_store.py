@@ -22,7 +22,6 @@ from reef.storage.evaluations import (
 )
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import NewWork
 
 REQUEST = ArtifactEvaluationRequest("r1", "weights", harness={"name": "terminus-2"}, rollouts_per_task=2)
 RESULT = PolicyEvaluation(
@@ -119,22 +118,22 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
 def test_the_start_reservation_and_work_share_the_evaluation_transaction(storage):
     with closing(storage.open("math")) as session, closing(storage.open("other")) as other:
         evaluations = session.evaluations
-        start = EvaluationStart("start-1", "0" * 64, NewWork("evaluations", "e1:0:0", "math", "rollout"))
+        start = EvaluationStart("start-1", "0" * 64, '{"scenario": "math"}')
         parameters = {"owner": "service-a", "request": REQUEST, "created_at": 10.0, "start": start}
         created = evaluations.create(evaluation_id="e1", **parameters)
-        assert evaluations.read_started(start.start_id, start.fingerprint) == (created, start.first_work)
+        assert evaluations.read_started(start.start_id, start.fingerprint) == (created, start.first_work_json)
         with pytest.raises(EvaluationStartConflictError):
             evaluations.create(evaluation_id="e2", **parameters)
         assert evaluations.read("e2") is None
         assert other.evaluations.read_started(start.start_id, start.fingerprint) is None
-        separate_start = replace(start, first_work=replace(start.first_work, scenario="other"))
+        separate_start = replace(start, first_work_json='{"scenario": "other"}')
         separate = other.evaluations.create(evaluation_id="e1", **{**parameters, "start": separate_start})
         evaluations.complete_start("e1")
         assert evaluations.pending_starts() == ()
         assert evaluations.read_started(start.start_id, start.fingerprint) == (created, None)
         assert other.evaluations.read_started(start.start_id, start.fingerprint) == (
             separate,
-            separate_start.first_work,
+            separate_start.first_work_json,
         )
 
 

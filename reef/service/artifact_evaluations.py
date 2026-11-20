@@ -33,7 +33,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, cast, overload
 
 from reef.artifact.artifact import Artifact
@@ -872,10 +872,10 @@ class EvaluationResults:
             try:
                 with self.dispatcher.locked_scenario(scenario) as current:
                     evaluations = current.store.evaluations
-                    for evaluation_id, work in evaluations.pending_starts():
+                    for evaluation_id, first_work_json in evaluations.pending_starts():
                         started = evaluations.read(evaluation_id)
                         if started is not None and started.state in ("queued", "running"):
-                            self.publish_start(evaluations, started, work)
+                            self.publish_start(evaluations, started, first_work_json)
                         # A cancelled start can still need its first work item when the client resumes it.
                         elif started is None or started.error != CANCELLED_ERROR:
                             evaluations.complete_start(evaluation_id)
@@ -893,8 +893,11 @@ class EvaluationResults:
         """Return whether the queue could already have removed the initial work for this start."""
         return time.time() - stored.created_at >= self.dispatcher.work_retention_seconds
 
-    def publish_start(self, evaluations: EvaluationStore, stored: StoredEvaluation, work: NewWork) -> StoredEvaluation:
+    def publish_start(
+        self, evaluations: EvaluationStore, stored: StoredEvaluation, first_work_json: str
+    ) -> StoredEvaluation:
         """Publish the pending work under the scenario lock, or fail if the queue could have removed it."""
+        work = NewWork(**json.loads(first_work_json))
         if self.queue.read(work.queue, work.id) is None:
             if self.start_work_expired(stored):
                 stored = evaluations.fail(stored.evaluation_id, error=STOPPED_ERROR, finished_at=time.time())
@@ -1018,10 +1021,10 @@ class ArtifactEvaluations:
                     if previous is None:
                         raise
             if previous is not None:
-                stored, first_work = previous
-                if first_work is None or stored.state not in ("queued", "running"):
+                stored, first_work_json = previous
+                if first_work_json is None or stored.state not in ("queued", "running"):
                     return stored
-                stored = self.results.publish_start(evaluations, stored, first_work)
+                stored = self.results.publish_start(evaluations, stored, first_work_json)
         self.results.settle(scenario, stored.evaluation_id)
         return stored
 
@@ -1127,7 +1130,7 @@ class ArtifactEvaluations:
             # An evaluation on e2b can end before it added a rollout: its template items are then all it has.
             templates = self.results.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             ended = stored.state in ("finished", "failed")
-            pending_work = (
+            first_work_json = (
                 current.store.evaluations.pending_start(evaluation_id)
                 if resumes
                 and not items
@@ -1157,7 +1160,7 @@ class ArtifactEvaluations:
                     and tasks <= set(range(start)) | set(templates)
                 )
             if ended and (
-                (not items and not templates and pending_work is None)
+                (not items and not templates and first_work_json is None)
                 or not kept
                 or (stored.state == "finished" and len(items) < total)
             ):
@@ -1165,7 +1168,7 @@ class ArtifactEvaluations:
             if resumes:
                 again = [item for item in items if rollout_cancelled(item)]
                 # The rollouts that never started have no item yet: the settle below adds them.
-                if not again and not (ended and len(items) < total) and pending_work is None:
+                if not again and not (ended and len(items) < total) and first_work_json is None:
                     raise EvaluationStateConflictError(
                         f"evaluation {evaluation_id!r} has no rollout that a cancel or a stop ended, "
                         "and no rollout that never started"
@@ -1190,8 +1193,8 @@ class ArtifactEvaluations:
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             reopened = current.store.evaluations.reopen(evaluation_id) if ended else stored
-            if pending_work is not None:
-                self.queue.append(pending_work)
+            if first_work_json is not None:
+                self.queue.append(NewWork(**json.loads(first_work_json)))
                 current.store.evaluations.complete_start(evaluation_id)
             # A rollout that requires prepared templates runs again only once its task's template item finished.
             # Each template item of these tasks that did not finish goes to the queue again, or back to it when the
@@ -1477,7 +1480,7 @@ class ArtifactEvaluations:
                     request=request,
                     created_at=time.time(),
                     state=state,
-                    start=EvaluationStart(*start, first_work),
+                    start=EvaluationStart(*start, json.dumps(asdict(first_work), ensure_ascii=True)),
                 )
                 self.queue.append(first_work)
                 evaluations.complete_start(evaluation_id)

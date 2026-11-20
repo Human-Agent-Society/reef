@@ -20,7 +20,6 @@ from typing import Literal
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.work_queue import NewWork
 
 #: The state of an evaluation: it waits for its turn, it runs, it finished with a result, or it failed with an error.
 EvaluationState = Literal["queued", "running", "finished", "failed"]
@@ -37,23 +36,24 @@ class EvaluationStartConflictError(ReefError):
 
 @dataclass(frozen=True)
 class EvaluationStart:
-    """The start ID, request fingerprint and first queue item of one evaluation.
+    """The start ID, request fingerprint and saved admission data of one evaluation.
 
     The ID is a non-blank client string of at most 256 characters. It contains no NUL or surrogate code point.
     The fingerprint is a 64-digit lowercase SHA-256 hex string.
-    The first work item lets control complete admission after an interruption.
+    ``first_work_json`` is a non-empty string that this store treats as opaque.
+    The evaluation service writes and reads its JSON to complete admission after an interruption.
     """
 
     start_id: str
     fingerprint: str
-    first_work: NewWork
+    first_work_json: str
 
     def __post_init__(self) -> None:
         check_evaluation_start_id(self.start_id)
         if len(self.fingerprint) != 64 or any(digit not in "0123456789abcdef" for digit in self.fingerprint):
             raise ValueError("the request fingerprint must be a SHA-256 hex string")
-        if not isinstance(self.first_work, NewWork):
-            raise TypeError("the first work item must be NewWork")
+        if not isinstance(self.first_work_json, str) or not self.first_work_json:
+            raise ValueError("the saved admission data must be a non-empty string")
 
 
 def check_evaluation_start_id(start_id: object) -> str:
@@ -187,19 +187,19 @@ class EvaluationStore(ABC):
         """
 
     @abstractmethod
-    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, NewWork | None] | None:
-        """Read the evaluation and its pending first work item, or return None for an unused start ID.
+    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, str | None] | None:
+        """Read the evaluation and its pending admission data, or return None for an unused start ID.
 
         Raise ``EvaluationStartConflictError`` if the stored fingerprint differs.
         """
 
     @abstractmethod
-    def pending_starts(self) -> tuple[tuple[str, NewWork], ...]:
-        """Return the evaluation ID and first work item of each start whose admission is pending."""
+    def pending_starts(self) -> tuple[tuple[str, str], ...]:
+        """Return the evaluation ID and saved admission data of each pending start."""
 
     @abstractmethod
-    def pending_start(self, evaluation_id: str) -> NewWork | None:
-        """Return the first work item if admission of this evaluation is pending, else None."""
+    def pending_start(self, evaluation_id: str) -> str | None:
+        """Return the saved admission data of this evaluation's pending start, else None."""
 
     @abstractmethod
     def complete_start(self, evaluation_id: str) -> None:
