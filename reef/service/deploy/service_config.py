@@ -302,6 +302,16 @@ class ServiceSettings:
         public_path=("evaluation", "task_template_builder"),
         help="A TaskTemplateBuilder plugin reference that makes the sandbox templates of each task of an e2b evaluation.",
     )
+    #: Whether a rollout of an e2b evaluation runs a trial only from its task's prepared templates: a task whose
+    #: template item failed runs no trial, and a trial builds no missing template.
+    evaluation_require_prepared_templates: bool = config_option(
+        False,
+        public_path=("evaluation", "require_prepared_templates"),
+        help=(
+            "Run each e2b evaluation rollout only from the templates that its task's template item prepared; "
+            "a trial then never builds a template. Default: false."
+        ),
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -536,6 +546,8 @@ class ServiceSettings:
             TaskTemplateBuilder.reference(
                 self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
             )
+        if not isinstance(self.evaluation_require_prepared_templates, bool):
+            raise ValueError("evaluation.require_prepared_templates must be true or false")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:

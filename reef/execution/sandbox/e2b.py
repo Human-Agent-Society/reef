@@ -45,8 +45,9 @@ from harbor.models.task.config import NetworkMode
 from harbor.models.task.task import Task
 from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
 from harbor.models.trial.paths import TrialPaths
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv_build import (
     AgentEnvTemplates,
     DockerfileBuild,
@@ -421,6 +422,11 @@ class E2BSession(RemoteSession):
                 logger.warning("could not copy %s back from the failed E2B process", root.name)
 
 
+class TemplateNotPreparedError(InternalError):
+    """A trial that builds no template (``KillOnTimeoutE2BEnvironment.builds_templates`` false) found its template
+    missing, or not ready on AgentENV."""
+
+
 class KillOnTimeoutE2BEnvironment(E2BEnvironment):
     """Harbor's ``E2BEnvironment`` whose sandbox is created with ``lifecycle={"on_timeout": "kill"}``, and whose
     template keeps the modes of ``COPY --chmod``.
@@ -435,13 +441,21 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
     - Else, when the Dockerfile has ``--chmod``, the template is built from ``dockerfile_with_copy_modes`` of it, and
       its alias ends with ``COPY_MODES_TEMPLATE_SUFFIX``.
 
+    ``builds_templates`` is the bool of the environment config's ``kwargs.builds_templates``, True when the config
+    has none. When it is false, the environment builds no template: ``_create_template`` raises
+    ``TemplateNotPreparedError``, and on AgentENV ``_does_template_exist`` is true only for a ready template.
+
     Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
-    as its ``import_path``. ``start`` builds a missing template with ``_create_template``, creates the sandbox with
-    ``_create_sandbox``, and ``stop`` deletes it, as before.
+    as its ``import_path``, and one for each separate verifier environment of the trial, from the same config.
+    ``start`` builds a missing template with ``_create_template``, creates the sandbox with ``_create_sandbox``, and
+    ``stop`` deletes it, as before. ``build_task_template`` makes one that builds templates.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, builds_templates: bool = True, **kwargs: Any) -> None:
+        if not isinstance(builds_templates, bool):
+            raise TypeError("builds_templates is a bool")
         super().__init__(*args, **kwargs)
+        self.builds_templates = builds_templates
         self.dockerfile_build = dockerfile_build(os.environ)
         # Harbor builds the template from the task's image when it has one; then the Dockerfile is not read.
         if self.task_env_config.docker_image:
@@ -461,19 +475,33 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
     @override
     async def _does_template_exist(self) -> bool:
-        # An AgentENV alias can name a template that is still building or that failed. ``ensure_aenv_template`` in
-        # ``_create_template`` reads its status and returns at once for a ready template.
-        if self.builds_with_aenv:
+        if not self.builds_with_aenv:
+            return await super()._does_template_exist()
+        if self.builds_templates:
+            # An AgentENV alias can name a template that is still building or that failed. ``ensure_aenv_template``
+            # in ``_create_template`` reads its status and returns at once for a ready template.
             return False
-        return await super()._does_template_exist()
+        state = await AgentEnvTemplates.from_environ(os.environ).state(self._template_name)
+        return state is not None and state.status == "ready"
 
-    # Harbor 0.25.0's template build, with two changes: with ``builds_with_aenv``, ``aenv build`` builds the template;
-    # else the Dockerfile is ``dockerfile_with_copy_modes`` of the task's Dockerfile. The decorator is Harbor's retry
-    # policy. The parity test in tests/sandbox/test_task_environment.py compares the build with Harbor's for a
-    # Dockerfile without ``--chmod``.
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    # Harbor 0.25.0's template build, with three changes: an environment that builds no template refuses; with
+    # ``builds_with_aenv``, ``aenv build`` builds the template; else the Dockerfile is ``dockerfile_with_copy_modes``
+    # of the task's Dockerfile. Harbor's retry policy applies to builds. A trial that cannot build fails immediately.
+    # The parity test in tests/sandbox/test_task_environment.py compares the build with Harbor's for a Dockerfile
+    # without ``--chmod``.
+    @retry(
+        retry=retry_if_not_exception_type(TemplateNotPreparedError),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     @override
     async def _create_template(self) -> None:
+        if not self.builds_templates:
+            raise TemplateNotPreparedError(
+                f"the template {self._template_name} of {self.environment_name} is not ready, and this trial "
+                "builds no template: prepare the task's templates before its trials"
+            )
         if self.builds_with_aenv:
             dockerfile = self._environment_definition_path.read_text()
             cpus = self._effective_cpus
@@ -578,6 +606,7 @@ __all__ = [
     "E2BSession",
     "KillOnTimeoutE2BEnvironment",
     "SandboxKeeper",
+    "TemplateNotPreparedError",
     "build_task_template",
     "dockerfile_with_copy_modes",
     "ensure_template",

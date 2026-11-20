@@ -808,7 +808,10 @@ def build_app(
         components=components,
     )
     evaluations = ArtifactEvaluations(
-        dispatcher, new_artifacts=new_artifacts, sources=ArtifactSources.from_setting(settings.artifact_sources)
+        dispatcher,
+        new_artifacts=new_artifacts,
+        sources=ArtifactSources.from_setting(settings.artifact_sources),
+        requires_prepared_templates=settings.evaluation_require_prepared_templates,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.

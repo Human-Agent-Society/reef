@@ -600,7 +600,9 @@ class EvaluationResults:
         evaluation keeps template items for the first ``TEMPLATE_TASKS_AHEAD`` tasks that have rollouts to add, and
         queues again each one that a cancel or a stop ended. A template item counts against no limit: its build holds
         no rollout slot. The rollouts of later tasks whose templates are ready start before those of a task whose
-        template still builds, so a slow template holds back its own task only.
+        template still builds, so a slow template holds back its own task only. A rollout that requires prepared
+        templates and waits to run again also waits until its task's template item is final; until then it keeps no
+        place of ``max_concurrent_rollouts`` from the rollouts of other tasks.
 
         A rollout that a cancel or a stop ended (``rollout_cancelled``) stays ended in a running evaluation only after
         a retry of a cancelled or stopped evaluation. While one does, no rollout starts its first run, the failure
@@ -644,16 +646,28 @@ class EvaluationResults:
             waiting = len(missing)
             retry_waiting = [item for item in items if rollout_waits(item)]
             if waiting > 0 or retry_waiting:
-                # A retry or a resume can remove the limit while rollouts wait: then each one goes to the queue.
-                limit = request.max_concurrent_rollouts
-                free = waiting + len(retry_waiting) if limit is None else limit - sum(not item.final for item in items)
-                for item in retry_waiting[: max(free, 0)]:
-                    self.queue.retry(EVALUATIONS_QUEUE, item.id)
-                    self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
-                free -= len(retry_waiting)
                 # An evaluation on e2b can have template items and no rollout yet; the task's first rollout is the
                 # payload of its template item.
                 first = EvaluationRollout.from_item(items[0] if items else next(iter(templates.values())))
+                # A rollout that requires prepared templates also waits for its task's template item, which a retry
+                # or a resume queued again. A task whose item the queue no longer holds lets its rollouts go: the
+                # worker then fails them, with that reason.
+                building: set[int] = (
+                    {index for index, template in templates.items() if not template.final}
+                    if first.requires_prepared_templates
+                    else set()
+                )
+                ready = [item for item in retry_waiting if cast(int, item.payload["task_index"]) not in building]
+                # A retry or a resume can remove the limit while rollouts wait: then each one goes to the queue.
+                limit = request.max_concurrent_rollouts
+                free = waiting + len(retry_waiting) if limit is None else limit - sum(not item.final for item in items)
+                retried = ready[: max(free, 0)]
+                for item in retried:
+                    self.queue.retry(EVALUATIONS_QUEUE, item.id)
+                    self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
+                # A ready rollout that the limit holds back leaves no place, so the next settle queues it first. A
+                # rollout whose template builds again keeps no place, so the ready tasks' rollouts can start.
+                free -= len(retried)
                 if request.environment == "e2b" and not cancelled:
                     # A template that builds slowly holds one of these places only: the window moves on as the
                     # rollouts of the other tasks go to the queue.
@@ -788,8 +802,10 @@ class ArtifactEvaluations:
 
     Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts
     to the evaluation service's workers. ``sources`` reads the harness tree of an artifact item. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
-    scenario's settings, or is None for no automatic evaluation. ``results`` ends each evaluation as its rollouts
-    end. ``ended_progress`` keeps the progress of ended evaluations for ``status_json``.
+    scenario's settings, or is None for no automatic evaluation. ``requires_prepared_templates`` is the deployment's
+    ``evaluation.require_prepared_templates``: each evaluation on e2b that it accepts runs a trial only from its task's
+    prepared templates (``EvaluationRollout.requires_prepared_templates``). ``results`` ends each evaluation as its
+    rollouts end. ``ended_progress`` keeps the progress of ended evaluations for ``status_json``.
 
     Purpose: the evaluation routes call ``start``, ``cancel``, ``retry``, ``resume``, ``get``, ``newest``,
     ``rollouts_json``, ``calls_json``, ``call_json``, ``trajectories_json``, ``exported_rollouts`` and
@@ -805,10 +821,14 @@ class ArtifactEvaluations:
         *,
         new_artifacts: NewArtifacts | None = None,
         sources: ArtifactSources | None = None,
+        requires_prepared_templates: bool = False,
     ) -> None:
+        if not isinstance(requires_prepared_templates, bool):
+            raise TypeError("requires_prepared_templates is a bool")
         self.dispatcher = dispatcher
         self.sources = ArtifactSources.from_setting(()) if sources is None else sources
         self.new_artifacts = new_artifacts
+        self.requires_prepared_templates = requires_prepared_templates
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
         self.ended_progress = EndedProgress()
@@ -941,7 +961,9 @@ class ArtifactEvaluations:
 
         Each chosen rollout goes back to the queue with its earlier attempts kept, while fewer than
         ``max_concurrent_rollouts`` rollouts are not final; the others wait (``rollout_waits``) and go back as
-        rollouts end (``EvaluationResults.settle``). The other rollouts stay as they are, and a scored rollout keeps
+        rollouts end (``EvaluationResults.settle``). In an evaluation that requires prepared templates, a chosen
+        rollout whose task's template item did not finish also waits: the template item goes to the queue again, and
+        the rollout goes back once that item is final. The other rollouts stay as they are, and a scored rollout keeps
         its score. An evaluation that runs goes on with those rollouts in the queue again. An evaluation that ended
         runs again, without its result or its error. When the rollouts are final, ``EvaluationResults`` ends the
         evaluation as it ends a first run, and gives a finished one to the activation rule.
@@ -1017,12 +1039,29 @@ class ArtifactEvaluations:
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             reopened = current.store.evaluations.reopen(evaluation_id) if ended else stored
+            # A rollout that requires prepared templates runs again only once its task's template item finished.
+            # Each template item of these tasks that did not finish goes to the queue again, or back to it when the
+            # queue no longer holds it, and the task's rollouts wait until it is final (``settle``).
+            unprepared: set[int] = set()
+            if again and EvaluationRollout.from_item(again[0]).requires_prepared_templates:
+                for item in again:
+                    index = cast(int, item.payload["task_index"])
+                    template = templates.get(index)
+                    if index in unprepared or (template is not None and template.state == "finished"):
+                        continue
+                    if template is None:
+                        self.queue.append(template_work(EvaluationRollout.from_item(item)))
+                    else:
+                        self.queue.retry(EVALUATIONS_QUEUE, template.id)
+                    unprepared.add(index)
+            waits = [item for item in again if cast(int, item.payload["task_index"]) in unprepared]
+            runs = [item for item in again if cast(int, item.payload["task_index"]) not in unprepared]
             limit = request.max_concurrent_rollouts
-            free = len(again) if limit is None else max(limit - sum(not item.final for item in items), 0)
+            free = len(runs) if limit is None else max(limit - sum(not item.final for item in items), 0)
             # Under the scenario lock, a settle sees each of these rollouts either queued or marked to wait.
-            for item in again[free:]:
+            for item in (*waits, *runs[free:]):
                 self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, True)
-            for item in again[:free]:
+            for item in runs[:free]:
                 self.queue.retry(EVALUATIONS_QUEUE, item.id)
         operation = "resumes" if resumes else "retries"
         logger.info("evaluation %s of %s %s %d rollouts", evaluation_id, scenario, operation, len(again))
@@ -1195,10 +1234,11 @@ class ArtifactEvaluations:
         """Check and store the evaluation of ``artifact_id`` with ``settings``, and add its rollouts to the queue.
 
         A client's evaluation is stored ``running``; an automatic one ``queued``, until a worker takes one of its
-        rollouts.
+        rollouts. On e2b, the template worker gets the owner that the scenario's record stores.
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, _artifact, model, api = self.checked(current, artifact_id, settings)
+            owner = self.dispatcher.task_owner(scenario) if request.environment == "e2b" else None
             selection = {**current.artifact_selection().to_dict(), request.component: request.artifact_id}
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             # The listing reads no task files: the eval split can hold many more tasks than the evaluation runs.
@@ -1264,6 +1304,8 @@ class ArtifactEvaluations:
                 cast(dict[str, JsonValue], selection),
                 tree,
                 request.log_probs,
+                owner=owner,
+                requires_prepared_templates=self.requires_prepared_templates and request.environment == "e2b",
             )
             for index, name in enumerate(names)
             for repeat in range(request.rollouts_per_task)

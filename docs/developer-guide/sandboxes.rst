@@ -114,6 +114,9 @@ ready.
   When the build finds no free builder within the build timeout, the item waits
   again, for at most six hours in each attempt. A failed build still adds the
   task's rollouts: their trials build the template, and fail as rollouts.
+  With ``evaluation.require_prepared_templates``, those rollouts report the
+  build error and skip the trial. If a prepared task or verifier template
+  disappears before startup, the trial reports the missing template.
   The rollouts of a task whose template is ready start before those of an
   earlier task whose template still builds, so a slow build holds back its own
   task only.

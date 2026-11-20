@@ -1373,7 +1373,21 @@ downgrade without restoring a compatible backup.
        ``module`` and ``config``. An evaluation on ``e2b`` calls it once for each task, before it adds the task's
        rollouts, to make the task's sandbox templates ready. Unset, ``DockerfileTemplateBuilder`` builds them from the
        task's Dockerfiles, as a trial would. A deployment that keeps task images in a registry names a builder that
-       makes the templates from those images.
+       makes the templates from those images. Such a builder overrides ``build_for_owner``: it gets the owner that the
+       scenario's record stores, so it finds a task's image by owner and task name, not by the scenario's name. A
+       template item whose scenario has another owner than when the evaluation started fails, and builds nothing.
+   ``evaluation.require_prepared_templates`` : false
+       whether an evaluation on ``e2b`` runs a trial only from the templates that its task's template item
+       prepared. When it is true:
+
+       - A task whose template item failed runs no trial. Each of its rollouts fails with the item's error.
+       - A trial never builds a template, also of a separate verifier environment. A template that is missing at the
+         start of a trial fails the trial.
+       - A retry or resume requests preparation again for tasks whose preparation failed or was lost.
+
+       When it is false, a trial builds a template that is still missing itself. The setting applies to the
+       evaluations that start after it changes. It does not change evaluations on ``docker``, training rollouts or
+       the template builder.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
