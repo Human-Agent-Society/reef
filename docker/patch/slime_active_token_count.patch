@@ -6,13 +6,13 @@
      """
 -    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in batch["loss_masks"]])
 +    num_tokens = sum(loss_mask.sum() for loss_mask in batch["loss_masks"])
- 
+
      sum_of_sample_mean = get_sum_of_sample_mean(
          batch["total_lengths"],
 --- a/slime/observability/train_metric_utils.py
 +++ b/slime/observability/train_metric_utils.py
 @@ -52,6 +52,8 @@
- 
+
      if calculate_per_token_loss:
          num_samples_or_tokens = values[0]
 +        if num_samples_or_tokens == 0:
