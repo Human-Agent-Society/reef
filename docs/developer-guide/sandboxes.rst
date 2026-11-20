@@ -104,8 +104,10 @@ ends, so a late build there loses the agent's work. The function returns the
 alias of the task environment's template. A trial after it finds the templates
 ready.
 
-- An evaluation on ``e2b`` calls it from one template item for each task, before
-  it adds the task's rollouts. It keeps template items for the next 32 tasks, so
+- An evaluation on ``e2b`` makes the templates in one template item for each
+  task, before it adds the task's rollouts. The item calls the deployment's
+  ``evaluation.task_template_builder``. Without one, it calls
+  ``build_task_template``. It keeps template items for the next 32 tasks, so
   their templates build while earlier rollouts run. A template item holds no
   rollout slot of ``max_concurrent_rollouts`` and no sandbox slot of a worker.
   When the build finds no free builder within the build timeout, the item waits

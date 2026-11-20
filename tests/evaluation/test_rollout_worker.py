@@ -37,6 +37,7 @@ from reef.evaluation.rollout_worker import (
     template_item_id,
     verifier_output,
 )
+from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import WorkerStoppedError
@@ -513,7 +514,7 @@ def test_a_template_item_waits_again_for_a_template_that_found_no_free_builder(m
     value = e2b_rollout()
     item_id = template_item_id(value.evaluation_id, value.task_index)
     queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
-    worker = TaskTemplateWorker(queue, endpoints, worker_id="w")
+    worker = TaskTemplateWorker(queue, endpoints, DockerfileTemplateBuilder(), worker_id="w")
     assert worker.run_once() is True
     assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
     assert builds.paths == [endpoints.task_directory(value)] * 2
@@ -535,10 +536,34 @@ def test_a_template_item_fails_as_retryable_when_its_template_is_not_ready(monke
     value = e2b_rollout()
     item_id = template_item_id(value.evaluation_id, value.task_index)
     queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
-    worker = TaskTemplateWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w")
+    worker = TaskTemplateWorker(queue, OpenEndpoints(tmp_path / "tasks"), DockerfileTemplateBuilder(), worker_id="w")
     assert worker.run_once() is True
     item = queue.read(EVALUATIONS_QUEUE, item_id)
     assert item.state == "queued" and message in str(item.error)
+
+
+class RecordedBuilder(TaskTemplateBuilder):
+    """A ``TaskTemplateBuilder`` that keeps the arguments of each build in ``builds`` and builds nothing."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str, str, Path]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.builds.append((scenario, task_name, task_directory))
+
+
+@pytest.mark.unit
+def test_a_template_item_builds_with_the_deployments_builder_and_not_from_the_dockerfile(monkeypatch, tmp_path):
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", TemplateBuilds())
+    queue = memory_coordination().work_queue
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = RecordedBuilder()
+    assert TaskTemplateWorker(queue, endpoints, builder, worker_id="w").run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert builder.builds == [(value.scenario, value.task_name, endpoints.task_directory(value))]
 
 
 class HeldLab(CalledThenFailedLab):

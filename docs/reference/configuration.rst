@@ -1368,6 +1368,12 @@ downgrade without restoring a compatible backup.
        ``config``. The evaluation worker gives it each trial: the rollout, the attempt, the trial directory and the
        error. It runs before the worker removes the directory, so it can keep the logs of the agent and the verifier.
        Its failure is logged and does not change the rollout.
+   ``evaluation.task_template_builder`` : unset
+       a ``TaskTemplateBuilder`` plugin (``reef.evaluation.task_templates``), as ``package.module:ClassName`` or
+       ``module`` and ``config``. An evaluation on ``e2b`` calls it once for each task, before it adds the task's
+       rollouts, to make the task's sandbox templates ready. Unset, ``DockerfileTemplateBuilder`` builds them from the
+       task's Dockerfiles, as a trial would. A deployment that keeps task images in a registry names a builder that
+       makes the templates from those images.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
