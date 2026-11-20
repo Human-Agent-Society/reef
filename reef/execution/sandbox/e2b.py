@@ -91,6 +91,18 @@ COPY_MODES_TEMPLATE_SUFFIX = "__copy-modes"
 #: The end of the template alias that ``aenv build`` builds, so that it never names a template of E2B's template API,
 #: which AgentENV builds without the task's files.
 AENV_TEMPLATE_SUFFIX = "__aenv"
+#: The shell command that waits, for at most 120 s, until a task image whose first process is systemd emptied
+#: ``/tmp`` at boot (``systemd-tmpfiles-setup.service``), or until the boot ended. A trial uploads its agent's files to
+#: ``/tmp`` after the start, and that boot step deletes them. An image whose first process is not systemd returns at
+#: once.
+SYSTEMD_TMP_CLEANUP_WAIT = (
+    'if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; then waited=0; '
+    "until systemctl is-active --quiet systemd-tmpfiles-setup.service 2>/dev/null || "
+    'case "$(systemctl is-system-running 2>/dev/null)" in running|degraded) true;; *) false;; esac; do '
+    "waited=$((waited + 1)); [ $waited -ge 120 ] && break; sleep 1; done; fi"
+)
+#: The seconds that ``KillOnTimeoutE2BEnvironment.start`` gives ``SYSTEMD_TMP_CLEANUP_WAIT``.
+SYSTEMD_TMP_CLEANUP_WAIT_SECONDS = 150
 
 
 def dockerfile_with_copy_modes(dockerfile: str, context_dir: Path) -> str:
@@ -448,7 +460,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
     Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
     as its ``import_path``, and one for each separate verifier environment of the trial, from the same config.
     ``start`` builds a missing template with ``_create_template``, creates the sandbox with ``_create_sandbox``, and
-    ``stop`` deletes it, as before. ``build_task_template`` makes one that builds templates.
+    ``stop`` deletes it, as before. Then ``start`` waits until the sandbox's systemd, if its first process is systemd,
+    emptied ``/tmp`` (``SYSTEMD_TMP_CLEANUP_WAIT``). ``build_task_template`` makes one that builds templates.
     """
 
     def __init__(self, *args: Any, builds_templates: bool = True, **kwargs: Any) -> None:
@@ -466,6 +479,13 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
         dockerfile = self._environment_definition_path.read_text()
         if dockerfile_with_copy_modes(dockerfile, self.environment_dir) != dockerfile:
             self._template_name += COPY_MODES_TEMPLATE_SUFFIX
+
+    @override
+    async def start(self, force_build: bool) -> None:
+        await super().start(force_build)
+        # A task image can boot systemd, which empties /tmp some seconds after the start. The agent's install uploads
+        # its archives there next, so it waits for that step. The wait is a best effort: its result is not checked.
+        await self.exec(SYSTEMD_TMP_CLEANUP_WAIT, timeout_sec=SYSTEMD_TMP_CLEANUP_WAIT_SECONDS, user="root")
 
     @property
     def builds_with_aenv(self) -> bool:

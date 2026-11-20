@@ -235,6 +235,67 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
 
 
 @pytest.mark.unit
+def test_reefs_e2b_start_waits_for_the_tmp_cleanup_of_systemd_after_harbors_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    from harbor.environments.base import ExecResult
+    from harbor.environments.e2b import E2BEnvironment
+
+    from reef.execution.sandbox import e2b as reef_e2b
+
+    steps: list[tuple[object, ...]] = []
+
+    async def harbor_start(environment: E2BEnvironment, force_build: bool) -> None:
+        steps.append(("harbor start", force_build))
+
+    async def run(environment: E2BEnvironment, command: str, **options: object) -> ExecResult:
+        steps.append((command, options))
+        return ExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(E2BEnvironment, "start", harbor_start)
+    monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "exec", run)
+    asyncio.run(harbor_e2b_environments(tmp_path)["reef"].start(force_build=False))
+    assert steps == [
+        ("harbor start", False),
+        (
+            reef_e2b.SYSTEMD_TMP_CLEANUP_WAIT,
+            {"timeout_sec": reef_e2b.SYSTEMD_TMP_CLEANUP_WAIT_SECONDS, "user": "root"},
+        ),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("first_process", "questions"),
+    [("systemd", ["is-active", "is-system-running", "is-active"]), ("bash", [])],
+)
+def test_the_systemd_tmp_cleanup_wait_waits_only_for_systemd(
+    tmp_path: Path, first_process: str, questions: list[str]
+) -> None:
+    import subprocess
+
+    from reef.execution.sandbox.e2b import SYSTEMD_TMP_CLEANUP_WAIT
+
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    asked = tmp_path / "systemctl-questions"
+    stand_ins = {
+        # The first process of the image.
+        "cat": f'[ "$1" = /proc/1/comm ] && echo {first_process}\n',
+        # The cleanup step is active at the second is-active; the boot does not end.
+        "systemctl": f'echo "$1" >> {asked}\n[ "$1" = is-active ] && [ "$(grep -c is-active {asked})" -ge 2 ]\n',
+        "sleep": "true\n",
+    }
+    for name, body in stand_ins.items():
+        (tools / name).write_text("#!/bin/sh\n" + body)
+        (tools / name).chmod(0o755)
+    path = f"{tools}:{os.environ['PATH']}"
+    subprocess.run(["sh", "-c", SYSTEMD_TMP_CLEANUP_WAIT], check=True, env={**os.environ, "PATH": path}, timeout=30)
+    assert (asked.read_text().split() if asked.exists() else []) == questions
+
+
+@pytest.mark.unit
 def test_a_dockerfile_for_e2b_sets_the_modes_of_copy_chmod_with_chmod(tmp_path: Path) -> None:
     pytest.importorskip("dockerfile_parse")
     from reef.execution.sandbox.e2b import dockerfile_with_copy_modes
