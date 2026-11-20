@@ -93,8 +93,8 @@ The class also builds a task's Dockerfile differently in two ways:
   timeout. An AgentENV worker answers 429 when it already runs as many builds as
   it takes at once.
 
-A trial builds a missing template inside its environment start limit. A wait
-for a free AgentENV builder then counts against that limit.
+By default, a trial builds a missing template inside its environment start
+limit. A wait for a free AgentENV builder then counts against that limit.
 ``reef.execution.sandbox.e2b.build_task_template(task_path)`` keeps the builds
 out of the trial. It builds the templates that a trial of the task would build,
 with the same aliases, resources and build timeouts: the template of the task's
@@ -112,11 +112,8 @@ ready.
   run. A template item holds no rollout slot of ``max_concurrent_rollouts``
   and no sandbox slot of a worker.
   When the build finds no free builder within the build timeout, the item waits
-  again, for at most six hours in each attempt. A failed build still adds the
-  task's rollouts: their trials build the template, and fail as rollouts.
-  With ``evaluation.require_prepared_templates``, those rollouts report the
-  build error and skip the trial. If a prepared task or verifier template
-  disappears before startup, the trial reports the missing template.
+  again, for at most six hours in each attempt. Enable
+  ``evaluation.require_prepared_templates`` to keep template builds out of trials.
   The rollouts of a task whose template is ready start before those of an
   earlier task whose template still builds, so a slow build holds back its own
   task only.
