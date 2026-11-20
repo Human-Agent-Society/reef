@@ -649,6 +649,8 @@ def test_a_rollout_page_materializes_only_its_range_of_a_large_waiting_evaluatio
                 ("task-9999", 15, None)
             ]
             assert (await client.get(f"{route}?limit=501", headers=AUTH)).status == 400
+            filtered = await (await client.get(f"{route}?limit=1&benchmark=full", headers=AUTH)).json()
+            assert (filtered["total"], filtered["rollouts"], filtered["task_means"]) == (0, [], {})
 
     asyncio.run(run())
 
@@ -1135,7 +1137,12 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
             collection = {"benchmarks": ["lite", "full", "other"], "average": "benchmark"}
             stored = "/reef/namespaces/s/collections/coding"
             assert (await client.put(stored, headers=AUTH, json=collection)).status == 200
-            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "collection": "coding"}
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "collection": "coding",
+                "rollouts_per_task": 2,
+            }
             for refused in ({**body, "task_names": ["add"]}, {**body, "collection": "missing"}):
                 response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=refused)
                 assert response.status == 400, await response.text()
@@ -1152,25 +1159,34 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
                 ],
             }
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
-            # The progress counts the rollouts of each benchmark while the evaluation runs: "add" ended, "sort" waits.
+            # The first repeat of "add" has ended. The other repeats have not ended.
             item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
             queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
             running = (await (await client.get(route, headers=AUTH)).json())["progress"]
             ended = {"ended": 1, "scored": 1, "failed": 0, "cancelled": 0, "running": 0, "mean_score": 1.0}
             assert running["benchmarks"] == [
-                {"benchmark": "lite", "total": 1, **ended},
-                {"benchmark": "full", "total": 2, **ended},
+                {"benchmark": "lite", "total": 2, **ended},
+                {"benchmark": "full", "total": 4, **ended},
             ]
-            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
-            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(0.0).to_json()})
+            for _ in range(3):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(0.0).to_json()})
             answer = await finished(client, accepted["evaluation_id"])
             assert answer["state"] == "finished", answer
-            assert [entry["mean_score"] for entry in answer["progress"]["benchmarks"]] == [1.0, 0.5]
+            assert [entry["mean_score"] for entry in answer["progress"]["benchmarks"]] == [0.5, 0.25]
             assert answer["benchmark_scores"] == [
-                {"benchmark": "lite", "task_count": 1, "mean_score": 1.0},
-                {"benchmark": "full", "task_count": 2, "mean_score": 0.5},
+                {"benchmark": "lite", "task_count": 1, "mean_score": 0.5},
+                {"benchmark": "full", "task_count": 2, "mean_score": 0.25},
             ]
-            assert answer["mean_score"] == 0.75
+            assert answer["mean_score"] == 0.375
+
+            response = await client.get(f"{route}/rollouts?limit=1&benchmark=lite&calls=false", headers=AUTH)
+            assert response.status == 200
+            page = await response.json()
+            assert page["total"] == 2
+            [rollout] = page["rollouts"]
+            assert (rollout["task"], rollout["repeat"], rollout["score"]) == ("add", 0, 1.0)
+            assert page["task_means"] == {"0": 0.5}
 
     asyncio.run(run())
 

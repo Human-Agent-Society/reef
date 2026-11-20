@@ -1601,7 +1601,8 @@ Add ``limit`` to get 1 to 500 rollouts. ``offset`` skips that many rollouts and
 defaults to zero. The response also includes ``offset`` and ``total``, the number
 of rollouts that match the filters. ``state`` defaults to ``all``. It can also
 be ``running`` (assigned or running) or ``failed`` (including rollouts with a
-failed score). ``benchmark`` selects the tasks of one benchmark of a collection.
+failed score). ``benchmark`` selects the tasks of one recorded collection benchmark.
+It matches no task if the evaluation has no mapping for that benchmark.
 ``sort=score`` orders tasks by their mean score, with unscored tasks last.
 The default, ``sort=task``, keeps task order. Each task's rollouts keep repeat
 order. Filtered pages and pages sorted by score include ``task_means``.

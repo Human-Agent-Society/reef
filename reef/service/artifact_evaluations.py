@@ -1538,16 +1538,26 @@ class ArtifactEvaluations:
         request = stored.request
         per_task = request.rollouts_per_task
         task_indexes: Sequence[int] = range(len(request.task_names))
-        if benchmark is not None and request.collection is not None:
-            names = next((set(names) for key, names in request.collection.benchmarks if key == benchmark), set())
+        if benchmark is not None:
+            benchmarks = request.collection.benchmarks if request.collection is not None else ()
+            names = next((set(names) for key, names in benchmarks if key == benchmark), set())
             task_indexes = [index for index, name in enumerate(request.task_names) if name in names]
         items: tuple[WorkItem, ...] | None = None
         means: dict[int, float | None] = {}
-        if state != "all" or lowest_first:
+        needs_all_items = state != "all" or lowest_first
+        include_task_means = needs_all_items or benchmark is not None
+        if needs_all_items:
             items = self.results.rollouts(evaluation_id, scenario)
+        elif include_task_means:
+            page_tasks = task_indexes[offset // per_task : (offset + limit - 1) // per_task + 1]
+            item_ids = [
+                rollout_item_id(evaluation_id, index, repeat) for index in page_tasks for repeat in range(per_task)
+            ]
+            items = self.queue.read_items(EVALUATIONS_QUEUE, item_ids) if item_ids else ()
+        if include_task_means:
             scores: dict[int, list[RolloutScore]] = {}
-            for item in items:
-                if item.state == "finished" and not rollout_waits(item):
+            for item in items or ():
+                if item.scenario == scenario and item.state == "finished" and not rollout_waits(item):
                     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
                     scores.setdefault(cast(int, item.payload["task_index"]), []).append(score)
             means = {index: mean_score(values) for index, values in scores.items()}
@@ -1585,7 +1595,7 @@ class ArtifactEvaluations:
             calls=calls,
         )
         page: dict[str, object] = {"rollouts": views, "total": total, "offset": offset}
-        if state != "all" or lowest_first:
+        if include_task_means:
             page["task_means"] = {index: means.get(index) for index, _ in positions}
         return page
 
