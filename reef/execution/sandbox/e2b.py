@@ -91,15 +91,19 @@ COPY_MODES_TEMPLATE_SUFFIX = "__copy-modes"
 #: The end of the template alias that ``aenv build`` builds, so that it never names a template of E2B's template API,
 #: which AgentENV builds without the task's files.
 AENV_TEMPLATE_SUFFIX = "__aenv"
-#: The shell command that waits, for at most 120 s, until a task image whose first process is systemd emptied
+#: The shell command that waits, for at most about 130 s, until a task image whose first process is systemd emptied
 #: ``/tmp`` at boot (``systemd-tmpfiles-setup.service``), or until the boot ended. A trial uploads its agent's files to
 #: ``/tmp`` after the start, and that boot step deletes them. An image whose first process is not systemd returns at
-#: once.
+#: once. Each ``systemctl`` call gets 5 s. When systemd does not answer in that time, the wait stops: in such an image
+#: ``systemctl`` hangs, and the boot does not empty ``/tmp``. An image without ``timeout`` does not wait.
 SYSTEMD_TMP_CLEANUP_WAIT = (
-    'if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; then waited=0; '
-    "until systemctl is-active --quiet systemd-tmpfiles-setup.service 2>/dev/null || "
-    'case "$(systemctl is-system-running 2>/dev/null)" in running|degraded) true;; *) false;; esac; do '
-    "waited=$((waited + 1)); [ $waited -ge 120 ] && break; sleep 1; done; fi"
+    'if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && command -v timeout >/dev/null 2>&1; then '
+    "end=$(($(date +%s) + 120)); while :; do "
+    "timeout 5 systemctl is-active --quiet systemd-tmpfiles-setup.service; code=$?; "
+    "[ $code -eq 0 ] || [ $code -eq 124 ] && break; "
+    "state=$(timeout 5 systemctl is-system-running 2>/dev/null); [ $? -eq 124 ] && break; "
+    'case "$state" in running|degraded) break;; esac; '
+    '[ "$(date +%s)" -ge "$end" ] && break; sleep 1; done; fi'
 )
 #: The seconds that ``KillOnTimeoutE2BEnvironment.start`` gives ``SYSTEMD_TMP_CLEANUP_WAIT``.
 SYSTEMD_TMP_CLEANUP_WAIT_SECONDS = 150

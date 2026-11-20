@@ -267,11 +267,16 @@ def test_reefs_e2b_start_waits_for_the_tmp_cleanup_of_systemd_after_harbors_star
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("first_process", "questions"),
-    [("systemd", ["is-active", "is-system-running", "is-active"]), ("bash", [])],
+    ("first_process", "systemctl_answers", "questions"),
+    [
+        ("systemd", True, ["is-active", "is-system-running", "is-active"]),
+        # systemctl hangs, so timeout stops it after the first question, and the wait ends.
+        ("systemd", False, ["is-active"]),
+        ("bash", True, []),
+    ],
 )
-def test_the_systemd_tmp_cleanup_wait_waits_only_for_systemd(
-    tmp_path: Path, first_process: str, questions: list[str]
+def test_the_systemd_tmp_cleanup_wait_waits_only_for_a_systemd_that_answers(
+    tmp_path: Path, first_process: str, systemctl_answers: bool, questions: list[str]
 ) -> None:
     import subprocess
 
@@ -280,11 +285,14 @@ def test_the_systemd_tmp_cleanup_wait_waits_only_for_systemd(
     tools = tmp_path / "bin"
     tools.mkdir()
     asked = tmp_path / "systemctl-questions"
+    hang = "" if systemctl_answers else f'[ "$2" = systemctl ] && echo "$3" >> {asked} && exit 124\n'
     stand_ins = {
         # The first process of the image.
         "cat": f'[ "$1" = /proc/1/comm ] && echo {first_process}\n',
         # The cleanup step is active at the second is-active; the boot does not end.
         "systemctl": f'echo "$1" >> {asked}\n[ "$1" = is-active ] && [ "$(grep -c is-active {asked})" -ge 2 ]\n',
+        # coreutils timeout exits with 124 when it stops the command.
+        "timeout": f'{hang}shift\nexec "$@"\n',
         "sleep": "true\n",
     }
     for name, body in stand_ins.items():
