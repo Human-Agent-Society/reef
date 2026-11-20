@@ -14,6 +14,10 @@ before it builds again.
 then, killed or refused by an overloaded API, leaves the template ``waiting`` for good, and the alias bound to it. So a
 template that stays ``waiting`` for ``ORPHAN_WAITING_S`` is an orphan: ``ensure_aenv_template`` deletes it and builds.
 
+A worker that AgentENV loses during a build never ends the build. Its template stays ``building`` for good, and the
+alias stays bound to it. A live worker ends each build within ``ORPHAN_BUILDING_GRACE_S`` after the build's deadline.
+So a template that is ``building`` for longer is an orphan too.
+
 ``KillOnTimeoutE2BEnvironment`` (``reef.execution.sandbox.e2b``) uses this module when ``REEF_E2B_DOCKERFILE_BUILD`` is
 ``aenv``. The ``aenv`` CLI and its ``aenv-buildctl`` must be on ``PATH``.
 """
@@ -28,6 +32,7 @@ import random
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
 from urllib.parse import quote
@@ -49,6 +54,9 @@ BUILD_POLL_INTERVAL_S = 15.0
 #: How long a template can stay ``waiting`` before it counts as an orphan: ``aenv build`` starts its build at once
 #: after it makes the template, so a live build leaves ``waiting`` within seconds.
 ORPHAN_WAITING_S = 180.0
+#: How long after its deadline a build of a live AgentENV worker can still be ``building``. AgentENV ends the build at
+#: its deadline, then gives the image import up to 3600 s, and deletes the builder sandbox 3900 s after the deadline.
+ORPHAN_BUILDING_GRACE_S = 4500.0
 #: The HTTP statuses of an AgentENV API that is busy, down or overloaded for a while: a later request can pass. Each
 #: AgentENV worker runs a fixed number of builds at once, and refuses another with 429 ("node concurrent build limit
 #: reached; retry later").
@@ -105,18 +113,22 @@ class TemplateState:
 
     Values: ``template_id`` is the template's ID, which is also the ID of its one build. ``status`` is one of
     ``BUILD_STATUSES``. ``reason`` is the reason that AgentENV gives for an ``error`` status, else empty.
+    ``created_at`` is the time with a time zone when AgentENV made the build, or None when it is not known.
     Purpose: ``AgentEnvTemplates.state`` makes one; ``ensure_aenv_template`` decides from it.
     """
 
     template_id: str
     status: str
     reason: str = ""
+    created_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.template_id:
             raise ValueError("a template state needs a template ID")
         if self.status not in BUILD_STATUSES:
             raise ValueError(f"unknown template build status {self.status!r} of template {self.template_id}")
+        if self.created_at is not None and self.created_at.tzinfo is None:
+            raise ValueError(f"the creation time of template {self.template_id} needs a time zone")
 
 
 @dataclass(frozen=True)
@@ -148,22 +160,31 @@ class AgentEnvTemplates:
         return cls(api_url.rstrip("/"), api_key)
 
     async def state(self, alias: str) -> TemplateState | None:
-        """The template that ``alias`` names, or None when no template has the alias."""
+        """The template that ``alias`` names, or None when no template has the alias. The state of a ``building``
+        template has the creation time of its build."""
         async with aiohttp.ClientSession(headers={"X-API-Key": self.api_key}) as session:
             async with session.get(f"{self.api_url}/templates/aliases/{quote(alias, safe='')}") as response:
                 if response.status == 404:
                     return None
                 response.raise_for_status()
                 template_id = (await response.json())["templateID"]
-            path = f"/templates/{quote(template_id, safe='')}/builds/{quote(template_id, safe='')}/status"
-            async with session.get(f"{self.api_url}{path}") as response:
+            template = f"{self.api_url}/templates/{quote(template_id, safe='')}"
+            async with session.get(f"{template}/builds/{quote(template_id, safe='')}/status") as response:
                 if response.status == 404:
                     # Deleted after the alias was read.
                     return None
                 response.raise_for_status()
                 status = await response.json()
-        reason = status.get("reason") or {}
-        return TemplateState(template_id, status["status"], reason.get("message") or "")
+            reason = (status.get("reason") or {}).get("message") or ""
+            if status["status"] != "building":
+                return TemplateState(template_id, status["status"], reason)
+            async with session.get(template) as response:
+                if response.status == 404:
+                    return None
+                response.raise_for_status()
+                builds = (await response.json())["builds"]
+        created_at = {build["buildID"]: build["createdAt"] for build in builds}[template_id]
+        return TemplateState(template_id, "building", reason, datetime.fromisoformat(created_at))
 
     async def delete(self, template_id: str) -> None:
         """Delete the template ``template_id``. A template that is gone already counts as deleted."""
@@ -268,7 +289,9 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
 
     A ready template is used as it is. While another trial builds the template, this waits for it, at most
     ``build.timeout_seconds``, and then raises ``TimeoutError``. A failed template is deleted, and the alias is built
-    again; so is a template that this wait saw ``waiting``, unchanged, for ``ORPHAN_WAITING_S`` (an orphan). When the
+    again; so is an orphan: a template that this wait saw ``waiting``, unchanged, for ``ORPHAN_WAITING_S``, or a
+    template ``building`` for more than ``build.timeout_seconds`` plus ``ORPHAN_BUILDING_GRACE_S``. Reef builds an alias
+    with the deadline of its task, so the other trial's build has the same deadline. When the
     alias names no template, ``build`` runs; when another trial starts a build under the alias first, this waits for
     that build. A failure of this trial's own build deletes the ``waiting`` template that it left. A build or a read
     that the API refuses for a while (``is_transient``, ``TransientBuildError``) is tried again until the deadline; any
@@ -307,13 +330,18 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
                 logger.warning("the AgentENV API refused the build of %s; building it again: %s", build.alias, error)
             await asyncio.sleep(poll_interval())
             continue
-        orphan = False
+        orphan_reason = ""
         if state.status == "waiting":
             if waiting_since is None or waiting_since[0] != state.template_id:
                 waiting_since = (state.template_id, loop.time())
-            orphan = loop.time() - waiting_since[1] >= ORPHAN_WAITING_S
-        if state.status == "error" or orphan:
-            reason = state.reason if state.status == "error" else f"waiting for {ORPHAN_WAITING_S:.0f} s"
+            if loop.time() - waiting_since[1] >= ORPHAN_WAITING_S:
+                orphan_reason = f"waiting for {ORPHAN_WAITING_S:.0f} s"
+        elif state.status == "building" and state.created_at is not None:
+            building_seconds = (datetime.now(UTC) - state.created_at).total_seconds()
+            if building_seconds > build.timeout_seconds + ORPHAN_BUILDING_GRACE_S:
+                orphan_reason = f"building for {building_seconds:.0f} s, past the deadline of its build"
+        if state.status == "error" or orphan_reason:
+            reason = state.reason if state.status == "error" else orphan_reason
             logger.warning("deleting the template %s (%s): %s", build.alias, state.template_id, reason)
             try:
                 await templates.delete(state.template_id)
