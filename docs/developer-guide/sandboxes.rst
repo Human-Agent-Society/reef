@@ -107,14 +107,16 @@ ready.
 - An evaluation on ``e2b`` makes the templates in one template item for each
   task, before it adds the task's rollouts. The item calls the deployment's
   ``evaluation.task_template_builder``. Without one, it calls
-  ``build_task_template``. It keeps template items for the next 32 tasks, so
-  their templates build while earlier rollouts run. A template item holds no
-  rollout slot of ``max_concurrent_rollouts`` and no sandbox slot of a worker.
+  ``build_task_template``. It keeps template items for the first 32 tasks that
+  still have rollouts to add, so their templates build while earlier rollouts
+  run. A template item holds no rollout slot of ``max_concurrent_rollouts``
+  and no sandbox slot of a worker.
   When the build finds no free builder within the build timeout, the item waits
   again, for at most six hours in each attempt. A failed build still adds the
   task's rollouts: their trials build the template, and fail as rollouts.
-  Rollouts start in task order, so a task whose template is not ready holds back
-  the rollouts of the tasks after it.
+  The rollouts of a task whose template is ready start before those of an
+  earlier task whose template still builds, so a slow build holds back its own
+  task only.
 - A deployment can also call it for each task before an evaluation, so that
   most rollouts find their templates ready.
 
