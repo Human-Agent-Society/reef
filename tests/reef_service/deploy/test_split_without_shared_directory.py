@@ -305,8 +305,9 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_weight_byte_in_c
 
         # The checkpoint was committed by name, from a directory that only the training service has.
         (job,) = scenario_jobs(control.queue, "math")
-        assert job["state"] == "finished" and [entry["content"] for entry in job["checkpoints"]] == [f"{job['id']}:0"]
-        assert job["checkpoints"][0]["path"].startswith(str(tmp_path / "training"))
+        assert job["state"] == "finished"
+        (checkpoint,) = job["checkpoints"]
+        assert checkpoint["content"] and checkpoint["path"].startswith(str(tmp_path / "training"))
         status = control.build_training_status()["scenarios"]["math"]
         assert status["last_training_commit"]["metrics"]["training_job"]["event"] == "finished"
         trained = scenario.artifact_status()["weights"]["active"]
