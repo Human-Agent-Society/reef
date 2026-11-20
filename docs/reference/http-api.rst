@@ -1451,7 +1451,9 @@ The body takes these fields:
   at once, or null (the default) for no limit. Each rollout holds a task
   sandbox and sends model calls to the candidate, so set it to what the
   sandbox provider and the candidate's serving can take. Reef adds the next
-  rollouts to the queue as earlier ones end.
+  rollouts to the queue as earlier ones end. On ``e2b``, Reef adds a task's
+  rollouts only after it built the task's sandbox templates, and a build holds
+  no place of this limit.
 - ``max_failed_fraction``: the largest fraction of failed rollouts, a number
   greater than 0 and less than 1, or null (the default) for no limit. A
   rollout fails when its work fails or when it ends with no score. After at
@@ -1548,7 +1550,8 @@ score, rewards, error, calls, verifier_calls}``.
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
   ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
   while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also
-  when a retry runs the rollout again.
+  when a retry runs the rollout again. On ``e2b``, it is also ``waiting`` while
+  the task's sandbox templates build.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.

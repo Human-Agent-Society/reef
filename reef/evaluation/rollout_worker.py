@@ -5,6 +5,10 @@ item for each rollout (``reef.service.artifact_evaluations``). An ``EvaluationRo
 runs the task once with a Harbor agent against the candidate's model, and finishes the item with the rollout's
 ``RolloutScore``. Control reads the scores back when every rollout of the evaluation is final.
 
+On ``e2b``, control first adds one ``evaluation_task_template`` item for each task, and adds the task's rollouts once
+that item is final. A ``TaskTemplateWorker`` takes a template item and builds the task's sandbox templates. So a
+rollout that waits for a template builder holds no rollout slot of its evaluation and no sandbox slot of a worker.
+
 A worker asks inference to serve the candidate before each trial (a ``serve_artifact`` item of the ``serving`` queue),
 and waits until the engine is ready. It answers the agent's model calls from that engine on a loopback endpoint
 (``CandidateEndpoints``). The item writes no route, so no client reaches the candidate through ``served_models``, and
@@ -66,14 +70,16 @@ logger = logging.getLogger(__name__)
 EVALUATIONS_QUEUE = "evaluations"
 #: The kind of the item of one rollout.
 EVALUATION_ROLLOUT_KIND = "evaluation_rollout"
+#: The kind of the item that builds the sandbox templates of one task of an evaluation on e2b.
+TASK_TEMPLATE_KIND = "evaluation_task_template"
 #: The address at which a task's container reaches this host, by default.
 DEFAULT_AGENT_HOST = "host.docker.internal"
 #: The longest wait for inference to serve a candidate, in seconds: a first start can quantize its weights.
 SERVE_WAIT_S = 12 * 3600.0
 #: The wait between two reads of a serve item, in seconds.
 SERVE_POLL_S = 1.0
-#: The longest time that a rollout on e2b waits for its task's template before its trial. An AgentENV builder builds
-#: one template at a time, so a template can wait hours for a free builder when many tasks are new.
+#: The longest time that one attempt of a template item waits for its task's templates. An AgentENV worker builds a
+#: few templates at a time, so a template can wait hours for a free builder when many tasks are new.
 TEMPLATE_WAIT_S = 6 * 3600.0
 #: The seconds between two checks of a running trial's lease.
 LEASE_CHECK_S = 1.0
@@ -281,6 +287,11 @@ class EvaluationRollout:
 def rollout_item_id(evaluation_id: str, task_index: int, repeat: int) -> str:
     """The ID of the item of rollout ``repeat`` of task ``task_index`` of an evaluation."""
     return f"{EVALUATION_ROLLOUT_KIND}:{evaluation_id}:{task_index:05d}:{repeat:05d}"
+
+
+def template_item_id(evaluation_id: str, task_index: int) -> str:
+    """The ID of the template item of task ``task_index`` of an evaluation."""
+    return f"{TASK_TEMPLATE_KIND}:{evaluation_id}:{task_index:05d}"
 
 
 @dataclass(frozen=True)
@@ -688,13 +699,6 @@ class EvaluationRolloutWorker(QueueWorker):
                     f"task {rollout.task_name!r} needs {', '.join(tools)}, which adapter {rollout.tree.adapter!r} "
                     "does not give its agent"
                 )
-        if rollout.environment == "e2b":
-            # The trial builds a missing template inside its task's environment start limit, and an AgentENV builder
-            # builds one template at a time. So a trial that waited for a builder failed with no model call. The
-            # worker builds the template first, with no such limit; the trial then only starts a sandbox from it.
-            asyncio.run(
-                run_while_held(self.build_task_template(rollout, task_directory), lease_lost, self.rollouts_cancelled)
-            )
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
         bridged = rollout.tree is not None and rollout.environment != "docker"
@@ -761,29 +765,6 @@ class EvaluationRolloutWorker(QueueWorker):
                 return score, None, result.error
             return score, verifier_rewards(result.rewards), None
 
-    async def build_task_template(self, rollout: EvaluationRollout, task_directory: Path) -> None:
-        """Make the e2b template of the task of ``rollout``, at ``task_directory``, ready: build it when it is
-        missing, or wait for the build that another rollout started (``build_task_template`` of Reef's e2b sandbox).
-        A build that found no free builder in the task's build time limit (``TimeoutError``) waits again, at most
-        ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the rollout is retried. Any
-        other failure of the build fails the attempt in the same way."""
-        # The e2b extra is optional, and only a rollout on e2b needs it.
-        from reef.execution.sandbox.e2b import build_task_template
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + TEMPLATE_WAIT_S
-        while True:
-            try:
-                await build_task_template(task_directory)
-                return
-            except TimeoutError as error:
-                if loop.time() >= deadline:
-                    raise ReefError(
-                        f"the template of task {rollout.task_name!r} was not ready after {TEMPLATE_WAIT_S:.0f} s: "
-                        f"{error}"
-                    ) from error
-                logger.info("the template of task %r is not ready; waiting again: %s", rollout.task_name, error)
-
     def observe_trial(self, rollout: EvaluationRollout, trial: EvaluationTrial) -> None:
         """Give ``trial`` of ``rollout`` to the trial observer, when there is one. Its failure is logged, and the
         rollout and its score do not change."""
@@ -821,11 +802,79 @@ class EvaluationRolloutWorker(QueueWorker):
                 )
 
 
+class TaskTemplateWorker(QueueWorker):
+    """The worker that builds the sandbox templates of the tasks of evaluations on e2b.
+
+    Values: as ``QueueWorker``, on the template items of the evaluations queue (``TASK_TEMPLATE_KIND``), with one
+    item in each slot. An item's payload is the payload of the task's first rollout (``EvaluationRollout``).
+    ``endpoints`` gives each task's directory. Every failure of a build is retryable, until the item uses up its
+    attempts. Control adds a task's rollouts once its item is final, also when the build failed: the trial then
+    builds the template itself, and its failure is the rollout's failure.
+
+    Purpose: the evaluation service starts one beside its ``EvaluationRolloutWorker``. A wait for a template builder
+    then holds a slot of this worker, not a rollout slot of the evaluation or a sandbox slot.
+    """
+
+    permanent_errors = ()
+
+    def __init__(
+        self,
+        queue: WorkQueue,
+        endpoints: CandidateEndpoints,
+        *,
+        worker_id: str,
+        poll_seconds: float = 0.5,
+        slots: int = 1,
+    ) -> None:
+        super().__init__(
+            queue,
+            EVALUATIONS_QUEUE,
+            [TASK_TEMPLATE_KIND],
+            worker_id=worker_id,
+            poll_seconds=poll_seconds,
+            slots=slots,
+        )
+        self.endpoints = endpoints
+
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        rollout = EvaluationRollout.from_item(item)
+        asyncio.run(
+            run_while_held(
+                self.build_task_template(rollout, self.endpoints.task_directory(rollout)), lease_lost, self.stopped
+            )
+        )
+        return {}
+
+    async def build_task_template(self, rollout: EvaluationRollout, task_directory: Path) -> None:
+        """Make the e2b templates of the task of ``rollout``, at ``task_directory``, ready: build them when they are
+        missing, or wait for the builds that another caller started (``build_task_template`` of Reef's e2b sandbox).
+        A build that found no free builder in the task's build time limit (``TimeoutError``) waits again, at most
+        ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the item is retried. Any
+        other failure of the build fails the attempt in the same way."""
+        # The e2b extra is optional, and only an evaluation on e2b needs it.
+        from reef.execution.sandbox.e2b import build_task_template
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TEMPLATE_WAIT_S
+        while True:
+            try:
+                await build_task_template(task_directory)
+                return
+            except TimeoutError as error:
+                if loop.time() >= deadline:
+                    raise ReefError(
+                        f"the template of task {rollout.task_name!r} was not ready after {TEMPLATE_WAIT_S:.0f} s: "
+                        f"{error}"
+                    ) from error
+                logger.info("the template of task %r is not ready; waiting again: %s", rollout.task_name, error)
+
+
 __all__ = [
     "EVALUATIONS_QUEUE",
     "EVALUATION_ROLLOUT_KIND",
     "MAX_VERIFIER_BYTES",
     "MAX_VERIFIER_CALLS",
+    "TASK_TEMPLATE_KIND",
     "VERIFIER_CALLS_FILE",
     "VERIFIER_JUDGE_DIR",
     "VERIFIER_TRAJECTORY_FILES",
@@ -835,12 +884,14 @@ __all__ = [
     "EvaluationRolloutWorker",
     "LocalCandidateEndpoints",
     "RolloutCalls",
+    "TaskTemplateWorker",
     "TreeHarness",
     "agent_harness",
     "evaluation_call",
     "harbor_agent",
     "reply_summary",
     "rollout_item_id",
+    "template_item_id",
     "verifier_call",
     "verifier_output",
 ]
