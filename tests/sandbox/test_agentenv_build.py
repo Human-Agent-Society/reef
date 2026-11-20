@@ -8,6 +8,7 @@ import os
 import stat
 import tomllib
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -44,10 +45,11 @@ esac
 class FakeAgentEnv:
     """A fake AgentENV template API. ``states`` holds the answers to the reads of the alias, in order; the last answer
     repeats. An answer is None (no template), ``(template_id, status)``, or ``503`` (an overloaded API). A template
-    that ``deleted`` records, each deletion in order, reads as no template."""
+    that ``deleted`` records, each deletion in order, reads as no template. Each build was made ``build_age`` ago."""
 
-    def __init__(self, states: list[tuple[str, str] | int | None]) -> None:
+    def __init__(self, states: list[tuple[str, str] | int | None], build_age: timedelta = timedelta()) -> None:
         self.states = states
+        self.build_age = build_age
         self.deleted: list[str] = []
         self.current: tuple[str, str] | None = None
 
@@ -69,6 +71,12 @@ class FakeAgentEnv:
             body = {"templateID": self.current[0], "buildID": self.current[0], "status": self.current[1]}
             return web.json_response({**body, "reason": reason})
 
+        async def template(request: web.Request) -> web.Response:
+            assert self.current is not None and request.match_info["template"] == self.current[0]
+            created_at = (datetime.now(UTC) - self.build_age).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            builds = [{"buildID": self.current[0], "status": self.current[1], "createdAt": created_at}]
+            return web.json_response({"templateID": self.current[0], "builds": builds})
+
         async def delete(request: web.Request) -> web.Response:
             self.deleted.append(request.match_info["template"])
             return web.Response(status=204)
@@ -76,6 +84,7 @@ class FakeAgentEnv:
         app = web.Application()
         app.router.add_get("/templates/aliases/{alias}", alias)
         app.router.add_get("/templates/{template}/builds/{build}/status", status)
+        app.router.add_get("/templates/{template}", template)
         app.router.add_delete("/templates/{template}", delete)
         return app
 
@@ -222,6 +231,24 @@ def test_a_template_left_waiting_is_an_orphan_that_is_deleted_and_built_again(
     fake = FakeAgentEnv([("t1", "waiting")])
     ensured(fake, task_build(tmp_path))
     assert fake.deleted == ["t1"] and Path(f"{fake_aenv}.args").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("age_seconds", "orphan"), [(4400, False), (4600, True)])
+def test_a_template_building_long_past_its_deadline_is_an_orphan_that_is_deleted_and_built_again(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, age_seconds: int, orphan: bool
+) -> None:
+    # A worker that AgentENV lost during the build left the template building, with no build behind it. A live
+    # worker ends a build of a 1 s deadline within 1 s plus ORPHAN_BUILDING_GRACE_S (4500 s).
+    monkeypatch.setenv("FAKE_AENV_MODE", "ok")
+    fake = FakeAgentEnv([("t1", "building")], build_age=timedelta(seconds=age_seconds))
+    if orphan:
+        ensured(fake, task_build(tmp_path, timeout_seconds=1))
+        assert fake.deleted == ["t1"] and Path(f"{fake_aenv}.args").exists()
+    else:
+        with pytest.raises(TimeoutError, match="was building after 1 s"):
+            ensured(fake, task_build(tmp_path, timeout_seconds=1))
+        assert fake.deleted == [] and not Path(f"{fake_aenv}.args").exists()
 
 
 @pytest.mark.unit
