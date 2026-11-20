@@ -411,7 +411,10 @@ class WorkQueue(ABC):
         """The item, or None."""
 
     def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
-        """The items in ``queue`` with an ID in ``item_ids``."""
+        """The items in ``queue`` in the order of ``item_ids``.
+
+        Include one result per occurrence of an ID that exists in the queue. Skip missing IDs.
+        """
         return tuple(item for item_id in item_ids if (item := self.read(queue, item_id)) is not None)
 
     @abstractmethod

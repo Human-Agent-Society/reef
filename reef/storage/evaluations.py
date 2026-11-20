@@ -39,7 +39,7 @@ class EvaluationStartConflictError(ReefError):
 class EvaluationStart:
     """The start ID, request fingerprint and first queue item of one evaluation.
 
-    The ID is a non-empty client string, at most 256 characters, with no NUL or surrogate code point.
+    The ID is a non-blank client string of at most 256 characters. It contains no NUL or surrogate code point.
     The fingerprint is a 64-digit lowercase SHA-256 hex string.
     The first work item lets control complete admission after an interruption.
     """

@@ -117,7 +117,18 @@ def test_prefix_state_counts_include_only_the_requested_items_and_top_level_bool
         "finished": (1, "e:1", True),
         "queued": (2, "e:3", False),
     }
-    assert {item.id for item in queue.read_items("q", ["e:3", "missing", "e:1"])} == {"e:3", "e:1"}
+
+
+def test_bulk_reads_preserve_id_order_and_duplicates_and_skip_missing_items(open_coordination):
+    queue = open_coordination().queue
+    first = queue.append(job("a"))
+    second = queue.append(job("b"))
+    queue.append(NewWork("other", "missing", "s", "task", {}))
+    item_ids = ["b", "missing", "a", "b"]
+
+    assert queue.read_items("jobs", item_ids) == (second, first, second)
+    assert WorkQueue.read_items(queue, "jobs", item_ids) == (second, first, second)
+    assert queue.read_items("jobs", []) == ()
 
 
 def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_coordination):

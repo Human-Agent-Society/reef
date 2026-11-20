@@ -1679,7 +1679,6 @@ class ArtifactEvaluations:
             kept = (
                 item
                 for position in positions
-                if position in views
                 for item in evaluation_call_items(*place, scenario, evaluation_id, content=False, rollout=position)
             )
         for call_item in kept:

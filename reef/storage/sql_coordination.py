@@ -76,6 +76,7 @@ from reef.storage.served_models import (
     serving_serial_key,
     without_redeploy,
 )
+from reef.storage.sql_records import batches
 from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 from reef.storage.work_queue import (
     FINAL_STATES,
@@ -1374,9 +1375,17 @@ class SQLWorkQueue(WorkQueue):
             return self.row(connection, queue, item_id)
 
     def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
-        query = select(self.table).where(self.table.c.queue == queue, self.table.c.item_id.in_(item_ids))
+        if not item_ids:
+            return ()
+        found = {}
+        query = select(self.table).where(self.table.c.queue == queue)
         with self.database.read() as connection:
-            return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
+            for batch in batches(dict.fromkeys(item_ids)):
+                rows = connection.execute(query.where(self.table.c.item_id.in_(batch))).mappings()
+                for row in rows:
+                    item = item_from_row(row)
+                    found[item.id] = item
+        return tuple(found[item_id] for item_id in item_ids if item_id in found)
 
     def read_changes(self, queue: str, after_sequence: int, *, limit: int = 1000) -> tuple[WorkItem, ...]:
         query = (

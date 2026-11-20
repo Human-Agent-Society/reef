@@ -268,8 +268,9 @@ def test_evaluation_start_id_replays_one_evaluation_and_rejects_a_different_requ
             assert second["evaluation_id"] == evaluation_id
             conflict = await client.post(route, headers=AUTH, json={**body, "rollouts_per_task": 1})
             assert conflict.status == 409
-            invalid = await client.post(route, headers=AUTH, json={**body, "start_id": ""})
-            assert invalid.status == 400
+            for invalid_id in ("", " \t"):
+                invalid = await client.post(route, headers=AUTH, json={**body, "start_id": invalid_id})
+                assert invalid.status == 400
             cancelled = await client.post(f"{route}/{evaluation_id}/cancel", headers=AUTH)
             assert cancelled.status == 200
             replay = await client.post(route, headers=AUTH, json=body)
@@ -604,6 +605,15 @@ def test_an_evaluation_keeps_the_calls_and_trajectories_that_its_verifier_wrote(
             export_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/trajectories"
             exported = (await (await client.get(export_route, headers=AUTH)).text()).splitlines()
             assert len(exported) == 1, "the export holds the agent's trajectories only"
+
+            dispatcher.queue.delete_final(finished_before=time.time())
+            item_id = rollout_item_id(accepted["evaluation_id"], 0, 0)
+            assert dispatcher.queue.read(EVALUATIONS_QUEUE, item_id) is None
+            [unpaged] = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+            assert unpaged["calls"] == rollout["calls"]
+            assert unpaged["verifier_calls"] == rollout["verifier_calls"]
+            page = await (await client.get(f"{rollouts_route}?offset=0&limit=1", headers=AUTH)).json()
+            assert (page["offset"], page["total"], page["rollouts"]) == (0, 1, [unpaged])
 
     asyncio.run(run())
 
