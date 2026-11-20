@@ -89,8 +89,10 @@ from reef.storage.work_queue import (
     WorkLeaseLostError,
     WorkLogLine,
     WorkQueue,
+    check_id_prefix,
     check_log_page,
     check_page,
+    check_prefix_state_counts,
     clock,
 )
 
@@ -1406,8 +1408,7 @@ class SQLWorkQueue(WorkQueue):
         if kind is not None:
             conditions.append(self.table.c.kind == kind)
         if id_prefix is not None:
-            if not isinstance(id_prefix, str) or not id_prefix:
-                raise ValueError("id_prefix must be a non-empty string")
+            check_id_prefix(id_prefix)
             conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
         query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
@@ -1416,6 +1417,7 @@ class SQLWorkQueue(WorkQueue):
     def prefix_state_counts(
         self, queue: str, *, scenario: str, kind: str, id_prefix: str, marker: str
     ) -> dict[str, tuple[int, str, bool]]:
+        check_prefix_state_counts(queue, scenario, kind, id_prefix, marker)
         item_id = self.database.code_point_order(self.table.c.item_id)
         with self.database.read() as connection:
             marked: ColumnElement[bool]

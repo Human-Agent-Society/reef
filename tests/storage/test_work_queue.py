@@ -119,6 +119,21 @@ def test_prefix_state_counts_include_only_the_requested_items_and_top_level_bool
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("queue", ""), ("scenario", None), ("kind", None), ("id_prefix", ""), ("id_prefix", None), ("marker", 1)],
+)
+def test_prefix_state_counts_rejects_invalid_arguments(open_coordination, field, value):
+    queue = open_coordination().queue
+    inputs = {"queue": "q", "scenario": "s", "kind": "rollout", "id_prefix": "e:", "marker": "waits"}
+    inputs[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        queue.prefix_state_counts(**inputs)
+    with pytest.raises(ValueError, match=field):
+        WorkQueue.prefix_state_counts(queue, **inputs)
+
+
 def test_bulk_reads_preserve_id_order_and_duplicates_and_skip_missing_items(open_coordination):
     queue = open_coordination().queue
     first = queue.append(job("a"))

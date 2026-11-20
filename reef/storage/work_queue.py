@@ -432,7 +432,16 @@ class WorkQueue(ABC):
     def prefix_state_counts(
         self, queue: str, *, scenario: str, kind: str, id_prefix: str, marker: str
     ) -> dict[str, tuple[int, str, bool]]:
-        """For each state in the prefix, give its count, largest ID, and whether an item has the true marker."""
+        """Count items of the given queue, scenario, and kind whose IDs start with ``id_prefix``.
+
+        For each state with matching items, return the count and the largest ID in code point order.
+        The third field is true if a matching item in that state has the top-level metadata key
+        ``marker`` with the Boolean value true.
+
+        All arguments are non-empty strings. Only ``id_prefix`` can have surrounding spaces.
+        Raise ValueError for an invalid argument.
+        """
+        check_prefix_state_counts(queue, scenario, kind, id_prefix, marker)
         counts: dict[str, tuple[int, str, bool]] = {}
         for item in self.items(queue, scenario=scenario, kind=kind, id_prefix=id_prefix):
             count, greatest, marked = counts.get(item.state, (0, "", False))
@@ -468,6 +477,19 @@ class WorkQueue(ABC):
         for item in self.items(queue, scenario=scenario):
             counts[item.state] += 1
         return counts
+
+
+def check_id_prefix(id_prefix: object) -> None:
+    """Raise ValueError unless ``id_prefix`` is a non-empty string."""
+    if not isinstance(id_prefix, str) or not id_prefix:
+        raise ValueError("id_prefix must be a non-empty string")
+
+
+def check_prefix_state_counts(queue: str, scenario: str, kind: str, id_prefix: str, marker: str) -> None:
+    """Check the inputs of ``WorkQueue.prefix_state_counts``."""
+    for value, name in ((queue, "queue"), (scenario, "scenario"), (kind, "kind"), (marker, "marker")):
+        require_text(value, name)
+    check_id_prefix(id_prefix)
 
 
 def check_page(state: str | None, before_sequence: int | None, limit: int) -> None:
