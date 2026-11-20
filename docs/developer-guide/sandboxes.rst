@@ -104,11 +104,15 @@ ends, so a late build there loses the agent's work. The function returns the
 alias of the task environment's template. A trial after it finds the templates
 ready.
 
-- An evaluation rollout on ``e2b`` calls it before its candidate is served and
-  before its trial. When the build finds no free builder within the build
-  timeout, the rollout waits again, for at most six hours in all. Then the
-  attempt fails, and the rollout is tried again as for any other failure. The
-  rollout holds its worker slot while it waits.
+- An evaluation on ``e2b`` calls it from one template item for each task, before
+  it adds the task's rollouts. It keeps template items for the next 32 tasks, so
+  their templates build while earlier rollouts run. A template item holds no
+  rollout slot of ``max_concurrent_rollouts`` and no sandbox slot of a worker.
+  When the build finds no free builder within the build timeout, the item waits
+  again, for at most six hours in each attempt. A failed build still adds the
+  task's rollouts: their trials build the template, and fail as rollouts.
+  Rollouts start in task order, so a task whose template is not ready holds back
+  the rollouts of the tasks after it.
 - A deployment can also call it for each task before an evaluation, so that
   most rollouts find their templates ready.
 

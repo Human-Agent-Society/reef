@@ -62,10 +62,12 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    TASK_TEMPLATE_KIND,
     EvaluationRollout,
     TreeHarness,
     harbor_agent,
     rollout_item_id,
+    template_item_id,
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
@@ -110,6 +112,9 @@ MAX_STOPPED_EVALUATIONS = 1000
 RETRY_WAIT_METADATA = "waits_for_retry"
 #: The seconds between two reads of the queue's changes when nothing changed.
 RESULT_POLL_SECONDS = 0.2
+#: How many tasks of an evaluation on e2b have template items before the evaluation adds their rollouts: from the task
+#: of the next rollout to add. The templates of these tasks build while the evaluation's rollouts run.
+TEMPLATE_TASKS_AHEAD = 32
 #: How often Reef tries to activate an artifact that passed its evaluation while training results wait to commit,
 #: and the seconds it waits after the first attempt, growing with each.
 ACTIVATION_ATTEMPTS = 5
@@ -321,6 +326,19 @@ def rollout_work(rollout: EvaluationRollout) -> NewWork:
     )
 
 
+def template_work(rollout: EvaluationRollout) -> NewWork:
+    """The template item of the task of ``rollout`` in the evaluations queue. Its payload is the task's first
+    rollout, so the item of a task is the same whichever rollout of the task makes it."""
+    first = replace(rollout, repeat=0)
+    return NewWork(
+        EVALUATIONS_QUEUE,
+        template_item_id(rollout.evaluation_id, rollout.task_index),
+        rollout.scenario,
+        TASK_TEMPLATE_KIND,
+        first.to_payload(),
+    )
+
+
 #: The calls that one read of the data store gives to ``StoredCalls`` when it is read in order. A batch holds the
 #: bodies of these calls at once, and each body holds its whole conversation.
 READ_CALLS = 16
@@ -517,6 +535,13 @@ class EvaluationResults:
         found = self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND, id_prefix=prefix)
         return tuple(sorted(found, key=lambda item: item.id))
 
+    def templates(self, evaluation_id: str, scenario: str) -> dict[int, WorkItem]:
+        """The template items of one evaluation (``template_work``), by task index. Only an evaluation on e2b has
+        them."""
+        prefix = template_item_id(evaluation_id, 0).rsplit(":", 1)[0] + ":"
+        found = self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=TASK_TEMPLATE_KIND, id_prefix=prefix)
+        return {cast(int, item.payload["task_index"]): item for item in found}
+
     def read_results(self) -> None:
         """Fail the evaluations whose rollouts the queue lost (``fail_stopped``), then end each evaluation whose
         rollouts are all final, until ``close``."""
@@ -537,7 +562,9 @@ class EvaluationResults:
             states: dict[str, dict[str, tuple[str, int, bool]]] = {}
             for item in changes:
                 sequence = item.changed_sequence
-                if item.kind == EVALUATION_ROLLOUT_KIND and settled.get(item.id) != settled_state(item):
+                if item.kind not in (EVALUATION_ROLLOUT_KIND, TASK_TEMPLATE_KIND):
+                    continue
+                if settled.get(item.id) != settled_state(item):
                     # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
                     evaluation_id = str(item.payload["evaluation_id"])
                     touched[evaluation_id] = item.scenario
@@ -564,10 +591,15 @@ class EvaluationResults:
         return True
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
-        """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
-        failed (``max_failed_fraction``); while fewer than ``max_concurrent_rollouts`` rollouts are not final, queue
-        again the rollouts that wait to run again (``rollout_waits``), then add the rollouts that wait for their first
-        run; end the evaluation once all of them are in the queue and ended.
+        """Start the evaluation once a worker took one of its rollouts or template items; stop it when too many of
+        its ended rollouts failed (``max_failed_fraction``); while fewer than ``max_concurrent_rollouts`` rollouts are
+        not final, queue again the rollouts that wait to run again (``rollout_waits``), then add the rollouts that wait
+        for their first run; end the evaluation once all of them are in the queue and ended.
+
+        On e2b, the rollouts of a task wait for their first run until the task's template item is final. The
+        evaluation keeps template items for the next ``TEMPLATE_TASKS_AHEAD`` tasks, from the task of the next
+        rollout to add, and queues again each one that a cancel or a stop ended. A template item counts against no
+        limit: its build holds no rollout slot.
 
         A rollout that a cancel or a stop ended (``rollout_cancelled``) stays ended in a running evaluation only after
         a retry of a cancelled or stopped evaluation. While one does, no rollout starts its first run, the failure
@@ -581,6 +613,7 @@ class EvaluationResults:
             # before it would count as failed again.
             items = self.rollouts(evaluation_id, scenario)
             request = stored.request
+            templates = self.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             cancelled = [item for item in items if rollout_cancelled(item)]
             ended = [item for item in items if rollout_ended(item) and not rollout_cancelled(item)]
             failed = sum(rollout_failed(item) for item in ended)
@@ -598,6 +631,8 @@ class EvaluationResults:
                     self.queue.cancel(EVALUATIONS_QUEUE, item.id, FAILURES_ERROR)
                     if rollout_waits(item):
                         self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
+                for item in templates.values():
+                    self.queue.cancel(EVALUATIONS_QUEUE, item.id, FAILURES_ERROR)
                 current.store.evaluations.fail(evaluation_id, error=error, finished_at=time.time())
                 return
             # The queue holds a prefix of the rollouts in task and repeat order. Each next rollout has a fixed ID, so
@@ -612,17 +647,34 @@ class EvaluationResults:
                     self.queue.retry(EVALUATIONS_QUEUE, item.id)
                     self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
                 free -= len(retry_waiting)
-                template = EvaluationRollout.from_item(items[0])
+                # An evaluation on e2b can have template items and no rollout yet; the task's first rollout is the
+                # payload of its template item.
+                first = EvaluationRollout.from_item(items[0] if items else templates[0])
                 # Only a resume starts the rollouts that a cancel or a stop held back.
-                for position in range(len(items), len(items) + (0 if cancelled else min(free, waiting))):
+                positions = range(len(items), len(items) + (0 if cancelled else min(free, waiting)))
+                if request.environment == "e2b" and not cancelled:
+                    next_task = len(items) // request.rollouts_per_task
+                    for index in range(next_task, min(len(request.task_names), next_task + TEMPLATE_TASKS_AHEAD)):
+                        template = templates.get(index)
+                        if template is None:
+                            task = replace(first, task_index=index, task_name=request.task_names[index])
+                            templates[index] = self.queue.append(template_work(task))
+                        elif rollout_cancelled(template):
+                            templates[index] = self.queue.retry(EVALUATIONS_QUEUE, template.id) or template
+                for position in positions:
                     index, repeat = divmod(position, request.rollouts_per_task)
+                    if request.environment == "e2b" and not (index in templates and templates[index].final):
+                        # The queue keeps a prefix of the rollouts, so the first task whose template is not final
+                        # stops the rollouts after it too. Its build started first, so it most often ends first.
+                        break
                     self.queue.append(
                         rollout_work(
-                            replace(template, task_index=index, task_name=request.task_names[index], repeat=repeat)
+                            replace(first, task_index=index, task_name=request.task_names[index], repeat=repeat)
                         )
                     )
             if (waiting > 0 and not cancelled) or retry_waiting or not all(item.final for item in items):
-                if stored.state == "queued" and any(item.state in ("assigned", "running") for item in items):
+                started = any(item.state in ("assigned", "running") for item in (*items, *templates.values()))
+                if stored.state == "queued" and started:
                     current.store.evaluations.begin(evaluation_id)
                 return
         if cancelled:
@@ -705,8 +757,8 @@ class EvaluationResults:
     def fail_stopped(self) -> None:
         """Fail each queued or running evaluation whose rollouts are not in the queue, with ``STOPPED_ERROR``.
 
-        ``accept`` queues the rollouts before it stores the evaluation, so this happens only when the queue lost
-        them: an in-memory queue, and a service that stopped. It loads each known scenario once.
+        ``accept`` queues the rollouts, or the template items on e2b, before it stores the evaluation, so this happens
+        only when the queue lost them: an in-memory queue, and a service that stopped. It loads each known scenario once.
         """
         for row in self.dispatcher.list_scenarios():
             scenario = row["scenario"]
@@ -714,7 +766,11 @@ class EvaluationResults:
                 with self.dispatcher.locked_scenario(scenario) as current:
                     evaluations = current.store.evaluations
                     for stored in evaluations.newest(limit=MAX_STOPPED_EVALUATIONS):
-                        if stored.state in ("queued", "running") and not self.rollouts(stored.evaluation_id, scenario):
+                        if (
+                            stored.state in ("queued", "running")
+                            and not self.rollouts(stored.evaluation_id, scenario)
+                            and not self.templates(stored.evaluation_id, scenario)
+                        ):
                             evaluations.fail(stored.evaluation_id, error=STOPPED_ERROR, finished_at=time.time())
             except Exception:
                 logger.exception("could not fail the stopped evaluations of %s", scenario)
@@ -829,6 +885,8 @@ class ArtifactEvaluations:
                 if rollout_waits(item):
                     # The rollout keeps the error of its last attempt.
                     self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
+            for item in self.results.templates(evaluation_id, scenario).values():
+                self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
         return cancelled
 
     def retry(
@@ -904,6 +962,8 @@ class ArtifactEvaluations:
                 request = replace(request, max_concurrent_rollouts=limit)
             total = len(request.task_names) * request.rollouts_per_task
             items = self.results.rollouts(evaluation_id, scenario)
+            # An evaluation on e2b can end before it added a rollout: its template items are then all it has.
+            templates = self.results.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             ended = stored.state in ("finished", "failed")
             # The queue holds a prefix of the rollouts in task and repeat order (``settle``). Anything else means that
             # it deleted some of them after their retention, which it does only after the evaluation ended.
@@ -912,7 +972,7 @@ class ArtifactEvaluations:
                 for position in range(len(items))
             ]
             if ended and (
-                not items
+                (not items and not templates)
                 or [item.id for item in items] != expected
                 or (stored.state == "finished" and len(items) < total)
             ):
@@ -1199,11 +1259,18 @@ class ArtifactEvaluations:
         # The rollouts go to the queue before the evaluation exists, so that no reader sees an evaluation whose
         # rollouts are missing. An evaluation runs on all of its tasks or on none: when a step fails, the added
         # rollouts are cancelled and no evaluation is stored.
+        # On e2b, the first tasks' template items go first; ``settle`` adds each task's rollouts once its template
+        # item is final.
+        first_work = (
+            [template_work(rollout) for rollout in rollouts[:: request.rollouts_per_task][:TEMPLATE_TASKS_AHEAD]]
+            if request.environment == "e2b"
+            else [rollout_work(rollout) for rollout in rollouts[: request.max_concurrent_rollouts]]
+        )
         added: list[str] = []
         try:
-            for rollout in rollouts[: request.max_concurrent_rollouts]:
-                self.queue.append(rollout_work(rollout))
-                added.append(rollout.item_id())
+            for work in first_work:
+                self.queue.append(work)
+                added.append(work.id)
             with self.dispatcher.locked_scenario(scenario) as current:
                 stored = current.store.evaluations.create(
                     evaluation_id=evaluation_id,

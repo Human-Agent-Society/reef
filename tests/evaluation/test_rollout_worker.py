@@ -22,16 +22,19 @@ from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    TASK_TEMPLATE_KIND,
     CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
     RolloutCalls,
+    TaskTemplateWorker,
     TreeHarness,
     evaluation_call,
     reply_summary,
     rollout_item_id,
     run_while_held,
+    template_item_id,
     verifier_output,
 )
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
@@ -501,43 +504,41 @@ class TemplateBuilds:
 
 
 @pytest.mark.unit
-def test_a_rollout_on_e2b_waits_again_for_a_template_that_found_no_free_builder(monkeypatch, tmp_path):
+def test_a_template_item_waits_again_for_a_template_that_found_no_free_builder(monkeypatch, tmp_path):
     pytest.importorskip("e2b")
     builds = TemplateBuilds(TimeoutError("the template was waiting after 600 s"), None)
     monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
-    worker = ServedWorker(memory_coordination().work_queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w")
-    asyncio.run(worker.build_task_template(e2b_rollout(), tmp_path / "add"))
-    assert builds.paths == [tmp_path / "add", tmp_path / "add"]
+    queue = memory_coordination().work_queue
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    worker = TaskTemplateWorker(queue, endpoints, worker_id="w")
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert builds.paths == [endpoints.task_directory(value)] * 2
 
 
 @pytest.mark.unit
-def test_a_rollout_on_e2b_fails_when_its_template_is_not_ready_in_time(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("outcome", "message"),
+    [
+        (TimeoutError("the template was waiting after 600 s"), "the template of task 'add' was not ready after 0 s"),
+        (AgentEnvBuildError("aenv build of add failed with exit code 1"), "aenv build of add failed"),
+    ],
+)
+def test_a_template_item_fails_as_retryable_when_its_template_is_not_ready(monkeypatch, tmp_path, outcome, message):
     pytest.importorskip("e2b")
     monkeypatch.setattr("reef.evaluation.rollout_worker.TEMPLATE_WAIT_S", 0.0)
-    builds = TemplateBuilds(TimeoutError("the template was waiting after 600 s"))
-    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
-    worker = ServedWorker(memory_coordination().work_queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w")
-    with pytest.raises(ReefError, match="the template of task 'add' was not ready after 0 s"):
-        asyncio.run(worker.build_task_template(e2b_rollout(), tmp_path / "add"))
-
-
-class UnservedWorker(EvaluationRolloutWorker):
-    """A worker that fails the test when it serves a candidate."""
-
-    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
-        raise AssertionError("the candidate was served before the template was ready")
-
-
-@pytest.mark.unit
-def test_a_rollout_on_e2b_builds_its_template_before_its_candidate_and_trial(monkeypatch, tmp_path):
-    pytest.importorskip("e2b")
-    builds = TemplateBuilds(AgentEnvBuildError("aenv build of add failed with exit code 1"))
-    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
-    endpoints = OpenEndpoints(tmp_path / "tasks")
-    worker = UnservedWorker(memory_coordination().work_queue, endpoints, worker_id="w")
-    with pytest.raises(AgentEnvBuildError):
-        worker.score(e2b_rollout(), threading.Event(), 1)
-    assert builds.paths == [endpoints.task_directory(e2b_rollout())]
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", TemplateBuilds(outcome))
+    queue = memory_coordination().work_queue
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    worker = TaskTemplateWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert item.state == "queued" and message in str(item.error)
 
 
 class HeldLab(CalledThenFailedLab):

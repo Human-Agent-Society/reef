@@ -24,7 +24,7 @@ from reef.artifact.repository import ConfigurableRepositoryBackendFactory, Repos
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.served import wait_for_control_lease
-from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
 from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
@@ -105,6 +105,8 @@ def _recipe_owned_settings(settings: ServiceSettings) -> dict[str, Any]:
 
 #: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
 GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
+#: The template items that one evaluation process builds at a time (``TaskTemplateWorker``).
+TEMPLATE_BUILD_SLOTS = 16
 
 
 def _require_non_empty(value: str | None, setting: str) -> str:
@@ -680,6 +682,16 @@ def build_dispatcher(
                     agent_host=settings.evaluation_agent_host,
                     slots=settings.evaluation_max_sandboxes,
                     on_stop=settings.evaluation_on_stop,
+                )
+            )
+            # The template builds of evaluations on e2b have their own slots, so a wait for a template builder holds
+            # no sandbox slot. A build mostly waits on AgentENV, so the slots can exceed the deployment's builders.
+            dispatcher.workers.add(
+                TaskTemplateWorker(
+                    dispatcher.queue,
+                    LocalCandidateEndpoints(dispatcher),
+                    worker_id=instance_id("evaluation-templates"),
+                    slots=TEMPLATE_BUILD_SLOTS,
                 )
             )
         if (
