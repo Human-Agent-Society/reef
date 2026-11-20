@@ -290,8 +290,9 @@ class HarborEnvironmentConfig(TypedDict):
     Values: ``type`` is the Harbor environment type that the caller selected. ``import_path`` is present if and only
     if ``type`` is ``e2b``, and then it is ``HARBOR_E2B_ENVIRONMENT``. ``kwargs`` is present if and only if it is not
     empty. Its keys are ``sandbox_timeout_secs``, on ``e2b`` and ``modal``, an integer number of seconds at most
-    ``SANDBOX_LIFETIME_MAX_S``; and ``modal_vm_runtime``, on ``modal`` only, True. A ``modal`` value always has
-    ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if the trial's agent has a time limit.
+    ``SANDBOX_LIFETIME_MAX_S``; ``modal_vm_runtime``, on ``modal`` only, True; and ``builds_templates``, on ``e2b``
+    only, False. A ``modal`` value always has ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if the
+    trial's agent has a time limit.
     Purpose: ``environment_config`` makes one, and two callers read it. The task rollout runner gives the whole value
     to an in-process Harbor trial as its environment config, through reef-eval's overrides. Harbor then makes the
     class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check reads
@@ -305,13 +306,15 @@ class HarborEnvironmentConfig(TypedDict):
 
 
 def environment_config(
-    environment: str, task_path: Path, agent: Mapping[str, object] | None = None
+    environment: str, task_path: Path, agent: Mapping[str, object] | None = None, *, builds_templates: bool = True
 ) -> HarborEnvironmentConfig:
     """The Harbor environment config of a trial of the task ``task_path`` in the Harbor environment type
     ``environment``, with the Harbor agent config ``agent``.
 
     ``agent`` has the field names of Harbor's ``AgentConfig``. None is an agent that sets no time limit of its own,
-    such as the ``oracle`` and ``nop`` agents of the generator's checks.
+    such as the ``oracle`` and ``nop`` agents of the generator's checks. ``builds_templates`` false makes an ``e2b``
+    trial start only from templates that exist: it fails instead of building a missing one. Raise ``ValueError`` for
+    ``builds_templates`` false on any other type.
 
     It is ``{"type": environment}`` for any type but ``e2b`` and ``modal``. For those two it adds:
 
@@ -319,6 +322,8 @@ def environment_config(
       timeout (:mod:`reef.execution.sandbox.e2b`). Harbor's own class leaves the timeout to the service, and a
       self-hosted service can pause the sandbox instead. Harbor makes the class of ``import_path`` and does not read
       ``type`` then. That class is an ``e2b`` environment too.
+    - ``kwargs.builds_templates`` on ``e2b``: False when ``builds_templates`` is false. Harbor gives it to the class of
+      the trial's environment and of each of its separate verifier environments.
     - ``kwargs.modal_vm_runtime`` on ``modal``: True when the task has ``environment/docker-compose.yaml`` and its
       ``task.toml`` asks for no GPU. Modal's default runtime puts each Compose service on the host network, and
       Compose refuses that for a service that names its networks. The VM runtime keeps the task's networks and their
@@ -345,6 +350,8 @@ def environment_config(
     a value that Harbor accepts counts here, such as a numeric string, and a value that Harbor refuses raises that
     model's ``ValueError``. No other field of ``agent`` is read or checked, and ``agent`` is not changed.
     """
+    if not builds_templates and environment != "e2b":
+        raise ValueError(f"only an e2b trial can refuse to build its templates, not a {environment!r} trial")
     if environment not in ("e2b", "modal"):
         return {"type": environment}
     # Imported here: only a cloud trial needs Harbor's trial models. Only the two time limits go to the model. The
@@ -365,6 +372,8 @@ def environment_config(
     kwargs: dict[str, bool | int] = {}
     if environment == "e2b":
         config["import_path"] = HARBOR_E2B_ENVIRONMENT
+        if not builds_templates:
+            kwargs["builds_templates"] = False
     elif (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
         kwargs["modal_vm_runtime"] = True
     # Harbor 0.25.0 (``Trial._compute_agent_timeout_sec``): the override, or the task's limit; None is no limit.

@@ -318,6 +318,9 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     ``keeps_turns``. Without ``keeps_turns``, its proxy keeps no request body and no answered response body, its
     ``turns`` are empty, and a call counts as answered when it answered 200. ``keeps_turns`` changes nothing for a
     recorded rollout.
+
+    ``builds_templates`` false makes each trial and each environment build of an ``e2b`` runner start only from
+    templates that exist (``environment_config``); a runner on another environment refuses it.
     """
 
     def __init__(
@@ -341,6 +344,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         concurrency: int = 1,
         capture_observer: CaptureObserver | None = None,
         keeps_turns: bool = True,
+        builds_templates: bool = True,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -356,6 +360,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             raise TaskRolloutError("an unrecorded rollout reports nothing")
         if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
             raise TaskRolloutError("agent_host must be a non-empty host name or address")
+        if not builds_templates and environment != "e2b":
+            raise TaskRolloutError(f"only an e2b runner can refuse to build templates, not a {environment!r} runner")
         self.reef_url = reef_url.rstrip("/")
         self.scenario = scenario
         self.model = model
@@ -382,6 +388,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.verifier_timeout_reward = verifier_timeout_reward
         self.concurrency = concurrency
         self.capture_observer = capture_observer
+        self.builds_templates = builds_templates
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -468,11 +475,12 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         agent (``environment_config``).
         """
         error = ""
+        environment = environment_config(
+            self.environment, task_path, self.agent, builds_templates=self.builds_templates
+        )
         for _ in range(2):
             async with slots:
-                error = await self.lab.build_environment(
-                    task_path, overrides={"environment": environment_config(self.environment, task_path, self.agent)}
-                )
+                error = await self.lab.build_environment(task_path, overrides={"environment": environment})
             if not error:
                 break
         return error
@@ -506,7 +514,11 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
             # The environment config reads the agent's own time limits, so a cloud sandbox lives for them. They are
             # numbers, which bound_agent leaves as they are, so the task's build gets the same config.
-            overrides: dict[str, object] = {"environment": environment_config(self.environment, task_path, self.agent)}
+            overrides: dict[str, object] = {
+                "environment": environment_config(
+                    self.environment, task_path, self.agent, builds_templates=self.builds_templates
+                )
+            }
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)

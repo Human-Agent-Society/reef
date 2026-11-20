@@ -1243,6 +1243,13 @@ class Dispatcher(
             raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")
         return sample.task_path
 
+    def task_owner(self, scenario: str) -> str | None:
+        """The owner that the record of ``scenario`` stores, or None (``CandidateArtifacts``). Unlike
+        ``scenario_owner``, it does not give the scenario's own name for a record without an owner."""
+        if not self.has_scenario(scenario):
+            return None
+        return self.storage.read_settings(scenario).owner
+
     def add_evaluation_call(self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall) -> None:
         """Keep ``call`` of evaluation ``evaluation_id`` as a record item of the owner of ``scenario``, for the current
         generation of the scenario (``CandidateArtifacts``). ``ReefError`` without a data store;

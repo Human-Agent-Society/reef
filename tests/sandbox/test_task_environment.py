@@ -449,3 +449,141 @@ def test_a_task_template_that_exists_is_not_built_again(tmp_path: Path, monkeypa
     monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "_create_template", create)
     assert asyncio.run(reef_e2b.build_task_template(tmp_path / "task")) == trial._template_name
     assert built == []
+
+
+@pytest.mark.unit
+def test_only_an_e2b_trial_can_be_told_to_build_no_template(tmp_path: Path) -> None:
+    task_path = tmp_path / "task"
+    task_path.mkdir()
+    (task_path / "task.toml").write_text(E2B_TASK_TOML)
+    assert "builds_templates" not in environment_config("e2b", task_path).get("kwargs", {})
+    assert environment_config("e2b", task_path, builds_templates=False)["kwargs"]["builds_templates"] is False
+    with pytest.raises(ValueError, match="only an e2b trial can refuse to build its templates"):
+        environment_config("docker", task_path, builds_templates=False)
+
+
+class SandboxCreatedError(Exception):
+    """A stand-in ``_create_sandbox`` raises it: the template part of ``start`` passed, and the sandbox starts."""
+
+
+def trial_environments(tmp_path: Path, *, builds_templates: bool) -> list[object]:
+    """The environment of a trial of the task under ``tmp_path`` and its separate verifier environment, made by
+    Harbor's factory from one config of ``environment_config``, as Harbor's trial makes them."""
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.task import Task
+    from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
+    from harbor.models.trial.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    task_path = tmp_path / "task"
+    task = Task(task_path)
+    verifier = resolve_verifier_environment_definition(task.config, task.paths)
+    assert verifier is not None
+    config = EnvironmentConfig.model_validate(environment_config("e2b", task_path, builds_templates=builds_templates))
+    return [
+        EnvironmentFactory.create_environment_from_config(
+            config=config,
+            environment_dir=directory,
+            environment_name=task.short_name,
+            session_id=session,
+            trial_paths=TrialPaths(tmp_path / session),
+            task_env_config=task_env_config,
+        )
+        for directory, task_env_config, session in (
+            (task.paths.environment_dir, task.config.environment, "t__env"),
+            (verifier.directory, verifier.config, "t__verifier"),
+        )
+    ]
+
+
+def write_separate_verifier_task(tmp_path: Path) -> None:
+    """The task of ``harbor_e2b_environments`` under ``tmp_path``, with a separate verifier environment of its own."""
+    harbor_e2b_environments(tmp_path)
+    task_path = tmp_path / "task"
+    (task_path / "task.toml").write_text(
+        E2B_TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+    )
+    (task_path / "tests" / "Dockerfile").write_text("FROM python:3.12-slim\nCOPY test.sh /tests/test.sh\n")
+
+
+@pytest.mark.unit
+def test_a_trial_that_builds_no_template_starts_only_from_the_prepared_task_and_verifier_templates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+
+    monkeypatch.delenv("REEF_E2B_DOCKERFILE_BUILD", raising=False)
+    write_separate_verifier_task(tmp_path)
+    aliases: set[str] = set()
+    built: list[str] = []
+    started: list[str] = []
+
+    async def alias_exists(alias: str, **options: object) -> bool:
+        return alias in aliases
+
+    async def build(**options: object) -> None:
+        built.append(str(options["alias"]))
+        aliases.add(str(options["alias"]))
+
+    async def create_sandbox(environment: reef_e2b.KillOnTimeoutE2BEnvironment) -> None:
+        started.append(environment._template_name)
+        raise SandboxCreatedError
+
+    monkeypatch.setattr(e2b.AsyncTemplate, "alias_exists", staticmethod(alias_exists))
+    monkeypatch.setattr(e2b.AsyncTemplate, "build", staticmethod(build))
+    monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "_create_sandbox", create_sandbox)
+
+    # The preparation builds both templates, as before; a trial that builds no template starts from each one.
+    prepared = asyncio.run(reef_e2b.build_task_template(tmp_path / "task"))
+    environment, verifier_environment = trial_environments(tmp_path, builds_templates=False)
+    assert built == [prepared, verifier_environment._template_name]
+    assert prepared == environment._template_name != verifier_environment._template_name
+    for trial_environment in (environment, verifier_environment):
+        with pytest.raises(SandboxCreatedError):
+            asyncio.run(trial_environment.start(force_build=False))
+    assert started == built
+
+    # A template that went away after the preparation fails the start: nothing builds it and no sandbox starts.
+    aliases.remove(verifier_environment._template_name)
+    with pytest.raises(reef_e2b.TemplateNotPreparedError, match="this trial builds no template"):
+        asyncio.run(trial_environments(tmp_path, builds_templates=False)[1].start(force_build=False))
+    assert (len(built), len(started)) == (2, 2)
+    # A trial that builds templates, the default, builds the missing one as before.
+    with pytest.raises(SandboxCreatedError):
+        asyncio.run(trial_environments(tmp_path, builds_templates=True)[1].start(force_build=False))
+    assert built[2:] == [verifier_environment._template_name]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("status", "starts"), [("ready", True), ("building", False), ("error", False), (None, False)])
+def test_on_agentenv_a_trial_that_builds_no_template_starts_only_from_a_ready_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str | None, starts: bool
+) -> None:
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild, TemplateState
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    write_separate_verifier_task(tmp_path)
+    read: list[str] = []
+
+    async def state(templates: AgentEnvTemplates, alias: str) -> TemplateState | None:
+        read.append(alias)
+        return None if status is None else TemplateState("template-1", status)
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        raise AssertionError("a trial that builds no template never runs aenv build")
+
+    async def create_sandbox(environment: reef_e2b.KillOnTimeoutE2BEnvironment) -> None:
+        raise SandboxCreatedError
+
+    monkeypatch.setattr(AgentEnvTemplates, "state", state)
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+    monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "_create_sandbox", create_sandbox)
+    for trial_environment in trial_environments(tmp_path, builds_templates=False):
+        with pytest.raises(SandboxCreatedError if starts else reef_e2b.TemplateNotPreparedError):
+            asyncio.run(trial_environment.start(force_build=False))
+    assert len(read) == 2 and all(alias.endswith(reef_e2b.AENV_TEMPLATE_SUFFIX) for alias in read)

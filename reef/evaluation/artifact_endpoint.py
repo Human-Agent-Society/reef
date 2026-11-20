@@ -156,6 +156,7 @@ class CandidateArtifacts(ABC):
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
+    ``task_owner(scenario)`` returns the owner that the record of ``scenario`` stores, whose data holds its tasks.
     ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
     ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
     ``add_evaluation_trajectory(scenario, evaluation_id, trajectory)`` keeps one trajectory that a rollout's verifier
@@ -168,6 +169,11 @@ class CandidateArtifacts(ABC):
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` on this process's file system, which the task
         file store fetches when another process stored it. ``ReefError`` for a task that the scenario does not use."""
+
+    def task_owner(self, scenario: str) -> str | None:
+        """The owner that the record of ``scenario`` stores (``ScenarioSettings.owner``); None when the scenario does
+        not exist or its record stores no owner. It never puts the scenario's name in place of a missing owner."""
+        return None
 
     @abstractmethod
     def candidate(

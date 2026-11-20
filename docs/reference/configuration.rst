@@ -1374,6 +1374,9 @@ downgrade without restoring a compatible backup.
        rollouts, to make the task's sandbox templates ready. Unset, ``DockerfileTemplateBuilder`` builds them from the
        task's Dockerfiles, as a trial would. A deployment that keeps task images in a registry names a builder that
        makes the templates from those images.
+   ``evaluation.require_prepared_templates`` : false
+       Set to ``true`` to require prepared task and verifier templates for new ``e2b`` evaluations.
+       If preparation fails, the affected rollouts report the error and skip the trial.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe

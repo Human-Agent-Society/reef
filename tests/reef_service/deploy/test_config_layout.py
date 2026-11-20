@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 import pytest
 import yaml
@@ -409,3 +410,15 @@ def test_the_evaluation_section_names_a_task_template_builder_plugin() -> None:
         match=r"evaluation\.task_template_builder .* must name a class that inherits TaskTemplateBuilder",
     ):
         service_config_from_mapping(resolved)
+
+
+def test_the_evaluation_section_requires_prepared_templates_only_when_it_says_so() -> None:
+    default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
+    assert default.evaluation_require_prepared_templates is False
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"require_prepared_templates": True}})
+    assert service_config_from_mapping(resolved).evaluation_require_prepared_templates is True
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"require_prepared_templates": "sometimes"}})
+    with pytest.raises(ValueError, match=r"evaluation\.require_prepared_templates"):
+        service_config_from_mapping(resolved)
+    with pytest.raises(ValueError, match=r"evaluation\.require_prepared_templates must be true or false"):
+        dataclasses.replace(default, evaluation_require_prepared_templates="yes")

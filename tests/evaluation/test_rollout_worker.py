@@ -43,7 +43,7 @@ from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.work_queue import NewWork, WorkLeaseLostError, WorkQueue
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -564,6 +564,146 @@ def test_a_template_item_builds_with_the_deployments_builder_and_not_from_the_do
     assert TaskTemplateWorker(queue, endpoints, builder, worker_id="w").run_once() is True
     assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
     assert builder.builds == [(value.scenario, value.task_name, endpoints.task_directory(value))]
+
+
+class OwnedEndpoints(OpenEndpoints):
+    """``OpenEndpoints`` whose scenario record stores the owner ``owner``, or none when it is None."""
+
+    def __init__(self, root: Path, owner: str | None) -> None:
+        super().__init__(root)
+        self.owner = owner
+
+    def task_owner(self, rollout: EvaluationRollout) -> str | None:
+        return self.owner
+
+
+class OwnerBuilder(TaskTemplateBuilder):
+    """A builder that finds templates by owner: it keeps ``(owner, scenario, task_name)`` of each build in ``builds``
+    and builds nothing. Its three-argument ``build`` fails the test, since the worker gives the owner."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str | None, str, str]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_owner")
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.builds.append((owner, scenario, task_name))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("queued_owner", "record_owner", "error"),
+    [
+        # An item that an older Reef queued names no owner: the record's owner counts.
+        (None, "workspace-7", None),
+        ("workspace-7", "workspace-7", None),
+        # A scenario of the same name with another owner, or none, gets no template of this evaluation.
+        ("workspace-7", "workspace-9", "has the owner 'workspace-9' now, not 'workspace-7'"),
+        ("workspace-7", None, "has no owner now, not 'workspace-7'"),
+    ],
+)
+def test_a_template_item_builds_for_the_owner_of_the_scenarios_record_and_never_for_another(
+    tmp_path, queued_owner, record_owner, error
+):
+    queue = memory_coordination().work_queue
+    # The scenario's name is a slug that says nothing of its owner.
+    value = replace(e2b_rollout(), scenario="eval-run-3f9a", owner=queued_owner)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = OwnerBuilder()
+    worker = TaskTemplateWorker(queue, OwnedEndpoints(tmp_path / "tasks", record_owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    if error is None:
+        assert item.state == "finished"
+        assert builder.builds == [(record_owner, "eval-run-3f9a", "add")]
+        return
+    assert (item.state, item.attempt_count, builder.builds) == ("failed", 1, [])
+    assert error in str(item.error)
+
+
+def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:
+    """Add the template item of ``value``'s task, and end it: finished when ``error`` is None, else failed for good
+    with ``error``."""
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == item_id
+    if error is None:
+        queue.finish(EVALUATIONS_QUEUE, item_id, "builder", {})
+    else:
+        queue.fail(EVALUATIONS_QUEUE, item_id, "builder", error, retryable=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("template_error", "reason"),
+    [
+        ("the registry holds no image of task add", "the registry holds no image of task add"),
+        (None, "the queue no longer holds its template item"),
+    ],
+)
+def test_a_rollout_that_requires_prepared_templates_runs_no_trial_without_them(tmp_path, template_error, reason):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(e2b_rollout(), requires_prepared_templates=True)
+    if template_error is not None:
+        finished_template(queue, value, template_error)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    # No candidate is served and the lab runs no trial, which would write under ``trials``.
+    lab = NoSandboxLab(tmp_path / "trials")
+    worker = ServingRefusedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1", lab=lab)
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (failed.state, failed.attempt_count) == ("failed", 1)
+    assert failed.error == f"the templates of task 'add' were not prepared: {reason}"
+    assert not (tmp_path / "trials").exists()
+
+
+class EnvironmentLab(CalledThenFailedLab):
+    """A ``CalledThenFailedLab`` that keeps the Harbor environment config of each trial in ``environments``."""
+
+    def __init__(self) -> None:
+        self.environments: list[Mapping[str, object]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.environments.append(overrides["environment"])
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requires", [True, False])
+def test_the_trial_of_a_rollout_that_requires_prepared_templates_builds_no_template(tmp_path, requires):
+    queue = memory_coordination().work_queue
+    value = replace(
+        e2b_rollout(),
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+        requires_prepared_templates=requires,
+    )
+    finished_template(queue, value, None)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "finished"
+    [environment] = lab.environments
+    # Only a rollout that requires prepared templates tells Reef's e2b class not to build one.
+    assert environment["import_path"] == "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+    assert ("builds_templates" in environment.get("kwargs", {})) == requires
+    if requires:
+        assert environment["kwargs"]["builds_templates"] is False
+
+
+@pytest.mark.unit
+def test_only_a_rollout_on_e2b_requires_prepared_templates():
+    with pytest.raises(ValueError, match="only a rollout on e2b requires prepared templates"):
+        replace(rollout(), requires_prepared_templates=True)
+    with pytest.raises(ValueError, match="owner is a non-empty string or None"):
+        replace(e2b_rollout(), owner="")
+    value = replace(e2b_rollout(), owner="workspace-7", requires_prepared_templates=True)
+    item = memory_coordination().work_queue.append(
+        NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload())
+    )
+    assert EvaluationRollout.from_item(item) == value
 
 
 class HeldLab(CalledThenFailedLab):
