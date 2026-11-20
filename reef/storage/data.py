@@ -876,6 +876,23 @@ class DataStore(Plugin, JobDataReader, ABC):
     @abstractmethod
     def delete_collection(self, owner: str, name: str) -> bool: ...
 
+    def benchmark_item_ids(self, owner: str, benchmarks: Sequence[str]) -> dict[str, set[str]]:
+        """Map each requested benchmark to the IDs of its current task items.
+
+        A benchmark without any task items maps to an empty set.
+        """
+        found: dict[str, set[str]] = {benchmark: set() for benchmark in benchmarks}
+        if not found:
+            return found
+        after = 0
+        while page := self.query(owner, kind="task", after=after, limit=MAX_QUERY_LIMIT, content=False):
+            for item in page:
+                for benchmark in (held_sets(item.metadata) or ("", ()))[1]:
+                    if benchmark in found:
+                        found[benchmark].add(item.item_id)
+            after = page[-1].sequence
+        return found
+
     def groups(
         self,
         owner: str,

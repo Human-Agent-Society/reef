@@ -435,11 +435,21 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
     assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
     assert store.query("acme", benchmark="unknown") == ()
     assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ["full", "lite", "unknown"]) == {
+        "full": {"add", "sort"},
+        "lite": {"add"},
+        "unknown": set(),
+    }
     # A patch replaces the list, and null removes it.
     store.update("acme", ["sort"], {"benchmarks": ["lite"]})
     store.update("acme", ["add"], {"benchmarks": None})
     assert [item.item_id for item in store.query("acme", benchmark="lite")] == ["sort"]
     assert store.query("acme", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ["full", "lite"]) == {"full": set(), "lite": {"sort"}}
+    assert store.delete("acme", "sort")
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": set()}
+    assert store.restore("acme", ["sort"])
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": {"sort"}}
     for benchmarks in ("lite", ["lite", "lite"], [""], [1]):
         with pytest.raises(ValueError, match="benchmarks"):
             store.update("acme", ["sort"], {"benchmarks": benchmarks})

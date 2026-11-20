@@ -206,6 +206,12 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         assert (await client.put(f"{stored}/empty", headers=AUTH, json={})).status == 200
         empty = await (await client.get(f"{stored}/empty", headers=AUTH)).json()
         assert (empty["benchmarks"], empty["collections"], empty["task_count"]) == ([], [], 0)
+        summary = await (await client.get(stored, params={"counts": "true"}, headers=AUTH)).json()
+        assert [(row["name"], row["benchmark_count"], row["task_count"]) for row in summary["collections"]] == [
+            ("all", 3, 3),
+            ("coding", 2, 2),
+            ("empty", 0, 0),
+        ]
         to_eval = {"scenario": "math", "split": "eval"}
         assert (await client.post(f"{stored}/empty/scenarios", headers=AUTH, json=to_eval)).status == 400
         assert (await client.delete(f"{stored}/empty", headers=AUTH)).status == 200
