@@ -18,7 +18,7 @@ changes nothing. A deployment selects the file store in
 and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
 A client that writes a task directory into the task file store itself computes
-the digest with :class:`FilesDigest`, one file at a time, in the order of
+the digest with :class:`TaskDirectoryDigest`, one file at a time, in the order of
 ``task_file_order``. Every client checks a task's files against the same limits
 (``task_limit_errors``): ``MAX_TASK_FILE_BYTES`` for one file,
 ``MAX_TASK_DIRECTORY_ENTRIES`` for the entries of one directory, and
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import shutil
 import stat
 import tempfile
@@ -53,14 +52,12 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 from reef.core.errors import ReefError
-from reef.core.job_data import TaskFiles
+from reef.core.job_data import FILES_DIGEST_PATTERN, TaskFiles
 from reef.core.plugins import NoSettings, Plugin
 
 SplitName = Literal["train", "eval"]
 SPLIT_NAMES: tuple[SplitName, ...] = ("train", "eval")
 
-#: A files digest: the lowercase hex SHA-256 that ``files_digest`` returns.
-FILES_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 #: The most bytes of one file of a task: the hard limit of one file on the Hugging Face Hub (500 GB).
 MAX_TASK_FILE_BYTES = 500 * 1000**3
 #: The most entries, files and directories, directly in one directory of a task: the Hugging Face Hub's limit.
@@ -398,7 +395,7 @@ def task_file_order(relative_path: str) -> tuple[str, ...]:
 
 
 class FilesDigest:
-    """The ``files_digest`` of a task directory, from its files given one at a time.
+    """The legacy content-only digest of a task directory, from its files given one at a time.
 
     Values: a digest is the triple ``(H, last, remaining)``. ``H`` is the SHA-256 state of the bytes of the directory
     name and of the files given so far. ``last`` is the ``task_file_order`` key of the last file given, or ``None``
@@ -406,7 +403,7 @@ class FilesDigest:
     before the first file. The files come in strictly increasing ``task_file_order``.
 
     Purpose: a client that writes a task directory into the task file store computes its digest with bounded memory,
-    from a stream of each file. ``files_digest`` uses it for a local directory.
+    from a stream of each file. ``TaskDirectoryDigest`` uses it to hash file paths and bytes.
 
     Operations:
 
@@ -421,7 +418,7 @@ class FilesDigest:
     * ``hexdigest()`` returns the hex digest of ``H``, and changes nothing. Raises ``TaskStoreError`` while
       ``remaining`` is not 0.
 
-    The name of a directory and the files of its ``rglob``, given in ``task_file_order``, give ``files_digest`` of the
+    The name of a directory and the files of its ``rglob``, given in ``task_file_order``, give the legacy digest of the
     directory. A directory is not given, so an empty directory does not change the digest.
     """
 
@@ -460,14 +457,50 @@ class FilesDigest:
         return self.hash.hexdigest()
 
 
-def files_digest(source: Path) -> str:
-    """Return the sha256 digest of a task directory: its name, and the path and bytes of each file.
+class TaskDirectoryDigest:
+    """The digest of a task directory's name, file paths, bytes, and executable flags.
 
-    The files come in ``task_file_order`` (``FilesDigest``), and each is read in chunks of ``DIGEST_CHUNK_BYTES``.
+    A value holds a ``FilesDigest`` and the SHA-256 state of the digest prefix.
+    The prefix starts with the ASCII text ``reef-task-directory-v2`` and a zero byte.
+    Then it holds one byte per regular file, in file order.
+    The byte is 1 if any executable bit is set and 0 otherwise.
+
+    ``add_file`` starts a file in both states, using its Unix mode for the flag.
+    ``update`` adds the next chunk to the content state. Both enforce the order
+    and sizes of ``FilesDigest``. ``hexdigest`` hashes the prefix followed by the
+    32 content digest bytes. Legacy writers can read ``content.hexdigest()``.
+    """
+
+    def __init__(self, directory_name: str) -> None:
+        self.content = FilesDigest(directory_name)
+        self.flags = hashlib.sha256(b"reef-task-directory-v2\x00")
+
+    def add_file(self, relative_path: str, size_bytes: int, mode: int) -> None:
+        self.content.add_file(relative_path, size_bytes)
+        self.flags.update(b"\x01" if mode & 0o111 else b"\x00")
+
+    def update(self, chunk: bytes) -> None:
+        self.content.update(chunk)
+
+    def hexdigest(self) -> str:
+        digest = self.flags.copy()
+        digest.update(bytes.fromhex(self.content.hexdigest()))
+        return digest.hexdigest()
+
+
+def files_digest(source: Path) -> str:
+    """Return the SHA-256 digest of a task directory's name, file paths, bytes, and executable flags."""
+    return task_directory_digest(source).hexdigest()
+
+
+def task_directory_digest(source: Path) -> TaskDirectoryDigest:
+    """Read a task directory into a digest that also gives its legacy digest.
+
+    The files come in ``task_file_order`` (``TaskDirectoryDigest``), and each is read in chunks of ``DIGEST_CHUNK_BYTES``.
     Raises ``TaskStoreError`` if the directory holds a symbolic link or a special file, or if a file changes size
     while it is read.
     """
-    digest = FilesDigest(source.name)
+    digest = TaskDirectoryDigest(source.name)
     files = ((path, path.relative_to(source).as_posix()) for path in source.rglob("*"))
     for path, relative_path in sorted(files, key=lambda file: task_file_order(file[1])):
         mode = path.lstat().st_mode
@@ -476,10 +509,21 @@ def files_digest(source: Path) -> str:
         if not stat.S_ISREG(mode):
             raise TaskStoreError(f"task directory {source} holds {relative_path}, which is not a file")
         with path.open("rb") as stream:
-            digest.add_file(relative_path, os.fstat(stream.fileno()).st_size)
+            info = os.fstat(stream.fileno())
+            digest.add_file(relative_path, info.st_size, info.st_mode)
             while chunk := stream.read(DIGEST_CHUNK_BYTES):
                 digest.update(chunk)
-    return digest.hexdigest()
+    return digest
+
+
+def task_file_executable_flags(source: Path) -> dict[str, bool]:
+    """Return the executable flag of each regular file by its path in the directory."""
+    flags = {}
+    for path in source.rglob("*"):
+        mode = path.lstat().st_mode
+        if stat.S_ISREG(mode):
+            flags[path.relative_to(source).as_posix()] = bool(mode & 0o111)
+    return flags
 
 
 @dataclass(frozen=True)
@@ -588,8 +632,14 @@ class LocalTaskFileStore(TaskFileStore):
         return cls(directory)
 
     def write(self, scenario: str, source: Path) -> str:
-        digest = files_digest(source)
-        target = self.scenario_directory(scenario) / digest
+        computed = task_directory_digest(source)
+        scenario_dir = self.scenario_directory(scenario)
+        legacy_digest = computed.content.hexdigest()
+        legacy = scenario_dir / legacy_digest / source.name
+        if legacy.is_dir() and task_file_executable_flags(legacy) == task_file_executable_flags(source):
+            return legacy_digest
+        digest = computed.hexdigest()
+        target = scenario_dir / digest
         if target.exists():
             return digest
         staging = self.directory / ".staging" / uuid.uuid4().hex
@@ -671,6 +721,7 @@ __all__ = [
     "StoredTask",
     "TaskCandidate",
     "TaskConflictError",
+    "TaskDirectoryDigest",
     "TaskFileStore",
     "TaskFilesNotFoundError",
     "TaskLimitCode",
@@ -679,6 +730,8 @@ __all__ = [
     "TaskStore",
     "TaskStoreError",
     "files_digest",
+    "task_directory_digest",
+    "task_file_executable_flags",
     "task_file_order",
     "task_limit_errors",
 ]

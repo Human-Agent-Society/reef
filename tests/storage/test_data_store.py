@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -51,7 +52,7 @@ from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.sql_setup import prefix_upper_bound
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.tasks import FilesDigest, LocalTaskFileStore, TaskFilesNotFoundError, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
@@ -418,6 +419,34 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
     assert [found.item_id for found in store.query("acme", kind="task", scenario="coding")] == ["fix-bug"]
     with pytest.raises(ValueError, match="not a task"):
         store.task_path(store.create("acme", [trajectory("t1")])[0])
+
+
+def test_a_legacy_task_retry_reuses_its_digest_only_with_the_same_executable_flags(store, tmp_path):
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    script = task / "run.sh"
+    body = b"#!/bin/sh\nexit 0\n"
+    script.write_bytes(body)
+    legacy = FilesDigest(task.name)
+    legacy.add_file(script.name, len(body))
+    legacy.update(body)
+    old_digest = legacy.hexdigest()
+    stored = store.task_files.scenario_directory(task_partition("acme")) / old_digest / task.name
+    shutil.copytree(task, stored)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (original,) = store.create("acme", [NewItem(task.name, TaskFilesReference(old_digest), metadata)])
+    used_before = store.scenario_items("acme", "coding", kinds=("task",))[0].sequence
+
+    assert store.create("acme", [NewItem(task.name, task, metadata)]) == (original,)
+    assert store.replace_task("acme", task.name, task) == original
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0].sequence == used_before
+
+    script.chmod(0o755)
+    changed = store.replace_task("acme", task.name, task)
+    assert changed.digest != old_digest
+    assert (store.task_path_for_digest("acme", changed.digest) / script.name).stat().st_mode & 0o111
+    assert (store.task_path_for_digest("acme", old_digest) / script.name).stat().st_mode & 0o111 == 0
+    assert store.replace_task("acme", task.name, task) == changed
 
 
 def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, tmp_path):

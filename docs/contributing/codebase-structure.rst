@@ -331,7 +331,7 @@ The extension points those packages expose are in `Python API
   share the task, training sample, artifact evaluation and commit tables and
   their operations in the same database.
   ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts,
-  with the files digest (``FilesDigest``) and the limits on a task's files
+  with the files digest (``TaskDirectoryDigest``) and the limits on a task's files
   that every client checks.
   ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
   maintenance. ``postgres.py`` supplies PostgreSQL tables and pooled
