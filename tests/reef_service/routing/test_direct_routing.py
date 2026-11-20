@@ -36,13 +36,14 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
+from reef.core.errors import ScenarioDeletedError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, ingest
 from reef.scenario.scenario import Scenario
 from reef.service import routing_preview
 from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, create_app
 from reef.service.assembly import build_app
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.errors import translate_error
 from reef.service.lifecycle import INFERENCE_FINALIZATION, REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.routed_inference import DispatcherShadowWriter
@@ -143,8 +144,6 @@ class Provider:
                     "Content-Type": "text/event-stream",
                     "x-reef-agent-record-id": "provider-record",
                     "x-reef-artifact-id": "provider-artifact",
-                    "x-reef-release-id": "provider-release",
-                    "x-reef-artifact-version": "provider-version",
                 }
             )
             await response.prepare(request)
@@ -351,8 +350,6 @@ def test_a_stream_shares_the_selection_and_its_receipt_links_feedback(tmp_path: 
             for header in (
                 "x-reef-agent-record-id",
                 "x-reef-artifact-id",
-                "x-reef-release-id",
-                "x-reef-artifact-version",
             ):
                 assert header not in headers
             receipt = next(
@@ -452,7 +449,6 @@ def test_routed_rollout_calls_are_refused_before_selection(tmp_path: Path, manag
         ([("x-selected-model", "teacher")], None, 400, "reserved_header"),
         ([("x-reef-sr-decision", "teacher_requested")], None, 400, "reserved_header"),
         ([("x-reef-scenario", "math")], None, 400, "duplicate_header"),
-        ([("x-reef-release-id", "release-1")], None, 400, "release_pin"),
         ([("x-reef-artifact-id", "artifact-1")], None, 400, "release_pin"),
         ([("x-reef-scenario", None), ("x-reef-scenario", "unknown")], None, 403, "unknown_scenario"),
         ([("x-reef-scenario", None)], None, 400, "missing_scenario"),
@@ -500,7 +496,7 @@ def test_forged_conflicting_or_cross_scenario_requests_never_reach_a_model(
         ("GET", "/reef/scenarios/coding/evaluations"),
         ("GET", "/reef/scenarios/coding/evaluations/id"),
         ("POST", "/reef/scenarios/coding/artifacts"),
-        ("POST", "/reef/scenarios/coding/artifacts/release-1/v1/chat/completions"),
+        ("POST", "/reef/scenarios/coding/artifacts/artifact-1/v1/chat/completions"),
         ("POST", "/reef/scenarios/coding/update"),
         ("GET", "/reef/scenarios/coding/samples"),
         ("GET", "/reef/scenarios/coding/buffer"),
@@ -1007,7 +1003,7 @@ def test_the_control_file_carries_the_selection_credential_and_router_runtime(tm
 
 def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
     path = write_manifest(tmp_path / "routing.json", "http://127.0.0.1:9")
-    settings = ServiceConfig(recipe="recipe", routing_manifest=str(path), tokens=("service",))
+    settings = ServiceSettings(recipe="recipe", routing_manifest=str(path), tokens=("service",))
     with pytest.raises(ValueError, match="managed routing deployment"):
         build_app(settings, environ={})
     # A child without its private control socket cannot be managed.
@@ -1019,7 +1015,7 @@ def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="sr_management_port"):
         build_app(
-            ServiceConfig(recipe="recipe", routing_manifest=str(path), tokens=("service",), port=50053),
+            ServiceSettings(recipe="recipe", routing_manifest=str(path), tokens=("service",), port=50053),
             environ={},
             lifecycle=managed,
         )
@@ -1074,6 +1070,8 @@ def test_the_tutorial_domain_smoke_writes_manifests_that_differ_only_in_a_reload
     initial = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.yaml")
     updated = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.updated.yaml")
     check_policy_change(initial, updated)
+    # The tutorial's default leaves the router image to Reef, which builds it at the first start.
+    assert initial.semantic_router_image is None and updated.semantic_router_image is None
     assert initial.domain_classifier is not None and initial.domain_classifier == updated.domain_classifier
     assert initial.domain_classifier.files == domain_smoke.VELA_DOMAIN_FILES
     assert initial.domain_classifier.model_directory == str(tmp_path / "vela-domain")
@@ -1359,9 +1357,9 @@ async def provider_error(request: web.Request) -> web.Response:
     ("case", "outcome", "error_type"),
     [
         ("error", "error", "UpstreamStatusError"),
-        ("oversized", "error", "ResponseTooLarge"),
-        ("oversized_stream", "error", "ResponseTooLarge"),
-        ("oversized_error", "error", "ResponseTooLarge"),
+        ("oversized", "error", "ResponseTooLargeError"),
+        ("oversized_stream", "error", "ResponseTooLargeError"),
+        ("oversized_error", "error", "ResponseTooLargeError"),
         ("timeout", "timeout", "TimeoutError"),
         ("refused", "error", "ClientConnectorError"),
         ("write_failure", None, None),
@@ -1739,7 +1737,8 @@ def test_an_offline_shadow_only_target_never_blocks_opening_or_serving(tmp_path:
     asyncio.run(run())
 
 
-def test_a_late_shadow_never_enters_a_recreated_scenario(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delete", [False, True], ids=["reload", "delete"])
+def test_a_late_shadow_cannot_write_after_its_scenario_is_reloaded_or_deleted(tmp_path: Path, delete: bool) -> None:
     async def run() -> None:
         provider = EchoProvider(held={"student-v1"})
         async with routed_service(
@@ -1750,18 +1749,25 @@ def test_a_late_shadow_never_enters_a_recreated_scenario(tmp_path: Path) -> None
                 assert status == 200
                 await provider.wait_for(1)
                 old = service.dispatcher.registry.get_loaded("coding")
-                service.dispatcher.delete_scenario("coding")
-                replacement = service.dispatcher.get_or_create_scenario("coding")
-                assert replacement is not None and replacement is not old
+                if delete:
+                    service.dispatcher.delete_scenario("coding")
+                    with pytest.raises(ScenarioDeletedError):
+                        service.dispatcher.create_scenario("coding")
+                else:
+                    assert service.dispatcher.registry.reload("coding") is not old
                 provider.release.set()
                 shadows = await shadows_finished(service)
                 assert shadows.failed == 1
-                assert service.records() == []
-                # The replacement still serves new requests and receives only its own primary/shadow pair.
+                if delete:
+                    assert service.dispatcher.registry.get_loaded("coding") is None
+                    return
+                # Reload preserves the primary record, and the late shadow cannot enter the new instance.
+                [primary], old_shadows = records_by_purpose(service)
+                assert primary.payload["messages"] == user_message("old") and old_shadows == []
                 assert (await service.chat({"model": "auto", "messages": user_message("new")}))[0] == 200
                 await shadows_finished(service)
-                assert len(service.records()) == 2
-                assert all(record["messages"] == user_message("new") for record in service.records())
+                primaries, [new_shadow] = records_by_purpose(service)
+                assert len(primaries) == 2 and new_shadow.payload["messages"] == user_message("new")
             finally:
                 provider.release.set()
 

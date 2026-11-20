@@ -108,11 +108,13 @@ Active selection
 A scenario's serving selection: a mapping from each
 component name to its selected ``artifact_id``. Inference answers from the
 selection that completed startup; harness routes read the selected tree.
-``POST /reef/scenarios/{scenario}/activate`` updates one component in the
-mapping and records the complete selection atomically. By default Reef activates each new artifact that passes its checks.
+The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` names the
+artifacts that the scenario serves of one component. The artifact with the
+largest weight is the active artifact of that component, and Reef records the
+complete selection atomically. By default Reef activates each new artifact that passes its checks.
 Every other artifact is inactive. An artifact that a training step made and
 that was never active waits for activation. See `Operate a deployment
-<../user-guide/operate.rst#activate-an-artifact>`__.
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__.
 
 Chain tip
 ---------
@@ -163,8 +165,8 @@ Candidate selection
 A harness trainer's decision about which candidate tree its step keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
-both. A harness recipe builds it for each scenario from its publication
-policy. Selection does not decide what serves; the activation rule does.
+both. The harness training component builds it for each job from the
+deployment's publication policy. Selection does not decide what serves; the activation rule does.
 
 Activation rule
 ---------------
@@ -270,7 +272,7 @@ A ``TrainingComponent`` runs bounded training jobs with its framework's own
 training loop, for example Slime or Tinker. Reef submits a job, reads its
 status, and can cancel it; the component saves checkpoints. A
 ``SavedCheckpoint`` names the directory a later job starts from and the
-directory Reef publishes as a snapshot.
+directory whose files the training service stores in the artifact backend, where Reef commits them as a snapshot.
 
 Training job
 ------------
@@ -332,11 +334,11 @@ artifact that answered by ``artifact_id``.
 Staleness
 ---------
 
-The number of artifacts that a scenario served after the artifact that
-produced a sample, bounded by the record-to-sample stage's ``max_staleness``
-(``pipeline.record2sample.config.max_staleness``). Zero trains a sample only
-while the artifact that produced it serves. The record-to-sample stage checks
-it before job data forms.
+Whether a stored sample may still train, given the artifacts that the
+scenario served after the artifact that produced it. The record-to-sample
+stage gives the rule, and the samples service marks a stale sample in the
+store. An on-policy stage trains a sample only while the artifact that
+produced it serves.
 
 Reported and computed feedback
 ------------------------------
@@ -352,8 +354,8 @@ Method
 
 The learning algorithm itself. A recipe is the object that binds one method to a
 scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
-methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
-step's workspace, with a scorer when its evaluation runs tasks.
+methods. Each is a ``Method`` whose ``run`` edits the harness tree in a
+job's workspace, with a scorer when its evaluation runs tasks.
 
 Adapter
 -------
@@ -391,6 +393,17 @@ evaluation. It gives one trajectory and one score, as a harness run does. On
 Tinker, a task job runs each task ``rollouts_per_task`` times on the job's start
 weights. On Slime, ``n-samples-per-prompt`` gives the rollouts of each task, on
 the weights of the Slime rollout that holds them.
+
+Training pool
+-------------
+
+The train tasks of the generated-task recipe that train again, with
+``pipeline.record2sample.config.pool_capacity`` above 0. When a task's job
+ends, the task waits for a job again after the tasks that wait already, so the
+tasks train in turn. A pool review retires a task whose recent pass rate is
+outside the review band, or whose recent rewards do not differ enough; a
+retired task does not train again. See `Configuration
+<configuration.rst#generated-tasks>`__.
 
 Patch
 -----

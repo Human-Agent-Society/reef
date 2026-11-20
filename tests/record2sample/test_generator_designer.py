@@ -42,7 +42,10 @@ HARBOR_REPLY = "Here is the task.\n\n```json\n" + json.dumps(HARBOR_DOCUMENT, in
 
 
 def request(**overrides: object) -> DesignerRequest:
-    fields: dict[str, object] = {"skill": "deduction", "target": "infer a hidden rule from feedback"}
+    fields: dict[str, object] = {
+        "inputs": TaskGenerationRequest((), "infer a hidden rule from feedback"),
+        "skill": "deduction",
+    }
     fields.update(overrides)
     return DesignerRequest(**fields)  # type: ignore[arg-type]
 
@@ -109,7 +112,7 @@ def test_a_cut_grounding_says_so_outside_the_fence() -> None:
     ("overrides", "message"),
     [
         ({"skill": "Deduction"}, "skill"),
-        ({"target": " "}, "target"),
+        ({"inputs": "infer a hidden rule"}, "inputs"),
         ({"difficulty": "brutal"}, "difficulty"),
         ({"turn_limit": 1}, "turn_limit"),
         ({"turn_limit": True}, "turn_limit"),
@@ -266,15 +269,11 @@ def test_a_refused_designer_call_is_a_designer_error() -> None:
         ReefDesigner(reef_url="http://127.0.0.1:1", timeout_s=0)
 
 
-def test_designer_wraps_shared_inputs_and_retains_legacy_target_calls() -> None:
+def test_designer_wraps_shared_inputs() -> None:
     inputs = TaskGenerationRequest((), "recover the port")
     request = DesignerRequest(inputs, difficulty="hard")
     assert request.inputs is inputs
-    assert request.target == inputs.description
-    assert DesignerRequest("recover the port") == DesignerRequest(target="recover the port")
     assert replace(request, difficulty="easy").inputs is inputs
-    with pytest.raises(ValueError, match="not both"):
-        DesignerRequest(inputs, target="another task")
 
 
 def test_unread_assets_cannot_be_silently_omitted_from_prompt_or_wire(tmp_path: Path) -> None:

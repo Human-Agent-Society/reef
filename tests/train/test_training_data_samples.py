@@ -7,8 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory, recorded_trajectory
 from tests.support.samples import made_task
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -21,8 +21,8 @@ from reef.core.trajectories import (
 )
 from reef.inference.interfaces import InferenceStream
 from reef.service.streaming import stream_record
-from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 
 
@@ -92,14 +92,32 @@ def test_harness_projection_reads_external_atif_without_reef_records():
     assert source_record_id(item) == "rollout-1"
 
 
-def test_original_provider_payloads_and_feedback_survive_json_roundtrip():
+def test_call_settings_and_feedback_survive_json_roundtrip():
     first = {"messages": [{"role": "user", "content": "hi"}], "provider_specific": {"opaque": [1, 2]}}
     last = {"messages": [{"role": "user", "content": "next"}], "response": {"content": "done"}}
     item = recorded_trajectory("record", last, 0.0, {"detail": "feedback"}, (first, last))
     loaded = TrajectorySample(json.loads(json.dumps(item.trajectory)))
-    assert recorded_payloads(loaded) == (first, last)
-    assert recorded_payload(loaded) == last
+    # Each call keeps its settings; the conversation and the answer come from the steps.
+    assert recorded_payloads(loaded) == ({"provider_specific": {"opaque": [1, 2]}}, {})
+    assert recorded_payload(loaded)["messages"][-1] == {"role": "user", "content": "next"}
+    assert recorded_payload(loaded)["response"]["choices"][0]["message"]["content"] == "done"
     assert loaded.metadata["feedback"] == {"detail": "feedback"}
+
+
+def test_a_trajectory_that_kept_whole_payloads_or_only_ids_reads_as_it_was_stored():
+    item = recorded_trajectory("record", {"messages": [{"role": "user", "content": "q"}]}, 1.0)
+    whole = {"model": "m", "messages": [{"role": "user", "content": "q"}], "chat_template_kwargs": {"x": 1}}
+    kept = item.with_metadata(records=[{"agent_record_id": "record", "artifact_id": "a1", "payload": whole}])
+    # A whole payload, which trajectories kept before call summaries, is the last call as served.
+    assert recorded_payloads(kept) == (whole,) and recorded_payload(kept) == whole
+    assert kept.artifact_id == "a1"
+    # A summary without a payload names the call and its artifact; the steps give the exchange.
+    named = item.with_metadata(records=[{"agent_record_id": "record", "created_at": 1.0, "artifact_id": "a1"}])
+    assert recorded_payloads(named) == ({},)
+    assert recorded_payload(named)["messages"] == [{"role": "user", "content": "q"}]
+    assert named.artifact_id == "a1"
+    with pytest.raises(ValueError, match="non-empty list of objects"):
+        recorded_payloads(item.with_metadata(records=["record"]))
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
@@ -139,7 +157,7 @@ def test_completed_stream_messages_survive_multiturn_atif_conversion(provider: s
         ("user", "Next question"),
         ("agent", "Next answer"),
     ]
-    assert recorded_payloads(loaded) == tuple(record.payload for record in records)
+    assert recorded_payloads(loaded) == ({}, {})
     assert item.source_agent_record_ids == tuple(record.agent_record_id for record in records)
     assert trajectory_reward(loaded) == 1.0
     assert loaded.training == {}
@@ -217,7 +235,7 @@ def test_non_atif_payloads_are_not_accepted_as_trajectories():
 
 
 def test_request_only_batch_preserves_manual_training_contract():
-    request = TrainingRequest("Improve the harness", "session", "release", id="request")
+    request = TrainingRequest("Improve the harness", "session", "artifact-1", id="request")
     batch = JobData("manual", request=request)
     assert trajectories(batch) == ()
     assert replace(batch, data_id="next").request is request
@@ -325,7 +343,7 @@ def test_atif_multiturn_tools_preserve_history_observations_and_provider_fields(
     assert steps[1]["observation"]["results"][0]["source_call_id"] == "read-1"
     assert steps[2]["reasoning_content"] == "File read"
     assert "is_copied_context" not in steps[1]
-    assert recorded_payloads(TrajectorySample(json.loads(json.dumps(item.trajectory)))) == (first, second)
+    assert recorded_payloads(TrajectorySample(json.loads(json.dumps(item.trajectory)))) == ({"opaque": {"x": 7}}, {})
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "responses"])
@@ -382,7 +400,11 @@ def test_atif_provider_tool_calls_and_multimodal_context(provider):
     assert steps[2]["tool_calls"][0]["arguments"] == {"x": 1}
     assert steps[2]["observation"]["results"][0]["content"] == "ok"
     assert steps[3]["message"] == "Done"
-    assert recorded_payload(item) == payload
+    # The payload holds only the conversation, so the call keeps no settings and the steps give the exchange.
+    assert recorded_payloads(item) == ({},)
+    served = recorded_payload(item)
+    assert served["messages"][0] == {"role": "system", "content": "Be precise"}
+    assert served["response"]["choices"][0]["message"]["content"] == "Done"
 
 
 def test_external_atif_projection_preserves_images_reasoning_and_tool_results():

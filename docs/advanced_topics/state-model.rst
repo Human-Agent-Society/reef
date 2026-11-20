@@ -49,17 +49,28 @@ with ``artifact_id``.
 
 Serving and training use separate selections:
 
-- The active selection supplies the default routes. ``activate`` replaces
-  one selected artifact and leaves every trainer's start unchanged. Inference
+- The active selection supplies the default routes. An ``activate``
+  operation replaces one selected artifact and leaves every trainer's start
+  unchanged. Inference
   uses the selection that completed startup; a failed load remains visible
   in startup status until control retries it.
 - Each trainer has a training start: the artifact its next job or evolve
   step starts from. It begins at the creation artifact and moves to its own
   newest output after training. ``train-from`` selects an existing artifact
-  and leaves serving unchanged.
-- ``serve`` adds an artifact beside the active selection. It records the
-  selected component mapping without publishing bytes. Later activation does
-  not change that served mapping. ``stop-serving`` removes the extra route.
+  and leaves serving unchanged. A request's ``train_from`` gives one job its
+  own start: that job does not move the training start, so it can run beside
+  the other jobs of the scenario.
+- A ``serve`` operation adds an artifact beside the active selection. It
+  records the selected component mapping without publishing bytes. Later
+  activation does not change that served mapping. A ``stop_serving``
+  operation removes the extra route.
+- The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` sets
+  what a scenario serves of one component: a mapping from artifact IDs to
+  weights. The largest weight names the active artifact, and each other
+  artifact serves beside it. Reef appends the ``activate``, ``serve`` and
+  ``stop_serving`` operations that lead to the mapping. With more than one
+  weight above 0, the weights are the traffic split, which the coordination
+  store holds outside the commit history.
 - ``import`` creates an artifact from external files and records its source.
   It changes neither serving nor the trainers' starts.
 
@@ -94,7 +105,7 @@ Commit ordering
 ---------------
 
 ``ScenarioStore`` owns a scenario's committed state, its ``RecordStore`` and
-its task stores. It validates step progression and settles record
+its task stores. It validates the order of commit numbers and settles record
 consumption with each commit.
 Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` writes a
 new scenario's root snapshot, opens a storage session, and returns the
@@ -104,16 +115,16 @@ assemble their record store with ``CommitHistoryScenarioStore`` and keep
 commits in a ``scenario_commit`` table of the record database.
 ``SQLiteScenarioStorage`` keeps one database file per scenario;
 ``PostgresScenarioStorage`` keeps every scenario in one schema. The committed
-row is the commit point. A committed step records its step number, operation,
+row is the commit point. A commit records its commit number, operation,
 component selection, private artifact locator, checkpoint flag, algorithm
 state, record high-water mark, consumed IDs
 (record IDs, and ``sample:<sample id>`` for each sample that its job trained), metrics, training job ID, and, in a scenario of several trainers, the
 component that made it.
 
-``commit_step(expected_step=..., commit=...)`` validates the expected scenario
-step before accepting its successor. Identical retries (ignoring only
-``recorded_at``) return the original commit; different content for that step
-or a stale expected step conflicts.
+``append_commit(expected_commit_number=..., commit=...)`` validates the expected commit
+number before accepting its successor. Identical retries (ignoring only
+``recorded_at``) return the original commit; different content for that commit
+number or a stale expected commit number conflicts.
 
 ``ScenarioCommitter`` keeps artifact operations outside the store. For a
 durable store, the order is:
@@ -136,7 +147,8 @@ durable store, the order is:
        including every unchanged component.
    * - Train-from
      - The trainer takes the artifact as its start and cancels its running
-       job: a weight trainer imports the artifact with ``import_start``, and
+       job: a weight trainer names the artifact's snapshot as its start, which the
+       training service imports with ``import_start`` for the next job, and
        a harness trainer reads the entries of its tree. Commit a ``train_from``
        record. A restart before the trainer's next training commit takes the
        start again from that record.
@@ -188,14 +200,14 @@ therefore rejects the step before its records are consumed. In-memory commit his
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record`` (format ``reef-scenario/7``): the root's
-``source``, and after step zero the root snapshot as ``start_artifact``.
+under ``scenario_commit_record`` (format ``reef-scenario/8``): the root's
+``source``, and after commit number zero the root snapshot as ``start_artifact``.
 Recovery refuses other formats. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the commit history can
 be adopted into the history. Recovery replays retained records through the
-committed watermark while excluding every committed step's consumed IDs and
+committed watermark while excluding every commit's consumed IDs and
 the records that the trainer's stages consumed (its training state), and
 restores the read cursor. The watermark is a read position:
 retained records behind it can still belong to incomplete job data.
@@ -206,7 +218,7 @@ A retry after a crash therefore submits the same job, and the component
 ignores a job ID it already has. After an ambiguous commit error, history is
 authoritative. Callers must reconcile or retry the same commit before
 publishing another version. Each scenario still needs exactly one logical Reef
-writer; expected-step validation does not provide distributed leases or make
+writer; the check of the expected commit number does not provide distributed leases or make
 external training operations atomic. Those operations must be idempotent or
 reconcilable after a crash. See the `Python storage contract
 <../reference/python-api.rst#scenario-stores>`__ for custom adapters.

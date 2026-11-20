@@ -1,0 +1,321 @@
+"""Control commits a checkpoint by the name of its stored content: it reads no directory of the training service,
+and it holds none of the checkpoint's bytes."""
+
+from __future__ import annotations
+
+import os
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+from tests.support.component_trainers import (
+    HARNESS,
+    WEIGHTS,
+    TextHarnessRecipe,
+    WeightsRecipe,
+    _dispatcher,
+    harness_recipe,
+    two_trainer_recipe,
+)
+
+from reef.artifact import (
+    Artifact,
+    ArtifactNotFoundError,
+    GitLFSRepositoryBackend,
+    InMemoryRepositoryBackend,
+    RepositoryBackendFactory,
+)
+from reef.artifact.artifact import ArtifactValidator
+from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents, TextFileTree
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.sources import DirectorySource
+from reef.recipe import Recipe
+from reef.scenario import Scenario
+from reef.train.types import TrainingCommit
+
+MODEL = "model.safetensors"
+
+
+class RefuseUnvetted(ArtifactValidator):
+    """Refuse an artifact any file of which says unvetted. It reads the files, so the artifact is made local."""
+
+    def validate(self, artifact: Artifact) -> None:
+        root = artifact.materialize().local_path
+        assert root is not None
+        if any("unvetted" in path.read_text(errors="ignore") for path in root.rglob("*") if path.is_file()):
+            raise ValueError("validator refused the artifact")
+
+
+class AnyTree(ArtifactLayout):
+    """A layout that accepts every directory as an artifact of its component."""
+
+    def check(self, files: ArtifactFiles) -> None:
+        return
+
+
+@dataclass(frozen=True)
+class CheckedHarnessRecipe(TextHarnessRecipe):
+    """The harness recipe of the two trainer recipe whose component takes an import, and whose every artifact
+    ``RefuseUnvetted`` checks."""
+
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        spec = ComponentSpec(files=TextFileTree(), validator=RefuseUnvetted(), layout=AnyTree())
+        return ScenarioComponents({HARNESS: spec})
+
+
+def checked_harness() -> CheckedHarnessRecipe:
+    seeded = harness_recipe()
+    return CheckedHarnessRecipe(
+        evolution=seeded.evolution, evaluation=seeded.evaluation, start=seeded.start, training_mode="auto"
+    )
+
+
+@contextmanager
+def control(
+    tmp_path: Path, recipe: Recipe | None = None, backends: RepositoryBackendFactory | None = None
+) -> Iterator[Scenario]:
+    """The scenario ``agent`` in a control process with no training service: a dispatcher over ``recipe`` (the two
+    trainer recipe by default) that runs no local cycle, so the test commits each result itself."""
+    dispatcher, _ = _dispatcher(
+        tmp_path / "control-state",
+        recipe=recipe,
+        backend_factory=backends,
+        hold_local_cycles=True,
+        components=frozenset({"control"}),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        yield scenario
+    finally:
+        dispatcher.close()
+
+
+def stored_commit(scenario: Scenario, content: str, component: str) -> TrainingCommit:
+    """The commit of a checkpoint of ``component``'s trainer whose files are the stored content ``content``."""
+    state = dict(scenario.trainer_for(component).state)
+    return TrainingCommit(state=state, artifact=Artifact.stored(content), component=component)
+
+
+def checkpoint(directory: Path, files: dict[str, bytes]) -> Path:
+    directory.mkdir(parents=True)
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+    return directory
+
+
+def git_backends(tmp_path: Path, name: str) -> RepositoryBackendFactory:
+    """The artifact store of one service: its own work and cache directories over the shared repository."""
+    return GitLFSRepositoryBackend.factory(
+        tmp_path / "artifacts.git", work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+    )
+
+
+@pytest.mark.integration
+def test_control_commits_a_checkpoint_that_the_training_service_stored_and_holds_none_of_its_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    training = git_backends(tmp_path, "training")("agent")
+    with control(tmp_path, backends=git_backends(tmp_path, "control")) as scenario:
+        seed = scenario.current_snapshot()
+        weights = os.urandom(4096)
+        trained = checkpoint(tmp_path / "trained", {MODEL: weights, "adapter_config.json": b'{"r": 8}'})
+        training.store_content("job-1:1", trained)
+        evolved = checkpoint(tmp_path / "evolved", {"AGENTS.md": b"evolved"})
+        training.store_content("job-2:0", evolved)
+        # Control has no volume of the training service: the directories are gone before it commits.
+        shutil.rmtree(trained)
+        shutil.rmtree(evolved)
+
+        result = stored_commit(scenario, "job-1:1", WEIGHTS)
+        scenario.commit(result, component=WEIGHTS)
+        # The harness step carries the weights by their artifact ID: control composes the snapshot by name.
+        scenario.commit(stored_commit(scenario, "job-2:0", HARNESS), component=HARNESS)
+        first, second = scenario.store.history()[-2:]
+        assert (first.snapshot.parent_revision, second.snapshot.parent_revision) == (
+            seed.revision,
+            first.snapshot.revision,
+        )
+        assert second.components is not None and first.components is not None
+        assert second.components[WEIGHTS] == first.components[WEIGHTS] == result.artifact.artifact_id
+
+        # The control process never held the weights: no file of them, and no LFS object.
+        assert not list((tmp_path / "control").rglob(MODEL))
+        assert not [path for path in (tmp_path / "control").rglob("lfs/objects/*/*/*") if path.is_file()]
+        # A commit discards the content that it took.
+        for name in ("job-1:1", "job-2:0"):
+            with pytest.raises(ArtifactNotFoundError):
+                training.materialize_content(name)
+
+        # Another service reads both components of the committed snapshot from the store.
+        served = git_backends(tmp_path, "inference")("agent").materialize(second.snapshot)
+        assert served.local_path is not None
+        assert (served.local_path / WEIGHTS / MODEL).read_bytes() == weights
+        assert (served.local_path / WEIGHTS / "adapter_config.json").read_text() == '{"r": 8}'
+        assert (served.local_path / HARNESS / "AGENTS.md").read_text() == "evolved"
+
+
+@pytest.mark.unit
+def test_a_commit_that_fails_after_the_snapshot_is_stored_commits_once_also_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backend = backends("agent")
+    backend.store_content("job-1:1", checkpoint(tmp_path / "one", {"weights.txt": b"w1"}))
+    backend.store_content("job-2:1", checkpoint(tmp_path / "two", {"weights.txt": b"w2"}))
+
+    def crash(**arguments):
+        raise OSError("control stopped before the record")
+
+    with control(tmp_path, WeightsRecipe(), backends) as scenario:
+        commits = scenario.commit_number
+        append_commit = scenario.store.append_commit
+        # The backend stored the snapshot, and the record did not land.
+        result = stored_commit(scenario, "job-1:1", WEIGHTS)
+        monkeypatch.setattr(scenario.store, "append_commit", crash)
+        with pytest.raises(OSError, match="before the record"):
+            scenario.commit(result)
+        assert scenario.commit_number == commits
+        stored = backend.artifact_snapshot(result.artifact.artifact_id)
+        # The content stays until a record names its snapshot, so the same result commits that snapshot.
+        assert backend.materialize_content("job-1:1").is_dir()
+        monkeypatch.setattr(scenario.store, "append_commit", append_commit)
+        scenario.commit(result)
+        assert scenario.store.history()[-1].snapshot == stored
+        with pytest.raises(ArtifactNotFoundError):
+            backend.materialize_content("job-1:1")
+
+        # A restart loses the pending result: the trainer polls the job again and commits the content anew.
+        monkeypatch.setattr(scenario.store, "append_commit", crash)
+        with pytest.raises(OSError, match="before the record"):
+            scenario.commit(stored_commit(scenario, "job-2:1", WEIGHTS))
+        monkeypatch.undo()
+    with control(tmp_path, WeightsRecipe(), backends) as restarted:
+        assert restarted.commit_number == commits + 1
+        restarted.commit(stored_commit(restarted, "job-2:1", WEIGHTS))
+        assert restarted.commit_number == commits + 2
+        committed = restarted.repository.materialize(restarted.store.history()[-1].snapshot)
+        assert (committed.local_path / "weights.txt").read_text() == "w2"
+        with pytest.raises(ArtifactNotFoundError):
+            backend.materialize_content("job-2:1")
+
+
+@pytest.mark.unit
+def test_control_commits_stored_content_by_name_and_reads_none_of_it_to_check_it(tmp_path: Path) -> None:
+    """The training service checks a checkpoint before it stores it (``TrainingJobWorker``), so control runs no check
+    on stored content and makes none of it local: content that the component's check would refuse commits here."""
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backend = backends("agent")
+    backend.store_content("job-1:0", checkpoint(tmp_path / "trained", {"AGENTS.md": b"unvetted"}))
+    with control(tmp_path, two_trainer_recipe(harness=checked_harness()), backends) as scenario:
+        commits = scenario.commit_number
+        scenario.commit(stored_commit(scenario, "job-1:0", HARNESS), component=HARNESS)
+        assert scenario.commit_number == commits + 1
+        assert not scenario.repository.materialized_stored
+        committed = scenario.repository.materialize(scenario.store.history()[-1].snapshot)
+        assert (committed.local_path / HARNESS / "AGENTS.md").read_text() == "unvetted"
+        assert (committed.local_path / WEIGHTS / "weights.txt").read_text() == "weights seed"
+        # A commit of content that the store does not hold fails, and the scenario stays.
+        with pytest.raises(ArtifactNotFoundError):
+            scenario.commit(stored_commit(scenario, "missing:0", HARNESS), component=HARNESS)
+        assert scenario.commit_number == commits + 1
+
+
+# -- a scenario of several components: imports, syncs and selections --------------------------------------------
+
+
+@pytest.mark.integration
+def test_a_sync_and_an_import_of_the_harness_of_a_composite_bring_no_weight_to_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control composes the snapshot of a sync and of an import by name, and it reads the harness tree alone: the
+    weights of the composite never reach its directories."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    training = git_backends(tmp_path, "training")("agent")
+    weights = os.urandom(1024 * 1024)
+    recipe = two_trainer_recipe(harness=checked_harness())
+    with control(tmp_path, recipe, git_backends(tmp_path, "control")) as scenario:
+        training.store_content("job-1:1", checkpoint(tmp_path / "trained", {MODEL: weights}))
+        scenario.commit(stored_commit(scenario, "job-1:1", WEIGHTS), component=WEIGHTS)
+        selection = scenario.artifact_selection()
+
+        # A sync reads the active harness tree, as the service does to merge a person's files onto it.
+        _, active = scenario.resolve_artifact(selection.components[HARNESS], HARNESS)
+        assert scenario.components.read_files(active) == {"harness.txt": "harness seed"}
+        synced = scenario.sync_artifact(
+            Artifact.local(checkpoint(tmp_path / "synced", {"AGENTS.md": b"synced"})),
+            component=HARNESS,
+            expected_selection=selection,
+            metrics={},
+        )
+        _, after_sync = scenario.resolve_artifact(synced.artifact_id, HARNESS)
+        assert scenario.components.read_files(after_sync) == {"AGENTS.md": "synced"}
+        assert scenario.artifact_selection().components == {**selection.components, HARNESS: synced.artifact_id}
+
+        given = checkpoint(tmp_path / "given", {"AGENTS.md": b"imported"})
+        imported = scenario.import_artifact(
+            DirectorySource(given, source_version="v1", link=False),
+            HARNESS,
+            source={"uri": "file:///given/", "version": "v1"},
+            directory=tmp_path / "import-work",
+        )
+        _, after_import = scenario.resolve_artifact(imported.artifact_id, HARNESS)
+        assert scenario.components.read_files(after_import) == {"AGENTS.md": "imported"}
+
+        assert not list((tmp_path / "control").rglob(MODEL))
+        assert not [path for path in (tmp_path / "control").rglob("lfs/objects/*/*/*") if path.is_file()]
+        # Both snapshots carry the weights: another service reads them from the store.
+        for component_artifact, text in ((synced, "synced"), (imported, "imported")):
+            _, ref = scenario.artifact_snapshot(component_artifact.artifact_id, HARNESS)
+            served = git_backends(tmp_path, f"inference-{text}")("agent").materialize(ref).local_path
+            assert served is not None
+            assert (served / WEIGHTS / MODEL).read_bytes() == weights
+            assert (served / HARNESS / "AGENTS.md").read_text() == text
+
+
+@pytest.mark.integration
+def test_selecting_artifacts_of_a_composite_brings_no_weight_to_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An activation, a restore and a train-from select artifacts by their metadata. Control fetches no file to select; the reader of a component makes that component local, and
+    control reads the harness alone."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    training = git_backends(tmp_path, "training")("agent")
+    first, second = os.urandom(1024 * 1024), os.urandom(1024 * 1024)
+    with control(tmp_path, backends=git_backends(tmp_path, "control")) as scenario:
+        root = scenario.artifact_selection().components
+        trained = []
+        for number, weights in enumerate((first, second), start=1):
+            training.store_content(f"job-{number}:1", checkpoint(tmp_path / f"trained-{number}", {MODEL: weights}))
+            result = stored_commit(scenario, f"job-{number}:1", WEIGHTS)
+            scenario.commit(result, component=WEIGHTS)
+            trained.append(result.artifact.artifact_id)
+        training.store_content("job-3:0", checkpoint(tmp_path / "evolved", {"harness.txt": b"evolved"}))
+        scenario.commit(stored_commit(scenario, "job-3:0", HARNESS), component=HARNESS)
+        evolved = scenario.artifact_selection().components[HARNESS]
+        after_training = scenario.commit_number
+
+        # Each of these selects other artifacts than the newest snapshot binds together.
+        scenario.activate(trained[0], WEIGHTS)
+        assert scenario.artifact_selection().components == {WEIGHTS: trained[0], HARNESS: evolved}
+        scenario.activate(root[HARNESS], HARNESS)
+        assert scenario.restore(after_training) == {WEIGHTS: trained[1], HARNESS: evolved}
+        scenario.train_from(root[HARNESS], HARNESS)
+        # A reader of the harness of the selected view gets its files, and no file of the weights.
+        _, selected = scenario.resolve_artifact(evolved, HARNESS)
+        assert scenario.components.read_files(selected) == {"harness.txt": "evolved"}
+
+        assert not list((tmp_path / "control").rglob(MODEL))
+        assert not [path for path in (tmp_path / "control").rglob("lfs/objects/*/*/*") if path.is_file()]
+        # The reader of the weights, such as the inference service, makes them local from the store.
+        weights_view = git_backends(tmp_path, "inference")("agent").resolve_artifact(trained[0])
+        assert weights_view.local_path is not None
+        assert (weights_view.local_path / MODEL).read_bytes() == first
+        assert not list((tmp_path / "inference").rglob("harness.txt"))

@@ -18,6 +18,7 @@ from recipes.openclawrl.examples.openclawrl.user_sim.personas import (
 )
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
+from reef.record2sample.staleness import ServedArtifacts
 from reef.train.pipeline import TrainingPipeline
 
 CLEAN_REPLY = """Sure, here is the working.
@@ -143,11 +144,10 @@ def test_openclawrl_processor_drops_unfillable_stale_artifact_candidates() -> No
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     # Two stale leftovers from before a weight swap, then a fresh generation.
-    processor.observe_serving_artifact_id("v1")
-    processor.observe_serving_artifact_id("v2")
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
     processor.produce()
+    processor.mark_stale(ServedArtifacts(("v1", "v2")))
     batch = processor.build_job_data(3)
     artifact_ids = {sample.artifact_id for sample in batch.samples}
     assert artifact_ids == {"v2"}

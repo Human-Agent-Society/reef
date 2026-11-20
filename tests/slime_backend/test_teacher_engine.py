@@ -10,14 +10,14 @@ from unittest.mock import patch
 import pytest
 
 from reef.core.errors import DeployConfigError
-from reef.service.deploy.service_config import ServiceConfig
-from reef.train.slime_backend.distill.algorithm import DistillAlgorithm, DistillSettings, settings_from_args
+from reef.service.deploy.service_config import ServiceSettings
+from reef.train.slime_backend.distill.algorithm import DistillAlgorithm, DistillAlgorithmSettings, settings_from_args
 from reef.train.slime_backend.distill.teacher_engine import TeacherEngine, parse_teacher_scores, teacher_vocab_size
 from reef.train.slime_backend.launch import TEACHER_URL_ENV, SlimeDeployment, slime_arguments, teacher_service
 
 
 def settings(**kwargs):
-    return DistillSettings(
+    return DistillAlgorithmSettings(
         **{
             "teacher": "separate",
             "teacher_url": "http://teacher:30001",
@@ -169,7 +169,7 @@ def test_family_flags_binding_and_worker_settings_preserve_engine(teacher_path):
 
 
 def test_managed_teacher_has_separate_gpu_allocation_and_scoring_endpoint():
-    config = asdict(ServiceConfig(recipe="recipe", teacher_model_path="/models/teacher", teacher_num_gpus=2))
+    config = asdict(ServiceSettings(recipe="recipe", teacher_model_path="/models/teacher", teacher_num_gpus=2))
     service = teacher_service(config)
     assert service["executor"] == "ray"
     assert service["resources"]["num_gpus"] == 2
@@ -186,7 +186,7 @@ def test_managed_teacher_has_separate_gpu_allocation_and_scoring_endpoint():
 def test_managed_teacher_rejects_identity_and_placement_overrides(flag):
     with pytest.raises(DeployConfigError):
         teacher_service(
-            asdict(ServiceConfig(recipe="recipe", teacher_model_path="/teacher", teacher_options={flag: "value"}))
+            asdict(ServiceSettings(recipe="recipe", teacher_model_path="/teacher", teacher_options={flag: "value"}))
         )
 
 
@@ -315,7 +315,7 @@ def test_engine_temperature_is_rejected_before_loading_models():
 
 @pytest.mark.parametrize("port", [True, "30001", 0, 65536, 8000])
 def test_teacher_rejects_invalid_or_conflicting_port(port):
-    config = asdict(ServiceConfig(recipe="recipe", port=8000, teacher_model_path="/teacher"))
+    config = asdict(ServiceSettings(recipe="recipe", port=8000, teacher_model_path="/teacher"))
     config["teacher_port"] = port
     with pytest.raises(DeployConfigError, match=r"teacher\.port"):
         teacher_service(config)

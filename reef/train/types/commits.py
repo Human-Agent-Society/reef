@@ -28,3 +28,5 @@ class PreparedCommit:
     released_ids: frozenset[str] = frozenset()
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
+    #: The artifact that the step's job named as its start (``TrainingCommit.train_from``), or None.
+    train_from: str | None = None

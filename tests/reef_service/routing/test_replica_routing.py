@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
@@ -30,21 +31,21 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
-from reef.core.errors import DeployConfigError
+from reef.core.errors import DeployConfigError, ScenarioDeletedError
 from reef.core.records_types import AgentRecord
 from reef.core.snapshot import SnapshotRef
 from reef.service import routed_replica
 from reef.service.components import build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.cli import main as routing_cli
-from reef.service.deploy.routing.renderer import MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
+from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.routed_inference import RoutedScenario, ShadowRecordWriter
 from reef.service.routed_shadow import ShadowTasks
 from reef.service.routing import RoutingSnapshot
 from reef.storage.commits import CommitRecord
-from reef.storage.data import ScenarioArchived
+from reef.storage.data import ScenarioArchivedError
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
@@ -54,8 +55,8 @@ CHAT = {"model": "auto", "messages": [{"role": "user", "content": "hello"}]}
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 
 
-def external_settings(tmp_path: Path, manifest: Path | None, port: int = 50053) -> ServiceConfig:
-    return ServiceConfig(
+def external_settings(tmp_path: Path, manifest: Path | None, port: int = 50053) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_work_dir=str(tmp_path / "work"),
@@ -408,6 +409,24 @@ def test_a_replica_refuses_settings_that_cannot_route(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_a_replica_refuses_a_manifest_without_its_router_image_before_any_routing_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As ``render`` does: Reef builds a router image only for a managed deployment, never for an external router.
+    path = tmp_path / "manifest.yaml"
+    path.write_text(json.dumps(routing_manifest("http://127.0.0.1:1", image=None)), encoding="utf-8")
+
+    def no_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a replica that refuses its manifest makes no routing client")
+
+    monkeypatch.setattr(routed_replica.RoutingAdapter, "from_snapshot", no_client)
+    monkeypatch.setattr(routed_replica, "RoutingPreviewClient", no_client)
+    monkeypatch.setattr(routed_replica, "RouterManagementClient", no_client)
+    with pytest.raises(ValueError, match=re.escape(EXTERNAL_IMAGE_MESSAGE)):
+        build_component_app("inference", external_settings(tmp_path, path), environ=ENVIRONMENT)
+
+
+@pytest.mark.unit
 def test_external_routing_is_only_for_the_inference_component(tmp_path: Path) -> None:
     path = tmp_path / "manifest.yaml"
     path.write_text(json.dumps(routing_manifest("http://127.0.0.1:1")), encoding="utf-8")
@@ -472,7 +491,7 @@ def test_render_writes_a_router_config_bound_to_the_replica_loopback(
 
 
 @pytest.mark.unit
-def test_a_replica_never_writes_a_late_shadow_into_a_recreated_scenario(
+def test_a_replica_rejects_a_late_shadow_after_its_record_generation_ends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def run() -> None:
@@ -490,7 +509,7 @@ def test_a_replica_never_writes_a_late_shadow_into_a_recreated_scenario(
         def write(writer: routed_replica.ReplicaShadowWriter, item: AgentRecord) -> AgentRecord:
             try:
                 return append(writer, item)
-            except ScenarioArchived:
+            except ScenarioArchivedError:
                 rejected.set()
                 raise
 
@@ -507,37 +526,38 @@ def test_a_replica_never_writes_a_late_shadow_into_a_recreated_scenario(
             assert response.status == 200
             await asyncio.wait_for(provider.shadow_started.wait(), 5)
             records = captured[0]
-            # Exercise the stale-generation guard defensively. Production archive requires all Scenario sessions closed.
-            records.storage.archive("coding")
+            # Invalidate the captured record generation while the shadow still holds its session.
+            # Leave SQLite files in place until that session has closed.
+            with (
+                closing(LocalTaskFileStore(tmp_path / "unused-task-files")) as files,
+                closing(SQLiteDataStore(tmp_path / "records" / "data", files)) as data,
+            ):
+                data.delete_scenario("coding", "coding")
             settings = ScenarioSettings(training_mode="manual")
             committed = CommitRecord(
-                scenario="coding",
-                step=1,
+                scenario="other",
+                commit_number=1,
                 snapshot=SnapshotRef("release:1", "base"),
                 checkpoint=True,
-                algorithm_state={"replacement": True},
+                algorithm_state={},
                 high_water_sequence=0,
                 high_water_offset=0,
                 consumed_ids=frozenset(),
                 recorded_at=1001.0,
             )
-            with closing(records.storage.open("coding")) as replacement:
-                assert list(replacement.records.replay("coding")) == []
-                records.storage.write_settings("coding", settings)
-                replacement.commit_step(expected_step=0, commit=committed)
+            with closing(records.storage.open("other")) as other:
+                records.storage.write_settings("other", settings)
+                other.append_commit(expected_commit_number=0, commit=committed)
                 provider.release_shadow.set()
-                assert await asyncio.to_thread(rejected.wait, 5), "the old session must reject a late shadow"
-                assert await asyncio.to_thread(closed.wait, 5), "the replacement must stay open through the old close"
-            with closing(records.storage.open("coding")) as reopened:
-                assert reopened.history() == (committed,)
-                assert records.storage.read_settings("coding") == settings
+                assert await asyncio.to_thread(rejected.wait, 5), "the old generation must reject the late shadow"
+                assert await asyncio.to_thread(closed.wait, 5), "the shadow must release its session"
+                assert other.history() == (committed,)
+                assert records.storage.read_settings("other") == settings
             assert stored_records(tmp_path) == []
-            # The replacement accepts only new requests, with normal primary and shadow records.
-            response = await client.post("/v1/chat/completions", headers=routing_headers(), json=CHAT)
-            assert response.status == 200
-            items = await wait_for_record_count(tmp_path, 2)
-            assert {item["payload"]["metadata"]["routing"]["purpose"] for item in items} == {"serve", "shadow"}
-        assert len(stored_records(tmp_path)) == 2
+            assert stored_records(tmp_path, "other") == []
+            records.storage.archive("coding")
+            with pytest.raises(ScenarioDeletedError):
+                records.storage.open("coding")
 
     asyncio.run(run())
 

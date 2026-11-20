@@ -5,31 +5,45 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import Iterator
+import urllib.request
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 import pytest
 from reef_client.serve import CapturedTurn
 
-from reef.core.evaluation import EvaluationCall, EvaluationTrajectory, PolicyModel
+from reef.core.errors import ReefError
+from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    TASK_TEMPLATE_KIND,
     CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
     RolloutCalls,
+    TaskTemplateWorker,
+    TreeHarness,
     evaluation_call,
     reply_summary,
     rollout_item_id,
     run_while_held,
+    template_item_id,
     verifier_output,
 )
+from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
+from reef.evaluation.trials import EvaluationTrial, TrialObserver
+from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
+from reef.execution.workers import WorkerStoppedError
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork, WorkLeaseLost
+from reef.storage.work_queue import NewWork, WorkLeaseLostError, WorkQueue
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -80,6 +94,165 @@ class UnreachableEndpoints(CandidateEndpoints):
         self.trajectories.append(trajectory)
 
 
+class OpenEndpoints(UnreachableEndpoints):
+    """Task-root endpoints for worker tests, with an address supplied by ``open``.
+
+    Values have a ``Path`` root and the inherited call and trajectory lists, initially empty, with no refused call index.
+    ``task_directory`` creates ``root / rollout.task_name``, writes an empty ``task.toml``, and returns that directory.
+    File errors propagate. Call and trajectory recording follow ``UnreachableEndpoints``.
+    The default ``open`` ignores its inputs and yields ``http://127.0.0.1:9`` with no token or server.
+    Subclasses can supply a live address for tests whose agents make calls.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        (task / "task.toml").write_text("")
+        return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+
+class NoSandboxLab(TaskLab):
+    """A lab whose trial writes its exception to its trial directory under ``root`` and ends with no call."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        trial = self.root / key
+        trial.mkdir(parents=True)
+        (trial / "exception.txt").write_text("SandboxError: the image did not build")
+        return RolloutRow(rewards={}, error="the sandbox did not start", trial_uri=trial.as_uri())
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+class ReadingObserver(TrialObserver):
+    """Keeps each trial and the exception text in its directory; raises after it keeps them when ``failing``."""
+
+    def __init__(self, failing: bool = False) -> None:
+        self.trials: list[tuple[EvaluationTrial, str]] = []
+        self.failing = failing
+
+    def observe(self, trial: EvaluationTrial) -> None:
+        assert trial.directory is not None
+        self.trials.append((trial, (trial.directory / "exception.txt").read_text()))
+        if self.failing:
+            raise OSError("the log store is gone")
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing(tmp_path, caplog, failing):
+    observer = ReadingObserver(failing)
+    worker = ServedWorker(
+        memory_coordination().work_queue,
+        OpenEndpoints(tmp_path / "tasks"),
+        worker_id="w",
+        lab=NoSandboxLab(tmp_path / "trials"),
+        trial_observer=observer,
+    )
+    with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
+        worker.score(rollout(), threading.Event(), 2)
+    [(trial, exception)] = observer.trials
+    assert trial == EvaluationTrial("s", "e1", 2, "add", 0, 2, trial.directory, "the sandbox did not start")
+    assert exception == "SandboxError: the image did not build"
+    failed = "the trial observer failed on rollout evaluation_rollout:e1:00002:00000"
+    assert (failed in caplog.text) == failing
+
+
+class AnsweringEndpoints(OpenEndpoints):
+    """Endpoints for the failed-score test's model call, with the state and task operations of ``OpenEndpoints``.
+
+    Values add no instance state. ``open`` ignores its inputs and starts an HTTP server on an unused loopback port.
+    It yields that server's URL with no token; ``Handler`` defines its responses.
+    Context exit stops and closes the server, including when the caller raises. Server setup errors propagate.
+    """
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        class Handler(BaseHTTPRequestHandler):
+            """One request handler, constructed by this endpoint's server with only ``BaseHTTPRequestHandler`` state.
+
+            ``do_POST`` accepts a body with a nonnegative integer ``Content-Length``, or an empty body without that header.
+            It reads that many bytes and returns HTTP 200 with JSON body ``{"choices": []}``.
+            The response has ``Content-Type: application/json`` and the body's byte length as ``Content-Length``.
+            Invalid length conversion and I/O errors propagate. ``log_message`` ignores its arguments and writes nothing.
+            Other request handling follows ``BaseHTTPRequestHandler``.
+            """
+
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'{"choices": []}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            yield CandidateEndpoint(f"http://127.0.0.1:{server.server_port}", None)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class CalledThenFailedLab(TaskLab):
+    """A stateless ``TaskLab`` for the worker test of a failure after a model call.
+
+    ``run`` requires ``agent["kwargs"]`` to be a mapping with an ``api_base`` string naming a reachable HTTP base URL.
+    It ignores ``task_path``, ``key``, ``tags``, ``overrides``, and all other agent entries.
+    It POSTs ``{"model": "m", "messages": []}`` as JSON to ``{api_base}/chat/completions``, with a 10-second timeout.
+    After reading the response, it returns a ``RolloutRow`` with empty rewards and no trial URI.
+    Its error is ``VerifierTimeoutError: the verifier ran past 600 s``.
+    Input and request errors propagate; the lab keeps no state or trial files.
+    ``build_environment`` ignores both inputs and returns ``""`` to simulate a successful build without starting an environment.
+    """
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
+        request = urllib.request.Request(
+            f"{api_base}/chat/completions",
+            data=b'{"model": "m", "messages": []}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+        return RolloutRow(rewards={}, error="VerifierTimeoutError: the verifier ran past 600 s", trial_uri=None)
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+@pytest.mark.unit
+def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp_path):
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=CalledThenFailedLab())
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == ("finished", None)
+    assert item.result == {
+        "score": FAILED,
+        "rewards": None,
+        "error": "VerifierTimeoutError: the verifier ran past 600 s",
+    }
+
+
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
     return CapturedTurn("", path, status, {"messages": []}, response, None, False, 2.0, at=100.0)
 
@@ -88,7 +261,7 @@ def turn(path: str, status: int, response: dict[str, object] | None) -> Captured
 def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
     value = rollout(repeat=1)
     queue = memory_coordination().work_queue
-    item = queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    item = queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     assert item.id == rollout_item_id("e1", 2, 1) == "evaluation_rollout:e1:00002:00001"
     assert EvaluationRollout.from_item(item) == value
 
@@ -97,15 +270,46 @@ def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
 def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
-    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     worker = ServedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
 
     assert worker.run_once() is True
-    assert queue.get(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
     assert worker.run_once() is True
-    failed = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
+
+
+class ServingRefusedWorker(EvaluationRolloutWorker):
+    """A worker that fails the test when it asks to serve a candidate."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        raise AssertionError("a rollout that cannot run serves no candidate")
+
+
+class ToolTaskEndpoints(OpenEndpoints):
+    """Endpoints whose task asks its agent for an SSE MCP server."""
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = super().task_directory(rollout)
+        (task / "task.toml").write_text(
+            '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
+        )
+        return task
+
+
+@pytest.mark.unit
+def test_a_tree_rollout_whose_task_needs_what_the_agent_lacks_fails_for_good_before_serving(tmp_path):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(rollout(), agent=None, tree=TreeHarness("codex", "openai-responses", {}))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServingRefusedWorker(queue, ToolTaskEndpoints(tmp_path), worker_id="evaluation-1")
+
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert failed.state == "failed" and failed.attempt_count == 1
+    assert failed.error == "task 'add' needs mcp_servers, which adapter 'codex' does not give its agent"
 
 
 @pytest.mark.unit
@@ -261,20 +465,290 @@ def test_a_verifier_output_that_cannot_be_kept_is_logged_and_changes_nothing(tmp
 
 
 @pytest.mark.unit
-def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout(monkeypatch):
+@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLostError), ("stopped", WorkerStoppedError)])
+def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops(monkeypatch, event, error):
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     cancelled = threading.Event()
 
-    class EndlessRunner:
-        async def run_rollouts_async(self, requests, slots):
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
+    async def endless_trial():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
-    lease_lost = threading.Event()
-    threading.Timer(0.1, lease_lost.set).start()
-    with pytest.raises(WorkLeaseLost):
-        asyncio.run(run_while_held(EndlessRunner(), "request", lease_lost))
+    events = {"lease_lost": threading.Event(), "stopped": threading.Event()}
+    threading.Timer(0.1, events[event].set).start()
+    with pytest.raises(error):
+        asyncio.run(run_while_held(endless_trial(), events["lease_lost"], events["stopped"]))
     assert cancelled.is_set()
+
+
+def e2b_rollout() -> EvaluationRollout:
+    return replace(rollout(), environment="e2b")
+
+
+class TemplateBuilds:
+    """A stand-in for ``build_task_template`` of Reef's e2b sandbox: each call takes the next of ``outcomes``, an
+    exception to raise or None for a ready template, and keeps the task directory in ``paths``."""
+
+    def __init__(self, *outcomes: Exception | None) -> None:
+        self.outcomes = list(outcomes)
+        self.paths: list[Path] = []
+
+    async def __call__(self, task_path: Path) -> str:
+        self.paths.append(task_path)
+        outcome = self.outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return "add__0123456789ab__aenv"
+
+
+@pytest.mark.unit
+def test_a_template_item_waits_again_for_a_template_that_found_no_free_builder(monkeypatch, tmp_path):
+    pytest.importorskip("e2b")
+    builds = TemplateBuilds(TimeoutError("the template was waiting after 600 s"), None)
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
+    queue = memory_coordination().work_queue
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    worker = TaskTemplateWorker(queue, endpoints, DockerfileTemplateBuilder(), worker_id="w")
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert builds.paths == [endpoints.task_directory(value)] * 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("outcome", "message"),
+    [
+        (TimeoutError("the template was waiting after 600 s"), "the template of task 'add' was not ready after 0 s"),
+        (AgentEnvBuildError("aenv build of add failed with exit code 1"), "aenv build of add failed"),
+    ],
+)
+def test_a_template_item_fails_as_retryable_when_its_template_is_not_ready(monkeypatch, tmp_path, outcome, message):
+    pytest.importorskip("e2b")
+    monkeypatch.setattr("reef.evaluation.rollout_worker.TEMPLATE_WAIT_S", 0.0)
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", TemplateBuilds(outcome))
+    queue = memory_coordination().work_queue
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    worker = TaskTemplateWorker(queue, OpenEndpoints(tmp_path / "tasks"), DockerfileTemplateBuilder(), worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert item.state == "queued" and message in str(item.error)
+
+
+class RecordedBuilder(TaskTemplateBuilder):
+    """A ``TaskTemplateBuilder`` that keeps the arguments of each build in ``builds`` and builds nothing."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str, str, Path]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.builds.append((scenario, task_name, task_directory))
+
+
+@pytest.mark.unit
+def test_a_template_item_builds_with_the_deployments_builder_and_not_from_the_dockerfile(monkeypatch, tmp_path):
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", TemplateBuilds())
+    queue = memory_coordination().work_queue
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = RecordedBuilder()
+    assert TaskTemplateWorker(queue, endpoints, builder, worker_id="w").run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert builder.builds == [(value.scenario, value.task_name, endpoints.task_directory(value))]
+
+
+class OwnedEndpoints(OpenEndpoints):
+    """``OpenEndpoints`` whose scenario record stores the owner ``owner``, or none when it is None."""
+
+    def __init__(self, root: Path, owner: str | None) -> None:
+        super().__init__(root)
+        self.owner = owner
+
+    def task_owner(self, rollout: EvaluationRollout) -> str | None:
+        return self.owner
+
+
+class OwnerBuilder(TaskTemplateBuilder):
+    """A builder that finds templates by owner: it keeps ``(owner, scenario, task_name)`` of each build in ``builds``
+    and builds nothing. Its three-argument ``build`` fails the test, since the worker gives the owner."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str | None, str, str]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_owner")
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.builds.append((owner, scenario, task_name))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("queued_owner", "record_owner", "error"),
+    [
+        # An item that an older Reef queued names no owner: the record's owner counts.
+        (None, "workspace-7", None),
+        ("workspace-7", "workspace-7", None),
+        # A scenario of the same name with another owner, or none, gets no template of this evaluation.
+        ("workspace-7", "workspace-9", "has the owner 'workspace-9' now, not 'workspace-7'"),
+        ("workspace-7", None, "has no owner now, not 'workspace-7'"),
+    ],
+)
+def test_a_template_item_builds_for_the_owner_of_the_scenarios_record_and_never_for_another(
+    tmp_path, queued_owner, record_owner, error
+):
+    queue = memory_coordination().work_queue
+    # The scenario's name is a slug that says nothing of its owner.
+    value = replace(e2b_rollout(), scenario="eval-run-3f9a", owner=queued_owner)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = OwnerBuilder()
+    worker = TaskTemplateWorker(queue, OwnedEndpoints(tmp_path / "tasks", record_owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    if error is None:
+        assert item.state == "finished"
+        assert builder.builds == [(record_owner, "eval-run-3f9a", "add")]
+        return
+    assert (item.state, item.attempt_count, builder.builds) == ("failed", 1, [])
+    assert error in str(item.error)
+
+
+def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:
+    """Add the template item of ``value``'s task, and end it: finished when ``error`` is None, else failed for good
+    with ``error``."""
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == item_id
+    if error is None:
+        queue.finish(EVALUATIONS_QUEUE, item_id, "builder", {})
+    else:
+        queue.fail(EVALUATIONS_QUEUE, item_id, "builder", error, retryable=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("template_error", "reason"),
+    [
+        ("the registry holds no image of task add", "the registry holds no image of task add"),
+        (None, "the queue no longer holds its template item"),
+    ],
+)
+def test_a_rollout_that_requires_prepared_templates_runs_no_trial_without_them(tmp_path, template_error, reason):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(e2b_rollout(), requires_prepared_templates=True)
+    if template_error is not None:
+        finished_template(queue, value, template_error)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    # No candidate is served and the lab runs no trial, which would write under ``trials``.
+    lab = NoSandboxLab(tmp_path / "trials")
+    worker = ServingRefusedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1", lab=lab)
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (failed.state, failed.attempt_count) == ("failed", 1)
+    assert failed.error == f"the templates of task 'add' were not prepared: {reason}"
+    assert not (tmp_path / "trials").exists()
+
+
+class EnvironmentLab(CalledThenFailedLab):
+    """A ``CalledThenFailedLab`` that keeps the Harbor environment config of each trial in ``environments``."""
+
+    def __init__(self) -> None:
+        self.environments: list[Mapping[str, object]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.environments.append(overrides["environment"])
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requires", [True, False])
+def test_the_trial_of_a_rollout_that_requires_prepared_templates_builds_no_template(tmp_path, requires):
+    queue = memory_coordination().work_queue
+    value = replace(
+        e2b_rollout(),
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+        requires_prepared_templates=requires,
+    )
+    finished_template(queue, value, None)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "finished"
+    [environment] = lab.environments
+    # Only a rollout that requires prepared templates tells Reef's e2b class not to build one.
+    assert environment["import_path"] == "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+    assert ("builds_templates" in environment.get("kwargs", {})) == requires
+    if requires:
+        assert environment["kwargs"]["builds_templates"] is False
+
+
+@pytest.mark.unit
+def test_only_a_rollout_on_e2b_requires_prepared_templates():
+    with pytest.raises(ValueError, match="only a rollout on e2b requires prepared templates"):
+        replace(rollout(), requires_prepared_templates=True)
+    with pytest.raises(ValueError, match="owner is a non-empty string or None"):
+        replace(e2b_rollout(), owner="")
+    value = replace(e2b_rollout(), owner="workspace-7", requires_prepared_templates=True)
+    item = memory_coordination().work_queue.append(
+        NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload())
+    )
+    assert EvaluationRollout.from_item(item) == value
+
+
+class HeldLab(CalledThenFailedLab):
+    """A ``TaskLab`` whose trial makes one model call, as ``CalledThenFailedLab``, then runs until ``released`` is
+    set, and ends with the reward 1. ``started`` is set once the call has an answer."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.released = threading.Event()
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        self.started.set()
+        while not self.released.is_set():
+            await asyncio.sleep(0.01)
+        return RolloutRow(rewards={"reward": 1.0}, error=None, trial_uri=None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("on_stop", "state", "error"), [("requeue", "queued", "the worker stopped"), ("finish", "finished", None)]
+)
+def test_a_stopping_worker_requeues_or_finishes_the_rollouts_that_it_runs(
+    tmp_path, monkeypatch, on_stop, state, error
+):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = HeldLab()
+    worker = ServedWorker(
+        queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab, slots=2, on_stop=on_stop
+    )
+    assert worker.run_once() is True
+    assert lab.started.wait(10)
+    # The rollout ends only when the lab lets it, so a worker that cancels it stops first.
+    threading.Timer(0.3, lab.released.set).start()
+    worker.stop()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == (state, error)
+    if on_stop == "finish":
+        assert item.result == {"score": 1.0, "rewards": {"reward": 1.0}, "error": None}
+
+
+@pytest.mark.unit
+def test_a_worker_refuses_an_unknown_stop():
+    with pytest.raises(ValueError, match="on_stop must be one of requeue, finish, not 'drain'"):
+        ServedWorker(memory_coordination().work_queue, UnreachableEndpoints(), worker_id="w", on_stop="drain")

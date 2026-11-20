@@ -74,10 +74,7 @@ declares its keys as a frozen settings dataclass that inherits
 ``reef.core.config.config_option``). Its ``from_config`` parses the config
 with ``Settings.parse(config, plugin_class=cls)`` and gives the settings
 object to the constructor; the stage never reads a raw mapping. A stage
-without config parses with ``NoSettings``, which refuses any key. A
-record-to-sample stage that holds units parses ``Record2SampleSettings`` or a
-settings class that extends it, and gives its ``max_staleness`` to
-``Record2Sample.__init__`` (see `Staleness <#staleness>`__). Reading the
+without config parses with ``NoSettings``, which refuses any key. Reading the
 deployment checks the stage classes; a bad config fails when the first
 scenario builds its pipeline. The default record-to-sample stage,
 ``NoSamples``, makes no sample, so the pipeline makes no job data.
@@ -128,7 +125,7 @@ a unit ready when the samples of all its record sets are made.
 
 When a unit is ready, the pipeline saves each of the unit's samples
 (``unit_samples``) as a data item of the scenario's owner that the scenario
-uses (``TrainerSamples.add_record_samples``, RFC #1140). Then the scenario's
+uses (``TrainerSamples.write_record_samples``, RFC #1140). Then the scenario's
 training state records the unit's records as consumed by the trainer. The stage
 then ends the unit (``consume``) and forgets its samples. Sample ``i`` of record
 set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or
@@ -280,8 +277,8 @@ that the scenario uses (``TrainingPipeline.auto_entries``):
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
    sample. A kind that the recipe gives no job parameters does not count; such
    samples train only for a request that gives them.
-3. It leaves out each stale sample that the trainer made from records (see
-   `Staleness <#staleness>`__), and every other sample of its group. An
+3. It leaves out each sample that the samples service marked stale (see
+   `Staleness <#staleness>`__). The mark covers every sample of a group. An
    uploaded trajectory is never stale.
 4. It takes the first ``buffer_size`` samples that remain, and the rest of
    each group that those samples touch.
@@ -310,32 +307,52 @@ reads the directory (RFC #1140). The jobs queue keeps only a reference to it.
 The directory holds the samples, not the training request: Reef keeps the
 request for its own accounting.
 
-Format 1 of a directory:
+Format 2 of a directory:
 
 .. code:: text
 
-   job.json        {"format": 1, "key", "sample_count", "kind"}
+   job.json        {"format": 2, "key", "sample_count", "kind"}
    samples.jsonl   one sample per line, in job order
-   tasks/<n>/<directory name>/
 
 - ``job.json`` gives the directory's key, its number of samples, and the kind
   of its samples: ``trajectory``, ``task``, or ``null`` without samples.
-- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``. A task's
-  ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``,
-  where ``n`` counts the tasks from 0.
-- ``tasks/`` holds a copy of each task's directory.
+- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``, with one
+  difference for a task. The line of a task has no ``task_path``. Its
+  ``files`` names the task's directory in the task file store
+  (``storage.task_file_backend``): ``partition`` and ``digest``, and ``name``,
+  the name of the directory.
+
+The directory holds no file of a task. The task file store keeps the one copy
+of each task's files, so a job of many tasks writes two small files. Each
+task of a job must therefore be in the task file store: ``TaskSample.files``
+names it there, and Reef refuses job data with a task that has no ``files``.
+The samples that Reef makes from imported and generated tasks have it.
 
 A directory does not change after Reef writes it, and several jobs can read
-it, so a component must not write in it. A component reads it with
-``reef.storage.job_data.read_job_data(job.data_dir, job.data_id)``. A
-component that runs the job elsewhere, such as in a container, gives that
-place ``job.data_uri`` and mounts or copies the directory there.
+it, so a component must not write in it.
+
+A job holds a reference to its directory (``JobDataRef``). The reference
+copies nothing. What Reef copies to its own host depends on what the
+component reads:
+
+- A component that trains on Reef's host reads the data with
+  ``job.read_data()``, or the directory at ``job.data_dir``. That read makes
+  the local copy of the directory. For a job of tasks, it also takes the local
+  directory of each task from the task file store, several at a time. Each
+  task sample of the result has that directory as its ``task_path``. The
+  component must not change it. A missing directory or task fails this read.
+- A component that runs the job elsewhere, such as in a container, gives that
+  place ``job.data_uri`` and mounts or copies the directory there. That place
+  reads ``files`` from each task line and gets the directory from the task
+  file store of the deployment by ``partition`` and ``digest``. Such a
+  component must not read ``job.data_dir`` or ``job.read_data()``: with a
+  remote store, each copies files that the job does not use.
 
 The data store keeps the directories (``DataStore.write_job_directory``,
 ``open_job_directory`` and ``delete_unused_job_directories``) in its segment
 store (``storage.segment_backend``), or in
-``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples and of the
-files of its tasks (``job_data_key``). So a job of the same samples, such as
+``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its lines (``job_data_key``): the
+samples, and the digest of each task's files. So a job of the same samples, such as
 a second job on one dataset, uses the directory that exists and writes
 nothing. The data store records when a job last used each directory, and its
 periodic work (``DataStore.maintain``, which the data service calls) deletes a
@@ -409,7 +426,7 @@ The record-to-sample stage
 
 Besides the record sets and their samples (see `Record sets and their units
 <#record-sets-and-their-units>`__), the stage owns the record lifecycle and
-the staleness check. It places reports in their groups, and it ends units and
+the staleness rule. It places reports in their groups, and it ends units and
 records that can no longer train.
 
 A record that the stage ends, for example a report in a taken slot, appears
@@ -419,66 +436,76 @@ before that commit reads the record again, so the stage makes the same decision
 again. The default bookkeeping keeps ended records until their release; a stage
 with its own record lifecycle overrides the lifecycle methods.
 
-Only the samples service feeds a stage. Control asks only ``is_stale`` and
-``uploaded_sample``, so these methods must depend only on their arguments and
-the stage's config.
+Only the samples service feeds a stage and asks it which samples are stale.
+Control asks only ``uploaded_sample``, so that method must depend only on its
+argument and the stage's config.
 
 Staleness
 ~~~~~~~~~
 
-Every record-to-sample stage runs the staleness check. No other part of Reef
-checks which artifact produced training data. The limit is the stage's setting
-``max_staleness`` (``Record2SampleSettings``), set in
-``pipeline.record2sample.config``:
-
-.. code:: yaml
-
-   pipeline:
-     record2sample:
-       config:
-         max_staleness: 2
-
-``max_staleness`` is a non-negative int, and its default is 0. With 0, only
-data of the artifact that the scenario serves trains. A negative value fails
-the pipeline build. A stage settings class with more keys extends
-``Record2SampleSettings``, so each stage takes the key next to its own keys.
-The check has these steps:
+The samples service alone decides whether a stored sample may still train.
+No other part of Reef checks which artifact produced training data. The stage
+gives the rule (``Record2Sample.is_stale(samples, served)``); it has no config
+key of its own unless its method defines a bound. The check has these steps:
 
 1. The inference service writes the ``artifact_id`` of the artifact that
-   answered into each inference record. The sample keeps each record's
-   payload in ``extra.reef.records``, and ``TrajectorySample.artifact_id``
-   reads the ``artifact_id`` of its last call. A task rollout of a training
+   answered into each inference record. The sample keeps a summary of each
+   record in ``extra.reef.records``, with the record's ``artifact_id``, and
+   ``TrajectorySample.artifact_id`` reads the ``artifact_id`` of its last call. A task rollout of a training
    component names its artifact in ``training.artifact_id`` instead.
-2. When the scenario reserves job data, it gives the pipeline the artifacts
-   that it served, oldest first. The commit history holds them, so a reload or
-   a restart keeps them.
-3. Each time the pipeline selects the next automatic job, it asks the stage
-   whether each sample that the trainer made from records has data more than
-   ``max_staleness`` artifacts behind the current artifact
-   (``Record2Sample.is_stale(samples, served_artifact_ids)``). The job leaves out a stale sample and
-   every other sample of its group. The sample stays in the store untrained.
+2. In each step, the samples service reads the artifacts that the scenario
+   served from the newest commit history in the store (``ServedArtifacts``):
+   the served component's artifact of the creation and of each activating
+   commit, oldest first, the artifacts that the scenario serves beside its
+   active selection, and the number of the newest commit that changed them.
+   A samples service in another process reads control's commits without a
+   reload. Every commit asks for a step, so an activation reaches the samples
+   service at once.
+3. When that commit number is newer than the last one it judged at, it asks
+   the stage about each group of the trainer's stored samples that no job
+   trained and that carry no mark (``TrainingPipeline.mark_stale``), reading
+   them in pages. It marks every sample of a stale group in the store (item
+   metadata ``stale``), and stores the commit number as judged. It judges the
+   samples that it stores later in the step as it writes them.
+4. Control's automatic jobs leave a marked sample out. An automatic job waits
+   until the samples service judged at the commit number of what the scenario
+   serves now. A commit number never recurs, so a rollback to an artifact that
+   served before waits for a new judgment too.
+
+A stale sample stays in the store, with its mark, and is never judged again: an
+artifact that serves again does not make its samples fresh. The records that
+made it stay consumed, so a restart rebuilds the same decision. A training
+request can still name it: the client chose it.
+
+The rule of each built-in stage:
+
+* The default is on-policy (``lags_behind(samples, served, 0)``): a sample is
+  stale when its data is of an artifact other than the one that the scenario
+  serves now, or one that it serves beside it. A sample whose record names no
+  artifact is stale. A task never goes stale: the algorithm rolls it out with
+  the weights that it trains. The report, judging, trajectory, distillation,
+  OPD, SDPO, SDFT, TTTD, Coral and OpenClaw-RL stages use the default.
+* ``SFTSamples`` never finds a sample stale, because an SFT target is fixed
+  text, not sampled tokens.
+* ``TraceSamples`` and ``InferenceSamples`` never find a trace stale. A harness
+  proposer reads what the served system did and computes no ratio against the
+  weights that sampled it. In a composite, a weights step does not take the
+  harness's samples away.
+* ``SAOSamples`` accepts a lag of ``max_artifact_lag`` artifacts, SAO's own
+  setting (default 0), because SAO updates asynchronously.
 
 The lag counts only the artifacts that this scenario served. A publication of
-another scenario on a shared engine does not age the data. An ``artifact_id``
-names the same weights in every process and after an engine restart. These
-rules also apply:
-
-* A sample whose record names no artifact is stale.
-* A sample from an artifact that the stage did not see is stale. A rebuilt
-  trainer knows only the artifacts that it sees after the rebuild.
-* A scenario that has no runtime, or no component of a weight kind for the
-  runtime to load, has no staleness check: no data is stale.
-* Until the scenario first gives the stage a served artifact, no data is
-  stale.
+another scenario on a shared engine does not age the data. Before the first
+commit, the scenario serves the artifact that it was created with. A scenario
+that has no runtime, or no component of a weight kind for the runtime to load,
+has no served artifacts: no data is stale. A scenario store without a durable
+history (an in-memory store, which only tests use) keeps the artifacts that the
+process saw selected, so its samples service and control share that memory.
 
 Reef's check is the only staleness filter that Reef runs. A training
 framework can have its own off-policy limit. Such a limit goes in that
 backend's ``training.options``, not in the record-to-sample stage. No
 built-in backend has one now.
-
-Two stages do not take ``max_staleness``. ``NoSamples`` holds no unit.
-``SFTSamples`` never finds a sample stale (its ``is_stale`` returns False),
-because an SFT target is fixed text, not sampled tokens. Both refuse the key.
 
 Built-in stages
 ~~~~~~~~~~~~~~~
@@ -521,7 +548,8 @@ serving returns none. ``SampleAssembly.build`` makes a report's sample:
 The training component renders each sample with the model's chat template
 (``reef.core.chat_rendering``). It computes the log probabilities that its
 objective needs with the weights of the job's start, the current weights.
-They are exact when ``max_staleness`` is 0 and an approximation above it.
+They are exact for an on-policy stage and an approximation for a stage that
+accepts a lag.
 A stage can add what the component renders with:
 
 - ``extra.reef.teacher``: the teacher request of a distillation sample. The
@@ -628,10 +656,9 @@ not a reason to discard the report.
 A reported-feedback recipe writes:
 
 - a ``ReportSamples`` subclass as its record-to-sample stage. Its constructor
-  takes the recipe's ``ReportGrouping`` (below), ``exclusive_sources``, and
-  ``max_staleness``: ``ReportSamples(context, grouping=None, *,
-  exclusive_sources=False, max_staleness=0)``. With no grouping, every valid
-  report trains by itself.
+  takes the recipe's ``ReportGrouping`` (below) and ``exclusive_sources``:
+  ``ReportSamples(context, grouping=None, *, exclusive_sources=False)``. With
+  no grouping, every valid report trains by itself.
 - ``make_sample(context) -> Sample`` on that subclass, when the default does
   not fit. The default, as in ``TrajectorySamples``, makes the report's
   trajectories one ATIF trajectory sample with the report's score. ``context.inferences`` holds the calls of the
@@ -686,8 +713,8 @@ A computed-feedback recipe writes a ``RecordJudging``: correlation in
 ``observe(record, now, stage)`` with the stage's ``dispatch``, ``track``,
 ``tracked_record``, and ``retire`` operations, ``async judge``, and ``expire``
 for tracked records that time out. The recipe's record-to-sample stage is a
-``JudgedSamples`` subclass, ``JudgedSamples(judging, worker, *,
-max_staleness=0)``, with the judging and the worker that runs ``judge``. It
+``JudgedSamples`` subclass, ``JudgedSamples(judging, worker)``, with the
+judging and the worker that runs ``judge``. It
 implements ``make_sample(record, judgment)``, which returns one sample or
 ``None`` for a record that cannot train. Its ``Sample2Job`` supplies
 ``make_job_data``. When a judgment arrives, the stage forms a judged set and
@@ -708,7 +735,7 @@ a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
 ``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
 ``TaskGenerationRequest`` in ``reef.record2sample.generator``. Reef calls its class method
-``from_config(config, *, scenario, environ)`` once for each scenario. The
+``from_config(config, *, scenario, environ, state)`` once for each scenario. The
 generator gets what it needs from its ``config`` and from these calls only:
 
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``
@@ -725,6 +752,32 @@ generator gets what it needs from its ``config`` and from these calls only:
   before, and the process may have restarted since. A generator keeps what it
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
+
+``state`` is the ``GeneratorState`` of the scenario's generator
+(``reef.recipe.generated_tasks``). A generator keeps there what it must read
+again after a restart, such as its open generations, and keeps no file of its
+own. The state holds text documents by key, and saved directories:
+
+- ``read(key)`` returns the document of ``key``, or ``None``.
+- ``write(key, document)`` saves the document. It replaces an earlier document
+  of the key.
+- ``remove(key)`` removes the document. An unknown key changes nothing.
+- ``keys(prefix="")`` returns the keys that start with ``prefix``, in
+  increasing string order.
+- ``save_files(directory)`` saves a copy of a directory and returns the digest
+  of its files.
+- ``files(digest)`` returns a local directory with the saved files. Do not
+  change it.
+
+Each write is durable and atomic when it returns. The record-to-sample stage
+builds the state from its task store, so the documents are in the deployment's
+database and the saved directories are in the task file store. A restart on
+another machine reads the same state, and an archive of the scenario retires
+it. The generator gets no other part of the task store: it cannot publish a
+task or read the stage's own documents. For work that needs a directory for a
+short time, such as a task under validation, use a temporary directory. A
+config that names a generator is refused when the scenario has no task
+storage.
 
 Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 
@@ -760,7 +813,7 @@ A generation job runs no rollouts. It:
 1. Asks the generator for tasks with the configured ``description`` and the
    round's source sessions.
 2. Saves the candidates in the scenario's task store, then validates each
-   task with the generator.
+   task with the generator, ``validation_concurrency`` tasks at once.
 3. Publishes each valid task with its train/eval split. It runs no eval
    tasks.
 
@@ -834,7 +887,9 @@ last round is released at once.
 The first round starts when the pipeline first looks for job data. The next
 round starts after ``jobs_per_round`` jobs trained since the previous
 round started, and only while fewer than ``refill_tasks`` stored train tasks
-wait to train, so saved tasks train before more are generated. A task waits
+wait to train, so saved tasks train before more are generated. With
+``jobs_per_round`` 0, the next round starts when the previous one ends, so
+generation runs ahead of training until ``refill_tasks`` tasks wait. A task waits
 until a committed job trains it; a task in a running job does not wait. A
 round that made no train task and a failed task job are followed at once,
 because no job end comes from them. So is a state in which every train task
@@ -844,13 +899,28 @@ sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
 generation from its saved candidates.
 
+With ``pool_capacity`` above 0, the stage keeps a training pool
+(``reef.recipe.generated_tasks.pool.TrainingPool``), and each train task trains
+again until a review retires it. A round is then due while fewer train tasks of
+complete generations than ``pool_capacity`` are active, in place of the
+``refill_tasks`` rule. When a job's end commits, the stage saves each use
+that the end ends, with its rewards, and runs the review that is due after every
+``review_interval`` jobs. Then it makes the sample of each active task's next
+use, ``generated-tasks/<task name>@<k>`` for use ``k``, which waits after the
+samples that wait already. A review that retires a task ends the scenario's use
+of the task's waiting sample (``TrainerSamples.delete_samples``), so no later
+job takes it; the item stays in the data store with its train counts. See
+`generated tasks <../reference/configuration.rst#generated-tasks>`__ for the
+keys.
+
 The record-to-sample stage keeps its tasks in the task store ``generated-tasks``
 of the scenario session (see `Where the stages live`_). It records each
 publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-rollout result and the generations whose results the generator received. The
+rollout result and the generations whose results the generator received, and,
+as state documents, the generator's own state. The
 scenario's training state counts the tasks that trained.
 
 After a restart, the record-to-sample stage continues with the next generation number.

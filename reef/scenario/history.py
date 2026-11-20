@@ -40,14 +40,16 @@ def read_records(
 
 
 def read_record(scenario: Scenario, record_id: str) -> dict[str, Any] | None:
-    stored = scenario.records.get_for_audit(scenario.name, record_id)
+    stored = scenario.records.read_for_audit(scenario.name, record_id)
     return None if stored is None else {**record_metadata(stored), "payload": stored.item.payload}
 
 
-def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids: tuple[str, ...]) -> dict[str, Any]:
+def read_commits(
+    scenario: Scenario, *, after_commit_number: int, limit: int, record_ids: tuple[str, ...]
+) -> dict[str, Any]:
     """Filter committed consumed_ids by exact record IDs; preserve their stored meaning."""
-    if after_step < 0 or not 1 <= limit <= 100:
-        raise ValueError("after_step must be non-negative and limit must be between 1 and 100")
+    if after_commit_number < 0 or not 1 <= limit <= 100:
+        raise ValueError("after_commit_number must be non-negative and limit must be between 1 and 100")
     if len(record_ids) > 100 or any(not value or len(value) > 256 for value in record_ids):
         raise ValueError("at most 100 non-empty record_id values of at most 256 characters are accepted")
     requested = frozenset(record_ids)
@@ -59,7 +61,8 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
             (
                 commit
                 for commit in commits
-                if commit.step > after_step and (not requested or not requested.isdisjoint(commit.consumed_ids))
+                if commit.commit_number > after_commit_number
+                and (not requested or not requested.isdisjoint(commit.consumed_ids))
             ),
             limit + 1,
         )
@@ -68,12 +71,12 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
         "scenario": scenario.name,
         "commits": [
             {
-                "step": commit.step,
+                "commit_number": commit.commit_number,
                 "operation": commit.operation,
                 "operation_verified": commit.operation_verified,
                 "recorded_at": commit.recorded_at,
                 "components": commit.artifact_ids
-                or queries.bound_artifact_ids(commit.snapshot.revision, components, scenario.scenario_step),
+                or queries.bound_artifact_ids(commit.snapshot.revision, components, scenario.commit_number),
                 "component": commit.component,
                 "activated": commit.activated,
                 "consumed_ids": sorted(commit.consumed_ids),
@@ -81,5 +84,5 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
             }
             for commit in matches[:limit]
         ],
-        "next_after_step": matches[limit - 1].step if len(matches) > limit else None,
+        "next_after_commit_number": matches[limit - 1].commit_number if len(matches) > limit else None,
     }

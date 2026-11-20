@@ -10,15 +10,12 @@ the same way, or compute the loss on the Reef host through
 :class:`TinkerCustomLoss`. :class:`ScoreCenteredLoss` is no family: a
 component with score centering trains ``importance_sampling`` with it.
 
-Methods register their loss in the shared loss-family table with
-``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``;
-the reference is imported the first time the name is resolved, so the recipe
-package never imports this module.
+``reef.train.tinker_backend.loss_families`` holds the families by name, and a
+method registers its own there.
 """
 
 from __future__ import annotations
 
-import importlib
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -26,12 +23,9 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from reef.core.job_data import TrajectorySample
-from reef.train.algos.registry import loss_family_refs
 from reef.train.tinker_backend.config import ScoreCentering
 from reef.train.types.rows import policy_row_violation
 
-#: The backend key under which methods register their loss.
-BACKEND = "tinker"
 #: The sampler log probability of an untrained position's head; its probability is zero in float32.
 UNTRAINED_LOGPROB = -1.0e4
 
@@ -139,9 +133,12 @@ class TinkerLoss(ABC):
     of each row when ``needs_base_logprobs`` is set and the KL coefficient is
     nonzero, and is empty otherwise. ``loss_fn_config`` goes with every
     ``forward_backward`` call; rows carry ``sampler_topk`` sampler log
-    probabilities per response token when it is positive.
+    probabilities per response token when it is positive. ``loss_family`` is
+    the name that the family registers under (``register_loss_family``), or is
+    empty for a loss that is no family.
     """
 
+    loss_family = ""
     loss_fn = "importance_sampling"
     needs_base_logprobs = False
     #: Whether the inputs read each row's rollout log probabilities and the trajectory advantage.
@@ -170,6 +167,8 @@ class TinkerLoss(ABC):
 
 class ImportanceSamplingLoss(TinkerLoss):
     """The trajectory advantage on every response token the loss mask selects."""
+
+    loss_family = "importance_sampling"
 
     def check_kl_coef(self, kl_coef: float) -> None:
         if kl_coef:
@@ -249,6 +248,7 @@ class ScoreCenteredLoss(TinkerLoss):
 class CrossEntropyLoss(TinkerLoss):
     """Supervised fine-tuning: Tinker's ``cross_entropy`` on every response token the loss mask selects."""
 
+    loss_family = "sft"
     loss_fn = "cross_entropy"
     uses_rollout_log_probs = False
     uses_advantages = False
@@ -284,30 +284,3 @@ class TinkerCustomLoss(TinkerLoss):
 
     @abstractmethod
     def loss(self, data: Sequence[Any], logprobs: Sequence[Any]) -> tuple[Any, Mapping[str, float]]: ...
-
-
-_BUILTIN: dict[str, TinkerLoss] = {"importance_sampling": ImportanceSamplingLoss(), "sft": CrossEntropyLoss()}
-_resolved: dict[str, TinkerLoss] = {}
-
-
-def resolve_tinker_loss(loss_family: str) -> TinkerLoss:
-    """Resolve a built-in family or import the one a method registered for Tinker."""
-    loss = _BUILTIN.get(loss_family) or _resolved.get(loss_family)
-    if loss is not None:
-        return loss
-    references = loss_family_refs(BACKEND)
-    reference = references.get(loss_family)
-    if reference is None:
-        available = ", ".join(sorted(set(_BUILTIN) | set(references)))
-        raise ValueError(f"unsupported Tinker loss family {loss_family!r}; registered: {available}")
-    module_name, _, attribute = reference.partition(":")
-    try:
-        candidate = getattr(importlib.import_module(module_name), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot import Tinker loss family {reference!r}: {exc}") from exc
-    if isinstance(candidate, type) and issubclass(candidate, TinkerLoss):
-        candidate = candidate()
-    if not isinstance(candidate, TinkerLoss):
-        raise TypeError(f"Tinker loss family {reference!r} is not a TinkerLoss")
-    _resolved[loss_family] = candidate
-    return candidate

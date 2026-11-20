@@ -18,8 +18,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, cast
 
-from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
-from reef.core.errors import ReefError, UnknownScenario
+from reef.artifact.artifact import ArtifactConflictError, ArtifactError, ArtifactNotFoundError
+from reef.core.errors import InternalError, ReefError, ScenarioNotFoundError
 from reef.core.records_types import RequestType
 from reef.execution.workers import QueueWorker
 from reef.service.request_service import RequestService
@@ -34,7 +34,7 @@ SYNC_WAIT_SECONDS = 30.0
 SYNC_POLL_SECONDS = 0.1
 
 
-class HarnessImportPending(ArtifactError):
+class HarnessImportPendingError(ArtifactError):
     """Control did not commit an import within ``SYNC_WAIT_SECONDS``: no control instance runs, or it is busy.
 
     The import stays queued, and control commits it when it takes the item; a retry of the same files waits for
@@ -47,7 +47,7 @@ class HarnessImports(ABC):
 
     Values: ``import_files(headers, payload)`` commits the sync of the person's files in ``payload`` for the
     scenario that ``headers`` name and returns its answer (``RequestService.harness_import``), or raises the error
-    of a refused import: ``ArtifactConflict``, ``ArtifactNotFound`` or ``ValueError``.
+    of a refused import: ``ArtifactConflictError``, ``ArtifactNotFoundError`` or ``ValueError``.
 
     Purpose: control's app uses ``DirectImports``; the harness service's app uses ``QueuedImports``.
     """
@@ -71,7 +71,7 @@ class QueuedImports(HarnessImports):
 
     Values: ``queue`` is the deployment's work queue. An item's ID is a hash of its scenario and payload, with
     ``:<n>`` after it for the ``n``-th item of the same import: a retry of an import whose item is not final waits
-    for that item, and an import whose earlier items all ended gets a new one. ``HarnessImportPending`` when
+    for that item, and an import whose earlier items all ended gets a new one. ``HarnessImportPendingError`` when
     control does not answer within ``SYNC_WAIT_SECONDS``.
     """
 
@@ -86,17 +86,17 @@ class QueuedImports(HarnessImports):
         base_id = f"{HARNESS_SYNC_KIND}:{hashlib.sha256(encoded.encode()).hexdigest()}"
         item_id, number = base_id, 1
         # An item that ended answered an earlier import: the active tree may have moved since, so it is not reused.
-        while (earlier := self.queue.get(HARNESS_SYNC_QUEUE, item_id)) is not None and earlier.final:
+        while (earlier := self.queue.read(HARNESS_SYNC_QUEUE, item_id)) is not None and earlier.final:
             number += 1
             item_id = f"{base_id}:{number}"
-        self.queue.add(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario, HARNESS_SYNC_KIND, work))
+        self.queue.append(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario, HARNESS_SYNC_KIND, work))
         deadline = time.monotonic() + SYNC_WAIT_SECONDS
         while True:
-            item = self.queue.get(HARNESS_SYNC_QUEUE, item_id)
+            item = self.queue.read(HARNESS_SYNC_QUEUE, item_id)
             if item is not None and item.final:
                 return import_answer(item)
             if time.monotonic() >= deadline:
-                raise HarnessImportPending(
+                raise HarnessImportPendingError(
                     f"control did not commit the import of scenario {scenario!r} within {SYNC_WAIT_SECONDS:.0f} s; "
                     "send it again to wait for it"
                 )
@@ -115,9 +115,9 @@ def import_answer(item: WorkItem) -> dict[str, Any]:
         message = str(refused.get("message"))
         kind = refused.get("kind")
         if kind == "conflict":
-            raise ArtifactConflict(message)
+            raise ArtifactConflictError(message)
         if kind == "not_found":
-            raise ArtifactNotFound(message)
+            raise ArtifactNotFoundError(message)
         raise ValueError(message)
     answer = item.result.get("answer")
     if not isinstance(answer, Mapping):
@@ -147,12 +147,12 @@ class HarnessSyncWorker(QueueWorker):
         headers = {SCENARIO_HEADER: item.scenario}
         try:
             answer = self.request_service.harness_import(headers, item.payload)
-        except ArtifactConflict as exc:
+        except ArtifactConflictError as exc:
             return {"refused": {"kind": "conflict", "message": str(exc)}}
-        except (ArtifactNotFound, UnknownScenario) as exc:
+        except (ArtifactNotFoundError, ScenarioNotFoundError) as exc:
             return {"refused": {"kind": "not_found", "message": str(exc)}}
-        except ArtifactError:
-            # The artifact store failed: a retry of the same import can pass.
+        except (ArtifactError, InternalError):
+            # The artifact store or Reef itself failed: a retry of the same import can pass.
             raise
         except (ReefError, ValueError) as exc:
             # The files or the scenario refuse the import, such as a tree that the trainer cannot start from.
@@ -165,7 +165,7 @@ __all__ = [
     "HARNESS_SYNC_QUEUE",
     "SYNC_WAIT_SECONDS",
     "DirectImports",
-    "HarnessImportPending",
+    "HarnessImportPendingError",
     "HarnessImports",
     "HarnessSyncWorker",
     "QueuedImports",

@@ -15,13 +15,16 @@ from typing import Any
 
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.dispatcher import Dispatcher
+from reef.storage.tasks import task_limit_errors
 
 #: The most tasks in one upload.
 MAX_TASKS_PER_UPLOAD = 1000
-#: The most archive entries, and the most bytes they unpack to. The route also refuses a body larger than
-#: ``MAX_UNPACKED_BYTES``; it streams the body to a file, so the limit bounds disk use, not memory.
-MAX_ARCHIVE_ENTRIES = 10_000
-MAX_UNPACKED_BYTES = 256 * 1024 * 1024
+#: The default of ``data.max_task_archive_bytes``: the most bytes of the body of a task archive upload. The route
+#: streams the body to a local file, so the limit bounds disk use, not memory.
+DEFAULT_MAX_TASK_ARCHIVE_BYTES = 512 * 1024 * 1024
+#: The most bytes that the files of one archive unpack to. A small gzip body can unpack to far more than its size,
+#: and the route unpacks the whole archive to local disk. A larger task uses the reference form.
+MAX_ARCHIVE_UNPACKED_BYTES = 8 * 1024**3
 
 
 def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
@@ -29,18 +32,15 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
 
     Every entry is a regular file or a directory under a top-level directory whose name is a task name
     (``TASK_NAME_PATTERN``); a top-level file, a link, a device, an absolute path, a ``..`` component or another
-    top-level name is refused with ``ValueError``, as is an archive of no task, of more
-    than ``MAX_TASKS_PER_UPLOAD`` tasks, of more than ``MAX_ARCHIVE_ENTRIES`` entries, or of more than
-    ``MAX_UNPACKED_BYTES`` bytes.
+    top-level name is refused with ``ValueError``, as is an archive of no task or of more than
+    ``MAX_TASKS_PER_UPLOAD`` tasks, of files that unpack to more than ``MAX_ARCHIVE_UNPACKED_BYTES``, and a task that
+    breaks a limit of ``reef.storage.tasks.task_limit_errors``.
+    Nothing is unpacked then.
     """
     try:
         with tarfile.open(archive, mode="r:gz") as tar:
             members = tar.getmembers()
-            if len(members) > MAX_ARCHIVE_ENTRIES:
-                raise ValueError(f"the archive holds more than {MAX_ARCHIVE_ENTRIES} entries")
-            if sum(member.size for member in members) > MAX_UNPACKED_BYTES:
-                raise ValueError(f"the archive unpacks to more than {MAX_UNPACKED_BYTES} bytes")
-            names: set[str] = set()
+            tasks: dict[str, list[tuple[str, int | None]]] = {}
             for member in members:
                 path = PurePosixPath(member.name)
                 if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] in ("", "."):
@@ -51,24 +51,38 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
                     raise ValueError(f"the archive entry {member.name!r} is not a file or a directory")
                 if len(path.parts) == 1 and not member.isdir():
                     raise ValueError(f"the archive entry {member.name!r} is a file outside a task directory")
-                names.add(path.parts[0])
-            if not names:
+                entries = tasks.setdefault(path.parts[0], [])
+                if len(path.parts) > 1:
+                    entries.append(("/".join(path.parts[1:]), member.size if member.isfile() else None))
+            if not tasks:
                 raise ValueError("the archive holds no task")
-            for name in sorted(names):
+            for name in sorted(tasks):
                 if not TASK_NAME_PATTERN.fullmatch(name):
                     raise ValueError(f"{name!r} is not a task name: it must match {TASK_NAME_PATTERN.pattern}")
-            if len(names) > MAX_TASKS_PER_UPLOAD:
+            if len(tasks) > MAX_TASKS_PER_UPLOAD:
                 raise ValueError(f"an upload holds at most {MAX_TASKS_PER_UPLOAD} tasks")
+            if sum(member.size for member in members if member.isfile()) > MAX_ARCHIVE_UNPACKED_BYTES:
+                raise ValueError(
+                    f"the archive unpacks to more than {MAX_ARCHIVE_UNPACKED_BYTES} bytes; "
+                    "create larger tasks by reference to the task file store"
+                )
+            for name, entries in sorted(tasks.items()):
+                errors = task_limit_errors(entries)
+                if errors:
+                    raise ValueError(f"task {name!r} breaks a limit: " + " ".join(error.message for error in errors))
             tar.extractall(target, filter="data")
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise ValueError(f"the body is not a gzip-compressed tar archive: {exc}") from exc
-    return tuple(target / name for name in sorted(names))
+    return tuple(target / name for name in sorted(tasks))
 
 
 def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]:
-    """The scenario's imported tasks in arrival order: ``{scenario, tasks: [{name, split, files_digest, trained}]}``.
+    """The scenario's uses of imported tasks in the order that they began: ``{scenario, tasks: [{name, split,
+    benchmark, files_digest, trained}]}``.
 
-    ``trained`` is whether a committed job of any trainer of the scenario trained the task.
+    ``benchmark`` is the held benchmark that gives the use, or null for the task's own mark; a task that the scenario
+    uses more than once is listed once for each use (RFC #1420). ``trained`` is whether a committed job of any
+    trainer of the scenario trained the task. The listing reads no task files.
     """
     return {
         "scenario": scenario,
@@ -76,9 +90,10 @@ def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]
             {
                 "name": task.sample_id,
                 "split": task.split,
-                "files_digest": task.sample.metadata["task"]["files_digest"],
+                "benchmark": task.held_set,
+                "files_digest": task.digest,
                 "trained": bool(task.train_counts),
             }
-            for task in dispatcher.imported_tasks(scenario)
+            for task in dispatcher.listed_imported_tasks(scenario)
         ],
     }

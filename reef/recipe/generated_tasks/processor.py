@@ -17,10 +17,18 @@ every train task of a generation has a result, the next job sends the generation
 
 A train task waits until a committed job trains it, and is unfinished until it has a result. The first round
 starts when the pipeline first looks for job data. The next round starts after ``jobs_per_round`` task jobs
-ended since the previous round started, and only while fewer than ``refill_tasks`` train tasks wait. A round
+ended since the previous round started, and only while fewer than ``refill_tasks`` train tasks wait; with
+``jobs_per_round`` 0 it starts when the previous round ends, so generation runs ahead of training. A round
 that made no train task, a failed task job, and no unfinished task are followed at once. A restart continues from
 the task store and the scenario's items: the scenario still uses the train tasks that did not train, and a later job takes
 them again.
+
+With ``pool_capacity`` above 0 (``GeneratedTaskSettings``), each train task trains again: when its job ends, the stage
+makes the task's sample of the next use, which waits after the samples that wait already. Rounds then start only
+while fewer train tasks than ``pool_capacity`` are active. Every ``review_interval`` jobs, a review retires the tasks
+whose recent rewards are outside the band or do not spread (:mod:`reef.recipe.generated_tasks.pool`), and the
+scenario stops using the sample of a retired task that waits. The task store and the scenario's items hold the pool,
+so a restart continues it.
 
 The stage trains on no report. It holds the reports that are source sessions for the rounds, and releases the
 others, such as a generator's own reports.
@@ -41,12 +49,20 @@ from typing import Any, Self
 from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.core.plugins import PluginConfigError
+from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
-from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
+from reef.core.tasks.split import TaskSplit, TaskSplitConflictError, extend_split_by_source
+from reef.core.values import require_integer
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
+from reef.recipe.generated_tasks.generator import (
+    GeneratedTaskResult,
+    GeneratorState,
+    HeldOutTask,
+    RejectedTask,
+    TaskGenerator,
+)
+from reef.recipe.generated_tasks.pool import PoolReviewRule, TrainingPool
 from reef.recipe.generated_tasks.results import (
     TaskRolloutResult,
     delivered_generations,
@@ -54,20 +70,31 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
-from reef.record2sample import Record2Sample, Record2SampleSettings, ReportContext, ReportGrouping, ReportSamples
+from reef.recipe.generated_tasks.training import (
+    TASK_STORE_NAME,
+    SingleUseTraining,
+    TaskTraining,
+    published_train_tasks,
+    sample_name,
+    task_item,
+    task_items,
+    train_task_names,
+)
+from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.reports import report_score
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.storage.samples import StoredSample, TrainerSamples
-from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
+from reef.storage.samples import TrainerSamples
+from reef.storage.tasks import GenerationState, SplitName, TaskConflictError, TaskStore, TaskStoreError
 from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUFFER_SIZE = 4
 DEFAULT_JOBS_PER_ROUND = 1
-TASK_STORE_NAME = "generated-tasks"
+#: Without a training pool, a round has room only while fewer train tasks than this wait for a job.
+DEFAULT_REFILL_TASKS = 1
 DEFAULT_EVAL_FRACTION = 0.0
 DEFAULT_SPLIT_SEED = 0
 DEFAULT_GENERATION_ATTEMPTS = 3
@@ -76,7 +103,7 @@ DELIVERY_RECEIPT = "delivery"
 
 
 def split_source_ids(task: HarborTask) -> tuple[str, ...]:
-    """The source record ids that place a task in a split: its sources without the author's own record."""
+    """The source record ids that place a task in a split: its sources without the Designer's own record."""
     designer_record_id = task.metadata.get("designer_record_id")
     return tuple(record_id for record_id in task.source_agent_record_ids if record_id != designer_record_id)
 
@@ -85,7 +112,7 @@ def assigned_split(store: TaskStore, task: HarborTask, *, seed: int, eval_fracti
     """Return the split of a task: the split of its published name, or else the split of its source records.
 
     Tasks that share a source record get the same split, and a published task keeps its split. Raises
-    ``TaskSplitConflict`` if the sources of the task join tasks of both splits.
+    ``TaskSplitConflictError`` if the sources of the task join tasks of both splits.
     """
     published = {stored.name: stored for stored in store.tasks()}
     existing = published.get(task.name)
@@ -109,11 +136,6 @@ def assigned_split(store: TaskStore, task: HarborTask, *, seed: int, eval_fracti
 
 
 # ---------------------------------------------------------------- store lookups
-
-
-def train_task_names(state: GenerationState) -> tuple[str, ...]:
-    """The names of the train tasks that a generation published, in candidate order."""
-    return tuple(candidate.name for candidate in state.candidates or () if candidate.split == "train")
 
 
 def find_generation(store: TaskStore, source_record_ids: tuple[str, ...]) -> GenerationState | None:
@@ -141,18 +163,6 @@ def next_generation(store: TaskStore) -> int:
 
 def complete_generation_count(store: TaskStore) -> int:
     return sum(state.is_complete for state in store.generations())
-
-
-def published_train_tasks(store: TaskStore) -> tuple[tuple[int, StoredTask], ...]:
-    """The published train tasks of complete generations, with their generation, oldest first."""
-    published = {stored.name: stored for stored in store.tasks(split="train")}
-    return tuple(
-        (state.generation, published[name])
-        for state in store.generations()
-        if state.is_complete
-        for name in train_task_names(state)
-        if name in published
-    )
 
 
 def deliverable_generations(store: TaskStore) -> tuple[GenerationState, ...]:
@@ -205,28 +215,6 @@ def task_counts(store: TaskStore, trained: frozenset[str]) -> dict[str, int]:
         "rejected": sum(bool(candidate.error) for candidate in candidates),
         "pending": sum(candidate.is_pending for candidate in candidates),
     }
-
-
-def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSample:
-    """The sample of a published train task, with its generation and the digest of its files."""
-    path = store.path(stored.files_digest)
-    task = read_harbor_task(path)
-    return TaskSample(
-        path,
-        source_agent_record_ids=task.source_agent_record_ids,
-        metadata={
-            "task": {
-                "name": stored.name,
-                "digest": task.digest,
-                "files_digest": stored.files_digest,
-                "round": generation,
-                "split": stored.split,
-            }
-        },
-    )
-
-
-# ---------------------------------------------------------------- rounds and jobs
 
 
 def session_records(sessions: tuple[ReportContext, ...]) -> tuple[AgentRecord, ...]:
@@ -383,32 +371,40 @@ class SourceSessionGrouping(ReportGrouping):
 
 
 @dataclass(frozen=True)
-class GeneratedTaskSettings(Record2SampleSettings):
+class GeneratedTaskSettings(PluginSettings):
     """The config of ``GeneratedTaskSamples``: the rounds, their pace, the source sessions, and the generations.
 
     Values:
 
     * ``rounds`` is a non-negative int; above 0 it needs a ``description``.
-    * ``jobs_per_round`` and ``refill_tasks`` are positive ints.
+    * ``jobs_per_round`` is a non-negative int, and ``validation_concurrency`` a positive int.
+    * ``refill_tasks`` is a positive int, or None for ``DEFAULT_REFILL_TASKS``; it needs ``pool_capacity`` 0.
     * ``source_records_per_round`` is a non-negative int; above 0 it needs a ``source_tag`` of the form
       ``name=value``.
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
     * ``eval_fraction`` is a number in [0, 1]; ``split_seed`` an int.
     * ``generation_attempts`` and ``generation_deadline_seconds`` are positive.
-    * ``max_staleness`` is as in ``Record2SampleSettings``.
+    * ``pool_capacity`` is a non-negative int; 0 trains each train task once, and above 0 each one trains again until
+      a review retires it.
+    * Each ``review_*`` value is None, for the default of its ``PoolReviewRule`` field, or a value of that field. A
+      value that is not None needs ``pool_capacity`` above 0.
 
-    The constructor refuses other values.
-    Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``.
+    None stands for a key that the config leaves out. The constructor refuses other values.
+    Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``, and
+    ``GeneratedTaskSamples`` takes its ``TaskTraining`` from it (``task_training``).
     """
 
     rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
     jobs_per_round: int = config_option(
-        DEFAULT_JOBS_PER_ROUND, help="The finished task jobs after which the next round starts."
+        DEFAULT_JOBS_PER_ROUND,
+        help="The finished task jobs after which the next round starts; 0 starts it when the last round ends.",
     )
     source_records_per_round: int = config_option(0, help="The source sessions that each round takes, at most.")
     source_tag: str = config_option("", help="The name=value tag that marks a source session.")
-    refill_tasks: int = config_option(
-        1, help="The next round starts only while fewer saved tasks than this wait to train."
+    refill_tasks: int | None = config_option(
+        None,
+        help="Without a training pool, the next round starts only while fewer saved tasks than this wait to train; "
+        "default 1.",
     )
 
     generator: Mapping[str, Any] | None = config_option(
@@ -426,13 +422,34 @@ class GeneratedTaskSettings(Record2SampleSettings):
     generation_deadline_seconds: float = config_option(
         DEFAULT_GENERATION_DEADLINE_SECONDS, help="The seconds that all attempts of one generation may take."
     )
+    validation_concurrency: int = config_option(1, help="The candidates that one generation checks at once.")
+    pool_capacity: int = config_option(
+        0, help="Above 0, tasks train again, and rounds start only while fewer tasks than this are active."
+    )
+    review_interval: int | None = config_option(
+        None, help="The task jobs between two pool reviews; 0 reviews nothing; default 0."
+    )
+    review_window: int | None = config_option(
+        None, help="The most recent rewards of a task that a review reads; default 2."
+    )
+    review_band_low: float | None = config_option(
+        None, help="A review retires a task whose pass rate is below this; default 0."
+    )
+    review_band_high: float | None = config_option(
+        None, help="A review retires a task whose pass rate is above this; default 1."
+    )
+    review_min_reward_std: float | None = config_option(
+        None,
+        help="A review retires a task whose rewards have a smaller standard deviation; 0 turns this off; default 0.",
+    )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.jobs_per_round < 1:
-            raise ValueError("jobs_per_round must be positive")
-        if self.refill_tasks < 1:
+        if self.jobs_per_round < 0:
+            raise ValueError("jobs_per_round must be non-negative")
+        if self.refill_tasks is not None and self.refill_tasks < 1:
             raise ValueError("refill_tasks must be positive")
+        if self.validation_concurrency < 1:
+            raise ValueError("validation_concurrency must be positive")
         if self.source_records_per_round < 0:
             raise ValueError("source_records_per_round must be non-negative")
         if self.source_records_per_round > 0 and not self.source_tag:
@@ -450,6 +467,83 @@ class GeneratedTaskSettings(Record2SampleSettings):
             raise ValueError("rounds need a description (what the tasks are about)")
         if self.generator is not None:
             TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
+        if self.pool_capacity < 0:
+            raise ValueError("pool_capacity must be non-negative")
+        if self.pool_capacity > 0:
+            if self.refill_tasks is not None:
+                raise ValueError(
+                    "refill_tasks needs pool_capacity 0: with a training pool, pool_capacity paces the rounds"
+                )
+            self.review_rule()
+        else:
+            review_settings = (
+                self.review_interval,
+                self.review_window,
+                self.review_band_low,
+                self.review_band_high,
+                self.review_min_reward_std,
+            )
+            if any(value is not None for value in review_settings):
+                raise ValueError("the review_* settings need a pool_capacity above 0")
+
+    def review_rule(self) -> PoolReviewRule:
+        """The rule of the pool reviews: each ``review_*`` value that the config sets, and the rule's default for each
+        other. Raises ``ValueError`` for a review setting out of its range."""
+        default = PoolReviewRule()
+        return PoolReviewRule(
+            interval=default.interval if self.review_interval is None else self.review_interval,
+            window=default.window if self.review_window is None else self.review_window,
+            band_low=default.band_low if self.review_band_low is None else self.review_band_low,
+            band_high=default.band_high if self.review_band_high is None else self.review_band_high,
+            min_reward_std=(
+                default.min_reward_std if self.review_min_reward_std is None else self.review_min_reward_std
+            ),
+        )
+
+    def task_training(self, scenario: str, store: TaskStore | None) -> TaskTraining:
+        """How the stage of ``scenario``, with its task store ``store``, trains its tasks: once each with
+        ``pool_capacity`` 0, else from a ``TrainingPool``. Raises ``ValueError`` for a training pool without a task
+        store."""
+        if self.pool_capacity == 0:
+            return SingleUseTraining(DEFAULT_REFILL_TASKS if self.refill_tasks is None else self.refill_tasks)
+        if store is None:
+            raise ValueError("a training pool needs the task storage of a scenario session")
+        return TrainingPool(scenario, store, self.pool_capacity, self.review_rule())
+
+
+class StoredGeneratorState(GeneratorState):
+    """The generator state ``(S, F)`` of one scenario in the task store of the generated-task stage.
+
+    Values: ``store`` is a ``TaskStore``. ``S`` is the state documents of the
+    store, and ``F`` is the directories that the store saved in the task
+    files of the scenario.
+    Purpose: ``GeneratedTaskSamples.from_config`` makes it for the generator of
+    the scenario. The stage's own generations and documents are not in
+    ``S``, so the generator does not read or change them.
+    """
+
+    def __init__(self, store: TaskStore) -> None:
+        if not isinstance(store, TaskStore):
+            raise TypeError("store must be a TaskStore")
+        self.store = store
+
+    def read(self, key: str) -> str | None:
+        return self.store.state_document(key)
+
+    def write(self, key: str, document: str) -> None:
+        self.store.write_state_document(key=key, document=document)
+
+    def remove(self, key: str) -> None:
+        self.store.delete_state_document(key=key)
+
+    def keys(self, prefix: str = "") -> tuple[str, ...]:
+        return self.store.state_document_keys(prefix=prefix)
+
+    def save_files(self, directory: Path) -> str:
+        return self.store.write_files(directory)
+
+    def files(self, digest: str) -> Path:
+        return self.store.path(digest)
 
 
 class GenerationRunner(BackgroundJobRunner):
@@ -461,6 +555,7 @@ class GenerationRunner(BackgroundJobRunner):
     exhausts its attempts and returns an incomplete outcome. Result saving requires the store alone.
     ``generation_attempts`` is a positive int.
     ``generation_deadline_seconds`` is a positive number, including infinity for no time limit.
+    ``validation_concurrency`` is a positive int: the candidates that one generation checks at once.
     ``eval_fraction`` is a number in [0, 1], and
     ``split_seed`` is a non-bool int. ``unsaved_results`` is a FIFO queue of TaskRolloutResult values whose saves
     failed; it may be empty and contain repeated task names, since the store keeps only each task's first result.
@@ -484,6 +579,7 @@ class GenerationRunner(BackgroundJobRunner):
         generation_deadline_seconds: float,
         eval_fraction: float,
         split_seed: int,
+        validation_concurrency: int,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be non-empty text")
@@ -505,6 +601,7 @@ class GenerationRunner(BackgroundJobRunner):
             raise ValueError("eval_fraction must be between 0 and 1")
         if isinstance(split_seed, bool) or not isinstance(split_seed, int):
             raise ValueError("split_seed must be an integer")
+        require_integer(validation_concurrency, "validation_concurrency", minimum=1)
         self.scenario = scenario
         self.task_store = task_store
         self.task_generator = task_generator
@@ -513,6 +610,7 @@ class GenerationRunner(BackgroundJobRunner):
         self.generation_deadline_seconds = generation_deadline_seconds
         self.eval_fraction = eval_fraction
         self.split_seed = split_seed
+        self.validation_concurrency = validation_concurrency
         self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
@@ -586,30 +684,75 @@ class GenerationRunner(BackgroundJobRunner):
                 directories = tuple(
                     write_harbor_task(task, Path(staging) / str(index)) for index, task in enumerate(generated)
                 )
-                generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
+                generation = self.task_store.write_candidates(generation=job.generation, directories=directories)
         candidates = generation.candidates or ()
-        for index in generation.pending_indices:
+        task_generator, task_store = self.task_generator, self.task_store
+        # Up to validation_concurrency candidates are checked at once. Each outcome is saved when its checks end, so
+        # a restart checks only the pending candidates.
+        check_slots = asyncio.Semaphore(self.validation_concurrency)
+        # The files of the published tasks, read once: each candidate that this attempt publishes adds its own.
+        published_digests = {stored.files_digest for stored in task_store.tasks()}
+
+        async def publish_or_reject(index: int) -> None:
             candidate = candidates[index]
+            refusal = f"task {candidate.name!r} is already published"
             # The store would take the same files again as the earlier publication, which this generation
             # does not own, so its results would never be complete.
-            if any(stored.files_digest == candidate.files_digest for stored in self.task_store.tasks()):
-                refusal = f"task {candidate.name!r} is already published"
-                self.task_store.reject_task(generation=job.generation, index=index, reason=refusal)
-                continue
-            task = read_harbor_task(self.task_store.path(candidate.files_digest))
-            validation = await self.task_generator.validate(task)
-            if validation.is_valid:
-                try:
-                    split = assigned_split(
-                        self.task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
-                    )
-                    self.task_store.publish_task(generation=job.generation, index=index, split=split)
-                except (TaskConflict, TaskSplitConflict) as conflict:
-                    self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
+            if candidate.files_digest in published_digests:
+                task_store.reject_task(generation=job.generation, index=index, reason=refusal)
+                return
+            task = read_harbor_task(task_store.path(candidate.files_digest))
+            validation = await task_generator.validate(task)
+            if not validation.is_valid:
+                task_store.reject_task(generation=job.generation, index=index, reason="; ".join(validation.errors))
             else:
-                self.task_store.reject_task(
-                    generation=job.generation, index=index, reason="; ".join(validation.errors)
-                )
+                try:
+                    split = assigned_split(task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction)
+                    task_store.publish_task(generation=job.generation, index=index, split=split)
+                    published_digests.add(candidate.files_digest)
+                except (TaskConflictError, TaskSplitConflictError) as conflict:
+                    task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
+
+        stopped = False
+
+        async def check_in_slot(index: int, earlier: asyncio.Task[None] | None) -> None:
+            nonlocal stopped
+            async with check_slots:
+                # A copy of an earlier candidate waits for that candidate's outcome, so a copy of a published candidate
+                # is refused without a check. The slots are taken in candidate order, so the earlier one runs or ended.
+                if earlier is not None and not earlier.done():
+                    await asyncio.wait([earlier])
+                # After a check that could not run, no further check starts. The flag is set before the slot frees.
+                if stopped:
+                    return
+                try:
+                    await publish_or_reject(index)
+                except BaseException:
+                    stopped = True
+                    raise
+
+        checks: list[asyncio.Task[None]] = []
+        latest: dict[str, asyncio.Task[None]] = {}
+        for index in generation.pending_indices:
+            files_digest = candidates[index].files_digest
+            checks.append(asyncio.create_task(check_in_slot(index, latest.get(files_digest))))
+            latest[files_digest] = checks[-1]
+        try:
+            if checks:
+                await asyncio.wait(checks)
+        finally:
+            # The generation's deadline ends the attempt, and the checks that run stop.
+            for check in checks:
+                check.cancel()
+            await asyncio.gather(*checks, return_exceptions=True)
+        failed = [check for check in checks if not check.cancelled() and check.exception() is not None]
+        for check in failed[1:]:
+            logger.error(
+                "generated-task generation %d: another check failed too: %s", job.generation, check.exception()
+            )
+        # The attempt raises the first error, after the checks that ran with it saved their outcomes.
+        for check in checks:
+            check.result()
         self.task_store.complete_generation(generation=job.generation)
 
     def save_result(self, result: TaskRolloutResult) -> None:
@@ -673,13 +816,13 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     generation ran out of attempts; a round of sessions that a complete generation already used does not count. A
     start reads the next round number and the complete generations from the task store. A restart counts complete
     generations only, so a generation that ran out of attempts gets new attempts after a restart. A round is due
-    when no round is running, the limit is not reached, fewer than ``refill_tasks`` train tasks wait to train
-    (``waiting_task_count``), and one of these is true:
+    when no round is running, the limit is not reached, the stage's ``TaskTraining`` has room for more train tasks
+    (``has_room``), and one of these is true:
 
     * it is the first round after a start;
     * the last round made no train task, or the last task job failed, so no job data comes;
-    * ``jobs_per_round`` task jobs finished since the last round started;
-    * no train task is unfinished (``unfinished_task_count``), so no job end can come.
+    * ``jobs_per_round`` task jobs finished since the last round started (always, with ``jobs_per_round`` 0);
+    * no train task waits for a job or trains in one (``is_idle``), so no job end can come.
 
     At the limit, the stage stops the rounds and holds no more source sessions.
 
@@ -696,12 +839,22 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
 
     **Tasks.** The stage hands each published train task of a complete generation to the pipeline
     (``made_samples``), which saves it as a task item; a start hands back each one that the scenario's items do
-    not hold. A train task is unfinished until it has a result. When a job's end commits
-    (``job_ended``), the stage saves ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that
-    a committed job trained and that has no result. When every train task of a generation has a result, the next
-    job sends the generation's results to the generator. A restart sends the results that the generator did not
-    receive.
+    not hold. A train task is unfinished until it has a result. When a job's end commits (``job_ended``), the stage
+    asks its ``TaskTraining`` for the task uses that the end ends, and saves ``rollout(n)`` of
+    :mod:`reef.recipe.generated_tasks.results` for each of their tasks that has no result. When every train task of
+    a generation has a result, the next job sends the generation's results to the generator. A restart sends the
+    results that the generator did not receive. A task never goes stale: the algorithm rolls it out with the weights
+    that it trains.
+
+    **Task training.** ``GeneratedTaskSettings.task_training`` gives the stage its ``TaskTraining``.
+    ``SingleUseTraining`` (``pool_capacity`` 0) trains each train task once: a round has room while fewer than
+    ``refill_tasks`` unfinished tasks wait for a job. ``TrainingPool`` (``pool_capacity`` above 0) trains each task
+    again until a review retires it, and a round has room while fewer tasks than its capacity are active. After the
+    stage saved the results of a job's end, the ``TaskTraining`` gives the samples that come next, and the tasks that
+    no longer train (``reuse_tasks``).
     """
+
+    goes_stale = False
 
     def __init__(
         self,
@@ -713,10 +866,9 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         worker: BackgroundJobWorker | None = None,
     ) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
-        super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, self.source_grouping, exclusive_sources=True)
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
-        self.refill_tasks = settings.refill_tasks
         self.running_round: TaskGenerationRound | None = None
         # The first round after a start is due at once.
         self.follow_at_once = True
@@ -756,6 +908,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             generation_deadline_seconds=settings.generation_deadline_seconds,
             eval_fraction=settings.eval_fraction,
             split_seed=settings.split_seed,
+            validation_concurrency=settings.validation_concurrency,
         )
         if self.worker is None and self.rounds > 0:
             self.worker = BackgroundJobWorker(
@@ -771,19 +924,22 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         self.unfinished: set[str] = set()
         #: The generation that runs on the worker. One generation runs at a time.
         self.generation_in_flight: int | None = None
+        #: How often each train task trains, and when a round has room (``GeneratedTaskSettings.task_training``).
+        self.task_training = settings.task_training(self.scenario, self.task_store)
         self.last_error = ""
         store = self.task_store
         self.next_round = next_generation(store) if store is not None else 0
         self.completed_rounds = complete_generation_count(store) if store is not None else 0
         if store is not None:
             saved = rollout_results(store)
-            stored = self.stored_tasks()
+            stored = {} if self.samples is None else task_items(self.samples)
             for generation, published in published_train_tasks(store):
                 if published.name not in saved:
                     self.unfinished.add(published.name)
                 # A stop can fall between the generation's end and the pipeline storing its tasks.
                 if published.name not in stored:
                     self.made.append(task_item(store, generation, published))
+            self.made.extend(self.task_training.start_samples(stored, frozenset(saved)))
         # A trained task without a result waits for the end of its task job (job_ended).
         # Results that a stop kept from the generator go out now, even when no other job is due.
         if store is not None and self.worker is not None and deliverable_generations(store):
@@ -797,13 +953,26 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         context: PipelineContext,
         environ: Mapping[str, str],
     ) -> Self:
-        """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names."""
+        """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names.
+
+        The generator gets its state in the stage's task store. Raises ``PluginConfigError`` if the config names
+        a generator and the context has no task storage.
+        """
         settings = GeneratedTaskSettings.parse(config, plugin_class=cls)
         task_generator = None
         if settings.generator is not None:
             generator = TaskGenerator.reference(settings.generator, setting="pipeline.record2sample.config.generator")
-            task_generator = TaskGenerator.referenced_class(generator).from_config(
-                generator.config, scenario=context.scenario, environ=environ
+            generator_class = TaskGenerator.referenced_class(generator)
+            if context.task_storage is None:
+                raise PluginConfigError(
+                    "pipeline.record2sample.config.generator needs the task storage of a scenario session: "
+                    "the generator keeps its state in the task store"
+                )
+            task_generator = generator_class.from_config(
+                generator.config,
+                scenario=context.scenario,
+                environ=environ,
+                state=StoredGeneratorState(context.task_storage.open(TASK_STORE_NAME)),
             )
         return cls(context, settings, task_generator=task_generator)
 
@@ -825,10 +994,11 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         """Whether the next round should start now."""
         if self.rounds_stopped or self.running_round is not None:
             return False
-        # With no unfinished task, no job end comes to count toward the next round.
-        if not (self.follow_at_once or self.trained_jobs >= self.jobs_per_round or self.unfinished_task_count() == 0):
+        training = self.task_training
+        # With no task that waits or trains, no job end comes to count toward the next round.
+        if not (self.follow_at_once or self.trained_jobs >= self.jobs_per_round or training.is_idle(self.unfinished)):
             return False
-        return self.waiting_task_count() < self.refill_tasks
+        return training.has_room(self.unfinished, self.samples)
 
     def advance(self, now: float) -> None:
         """End the rounds that finished, then start the next round when it is due, or stop the rounds at the limit."""
@@ -890,34 +1060,15 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         return self.running_round is not None or super().background_jobs_running()
 
     def made_samples(self) -> tuple[tuple[str, TaskSample], ...]:
-        """The published train tasks that the pipeline has not stored, each named ``generated-tasks/<task name>``."""
+        """The samples of published train tasks that the pipeline has not stored, each named by ``sample_name``:
+        ``generated-tasks/<task name>``, or ``generated-tasks/<task name>@<k>`` for use ``k`` of a training pool.
+        """
         made, self.made = self.made, []
-        return tuple((f"{TASK_STORE_NAME}/{task.metadata['task']['name']}", task) for task in made)
-
-    def stored_tasks(self) -> dict[str, StoredSample]:
-        """The generated tasks that the scenario's items hold for this trainer, by task name: the tasks that its
-        stage made."""
-        if self.samples is None:
-            return {}
-        trainer = self.samples.trainer
-        found: dict[str, StoredSample] = {}
-        after_sequence = 0
-        while page := self.samples.page(after_sequence=after_sequence, kind="task"):
-            for stored in page:
-                if stored.component == trainer:
-                    found[stored.sample.metadata["task"]["name"]] = stored
-            after_sequence = page[-1].sequence
-        return found
+        return tuple((sample_name(task), task) for task in made)
 
     def unfinished_task_count(self) -> int:
         """The number of published train tasks without a result: each waits for a job, or for its job's end."""
         return len(self.unfinished)
-
-    def waiting_task_count(self) -> int:
-        """The number of unfinished train tasks that no committed job trained: each waits for a job."""
-        trainer = "" if self.samples is None else self.samples.trainer
-        stored = self.stored_tasks()
-        return sum(name not in stored or stored[name].train_count(trainer) == 0 for name in self.unfinished)
 
     def start_round(self, generation_round: TaskGenerationRound) -> bool:
         """Submit the round's generation to the worker.
@@ -972,6 +1123,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             finished.append(RoundResult(made_train_tasks=bool(outcome.tasks), retry=not outcome.is_complete))
             self.made.extend(outcome.tasks)
             self.unfinished.update(task.metadata["task"]["name"] for task in outcome.tasks)
+            if outcome.tasks:
+                self.task_training.tasks_published()
         return tuple(finished)
 
     def close(self) -> None:
@@ -988,7 +1141,10 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     def status(self) -> Mapping[str, Any]:
         store = self.task_store
         trainer = "" if self.samples is None else self.samples.trainer
-        trained = frozenset(name for name, stored in self.stored_tasks().items() if stored.train_count(trainer) > 0)
+        items = {} if self.samples is None else task_items(self.samples)
+        trained = frozenset(
+            name for name, samples in items.items() if any(sample.train_count(trainer) > 0 for sample in samples)
+        )
         return {
             **super().status(),
             "task_store": task_counts(store, trained) if store is not None else {},
@@ -1000,6 +1156,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                 "of": self.rounds,
                 "last_error": self.last_error,
             },
+            **self.task_training.status(),
         }
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
@@ -1015,31 +1172,36 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         self.generation_runner.save_result(result)
 
     def job_ended(self, outcome: JobOutcome) -> None:
-        """Save a result for each task that a committed job trained and that has none: its rewards in the job's
-        ``rollout_rewards``, or why no rollout ran.
+        """Save a result for each task of the uses that the end ends (``TaskTraining.ended_uses``) and that has none:
+        its rewards in the job's ``rollout_rewards``, or why no rollout ran. Then hand out the samples that the
+        ``TaskTraining`` gives next (``reuse_tasks``), and drop the samples of the tasks that it withdrew.
 
-        One task job runs at a time, so such a task belongs to the ended job, or to an earlier job that a new
-        training start cancelled. A second call for the same end saves nothing new. Then the stage sends the
-        finished generations' results to the generator.
+        A second call for the same end saves nothing new. Then the stage sends the finished generations' results to
+        the generator.
         """
         rewards = outcome.metrics.get("rollout_rewards", {})
         if not isinstance(rewards, Mapping):
             raise TypeError("a task job's rollout_rewards metric must map task names to rewards")
         error = outcome.error or "no rollout of the task ran"
-        store = self.task_store
-        if store is not None and self.samples is not None:
+        store, samples = self.task_store, self.samples
+        if store is not None and samples is not None:
+            items = task_items(samples)
+            uses = self.task_training.ended_uses(outcome.job_id, rewards, items, samples.trainer)
             saved = rollout_results(store)
-            for name, stored in self.stored_tasks().items():
-                if stored.train_count(self.samples.trainer) == 0 or name in saved:
+            for use in uses:
+                if use.task_name in saved:
                     continue
-                values = tuple(rewards.get(name) or ())
-                if values:
-                    self.generation_runner.save_result(TaskRolloutResult(name, values))
+                if use.rewards:
+                    self.generation_runner.save_result(TaskRolloutResult(use.task_name, use.rewards))
                 else:
                     self.generation_runner.save_result(
-                        TaskRolloutResult(name, error=error, infrastructure_failure=True)
+                        TaskRolloutResult(use.task_name, error=error, infrastructure_failure=True)
                     )
-                self.unfinished.discard(name)
+                self.unfinished.discard(use.task_name)
+            following = self.task_training.reuse_tasks(uses, items, samples)
+            # A sample that an earlier end made and the pipeline has not stored yet waits too.
+            self.made = [task for task in self.made if task.metadata["task"]["name"] not in following.withdrawn]
+            self.made.extend(following.samples)
         self.task_job_ended(finished=outcome.event == "finished")
         self.deliver_later()
 
@@ -1057,7 +1219,8 @@ class GeneratedTaskJobData(Sample2Job):
     training component rolls the tasks out on its own sampler and trains on their rollouts (a task job; see the
     training component's job parameters). The commit that submits the job counts the tasks trained;
     ``GeneratedTaskSamples.job_ended`` saves their results when the job ends. Imported train tasks train the same
-    way; only generated tasks get results.
+    way; only generated tasks get results. With a training pool (``GeneratedTaskSettings.pool_capacity``), the
+    generated tasks train again, and imported tasks still train once.
     """
 
     accepts_imported_tasks = True

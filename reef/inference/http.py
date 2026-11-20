@@ -18,9 +18,17 @@ from aiohttp import ClientResponse
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
-from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime, InferenceStream
+from reef.core.served_models import ServedArtifact
+from reef.inference.interfaces import (
+    FULL_WEIGHT_NAME_PREFIX,
+    InferenceArtifact,
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+)
 from reef.inference.provider_protocol import provider_headers
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string
+from reef.inference.residency import ADAPTER_NAME_PREFIX
 
 #: Hop-by-hop headers that describe one connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -40,6 +48,10 @@ HOP_BY_HOP_HEADERS = frozenset(
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
 
+#: The request header with the engine-side name of the weights that a request selects. A remote inference
+#: component that keeps each request on its weights admits the request only while it serves that name.
+SERVED_MODEL_HEADER = "x-reef-served-model"
+
 # -- Request headers ----------------------------------------------------------
 
 
@@ -56,8 +68,17 @@ class RequestHeadersFactory(ABC):
 
 
 def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
-    """Reef identity headers for one selected, optionally materialized artifact."""
+    """Reef identity headers for one selected, optionally materialized artifact.
+
+    The artifact ID is always present, and the local path when the artifact has one. ``SERVED_MODEL_HEADER``
+    carries ``served_model`` when that is a full-weight or adapter name that Reef gave the engines; a provider's
+    own model name stays in the request body only.
+    """
     headers = {"x-reef-artifact-id": artifact.artifact_id}
+    if artifact.served_model is not None and artifact.served_model.startswith(
+        (FULL_WEIGHT_NAME_PREFIX, ADAPTER_NAME_PREFIX)
+    ):
+        headers[SERVED_MODEL_HEADER] = artifact.served_model
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers
@@ -97,7 +118,7 @@ def provider_request_headers(api_key: str) -> RequestHeadersFactory:
     return ProviderRequestHeaders(api_key)
 
 
-class ResponseTooLarge(UpstreamStatusError):
+class ResponseTooLargeError(UpstreamStatusError):
     """A provider body, success or error, exceeded its caller's byte limit; nothing of it was parsed (status 502)."""
 
 
@@ -109,15 +130,15 @@ async def bounded_body(response: ClientResponse, limit_bytes: int, label: str) -
     buffers that aiohttp itself keeps.
 
     Raises:
-        ResponseTooLarge: The body is longer than ``limit_bytes``.
+        ResponseTooLargeError: The body is longer than ``limit_bytes``.
     """
     if response.content_length is not None and response.content_length > limit_bytes:
-        raise ResponseTooLarge(f"{label} body exceeds {limit_bytes} bytes", status=502)
+        raise ResponseTooLargeError(f"{label} body exceeds {limit_bytes} bytes", status=502)
     body = bytearray()
     while chunk := await response.content.read(limit_bytes + 1 - len(body)):
         body.extend(chunk)
         if len(body) > limit_bytes:
-            raise ResponseTooLarge(f"{label} body exceeds {limit_bytes} bytes", status=502)
+            raise ResponseTooLargeError(f"{label} body exceeds {limit_bytes} bytes", status=502)
     return bytes(body)
 
 
@@ -164,10 +185,9 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def _post_arguments(
-        self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Keyword arguments of one ``session.post`` call."""
+    def post_arguments(self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """The keyword arguments of one ``session.post`` call: the upstream URL of ``path``, ``payload`` as JSON,
+        and the headers for ``artifact``, or only the provider's headers without one."""
         headers = (
             self._request_headers.external_headers(path)
             if artifact is None
@@ -196,13 +216,13 @@ class HttpInferenceHandler(InferenceHandler):
         """POST to the provider. External models omit the Reef artifact.
 
         With ``max_response_bytes``, the body of every status is read by ``bounded_body`` and parsed as JSON
-        whatever its content type; a longer body raises ``ResponseTooLarge``. Without it, the body is read whole.
+        whatever its content type; a longer body raises ``ResponseTooLargeError``. Without it, the body is read whole.
         """
         from aiohttp import ClientSession, ClientTimeout, ContentTypeError
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
-            session.post(**self._post_arguments(artifact, path, payload)) as response,
+            session.post(**self.post_arguments(artifact, path, payload)) as response,
         ):
             if max_response_bytes is not None:
                 body = await bounded_body(response, max_response_bytes, self._error_label)
@@ -242,7 +262,7 @@ class HttpInferenceHandler(InferenceHandler):
         # The session outlives this call: the stream owns it until closed.
         session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
         try:
-            response = await session.post(**self._post_arguments(artifact, path, payload))
+            response = await session.post(**self.post_arguments(artifact, path, payload))
         except BaseException:
             # Cancelled while waiting for the provider's headers, too: nothing else owns this session yet.
             await session.close()
@@ -276,8 +296,13 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. It loads no weights: a snapshot
-    serves under its release ID, and no load names what serves.
+    and exposes it via inference_handler, which forwards each request to the
+    provider in its native format. It binds no weights: nothing ties a Reef
+    artifact to what the provider serves under ``model_path``. So
+    ``served_artifact`` gives no route for any artifact, and
+    ``activate_checkpoint`` refuses every snapshot whose weights the runtime
+    would load. A snapshot without a weight component, such as a record-only or
+    harness snapshot, routes to the provider's model (``endpoint_model_name``).
     """
 
     def __init__(
@@ -323,11 +348,25 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._inference_handler
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        return artifact.artifact_id
+        """Refuse the snapshot with ``ValueError``: the proxy loads no weights, so its provider's model would answer
+        under the snapshot's artifact ID. The refusal does not change on a retry, so a startup fails for good."""
+        raise ValueError(
+            f"an inference proxy loads no weights, so it cannot serve the weights of artifact {artifact.artifact_id}; "
+            "serve weight snapshots with a runtime that loads them"
+        )
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """None for every artifact: the proxy binds no artifact's weights to the provider's model."""
+        return None
+
+    def endpoint_model_name(self, scenario: str) -> str | None:
+        """The provider's model (``served_model_name``, by default ``model_path``) for a snapshot without weights; None
+        when the proxy names no model."""
+        return self.served_model_name(scenario) or None
 
 
 @dataclass(frozen=True)
-class InferenceProxyConfig:
+class InferenceProxySettings:
     """Connection configuration owned by the inference proxy adapter."""
 
     base_url: str = config_option("", help="Inference provider base URL.")
@@ -349,7 +388,7 @@ class InferenceProxyRuntimeFactory(RuntimeFactory):
     kind = "inference_proxy"
 
     def config_type(self) -> type:
-        return InferenceProxyConfig
+        return InferenceProxySettings
 
     def __call__(
         self,
@@ -401,11 +440,12 @@ def _env_value(values: Mapping[str, str], name: str) -> str | None:
 
 __all__ = [
     "PROVIDER_APIS",
+    "SERVED_MODEL_HEADER",
     "ArtifactRequestHeaders",
     "HttpInferenceHandler",
-    "InferenceProxyConfig",
     "InferenceProxyRuntime",
     "InferenceProxyRuntimeFactory",
+    "InferenceProxySettings",
     "ProviderRequestHeaders",
     "RequestHeadersFactory",
     "artifact_identity_headers",

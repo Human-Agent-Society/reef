@@ -11,6 +11,7 @@ data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` i
 
 from __future__ import annotations
 
+import itertools
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -18,10 +19,11 @@ from collections.abc import Mapping, Sequence
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import QueueWorker
-from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, NoDataStore
+from reef.recipe.deployment import harness_adapter
+from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, DataStoreUnavailableError
 from reef.service.data_transfer import ArchiveWriters, run_export, run_import
 from reef.storage.artifact_items import artifact_item
-from reef.storage.data import ItemConflict, ItemNotFound, NewItem
+from reef.storage.data import ItemConflictError, ItemNotFoundError, NewItem
 from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
@@ -55,7 +57,7 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
             # has no kind.
             declared = components.components.get(row["component"])
             kind = None if declared is None else declared.kind
-            missing.append(artifact_item(scenario, row, kind, uri, dispatcher.recipe.harness_adapter))
+            missing.append(artifact_item(scenario, row, kind, uri, harness_adapter(dispatcher.recipe)))
     for start in range(0, len(missing), MAX_ITEMS_PER_CREATE):
         store.create(owner, missing[start : start + MAX_ITEMS_PER_CREATE])
     return len(missing)
@@ -91,7 +93,18 @@ class ArtifactCopy(DataJob):
 
 
 class DataImport(DataJob):
-    """Imports the files at the item's URI, which ``sources`` reads (``run_import``)."""
+    """Imports the files at the URI of a ``data_import`` item as items of its owner (``run_import``).
+
+    Values: ``dispatcher`` is the dispatcher whose data store holds the items and whose ``data`` queue holds the
+    import; ``sources`` reads the URIs that imports name. ``run(item)`` takes an import item that a worker holds
+    (``item.worker_id`` is set) and returns ``{items}``, the count it stored. It raises ``ValueError`` when no worker
+    holds ``item``, and as ``run_import`` for files it cannot import. For a trajectory import, progress entry ``n``
+    of ``item`` is ``{items}``, the count stored after transaction ``n``: each attempt reports the same entries, so a
+    retry adds only those that an earlier attempt did not. ``WorkLeaseLostError`` stops it when its worker no longer
+    holds ``item``; the items of its earlier transactions stay.
+
+    Purpose: ``data_jobs`` makes it; ``DataWorker`` runs each ``data_import`` item with it.
+    """
 
     kind = DATA_IMPORT_KIND
 
@@ -100,7 +113,16 @@ class DataImport(DataJob):
         self.sources = sources
 
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        return run_import(DataAccess.of(self.dispatcher), self.sources, item.payload)
+        worker_id = item.worker_id
+        if worker_id is None:
+            raise ValueError(f"no worker holds the import {item.id}")
+        data = DataAccess.of(self.dispatcher)
+        numbers = itertools.count()
+
+        def report_stored(stored: int) -> None:
+            data.queue.append_progress(DATA_QUEUE, item.id, worker_id, {"items": stored}, number=next(numbers))
+
+        return run_import(data, self.sources, item.payload, report_stored)
 
 
 class DataExport(DataJob):
@@ -136,7 +158,7 @@ class DataWorker(QueueWorker):
     Purpose: the process that runs the data service starts one or more.
     """
 
-    permanent_errors = (ValueError, ItemNotFound, ItemConflict, NoDataStore)
+    permanent_errors = (ValueError, ItemNotFoundError, ItemConflictError, DataStoreUnavailableError)
 
     def __init__(
         self, queue: WorkQueue, jobs: Sequence[DataJob], *, worker_id: str, poll_seconds: float = 0.2

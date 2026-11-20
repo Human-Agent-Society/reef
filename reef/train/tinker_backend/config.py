@@ -12,14 +12,14 @@ from reef.core.config import config_option
 
 
 @dataclass(frozen=True)
-class TinkerServiceConfig:
+class TinkerServiceSettings:
     """The ``training.options`` that every training component on a Tinker-compatible service reads.
 
     Values: ``state_dir`` and ``api_key_env`` are non-empty; ``batch_size`` is positive; ``learning_rate`` is finite
     and positive and ``kl_coef`` finite and non-negative, the defaults of each job's parameters
     (``TinkerJobParameters``); ``base_url`` is an http(s) URL or None for hosted Tinker; ``inference_timeout_s`` is
-    positive and ``train_timeout_s`` positive or None; ``chat_template_kwargs`` is None or an object. Purpose: the base of ``TinkerConfig`` and
-    ``SpindleFullConfig``; the components, their SDK client and their sampler read these fields.
+    positive and ``train_timeout_s`` positive or None; ``chat_template_kwargs`` is None or an object. Purpose: the base of ``TinkerSettings`` and
+    ``SpindleFullSettings``; the components, their SDK client and their sampler read these fields.
     """
 
     state_dir: str = config_option(help="Persistent local directory for Tinker checkpoint manifests.")
@@ -69,10 +69,10 @@ class TinkerServiceConfig:
 
 
 @dataclass(frozen=True)
-class TinkerConfig(TinkerServiceConfig):
+class TinkerSettings(TinkerServiceSettings):
     """The ``training.options`` of the Tinker training component, which trains a LoRA.
 
-    Values: those of ``TinkerServiceConfig``; ``lora_rank`` is positive and ``seed`` an int or None. Purpose:
+    Values: those of ``TinkerServiceSettings``; ``lora_rank`` is positive and ``seed`` an int or None. Purpose:
     ``tinker_settings`` parses it from a deployment; the component, its SDK client and its sampler read it, and
     ``TinkerDeployment.trainer_serving_config`` derives Tinker serving from it.
     """
@@ -96,7 +96,7 @@ class ScoreCentering:
     ``min_tail_mass`` is in (0, 1), the floor of the sampler's and the trainer's tail masses; ``weight_low`` and
     ``weight_high`` are finite with ``0 <= weight_low <= weight_high`` and ``weight_high > 0``, the bounds of the
     token weight ``clamp(p / q, weight_low, weight_high)``. ``weight_low == weight_high == 1`` is REINFORCE.
-    Purpose: ``SpindleFullConfig.score_centering_settings`` makes it; ``ScoreCenteredLoss`` trains with it and
+    Purpose: ``SpindleFullSettings.score_centering_settings`` makes it; ``ScoreCenteredLoss`` trains with it and
     the component's task rollouts record ``top_k`` sampler log probabilities per sampled token.
     """
 
@@ -120,10 +120,10 @@ class ScoreCentering:
 
 
 @dataclass(frozen=True, kw_only=True)
-class SpindleFullConfig(TinkerServiceConfig):
+class SpindleFullSettings(TinkerServiceSettings):
     """The ``training.options`` of the Spindle full-parameter training component (RFC #996).
 
-    Values: those of ``TinkerServiceConfig``, with ``base_url`` set to the Spindle deployment. ``base`` is
+    Values: those of ``TinkerServiceSettings``, with ``base_url`` set to the Spindle deployment. ``base`` is
     ``hf://<repo>@<commit>`` with a full 40-digit commit SHA (``HuggingFaceRevision``), the weights that the
     deployment's full-parameter engine for ``<repo>`` trains. ``release_repo`` is the ``org/name`` Hugging Face
     repo that each saved checkpoint's weights are exported to, one commit each. ``checkpoint_volume`` and

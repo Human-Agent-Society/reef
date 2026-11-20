@@ -1,6 +1,6 @@
 # Meta-Harness
 
-Meta-Harness is full-history search over a fixed model's harness. Each step,
+Meta-Harness is full-history search over a fixed model's harness. In each job,
 a proposer reads every earlier candidate with its scores on fixed evaluation
 tasks, and writes one complete harness tree. Reef evaluates that tree and
 keeps it only when its mean score beats the served tree's. The method
@@ -10,7 +10,7 @@ Harbor, Terminal-Bench, Terminus, or coding-agent dependency.
 
 ```text
 meta_harness/
-  method.py            MetaHarness: one complete tree per step from the whole search history
+  method.py            MetaHarness: one complete tree per job from the whole search history
   system_prompt.md     the proposer model's system prompt
   proposal_prompt.md   the instructions in front of the search state
   agent/               the same search with a coding agent as the proposer, as prompts (AgentMethod)
@@ -19,7 +19,7 @@ meta_harness/
   results/             the selected harness of the reported comparison
 ```
 
-`MetaHarness` makes one model call per step, and the prompt holds an excerpt
+`MetaHarness` makes one model call per job, and the prompt holds an excerpt
 of the history. Upstream's proposer is a coding agent that reads the whole
 search as files; [`agent/`](agent/README.md) runs that proposer as a method
 made of prompts, on the deployment's coding agent.
@@ -29,13 +29,13 @@ execution, timeouts, residue policy, finite-score checks, the score cache,
 selection, publication, and scenario commits. Meta-Harness adds the proposal:
 what the proposer model sees and how its reply becomes a candidate.
 
-## How a step starts
+## How a job starts
 
 The search learns from the evaluation tasks, not from traffic or uploaded
-tasks. So a training request starts each step: the deployment trains in
-`manual` mode, and each `POST /reef/train` runs one step. The request's
+tasks. So a training request starts each job: the deployment trains in
+`manual` mode, and each `POST /reef/train` runs one job. The request's
 `text` is an instruction that the proposer reads, such as "Propose the next
-candidate of the search." The number of requests is the number of steps;
+candidate of the search." The number of requests is the number of jobs;
 upstream's `--iterations` is the same count.
 
 ```bash
@@ -45,7 +45,7 @@ curl -f http://127.0.0.1:8901/reef/train \
   -d '{"text": "Propose the next candidate of the search.", "session": "", "artifact_id": ""}'
 ```
 
-The steps of the queued requests run one after another. See [Manual
+The jobs of the queued requests run one after another. See [Manual
 training](../../docs/reference/http-api.rst#manual-training) for the route.
 
 ## Configuration
@@ -106,9 +106,9 @@ class RolloutScore(TaskScorer):
 The method refuses to run when `evolution.models` does not declare `model`:
 the harness under test must not propose its own improvements.
 
-## One step
+## One job
 
-The population is the scenario's history. A step shows the proposer model
+The population is the scenario's history. A job shows the proposer model
 these items, as data:
 
 - The candidates of the search: the served tree, the seed, and each tree the
@@ -121,22 +121,22 @@ these items, as data:
   each with its failed runs and then its lowest scores first. A long record
   keeps its beginning and its end.
 - The latest replies that proposed no candidate, and why.
-- The text of the training request that started the step.
+- The text of the training request that started the job.
 - The parts of the adapter's tree: each part's path, format and render path,
   and what its file holds, with the parts a proposal may change.
 
 The reply names one parent and returns one complete tree as `files`, path to
-text. The step refuses the reply when the parent is not a candidate it
+text. The job refuses the reply when the parent is not a candidate it
 showed, when the tree changes a file of a part outside `components` (such
 files must stay byte for byte equal to the parent's), when the tree holds
 more than `max_files` files, or when the tree fails the adapter's
 validation. It also refuses a tree that the history already holds. A refused
-reply leaves the head unchanged, so the step skips and Reef evaluates
+reply leaves the head unchanged, so the job skips and Reef evaluates
 nothing. The adapter's validation remains authoritative: an adapter may
 still refuse an otherwise valid file.
 
-A proposed tree becomes the step's candidate. The history keeps it with the
-proposer's hypothesis, changes, and parent, so the next step shows it.
+A proposed tree becomes the job's candidate. The history keeps it with the
+proposer's hypothesis, changes, and parent, so the next job shows it.
 
 ## Selection
 
@@ -157,12 +157,12 @@ usual.
 ## State and commits
 
 The history directory under `evolution.state_dir` holds every candidate, its
-runs and records, and each step's decision. The method's own state,
-committed with each step, is `state/attempts.jsonl`: one line per reply that
+runs and records, and each job's decision. The method's own state,
+committed with each job, is `state/attempts.jsonl`: one line per reply that
 proposed no candidate.
 
-The history keeps an attempt whose step never committed, such as an
-evaluation or a commit that failed. A retry of that step does not show the
+The history keeps an attempt whose job never committed, such as an
+evaluation or a commit that failed. A retry of that job does not show the
 attempt's tree and does not refuse it as a known tree. If the proposer
 returns it again, the cache scores it; only the runs that could not run are
 run again.

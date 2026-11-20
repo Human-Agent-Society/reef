@@ -7,7 +7,7 @@
 # model call: the request body, with the response body as `response`. Those lines become the run's ATIF.
 name: python
 binary: uv
-# uv from PyPI at the pinned version. A task's container gets the same version from Astral's installer.
+# uv from PyPI at the pinned version. Reef uploads the same version into a task's container.
 install:
   kind: uv
   package: uv

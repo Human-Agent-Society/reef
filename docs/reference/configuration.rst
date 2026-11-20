@@ -5,7 +5,7 @@ Local inference needs no YAML file:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 
 This starts SGLang on an automatically selected loopback port, waits for its
 health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
@@ -61,7 +61,7 @@ sends requests that match a keyword or domain rule to another target (usually th
 teacher), and accepts explicit pins to its own targets.
 
 Clients call Reef directly. ``reef serve`` owns one unmodified Semantic Router
-(SR) container, the upstream version pinned in ``third_party/semantic-router``.
+(SR) container built from the upstream commit pinned by this Reef release.
 For ``model: auto``, Reef sends one ``POST /api/v1/routing/preview`` for the
 client's ``x-reef-scenario`` to that Scenario's private entrypoint, then checks
 the selected rule and target against the manifest and the SR runtime it
@@ -107,8 +107,10 @@ The manifest (``schema_version: 2``) has three parts:
   Optional ``shadow_target`` names one enabled target that Reef also calls for
   each of the Scenario's requests whose primary target is another one; see
   `Shadow targets <#shadow-targets>`__.
-* ``deployment`` pins the Semantic Router image (``semantic_router_image``) by
-  digest. Optional ``domain_classifier`` names a local pretrained domain
+* ``deployment`` may name the Semantic Router image (``semantic_router_image``)
+  by repository digest (``repository@sha256:<hex>``) or local image ID
+  (``sha256:<hex>``). Without it, a managed deployment builds the pinned image
+  (`Semantic Router image`_). Optional ``domain_classifier`` names a local pretrained domain
   classifier: ``model_directory`` (an absolute path without symlinks),
   ``threshold`` (a number from 0 to 1) and ``files``, the ``sha256:`` digest
   of each of exactly ``config.json``, ``tokenizer.json``, ``model.safetensors``
@@ -177,14 +179,8 @@ Managed routing lifecycle
 Setting ``reef.routing_manifest`` makes ``reef serve`` own the SR container
 and a routed Reef child; there is no separately launched mode. This requires
 Linux, a local Docker daemon with Compose, and the local ``uni`` service
-executor. External model services remain independently managed. The SR image
-must already be available locally and pinned by digest in the manifest.
-Before starting or recreating the container, Reef checks that the image's
-``org.opencontainers.image.revision`` label matches the SR commit pinned by
-this Reef release. A missing or different label prevents container creation.
-This checks declared source metadata, not the binaries themselves. See the
-`image build instructions <../../tutorials/semantic-router/README.md#1-build-the-semantic-router-image>`__
-for the required commit and label.
+executor. External model services remain independently managed. Reef builds the
+SR image when the manifest names none; see `Semantic Router image`_.
 
 .. code-block:: yaml
 
@@ -244,6 +240,9 @@ through ``--reef.routing-deployment``.
    * - container_stop_timeout_seconds
      - 10
      - Container stop operation timeout.
+   * - image_build_timeout_seconds
+     - 3600
+     - Longest startup build of the SR image, when the manifest names none and no built image is cached.
    * - sr_management_port
      - 50053
      - SR's authenticated HTTP API (previews and configuration), published on host loopback.
@@ -282,7 +281,8 @@ had when it started, even if no earlier target used it; Reef never adds
 credentials to a running process. The automatic model, Scenario names, the
 domain classifier, images and deployment settings must stay the same;
 otherwise the update is rejected, logged as ``policy_rejected``, and the
-current policy keeps serving. Preview settings also need a restart.
+current policy keeps serving. Preview settings also need a restart. A manifest
+that names no image keeps the generation's image; an update never builds one.
 
 Before anything closes, the Reef child checks the new manifest's providers
 (their model lists) with its own credentials. A missing credential, a provider
@@ -354,6 +354,62 @@ preserves this marker until the operator establishes that the daemon operation
 has finished and explicitly acknowledges it. See the tutorial for status,
 cleanup and configuration replacement commands.
 
+Semantic Router image
+^^^^^^^^^^^^^^^^^^^^^
+
+``deployment.semantic_router_image`` is optional for a managed deployment.
+
+* **The manifest names no image.** Startup uses the image that Reef builds from
+  the SR commit pinned by this release. Reef tags the image
+  ``reef-semantic-router:<commit prefix>-<recipe>`` and later starts reuse it.
+* **The manifest names an image.** Reef runs that image. It does not look for a
+  built image and does not build one.
+
+In both cases, Reef checks the image before it starts or recreates the
+container. The image's ``org.opencontainers.image.revision`` label must match
+the pinned commit. A missing or different label prevents container creation.
+This checks declared source metadata, not the binaries themselves.
+
+**The automatic build.** Reef builds the image only when no image has the tag.
+The build has these properties:
+
+* It runs ``docker buildx build`` directly from the commit on GitHub. It needs
+  Docker Buildx and network access, and no Git checkout. It receives no router
+  credentials.
+* It can take long. ``image_build_timeout_seconds`` bounds it. The Reef HTTP
+  port is not open until the image is ready.
+* Its progress goes to the private file ``semantic-router-build.log`` in the
+  deployment's registry directory.
+* The source commit is pinned, but the upstream build resolves its base images
+  and packages when it runs. Two builds of the same commit can therefore
+  produce different images.
+* Reef refuses an image that has the tag but other revision or build recipe
+  labels. Remove that image with ``docker image rm`` and start again.
+* Reef removes no image and no build cache. A later Reef release that pins
+  another commit builds an image with another tag; remove the old image when no
+  deployment uses it.
+
+**Stopping a build.** SIGTERM or Ctrl-C ends the build command and its process
+group before Reef creates the generation's SR container. Model containers,
+BuildKit and the resources of an earlier generation may still exist. Docker may
+keep or finish build cache.
+
+**The image of a generation.** Startup reads the manifest once and freezes the
+image for the generation. An edit during a build reaches the deployment only as
+a later policy update. Policy updates keep the image, and recovery restarts it
+without a build. The ``prepared`` lifecycle event reports the image with the
+generation's ``snapshot_version``.
+
+The ``snapshot_version`` covers the image. When the manifest names no image, the
+version therefore depends on the image that this host built: the same manifest
+gets another version on another host, or after the image is built again.
+``python -m reef.service.deploy.routing.cli validate`` prints
+``"snapshot_version": null`` for such a manifest. Name an image in the manifest
+when hosts with the same Reef release and settings must get the same version.
+
+See the `Semantic Router image <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__
+section of the tutorial for an example.
+
 External router lifecycle
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -418,13 +474,16 @@ This lifecycle differs from ``managed``:
   process more time than this before it is killed.
 * **Scenario deletion.** Stop all inference replicas before deleting
   or archiving a Scenario through control. Wait for their calls and record writes
-  to finish and their storage sessions to close. The generation check prevents
-  late shadow records entering a replacement Scenario; it does not coordinate
+  to finish and their storage sessions to close. The generation check rejects
+  late writes from an archived record generation. Operators coordinate
   storage archival across processes. In particular, never archive live SQLite
   database files.
-* **Your responsibilities.** Reef does not start, restart or stop SR, and it does
-  not check the image's revision label. Pin an image built from the commit in
-  ``third_party/semantic-router``.
+* **Your responsibilities.** Reef does not build, start, restart or stop SR, and it
+  does not check the image's revision label. Name an image built from this Reef
+  release's SR commit in ``deployment.semantic_router_image``, which ``render``
+  and the replica both require; one that a managed start built (see the `Semantic Router image
+  <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__)
+  qualifies.
 
 Only ``sr_management_port``, ``selection_timeout_seconds``,
 ``preview_max_concurrency``, ``finalization_timeout_seconds`` and the three
@@ -483,7 +542,7 @@ A weight-training stack trains and serves on separate processes and GPUs. The
 training backend runs a training component inside the HTTP service. Reef
 submits each job's ready data to that component as a bounded job, and the
 component saves checkpoints. Reef evaluates each saved checkpoint and
-publishes the selected ones as releases. The serving engines load only
+publishes the selected ones as snapshots. The serving engines load only
 published snapshots, from files. With the default Slime backend and an engine
 (``inference.backend: sglang`` or ``vllm``), ``reef serve`` starts these
 services:
@@ -544,6 +603,20 @@ starts serving engines before it answers, as with Slime and whenever Reef's
 engines serve, Reef raises ``reef.ready-timeout`` to at least
 ``training.ready-timeout``.
 
+``training.max-jobs`` (default 1) is the number of training jobs that one
+process of the training service runs at the same time for each training
+component. Several jobs of one scenario run at the same time only when the
+component allows it; the Tinker component does (see `Executors
+<../developer-guide/executors.rst>`__). Each running job needs its own
+compute, so set the value to what the machines hold.
+
+``training.manager`` names a ``TrainingManager`` plugin
+(``reef.train.manager``), as ``package.module:ClassName`` or as ``module`` and
+``config``. Without it, a scenario in ``auto`` mode starts a job when
+``job_samples`` untrained samples wait. With it, Reef starts no job by that
+rule: the manager decides. See `Decide what a scenario trains
+<../developer-guide/executors.rst#decide-what-a-scenario-trains>`__.
+
 ``training.timeout-s`` bounds each call to the training workers, in seconds.
 With Slime, it bounds each worker call of a job, such as training and
 checkpoint saves; when omitted, the bound is four hours. With Tinker, it
@@ -573,7 +646,7 @@ weights, or a PEFT adapter with its rank and target modules.
        adapters the engines keep resident when the snapshots are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
 
    ``inference.prefix-sharing`` : false
-       share prefix-cache entries between requests. Each snapshot load then retracts the requests in flight, which prefill again on the new weights. SGLang keeps the cache only where that is safe
+       ``true``: requests on the same weights share the engines' prefix cache. The engines finish their requests and clear the cache before each change of weights
 
 The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.tensor-parallel-size``, ``inference.options``,
@@ -581,24 +654,52 @@ The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.handler-config``, ``inference.max-loaded-adapters`` and
 ``inference.prefix-sharing``. Another serving mode refuses them. The engines
 start with the artifact format: an adapter format enables SGLang's adapter
-table with the adapter's rank and target modules. Releases without weight
+table with the adapter's rank and target modules. Snapshots without weight
 files, such as Tinker's, are served by engines only when the training backend
 names how to fetch their weights (``TrainingDeployment.engine_weights``);
 Tinker's does. Otherwise the HTTP service refuses that pairing when it
 starts.
 
+With ``inference.serving: engines``, the inference component keeps each
+production request on the weights that the request selected (`Request
+pinning <../developer-guide/executors.rst#request-pinning>`__). No setting
+turns this off. It needs ``inference.backend: sglang`` (the default) or
+``vllm`` with the engine's own request handler, so Reef refuses another
+backend or ``inference.handler-factory`` here. Another engine needs its own
+serving runtime (``inference.serving: module:Factory``). With ``trainer``,
+Tinker's sampler serves each snapshot as an immutable revision, so it needs
+no pinning.
+
+With ``inference.prefix-sharing: true``, the engines clear their prefix
+cache before each change of weights or adapters, after the admitted
+requests finish. The clear covers the engine's own cache, which includes
+SGLang's host-memory tier (``enable_hierarchical_cache``). Engines that do
+not confirm the clear stay unavailable until the control plane replaces
+them. For adapter artifacts, SGLang keeps the cache only when it keys the
+entries by adapter; otherwise the engines run without a prefix cache.
+
+The clear does not cover KV that an engine keeps outside itself. Engine
+serving therefore refuses these ``inference.options``, with or without
+prefix sharing: SGLang's ``hicache_storage_backend`` and
+``enable_lmcache``, and vLLM's ``kv_transfer_config``,
+``kv_offloading_size`` and ``kv_offloading_backend``. Reef checks these
+option names only. Do not give the engines another KV store through a
+plugin or an environment variable.
+
 The control plane checks the inference component every 30 seconds. When the
 component has restarted, or an engine has failed, the control plane pauses
-generation, starts the lost engines again, loads each scenario's served
-artifact into them, and resumes.
+generation, replaces the component's engine stack, loads each scenario's
+served artifact again, and resumes.
 
 Engine-serving inference uses the same ``inference`` fields as standalone
-serving. ``inference.num-gpus`` is the total inference GPU budget;
+serving. ``inference.num-gpus`` is the total inference GPU budget; with
+``inference.remote.slot-urls``, it is the budget of each component.
 ``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
-The total defaults to the per-engine count and must be a positive multiple of
-it. For example, 4 GPUs with tensor parallel size 2 creates two engines.
-Standalone serving currently supports one engine, so its total must equal its
-tensor parallel size. An external provider does not accept local GPU requests.
+The budget defaults to the per-engine count and must be a positive multiple
+of it. For example, 4 GPUs with tensor parallel size 2 creates two engines on
+one component. Standalone serving currently supports one engine on each
+component, so its budget must equal its tensor parallel size. An external
+provider does not accept local GPU requests.
 
 .. code:: yaml
 
@@ -622,10 +723,9 @@ CLI overrides use the same parser, for example
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
 SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
 from the ``inference`` section and the artifact format; Slime starts no serving
-engine. ``router-port`` binds the first router's HTTP
+engine. ``router-port`` binds the router's HTTP
 port, and other supported router flags keep their native ``router-*`` names.
-``router-ip`` is refused, because the serving engines use no external
-router. The standalone engine launcher does not include a router.
+The standalone engine launcher does not include a router.
 
 For the SGLang engines of a training stack, each engine probes free ports on
 its host at startup. A probe reserves nothing, so another process, such as
@@ -634,22 +734,17 @@ engine then fails to start and another process holds one of its ports, Reef
 stops the engine and starts it again on new ports. Reef does the same when
 another process listens on the engine's HTTP port and answers the readiness
 check. Reef makes at most three startup attempts per engine. Other startup
-failures, and any failure of an encoder engine, stop the launch.
+failures stop the launch.
 
 When Reef starts a router, it probes a free metrics port on the host, from
 port 4000 up. It also probes a free HTTP port, unless the router uses
-``router-port``. Only the first model's router uses ``router-port``. The
-router serves both ports on the host's address. If the router then fails to
+``router-port``. The router serves both ports on the host's address. If the router then fails to
 start and another process holds one of these ports, Reef stops the router and
 starts it again on new ports. Reef does the same when another process listens
 on the router's HTTP port and answers the readiness check. Reef makes at most
 three attempts. A configured ``router-port`` does not change, so a conflict on
 it stops the launch. Another stack's metrics port can take a ``router-port``
 near 4000, so use a port outside that range.
-
-Encoder engines keep the weights they started with. Published weights load
-only into the other engines of the model. When a model with an encoder group
-trains, keep its vision encoder frozen.
 
 Slime's own engine and placement options in ``training.options``
 (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
@@ -659,9 +754,9 @@ Slime`_), never the serving engines; before that session runs, a driver of any
 other job starts no rollout engines. Reef's serving
 never shares GPUs with training, so ``training.colocate`` is refused. Native
 options cannot override
-managed model, placement or parallelism settings. Pipeline/data parallel and
-prefill/decode-disaggregated inference topologies are not supported by this
-managed path yet. Reef binds ``training.options.hf-checkpoint`` to
+managed model, placement or parallelism settings. Each serving engine runs on
+one node. Pipeline/data parallel and prefill/decode-disaggregated inference
+topologies are not supported by this managed path. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. Slime also needs an
 explicit ``training.options.global-batch-size``, the samples in one optimizer
 step: Slime cuts each job's data into optimizer batches of that size.
@@ -691,9 +786,9 @@ handled by the inference component (see `Engine supervision
 
 ``inference.backend: vllm`` selects the vLLM engine integration. The
 inference component launches one vLLM server per engine on its GPUs with
-``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
-``--logprobs-mode processed_logprobs``. It loads each published snapshot
-through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
+``VLLM_SERVER_DEV_MODE=1`` and ``--logprobs-mode processed_logprobs``. It loads each published snapshot
+through vLLM's control routes: ``/pause?mode=keep`` (with
+``inference.prefix-sharing: true``, also
 ``/reset_prefix_cache?reset_running_requests=true``),
 ``/update_weight_version``, ``/collective_rpc reload_weights`` and the
 ``/v1/load_lora_adapter`` routes. Engines are single-node; more than one
@@ -710,9 +805,10 @@ Engine options use vLLM's engine-argument names. Reef sets ``model``,
 ``host``, ``port`` and ``tensor_parallel_size`` itself and refuses
 ``enable_sleep_mode``. It defaults
 ``generation_config`` to ``vllm``, so the model's own generation defaults
-cannot add truncation or a temperature the trainer never sees. It rejects
-``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
-instead) and enables prefix caching only under a retracting pause.
+cannot add truncation or a temperature the trainer never sees. It enables
+prefix caching only with ``inference.prefix-sharing: true``. Engine serving
+refuses a configured ``kv_transfer_config`` and vLLM's KV offloading options
+(see ``inference.prefix-sharing`` above).
 
 vLLM engines serve full-weight artifacts only. The HTTP service refuses
 adapter artifacts, such as Slime's with ``training.options.megatron-lora-rank``
@@ -732,9 +828,10 @@ The HTTP service uploads each published snapshot to the component as files:
   beside the base model. Only ``inference.backend: sglang`` serves LoRA
   adapters.
 
-The HTTP service reads each snapshot from the checkpoint directory. With
-multi-node training, put the checkpoint directory on storage that the HTTP
-service's host can read.
+The training service stores each checkpoint in the artifact backend from the
+checkpoint directory, and every other service reads it from the artifact
+backend. With multi-node training, put the checkpoint directory on storage that
+the training service's host can read.
 
 Reef starts only its own inference, training and HTTP services.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -810,7 +907,7 @@ For managed SGLang, use:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
      --inference.options.mem-fraction-static 0.8 \
      --inference.options.trust-remote-code true
 
@@ -849,21 +946,23 @@ rest to Slime's native parser.
 
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
-The factory path must name an ``InferenceHandler`` subclass with a
-``from_config`` class method; handler functions are not supported.
+The setting names an ``InferenceHandler`` subclass with a ``from_config``
+class method, as ``package.module:ClassName``; handler functions are not
+supported.
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
 Two token-native handlers render the prompt with the model's chat template
 and call the engine's native generate route.
-``reef.inference.sglang.chat.SGLangInferenceHandler`` calls SGLang
+``reef.inference.sglang.chat:SGLangInferenceHandler`` calls SGLang
 ``/generate`` and relays its incremental stream.
-``reef.inference.vllm.chat.VLLMInferenceHandler`` calls vLLM
+``reef.inference.vllm.chat:VLLMInferenceHandler`` calls vLLM
 ``/inference/v1/generate``; it serves buffered responses and answers a
 streaming request with the completed turn as one burst of protocol frames.
 The answer is the provider response without training tensors. The handler
 returns token log probabilities only to a client that sends the OpenAI
-``logprobs: true``. Training renders each recorded call itself (see
+``logprobs: true``, and token IDs only to a client that sends vLLM's
+``return_token_ids: true``. Training renders each recorded call itself (see
 `Chat template arguments`_).
 
 Both handlers accept ``tool_call_parser`` (the engine's parser name),
@@ -883,20 +982,6 @@ Anthropic messages requests.
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key.
 
-A vLLM engine serving a training stack also needs Reef's connector, which
-stamps every sampled token with the weight version that produced it::
-
-   --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
-
-The connector moves no KV and composes with another connector under vLLM's
-``MultiConnector``. To combine it with vLLM's native CPU offloading, list
-``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
-in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
-configured connector, so it cannot be combined with this one. Without the
-connector the engine reports no runtime load ID: a scenario that trains rejects
-the response, and a scenario that does not train serves it under its release
-id.
-
 ``rollout_log_probs`` are the sampled tokens' log probabilities that a
 training component's own task rollouts record; serving records none. They
 must mean the same thing as the trainer's. Sampling runs through::
@@ -911,7 +996,8 @@ client rejects a request whose effective ``top_p`` is below 1, ``top_k``
 above 0 or ``min_p`` above 0. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
-Both handlers split each reply into ``content`` and ``reasoning_content`` with
+Both handlers, and the Tinker sampler that serves a Tinker deployment and its
+task rollouts, split each reply into ``content`` and ``reasoning_content`` with
 the rules of SGLang's Qwen3 reasoning parser: ``<think>`` starts reasoning, and
 the first ``</think>`` or ``<tool_call>`` ends it. A reply that ends inside
 reasoning has an empty ``content``.
@@ -922,7 +1008,8 @@ handler checks whether each request's rendered prompt ends with ``<think>``.
 The check follows the request's ``chat_template_kwargs``: a Qwen3.5 template
 pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
 so such a request keeps its reply in ``content``. An explicit value bypasses
-this check.
+this check. The Tinker sampler takes no ``force_reasoning`` and always checks
+the prompt.
 
 Chat template arguments
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1017,14 +1104,11 @@ The effective settings are handed to the child using a private temporary
 config, removed when the launcher exits. No user YAML file is created.
 
 Public service settings use the same argument parser for YAML and CLI values.
-Their types, defaults, and help are declared on ``ServiceConfig``. Explicit
+Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
-Run ``reef serve --help`` to see these options. Use ``--inference.upstream-model``
-as the canonical spelling. Compatibility aliases include ``--upstream-model``,
-``--upstream_model`` and ``--reef.upstream_model``. The last
-explicit CLI spelling of a setting wins. ``--recipe.implementation`` overrides
-the deployment's recipe setting; a bare ``--recipe <name>`` is refused because
-built-in profiles were removed.
+Run ``reef serve --help`` to see these options. A flag is the setting's YAML
+path, for example ``--inference.upstream-model``. The last occurrence of a
+flag wins. ``--recipe.implementation`` overrides the deployment's recipe setting.
 
 String settings retain their text: ``--inference.upstream-model 00123`` remains ``00123``.
 Numeric and boolean settings are parsed according to their declared type;
@@ -1104,12 +1188,13 @@ role; it does not modify the shared profile. Backend ``options`` objects
 remain owned by the selected backend. Slime's native model/optimizer flags
 continue through Slime's own parser; Reef does not duplicate that schema.
 
-A non-weight dotted recipe can supply ``recipe.runtime`` to select a registered
-or dotted runtime factory. Its declared fields use names such as
+A non-weight dotted recipe can supply ``recipe.runtime`` to select a runtime
+factory: a bundled kind, or the ``package.module:ClassName`` reference of a
+``RuntimeFactory`` subclass. Its declared fields use names such as
 ``--recipe.runtime.timeout-s``. The inference proxy declares its connection
 settings. Custom ``RuntimeFactory``
-implementations can opt in with ``config_type()``; legacy callable factories
-keep receiving their existing mapping. Unknown fields in a declared component
+implementations can opt in with ``config_type()``; a factory without one
+receives the section as a mapping. Unknown fields in a declared component
 schema fail validation. Recipe-specific sections and opaque adapter option
 objects continue to be validated by their owning component.
 
@@ -1230,7 +1315,7 @@ persistent.
 .. container:: config
 
    ``storage.artifact-backend`` : git_lfs
-       where releases are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
+       where snapshots are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
 
    ``storage.artifact-repository`` : .reef/artifacts.git
        the Git LFS repository of the snapshot chain; only for ``git_lfs``. A Hugging Face repository needs the factory's ``refs`` and ``token_env`` options (`Choose the artifact backend <../user-guide/operate.rst#choose-the-artifact-backend>`__)
@@ -1339,6 +1424,28 @@ downgrade without restoring a compatible backup.
    ``evaluation.max_sandboxes`` : 4
        the task sandboxes that one process of the evaluation service holds at once, across all evaluations. Each
        running rollout holds one. Set it to the quota of the sandbox provider, divided by the evaluation processes.
+   ``evaluation.on_stop`` : requeue
+       what an evaluation process does with the rollouts that it runs when it stops, for example on SIGTERM:
+
+       - ``requeue``: it cancels each rollout and its sandbox, and gives the rollout back to the queue. Another
+         process starts the rollout again from its start. The stop does not count as an attempt.
+       - ``finish``: it takes no new rollout and stops when each running rollout has finished. Use it where processes
+         stop while they work, such as a scale-down or a deploy. Give the process a stop deadline longer than a
+         rollout: a process that is killed first leaves its rollouts to expire, and each one counts as an attempt.
+   ``evaluation.trial_observer`` : unset
+       a ``TrialObserver`` plugin (``reef.evaluation.trials``), as ``package.module:ClassName`` or ``module`` and
+       ``config``. The evaluation worker gives it each trial: the rollout, the attempt, the trial directory and the
+       error. It runs before the worker removes the directory, so it can keep the logs of the agent and the verifier.
+       Its failure is logged and does not change the rollout.
+   ``evaluation.task_template_builder`` : unset
+       a ``TaskTemplateBuilder`` plugin (``reef.evaluation.task_templates``), as ``package.module:ClassName`` or
+       ``module`` and ``config``. An evaluation on ``e2b`` calls it once for each task, before it adds the task's
+       rollouts, to make the task's sandbox templates ready. Unset, ``DockerfileTemplateBuilder`` builds them from the
+       task's Dockerfiles, as a trial would. A deployment that keeps task images in a registry names a builder that
+       makes the templates from those images.
+   ``evaluation.require_prepared_templates`` : false
+       Set to ``true`` to require prepared task and verifier templates for new ``e2b`` evaluations.
+       If preparation fails, the affected rollouts report the error and skip the trial.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
@@ -1371,7 +1478,7 @@ Records arrive and stages make samples in both modes, so a switch from
 ``manual`` to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
 ``NotImplementedError``. Harness evolution supports both modes, and every
-method takes a request step. Setting ``manual`` on an
+method takes a request job. Setting ``manual`` on an
 inference-only recipe does not create a training backend.
 
 .. code:: yaml
@@ -1498,7 +1605,7 @@ recipes whose runtime can be built from the preset or the deployment's
 upstream proxy. There, ``recipe.config`` holds the training mode and the
 recipe's own sections, and ``pipeline`` holds the stage config.
 
-A composite recipe serves and evolves several release components in one
+A composite recipe serves and evolves several snapshot components in one
 scenario, one recipe per recipe component. Its ``components`` object maps
 each recipe component name to a section with the shape of the top-level
 ``recipe`` section. In that section, ``implementation`` names the recipe
@@ -1512,9 +1619,16 @@ whose recipe component trains weights is deployed the way that recipe is.
 inference runtime serve every recipe component. A top-level ``pipeline`` or
 ``evaluation`` section goes to the recipe component that trains weights.
 
+``components`` holds at least two recipe components. At most one of them
+trains weights, because a snapshot loads one component into the runtime. At
+most one of them is a harness evolution recipe, because a process has one
+harness training component. A recipe component cannot be a composite. Reef
+refuses any other ``components`` object when it loads the configuration.
+
 A scenario's root snapshot keeps one directory per recipe component. Reef
-writes each recipe component's default start there: its seed, and the model
-snapshot under the directory of the recipe component that trains weights. A
+writes each recipe component's default start there: its seed, and the base
+root or the reference to the base model under the directory of the recipe
+component that trains weights. A
 recipe component whose recipe seeds nothing starts empty. Each recipe component's trainer runs as its own
 worker and commits into the same snapshot chain. Every step therefore
 checkpoints, and the recipe components share one ``training_mode``. Reef
@@ -1575,7 +1689,7 @@ Reef chooses native process placement in backend implementation code;
 ``execution.services`` is rejected. ``execution.training`` selects the
 executor of Slime's training workers (default ``auto``, resolving to ``ray``).
 The serving engines' executor belongs to the inference component.
-``execution.rollout`` selects it, for every training backend. All selectors accept a backend name/import path or a profile under
+``execution.rollout`` selects it, for every training backend. All selectors accept a built-in backend name, a ``package.module:ClassName`` reference or a profile under
 ``executors``. Inline objects/profiles accept ``backend`` (default ``auto``),
 ``options``, ``workers``, and ``resources`` containing ``cpus_per_worker`` and
 ``gpus_per_worker``. Counts must be positive integers; resource quantities must
@@ -1623,7 +1737,7 @@ describes the method contract. A key may use underscores or hyphens, and
 startup refuses an unknown key.
 
 The default stages train on every valid scored report as a trace, including
-successful outcomes. A step starts when ``pipeline.sample2job.config.job_samples``
+successful outcomes. A job starts when ``pipeline.sample2job.config.job_samples``
 traces are held, 1 by default. To train on recorded traffic alone, every ``job_samples``
 requests with unscored samples, set
 ``pipeline.record2sample.module: reef.record2sample.traces:InferenceSamples``.
@@ -1634,7 +1748,7 @@ To evolve offline, on the train split of the scenario's imported tasks
 instead of on traffic, set
 ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskJobData``. Each
 uploaded train task then trains once, in upload order. A
-step holds either traces or train tasks; a step of train tasks rolls out up to
+job holds either traces or train tasks; a job of train tasks rolls out up to
 ``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on
 the head tree as the method's traces. Startup refuses it without an adapter
 that plays task directories (an npm ``install``) and
@@ -1643,7 +1757,7 @@ that plays task directories (an npm ``install``) and
 .. container:: config
 
    ``evolution.method``
-       required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(context)`` makes each step's candidate
+       required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``run(job)`` makes each job's candidate
 
    ``evolution.adapter`` : pi
        ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), ``python`` (a Python program that uv runs, whose modules are tree files of the ``program`` part), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
@@ -1661,22 +1775,22 @@ that plays task directories (an npm ``install``) and
        optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
 
    ``evolution.state_dir`` : .reef/harness
-       the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the snapshot component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one step record per step (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
+       the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the snapshot component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one job record per job (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried job lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
 
    ``evolution.max_steps`` : 0
-       skip automatic evolve steps once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
+       skip automatic evolve jobs once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
 
    ``evolution.max_failure_streak`` : 0
-       stop automatic evolve steps after this many consecutive rejected steps, request steps included; 0 disables the limit; a request from ``POST /reef/train`` still runs while the breaker is open
+       stop automatic evolve jobs after this many consecutive rejected jobs, request jobs included; 0 disables the limit; a request from ``POST /reef/train`` still runs while the breaker is open
 
    ``evolution.max_model_calls_per_step`` : 0
-       cap the method's model calls in one step, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
+       cap the method's model calls in one job, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
 
    ``evolution.max_runs_per_step`` : 0
-       cap the runs that the method's ``services.evaluate`` runs in one step; reused runs and the evaluation's own runs do not count; 0 disables the limit
+       cap the runs that the method's ``services.evaluate`` runs in one job; reused runs and the evaluation's own runs do not count; 0 disables the limit
 
    ``evolution.executor`` : local
-       ``local`` runs tasks as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
+       ``local`` runs tasks as a plain subprocess; ``sandbox`` uses the host's local sandbox, a bubblewrap jail on Linux or a Seatbelt profile on macOS; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
 
    ``execution.evolution.workers`` : 1
        fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
@@ -1688,10 +1802,10 @@ that plays task directories (an npm ``install``) and
        ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
 
    ``evolution.sandbox``
-       for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
+       for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``; macOS refuses ``memory_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
 
    ``evolution.agent``
-       the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its steps (``services.run_agent``); unset, no agent runs, and such a method is refused at startup
+       the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its jobs (``services.run_agent``, or ``services.agent`` for a method that starts the agent itself); unset, no agent runs, and such a method is refused at startup unless it also runs without an agent (``runs_without_agent``)
 
    ``evolution.agent.adapter`` : pi
        the agent's harness: any adapter whose prompt is text
@@ -1700,7 +1814,7 @@ that plays task directories (an npm ``install``) and
        the agent's binary; unset, backend construction installs the adapter's pinned version, as for ``evolution.binary``
 
    ``evolution.agent.sandbox`` : ``REEF_AGENT_SANDBOX``
-       ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed where the host can run bwrap and pasta, and off where it cannot
+       ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``seatbelt`` does the same on macOS, but the host's LAN addresses stay reachable; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed in the host's local sandbox (bwrap and pasta on Linux, sandbox-exec on macOS) where the host can run it, and off where it cannot
 
    ``evolution.agent.timeout_s`` : 1800
        seconds one agent run may take
@@ -1732,7 +1846,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
        the directory the manifest's task names live under; set together with ``task_manifest``
 
    ``evolution.evaluation.imported_tasks`` : false
-       true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks (the ``task-import`` section, or task items whose metadata names the scenario's ``eval`` split) as the step reads them, so tasks that the scenario gets later join the next step. The eval split may be empty when the scenario loads. The same adapter rule as ``task_manifest``. The former ``evolution.evaluation.task_store`` is refused with a message that names this key
+       true makes each job evaluate on the task directories of the eval split of the scenario's imported tasks (the ``task-import`` section, or task items whose metadata names the scenario's ``eval`` split) as the job reads them, so tasks that the scenario gets later join the next job. The eval split may be empty when the scenario loads. The same adapter rule as ``task_manifest``. The former ``evolution.evaluation.task_store`` is refused with a message that names this key
 
    ``evolution.evaluation.scorer``
        a ``TaskScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory run by its Harbor verifier's reward
@@ -1762,7 +1876,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
        when true, a run leaving files outside the cleanup whitelist scores 0, as a run that gave no answer
 
    ``evolution.evaluation.collect_failures`` : false
-       when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
+       when true, prompts of each job's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
 
    ``evolution.evaluation.collector``
        optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is collected, and the caps and the credential and directive screens still apply
@@ -1781,13 +1895,14 @@ executor, ``evolution.executor`` and ``evolution.sandbox``. The history
 reuses a scored run only in the context it ran in, and never reuses a
 failed run.
 
-The beta Reefine recipe runs its agent on pi with ``evolution.agent``, adds
-``evolution.agent.trial_timeout_s``, and reads ``evolution.multimodal``. Its
+The beta Reefine recipe runs its agent on pi with ``evolution.agent``. Its
+method reads ``trial_timeout_s`` and ``multimodal`` from
+``evolution.method.config``. Its
 `README <../../recipes/beta/reefine/README.md>`__ documents them.
 
 The served model's binding is merged in when a run renders the tree; it
 never enters a published tree. The seed is the baseline the first candidate
-is measured against. The step records hold the method's raw model traffic and
+is measured against. The job records hold the method's raw model traffic and
 the clients' traces, and the history holds every evaluation run's session
 log, so treat ``evolution.state_dir`` like the commit history.
 
@@ -1817,6 +1932,9 @@ the component:
    ``inference.remote.url``
        the component's HTTP(S) base URL, without credentials, query or fragment
 
+   ``inference.remote.slot-urls`` : []
+       base URLs of further components, in the form of ``url`` and all different; for full-weight artifacts only
+
    ``inference.remote.control-token-env`` : REEF_REMOTE_CONTROL_TOKEN
        variable with the component's control token; the process that starts the engines reads it
 
@@ -1829,6 +1947,37 @@ the component:
    ``inference.remote.model-path`` : ``inference.model-path`` as written
        the model that the component loads: a Hugging Face repository ID or a path on the component's host; this host may replace ``inference.model-path`` with a local snapshot
 
+One component serves one full-weight checkpoint. To let a scenario serve
+several checkpoints at the same time, name one more component for each
+further checkpoint:
+
+.. code:: yaml
+
+   inference:
+     remote:
+       url: https://gpu-a.example.com
+       slot-urls:
+         - https://gpu-b.example.com
+
+The one training scenario then serves as many checkpoints together as there
+are components. A further component does not add a training scenario. These
+rules apply:
+
+- Start each further component in the same way as the first one, with the
+  same ``--engine`` and the same two tokens. Reef starts the same model and
+  engine options on each one, and ``inference.num-gpus`` counts the GPUs of
+  one component.
+- Give each component GPUs that no other component uses: its own host or
+  visible GPUs, or one Ray cluster that all of them join
+  (``--ray-address``). Different URLs alone do not separate the GPUs.
+- Use ``slot-urls`` with full-weight artifacts only. Reef refuses it for
+  adapter artifacts and for a trainer's rollout engines.
+
+`Set what a scenario serves
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ describes how a
+scenario uses the components, and how to replace a checkpoint when every
+component holds one.
+
 The ``training`` section
 ------------------------
 
@@ -1838,7 +1987,7 @@ Read by the weight-training stack. See `Evolve your model
 .. container:: config
 
    ``training.backend`` : slime
-       built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
+       built-in (slime, tinker or spindle_full), installed ``reef.training_backends`` entry-point name, or ``package.module:ClassName`` of a TrainingDeployment class
 
    ``training.colocate`` : false
        must stay false: Reef's serving never shares GPUs with training, and Slime and Tinker refuse ``true``; Slime's own rollout engines share the training GPUs with ``training.options.colocate``
@@ -1882,9 +2031,10 @@ can select one of the built-in rules for itself with
 scenario that selects none.
 
 An artifact that the rule does not activate stays inactive. A person can
-activate it with ``POST /reef/scenarios/{scenario}/activate``. Activation does
-not change where training continues. `Activate an artifact
-<../user-guide/operate.rst#activate-an-artifact>`__ describes activation, and
+activate it with the ``served`` setting of
+``POST /reef/scenarios/{scenario}/update``. Activation does
+not change where training continues. `Set what a scenario serves
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ describes activation, and
 `Go back to an older artifact
 <../user-guide/operate.rst#go-back-to-an-older-artifact>`__ describes how to
 make an older artifact serve for good.
@@ -1967,27 +2117,17 @@ under ``pipeline`` fails the startup. Each recipe's page
 lists the keys of its stages. Keys are written as the stage reads them; a
 hyphen spelling is also accepted.
 
-Every built-in record-to-sample stage that holds units reads
-``max_staleness``, Reef's staleness filter. Reef drops held training data
-whose producing artifact is more than this many served artifacts behind the
-artifact that the scenario serves. The limit is a record-to-sample setting,
-not a recipe setting: ``recipe.config.max_staleness`` is an error.
+A scenario can replace keys of ``pipeline.record2sample.config`` for itself
+with its ``record2sample_config`` setting (`Record-to-sample config
+<http-api.rst#record-to-sample-config>`__).
 
-.. container:: config
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
-
-.. code:: yaml
-
-   pipeline:
-     record2sample:
-       config:
-         max_staleness: 2
-
-``NoSamples`` and ``SFTSamples`` refuse the key: the first holds no unit, and
-the second never drops an SFT target as stale. A training
-framework's own off-policy limit goes in that backend's
+Each record-to-sample stage decides which of its samples are stale, and the
+samples service applies that rule; no setting chooses it. Most built-in stages
+are on-policy: only data of the artifact that the scenario serves trains. An
+SFT stage and the harness trace stages never drop a sample. SAO accepts a
+bounded lag, its own ``max_artifact_lag`` (`SAO <../user-guide/recipes/sao.rst>`__).
+A ``pipeline.record2sample.config.max_staleness`` key is refused at startup:
+remove it. A training framework's own off-policy limit goes in that backend's
 ``training.options``. No built-in backend has one now. See `Staleness
 <../developer-guide/processors.rst#staleness>`__.
 
@@ -2080,7 +2220,6 @@ and the rollouts.
            config:
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
-             state_dir: ${REEF_STATE_DIR}/generations
      sample2job:
        config:
          buffer_size: 2
@@ -2093,7 +2232,7 @@ which are not records.
 .. container:: config
 
    ``pipeline.record2sample.config.jobs_per_round`` : 1
-       trained jobs after which the next round starts
+       trained jobs after which the next round starts; 0 starts it when the previous round ends, so generation runs ahead of training until ``refill_tasks`` tasks wait
 
    ``pipeline.record2sample.config.source_records_per_round`` : 0
        recorded sessions that each round gives the generator, at most; 0 generates from the description only
@@ -2102,7 +2241,7 @@ which are not records.
        the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
    ``pipeline.record2sample.config.refill_tasks`` : 1
-       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
+       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pool_capacity`` above 0, leave it out: the pool's capacity paces the rounds.
 
    ``pipeline.record2sample.config.rounds`` : 0
        rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
@@ -2128,6 +2267,27 @@ which are not records.
    ``pipeline.record2sample.config.generation_deadline_seconds`` : 1800
        seconds that all attempts of one generation may take
 
+   ``pipeline.record2sample.config.validation_concurrency`` : 1
+       candidates that one generation checks at once. After a check that fails to run, no further check starts, and the attempt fails when the running checks end.
+
+   ``pipeline.record2sample.config.pool_capacity`` : 0
+       0 trains each train task once. Above 0, a task trains again after its job ends, and rounds start only while fewer tasks than this are active.
+
+   ``pipeline.record2sample.config.review_interval`` : 0
+       task jobs between two pool reviews; 0 reviews nothing
+
+   ``pipeline.record2sample.config.review_window`` : 2
+       the most recent rewards of a task that a review reads; at least 2
+
+   ``pipeline.record2sample.config.review_band_low`` : 0
+       a review retires a task whose pass rate is below this; between 0 and 1
+
+   ``pipeline.record2sample.config.review_band_high`` : 1
+       a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
+
+   ``pipeline.record2sample.config.review_min_reward_std`` : 0
+       a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
+
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store
@@ -2137,9 +2297,57 @@ A task that joins existing train and eval source groups is rejected.
 Eval tasks are saved without rollouts or Designer rewards.
 The generator's pass-rate band does not filter the store.
 
+The generator keeps its own state in the same task store, so the state is in
+the deployment's storage with the tasks. A generator's ``config`` therefore
+names no state directory; the built-in generators refuse a ``state_dir`` key.
+See `the task generation contract
+<../developer-guide/processors.rst#task-generation-contract>`__ for the state
+that a generator gets.
+
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
+
+With ``pipeline.record2sample.config.pool_capacity`` above 0, the train tasks
+form a training pool. When a task's job ends, the task waits for a job again
+after the tasks that wait already, so the tasks train in turn. A new round
+starts only while fewer tasks than ``pool_capacity`` are active, so the pool
+can hold more tasks than the capacity by the train tasks of one generation.
+The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks``
+must be left out. Imported train tasks still train once.
+
+After every ``review_interval`` task jobs, a review reads the last
+``review_window`` rewards of each active task. A failed task job counts too.
+The pass rate is the mean of those rewards. A task with fewer rewards stays.
+The review retires a task for one of these reasons, in this order:
+
+- ``below_band``: the pass rate is below ``review_band_low``.
+- ``above_band``: the pass rate is above ``review_band_high``.
+- ``no_reward_spread``: the population standard deviation of the rewards is
+  below ``review_min_reward_std``.
+
+A pass rate on a bound keeps the task. A retired task does not train again,
+except in a job whose tasks the trainer took before the review. The review
+reads the rewards that training recorded, so they can be one pool cycle old.
+The defaults run no review, and each of their rules keeps every task. The
+generator still receives the first rollout of each task only.
+
+The status shows the pool under ``training_pool``: ``capacity``, ``active``,
+``retired``, ``reviews``, and ``last_review_retired``. The task store keeps
+each use of a task with its rewards, each review, and each retired task with
+its reason, so a restart continues the pool in the same order. When a
+deployment sets ``pool_capacity`` on a scenario whose train tasks trained
+once, those tasks join the pool at the start.
+
+Two limits of the training pool:
+
+- When the trainer starts the next job before the stage reads the end of a
+  failed task job, the tasks of the next job also get a use with no rewards,
+  and their rewards in that job are not kept.
+- The tasks of a job that a new training start cancelled return to the pool
+  only when a later job ends. When that job held so many tasks that fewer than
+  ``job_samples`` wait and the pool is full, no job and no round can start,
+  also after a restart. Restart with a larger ``pool_capacity``.
 
 The saved train tasks become task items that the scenario uses,
 ``<scenario>.generated-tasks.<task name>``, and train like every other
@@ -2171,7 +2379,7 @@ samples train.
        the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit the training component's text chat: system, user and assistant text messages, no tools.
 
    ``rollout.environment`` : docker
-       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``
+       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. The paragraphs after this list describe the cloud sandbox of an ``e2b`` or ``modal`` rollout
 
    ``rollout.agent_host`` : none
        the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
@@ -2183,7 +2391,53 @@ samples train.
        the reward of a rollout whose verifier timed out; ``null`` leaves it unscored
 
    ``rollout.scaffold_tolerance`` : 8
-       masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+       tokens at the end of a prompt that the next prompt's history may drop, such as the empty think block of a thinking template with thinking off; the sample keeps them, and the response after them trains
+
+Set ``rollout.environment`` to ``e2b`` for an E2B-compatible service such as
+AgentENV, or ``modal`` for Modal. For a self-hosted E2B service, set
+``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` in the process that
+runs the rollouts. The first two select the service's API and sandbox
+endpoints. The Slime training component applies these settings to its
+workers automatically.
+
+On AgentENV, also set ``REEF_E2B_DOCKERFILE_BUILD=aenv`` in that process, and
+put AgentENV's ``aenv`` CLI and its ``aenv-buildctl`` on ``PATH``. AgentENV's
+E2B template builds refuse a Dockerfile's COPY steps. With this setting, Reef
+builds each task's Dockerfile with ``aenv build`` and the same ``E2B_API_URL``
+and ``E2B_API_KEY``. The default, ``e2b``, uses E2B's template API.
+
+Harbor deletes the sandbox when the rollout ends. If the rollout process is
+killed before cleanup, the sandbox's lifetime limits how long it can remain.
+The lifetime is the sum of the task's build, agent and verifier time limits,
+plus one hour. A nonzero ``override_timeout_sec`` in ``rollout.agent`` replaces
+the task's agent time limit in that sum, and an ``override_setup_timeout_sec``
+adds to it. The lifetime is at most one day, so a rollout that needs more time
+loses its sandbox after one day.
+
+When neither the task nor a nonzero ``override_timeout_sec`` gives the agent a
+time limit, this sum does not apply. A Modal sandbox then lives for two hours.
+An E2B sandbox keeps Harbor's default lifetime of one day.
+
+Reef asks the service to delete an E2B sandbox at the end of its lifetime.
+Without this request, a self-hosted service can pause the sandbox and keep it.
+
+These lifetime rules also apply to evaluation and generator rollouts, each
+with its own agent config. The ``generator`` section describes checks.
+Standalone ``harbor run -e e2b`` commands and the Meta-Harness Terminal-Bench
+``terminus`` adapter use Harbor's default timeout behavior. That adapter is
+separate from the ``terminus-2`` agent used by Reef rollouts.
+
+The job's metrics report each task's rewards of the rollouts that ran
+(``rollout_rewards``), the samples that train (``rollout_samples``), and the
+rollouts that give no sample because they fail in the infrastructure or their
+model calls do not assemble into one (``removed_rollouts``). A sample alone in
+its group trains with advantage 0 on Slime and counts in ``rollout_samples``;
+on Tinker it does not train, and it is in neither count. A Tinker task job
+also reports each rollout's response tokens and the tokens of them that train
+(``rollout_tokens``), and their sums (``rollout_response_tokens`` and
+``rollout_trained_tokens``). On Tinker, a sample longer than the model's context
+window is left out before its group forms: ``unrenderable_samples`` counts it,
+and it is in neither ``rollout_samples`` nor the trained tokens.
 
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
@@ -2270,8 +2524,8 @@ its reward out of its group's mean and deviation, so the group's other rollouts
 train against each other. A group with one sample left has advantage 0. When
 no group of a Slime rollout can train, the job fails before the workers train it,
 with the first rollout's error. Slime's metrics such as ``rollout/raw_reward``
-count a removed sample with reward 0. The job's metrics report
-``rollout_rewards``, by task, ``rollout_samples`` and ``removed_rollouts``.
+count a removed sample with reward 0. The job's metrics are the task job
+metrics above: ``rollout_rewards``, ``rollout_samples`` and ``removed_rollouts``.
 
 The driver refuses a task job, when it is submitted, in these cases:
 
@@ -2379,16 +2633,28 @@ generated-task stages to consume. The generator writes and checks Harbor tasks f
 and runs the plays of a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
 host needs the ``harbor`` command line and the Harbor environment that
-``generator.environment`` selects; the Reef service itself needs neither. The
-default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
+``generator.environment`` selects; the Reef service itself needs neither.
+
+The default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
 in an E2B cloud sandbox, so a host without Docker, such as a cluster node with
 only Apptainer, uses it. It needs ``E2B_API_KEY`` exported where ``reef serve``
 starts and ``reef-infra[e2b]`` in the generator's interpreter; the readiness
 check looks there, so ``generator.harbor`` must come from the same Python
-environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
+environment. ``modal`` runs each task in a Modal sandbox. It needs
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
+starts, and ``reef-infra[modal]`` in the generator's interpreter.
+
+With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
-new task image. ``execution.generator`` selects the generator's executor, so a
+new task image. The E2B rules of ``rollout.environment`` apply to the checks
+and to the rollouts: the value for a self-hosted service, the sandbox
+lifetime, and the request to delete the sandbox at its end. A rollout takes
+the agent's time limits from ``generator.agent``. A check runs Harbor's oracle
+or nop agent, which sets no time limit, so only the task's time limits count
+for a check.
+
+``execution.generator`` selects the generator's executor, so a
 deployment can place it on another host. The generator runs its proposals,
 checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
@@ -2417,7 +2683,7 @@ checks and rollouts at the same time.
        the harbor command line for the oracle check
 
    ``generator.environment`` : docker
-       the Harbor environment of the oracle and nop checks and of the rollouts: ``docker`` or ``e2b``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker
+       the Harbor environment of the oracle and nop checks and of the rollouts: ``docker``, ``e2b`` or ``modal``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker. With ``modal``, it waits for ``MODAL_TOKEN_ID``, ``MODAL_TOKEN_SECRET`` and the modal package
 
    ``generator.concurrency`` : 2
        rollouts in flight across all rollout requests of the generator service
@@ -2459,6 +2725,17 @@ other children: the Reef address from ``reef.host`` and ``reef.port``, the
 token from ``reef.token``, and the served model from ``inference.model-path``
 or ``inference.upstream-model``. Without ``reef serve``,
 ``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
+
+The ``data`` section
+--------------------
+
+Settings of the data service, which answers the data routes (`Data items
+<http-api.rst#data-items>`__).
+
+.. container:: config
+
+   ``data.max-task-archive-bytes`` : 536870912
+       the most bytes of the body of a task archive (512 MiB), for ``POST`` and ``PUT`` on ``/reef/namespaces/{owner}/data/tasks``. A larger body gets HTTP 413. The data service writes the body to a local file before it unpacks it, so the setting limits the disk that one upload uses. A larger task uses the reference form, which sends no files
 
 The ``task-import`` section
 ---------------------------
@@ -2516,7 +2793,7 @@ binds and another after each train-from. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A
 train-from finishes the current run and records each component's training-start
 artifact ID in ``reef/train_from_artifact_ids``. It resets ``train/step`` to zero. An activation
-does not end a run. The globally monotonic ``reef/step`` stays attached for
+does not end a run. The globally monotonic ``reef/commit_number`` stays attached for
 joining a run back to the commit history. A scenario with several
 trainers shares the run: each step's metrics carry its component name as a
 prefix (``harness/train/loss``) on the same ``train/step`` axis with
@@ -2647,7 +2924,9 @@ it. Its ``url`` is the URL that the open W&B run gives. An offline run gives
 none: the URL is then ``https://wandb.ai/<entity>/<project>/runs/<run_id>``,
 where the run is once it is synced, with the configured ``entity``. Without a
 configured ``entity``, the URL of an offline run is ``null``.
-Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
+With ``upload_checkpoints: true``, Reef reads the files of each committed
+checkpoint from the artifact backend and uploads them as a W&B artifact.
+Otherwise a run names its checkpoints by their artifact IDs only.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.
@@ -2699,11 +2978,11 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
 
 A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
-references are span links. A committed step adds a ``training step N`` span
-with the commit's step, component artifact IDs, job id, consumed record counts,
+references are span links. A training commit adds a ``training commit N`` span
+with the commit number as ``reef.commit_number``, component artifact IDs, job id, consumed record counts,
 its component as ``reef.component`` when the scenario runs several trainers,
-and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
-child span below every record the step consumed, linked back to the commit
+and its scalar metrics as ``reef.metrics.*``, plus one ``trained in commit N``
+child span below every record the commit consumed, linked back to the commit
 span. Records carry one timestamp, so their spans have zero duration and start
 at the record's creation time.
 

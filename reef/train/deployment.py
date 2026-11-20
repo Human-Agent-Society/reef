@@ -23,7 +23,7 @@ DefaultServing = Literal["engines", "trainer"]
 
 @dataclass(frozen=True)
 class EngineWeights:
-    """How Reef's engines serve releases that hold no weight files: what they load, and the plugin that fetches it.
+    """How Reef's engines serve snapshots that hold no weight files: what they load, and the plugin that fetches it.
 
     Values: ``artifact_format`` is the format of the files that ``weights`` gives for each snapshot. ``weights`` is a
     ``ArtifactWeights`` plugin reference, ``package.module:ClassName`` or a module and config. Purpose: a training
@@ -94,10 +94,10 @@ class TrainingDeployment(ABC):
         return None
 
     def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights | None:
-        """How Reef's engines (``inference.serving: engines``) get weights for releases that hold none, or None.
+        """How Reef's engines (``inference.serving: engines``) get weights for snapshots that hold none, or None.
 
         Reef asks only when the training component's ``artifact_format`` is ``None``. The default is None: engines
-        cannot serve such releases.
+        cannot serve such snapshots.
         """
         return None
 

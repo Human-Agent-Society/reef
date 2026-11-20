@@ -94,8 +94,8 @@ class SDPOGrouping(ReportGrouping):
 
 @dataclass(frozen=True)
 class SDPOSettings(SampleAssemblySettings):
-    """The config of ``SDPOSamples``: the sampling grid of one step, the teacher's windows, the sample assembly, and
-    the staleness limit.
+    """The config of ``SDPOSamples``: the sampling grid of one step, the teacher's windows, and the sample
+    assembly.
 
     Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two;
     ``0 < max_teacher_prompt_tokens <= max_teacher_tokens``; the other keys are as in ``SampleAssemblySettings``.
@@ -130,7 +130,7 @@ class SDPOSamples(ReportSamples):
     def __init__(self, context: PipelineContext, settings: SDPOSettings) -> None:
         #: The grouping of sampling steps.
         self.step_grouping = SDPOGrouping(settings.groups_per_step, settings.rollouts_per_group)
-        super().__init__(context, self.step_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, self.step_grouping, exclusive_sources=True)
         self.groups_per_step = settings.groups_per_step
         self.rollouts_per_group = settings.rollouts_per_group
         self.assembly = SampleAssembly(settings)

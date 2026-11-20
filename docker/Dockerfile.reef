@@ -42,7 +42,7 @@ RUN python -c "import transformers, peft; assert transformers.__version__ == '5.
 # opencode CLI — AI coding agent available inside the container.
 # Pinned GitHub release, x86_64 build (verified against the base image).
 # Kept above COPY so repo changes don't bust this layer's cache.
-ARG OPENCODE_VERSION=1.18.4
+ARG OPENCODE_VERSION=1.18.18
 RUN curl -fsSL "https://github.com/sst/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
       | tar -xzf - -C /usr/local/bin \
     && opencode --version

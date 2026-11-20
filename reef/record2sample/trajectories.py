@@ -19,11 +19,12 @@ from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
+from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.pipeline_context import PipelineContext
-from reef.record2sample.base import Record2Sample, Record2SampleSettings, SampleResult
+from reef.record2sample.base import Record2Sample, SampleResult
 from reef.record2sample.sets import RecordSet
 
 logger = logging.getLogger(__name__)
@@ -52,11 +53,10 @@ class TrajectorySet(RecordSet):
 
 
 @dataclass(frozen=True)
-class TrajectorySettings(Record2SampleSettings):
-    """The config of ``TrajectorySamples``: when a trajectory ends, and the staleness limit.
+class TrajectorySettings(PluginSettings):
+    """The config of ``TrajectorySamples``: when a trajectory ends.
 
-    Values: ``trajectory_idle_seconds`` is a positive number; ``max_staleness`` is as in ``Record2SampleSettings``.
-    The constructor refuses other values.
+    Values: ``trajectory_idle_seconds`` is a positive number. The constructor refuses other values.
     Purpose: ``TrajectorySamples.from_config`` parses it from ``pipeline.record2sample.config``.
     """
 
@@ -65,7 +65,6 @@ class TrajectorySettings(Record2SampleSettings):
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         idle = self.trajectory_idle_seconds
         if isinstance(idle, bool) or not isinstance(idle, (int, float)) or idle <= 0:
             raise ValueError(f"trajectory_idle_seconds must be a positive number, got {idle!r}")
@@ -86,10 +85,8 @@ class TrajectorySamples(Record2Sample):
     Config: ``TrajectorySettings``.
     """
 
-    def __init__(
-        self, context: PipelineContext, *, trajectory_idle_seconds: float = 300.0, max_staleness: int = 0
-    ) -> None:
-        super().__init__(max_staleness=max_staleness)
+    def __init__(self, context: PipelineContext, *, trajectory_idle_seconds: float = 300.0) -> None:
+        super().__init__()
         self.scenario = context.scenario
         self.trajectory_idle_seconds = trajectory_idle_seconds
         #: The inference records, by ID, until their release.
@@ -101,9 +98,7 @@ class TrajectorySamples(Record2Sample):
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         settings = TrajectorySettings.parse(config, plugin_class=cls)
-        return cls(
-            context, trajectory_idle_seconds=settings.trajectory_idle_seconds, max_staleness=settings.max_staleness
-        )
+        return cls(context, trajectory_idle_seconds=settings.trajectory_idle_seconds)
 
     def trajectory_sample(self, record_set: TrajectorySet) -> TrajectorySample:
         """The sample of a trajectory without a report: its calls as one ATIF trajectory, without a reward."""

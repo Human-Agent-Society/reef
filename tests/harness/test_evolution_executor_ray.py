@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 import tests
-from tests.support.harness_steps import PI_SEED, harness_backend
+from tests.support.harness_jobs import PI_SEED, harness_backend
 
 from reef.evaluation.harness import HarnessCandidate, TaskScorer
-from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.config import executor_settings
 from reef.execution.executor.requirements import ExecutionRequirements
 
@@ -83,7 +83,7 @@ def test_evolution_explicit_ray_places_scorer_on_declared_ray_gpu(tmp_path):
         # Shutdown is asynchronous in Ray: a following actor must be able to
         # acquire the same GPU, proving that backend.close released its workers.
         executor = Executor.create(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend="ray",
                 workers=(WorkerSpec(GPUScorer, options={"num_gpus": 1}),),
                 launch_timeout_s=15,

@@ -42,7 +42,7 @@ from typing import cast
 
 from reef.execution.jobs import JOB_LISTENER, JobListener
 from reef.execution.workers import QueueWorker
-from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
+from reef.storage.work_queue import JsonValue, WorkItem, WorkLeaseLostError, WorkQueue
 
 #: The queue of sample work.
 SAMPLES_QUEUE = "samples"
@@ -54,8 +54,9 @@ BACKGROUND_POLL_SECONDS = 1.0
 #: The longest wait, in seconds, between two fallback looks at background work that changed nothing.
 MAX_BACKGROUND_POLL_SECONDS = 300.0
 #: The sources that request a selection: accepted records, a data sync, a commit, a scenario reload, background
-#: work that still runs, and a set that waits for time.
-TRIGGERS = ("records", "data", "commit", "reload", "background", "due")
+#: work that still runs, a set that waits for time, and the delete of the scenario, after which the samples service
+#: drops what it keeps of the scenario and makes nothing.
+TRIGGERS = ("records", "data", "commit", "reload", "background", "due", "delete")
 #: The shortest time, in seconds, between two progress writes of one selection.
 PROGRESS_INTERVAL_SECONDS = 1.0
 
@@ -76,16 +77,35 @@ class Selection(ABC):
     def progress(self, records_read: int, samples_created: int) -> None:
         """Report the records read and the samples created so far in this attempt."""
 
+    def check_lease(self) -> None:
+        """Raise ``WorkLeaseLostError`` when the worker of this attempt no longer holds its item; the trainer calls it
+        before each write. The default holds always: no queue gives the attempt."""
+        return
+
+    def requested_by(self, trigger: str) -> bool:
+        """Whether ``trigger`` (one of ``TRIGGERS``) requested this selection. The default is False: no queue item
+        records the requests."""
+        return False
+
 
 class ItemSelection(Selection):
     """The attempt of the selection ``item`` that a samples worker runs: it writes the counts so far to the item's
-    ``metadata["progress"]``, at most once in ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts."""
+    ``metadata["progress"]``, at most once in ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts.
+    ``lease_lost`` is set once the worker no longer holds the item (``LeaseExtender``)."""
 
-    def __init__(self, queue: WorkQueue, item: WorkItem) -> None:
+    def __init__(self, queue: WorkQueue, item: WorkItem, lease_lost: threading.Event | None = None) -> None:
         super().__init__(item.id)
         self.queue = queue
         self.item = item
         self.last_write = -math.inf
+        self.lease_lost = threading.Event() if lease_lost is None else lease_lost
+
+    def requested_by(self, trigger: str) -> bool:
+        return f"trigger:{trigger}" in self.item.metadata
+
+    def check_lease(self) -> None:
+        if self.lease_lost.is_set():
+            raise WorkLeaseLostError(f"the samples worker no longer holds {self.item.id!r}")
 
     def progress(self, records_read: int, samples_created: int) -> None:
         now = time.monotonic()
@@ -98,7 +118,7 @@ class ItemSelection(Selection):
             "samples_created": samples_created,
             "at": time.time(),
         }
-        self.queue.set_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress)
+        self.queue.write_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress)
 
 
 def selection_key(scenario: str, component: str) -> str:
@@ -125,7 +145,7 @@ def request_selection(
     key = f"trigger:{trigger}"
     if key in item.metadata:
         return item
-    return queue.set_metadata(SAMPLES_QUEUE, item.id, key, time.time()) or item
+    return queue.write_metadata(SAMPLES_QUEUE, item.id, key, time.time()) or item
 
 
 def selection_triggers(item: WorkItem) -> list[JsonValue]:
@@ -234,7 +254,7 @@ class SamplesWorker(QueueWorker):
             raise ValueError("a record selection names its component")
         token = JOB_LISTENER.set(SelectionRequest(self.queue, item.scenario, component))
         try:
-            produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item))
+            produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item, lease_lost))
         finally:
             JOB_LISTENER.reset(token)
         sequences = produced.record_sequences
@@ -256,7 +276,7 @@ class SamplesWorker(QueueWorker):
             next_item = request_selection(
                 self.queue, item.scenario, component, trigger="background", available_at=time.time() + delay
             )
-            self.queue.set_metadata(SAMPLES_QUEUE, next_item.id, "background_poll_seconds", delay)
+            self.queue.write_metadata(SAMPLES_QUEUE, next_item.id, "background_poll_seconds", delay)
         elif result["due_in_seconds"] is not None:
             delay = cast(float, result["due_in_seconds"])
             request_selection(self.queue, item.scenario, component, trigger="due", available_at=time.time() + delay)

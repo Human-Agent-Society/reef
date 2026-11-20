@@ -44,6 +44,9 @@ SINGLE_VALUE_HEADERS = frozenset({"authorization", "x-api-key", "content-type"})
 ROUTER_CONFIG_HASH = re.compile(r"[0-9a-f]{64}")
 #: A routing snapshot version or a deployment configuration digest.
 SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+#: A Semantic Router image pinned by its repository digest (``repository@sha256:<hex>``) or a local image ID
+#: (``sha256:<hex>``).
+SEMANTIC_ROUTER_IMAGE = re.compile(r"(?:[^\s@]+@)?sha256:[0-9a-f]{64}")
 #: A rule's name; the Semantic Router reports it as the decision name.
 RULE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 #: How a keyword rule combines its keywords: ``any`` needs one of them in the request text, ``all`` every one.
@@ -454,10 +457,12 @@ class RoutingSnapshot:
     rule target are enabled; its ``shadow_target``, if any, is an enabled target. Targets may be shared between
     Scenarios. ``version`` is a ``sha256:<hex>``
     digest; the constructor checks only its form. ``domain_classifier`` is None or a ``DomainClassifier``, and
-    it is not None when any rule of any Scenario names domains.
+    it is not None when any rule of any Scenario names domains. ``semantic_router_image`` is None when the
+    manifest omits ``deployment.semantic_router_image``, else that image (``SEMANTIC_ROUTER_IMAGE``).
     Purpose: ``from_mapping`` makes it and sets ``version`` to the SHA-256 of the manifest's canonical JSON,
     including fields the snapshot does not keep. ``RoutingAdapter`` and the renderer read it; nothing
-    changes it after construction.
+    changes it after construction. A managed deployment resolves an omitted image once at startup and
+    freezes it in its generated manifest.
     """
 
     automatic_model: str
@@ -465,6 +470,7 @@ class RoutingSnapshot:
     scenarios: Mapping[str, RoutingScenario]
     version: str
     domain_classifier: DomainClassifier | None = None
+    semantic_router_image: str | None = None
 
     def __post_init__(self) -> None:
         targets = MappingProxyType(dict(self.targets))
@@ -511,6 +517,14 @@ class RoutingSnapshot:
             raise ValueError("deployment.domain_classifier must be a domain classifier")
         if not isinstance(self.version, str) or not SHA256_DIGEST.fullmatch(self.version):
             raise ValueError("routing snapshot version must be a sha256 digest")
+        if self.semantic_router_image is not None and (
+            not isinstance(self.semantic_router_image, str)
+            or not SEMANTIC_ROUTER_IMAGE.fullmatch(self.semantic_router_image)
+        ):
+            raise ValueError(
+                "deployment.semantic_router_image must pin an image by digest (repository@sha256:<64 hex>) "
+                "or name a local image ID (sha256:<64 hex>)"
+            )
 
     @property
     def shadow_only_targets(self) -> frozenset[str]:
@@ -536,7 +550,9 @@ class RoutingSnapshot:
         """Validate schema version 2 and hash its canonical JSON representation.
 
         The parsers read the manifest's shape and refuse unknown or explicitly null fields; the value types'
-        constructors check every field's domain and the snapshot checks references between them.
+        constructors check every field's domain and the snapshot checks references between them. The hash
+        covers the manifest as given, so omitting ``deployment.semantic_router_image`` changes no other
+        manifest's version.
         """
         manifest = manifest_mapping(
             value,
@@ -551,9 +567,11 @@ class RoutingSnapshot:
             "deployment",
             {"semantic_router_image", "configuration_digest", "domain_classifier"},
         )
-        image = manifest_string(deployment.get("semantic_router_image"), "deployment.semantic_router_image")
-        if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
-            raise ValueError("deployment.semantic_router_image must pin an image by sha256 digest")
+        image = (
+            manifest_string(deployment["semantic_router_image"], "deployment.semantic_router_image")
+            if "semantic_router_image" in deployment
+            else None
+        )
         if "configuration_digest" in deployment:
             configuration_digest = manifest_string(
                 deployment["configuration_digest"], "deployment.configuration_digest"
@@ -579,7 +597,7 @@ class RoutingSnapshot:
         )
         canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         version = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(automatic_model, targets, scenarios, version, classifier)
+        return cls(automatic_model, targets, scenarios, version, classifier, image)
 
 
 def check_policy_change(current: RoutingSnapshot, candidate: RoutingSnapshot) -> None:
@@ -813,10 +831,11 @@ class RoutingAdapter:
         )
 
     async def check_ready(self) -> None:
-        """Check that each enabled target's provider lists its model; this does not verify model weights.
+        """Check model availability for enabled targets other than shadow-only targets.
 
-        A shadow-only target (``RoutingSnapshot.shadow_only_targets``) is not checked: it serves no request, so
-        its outage fails only shadow calls. Every other enabled target is checked, also one no Scenario names.
+        Each probed endpoint must answer ``/v1/models`` with HTTP 200 and list the expected models. Read the
+        list as JSON regardless of media type because SGLang's model gateway labels its JSON as text. A
+        shadow-only target's outage affects only shadow calls. This check does not verify model weights.
         """
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
@@ -837,8 +856,8 @@ class RoutingAdapter:
                                 code="target_unavailable",
                                 status=503,
                             )
-                        payload: object = await response.json()
-                except (ClientError, TimeoutError, json.JSONDecodeError) as exc:
+                        payload: object = await response.json(content_type=None)
+                except (ClientError, TimeoutError, ValueError) as exc:  # ValueError: a body that is not JSON text
                     raise RoutingRequestError(
                         "routing readiness check failed", code="target_unavailable", status=503
                     ) from exc
@@ -873,9 +892,8 @@ class RoutingAdapter:
                 raise RoutingRequestError(f"request repeats the {name} header", code="duplicate_header")
             if name in RESERVED_HEADERS or name.startswith(RESERVED_HEADER_PREFIX):
                 raise RoutingRequestError(f"{name} is not accepted from clients", code="reserved_header")
-        for name in ("x-reef-release-id", "x-reef-artifact-id"):
-            if values.get(name, [""])[0].strip():
-                raise RoutingRequestError(f"routed external targets do not accept {name}", code="release_pin")
+        if values.get("x-reef-artifact-id", [""])[0].strip():
+            raise RoutingRequestError("routed external targets do not accept x-reef-artifact-id", code="release_pin")
         name = values.get(SCENARIO_HEADER, [""])[0]
         if not name:
             raise RoutingRequestError("routing requires x-reef-scenario", code="missing_scenario")

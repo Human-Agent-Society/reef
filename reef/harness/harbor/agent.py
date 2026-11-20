@@ -30,14 +30,14 @@ import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, override
+from typing import Any, ClassVar, override
 
 import aiohttp
+from harbor.agents.capabilities import AgentCapabilities
 from harbor.agents.installed.base import BaseInstalledAgent
-from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from harbor.models.task.config import TaskConfig
+from harbor.models.task.config import MCPServerConfig, TaskConfig
 
 from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox import relay as sandbox_relay
@@ -47,7 +47,16 @@ from reef.execution.sandbox.remote import HOP_BY_HOP
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
-from reef.harness.harbor.rollouts import ReefEvalLab, TaskLab, TaskRolloutError
+from reef.harness.harbor.agent_bundle import BUNDLE_PREFIX, ContainerLibc, agent_bundle, agent_cache_directory
+from reef.harness.harbor.node_runtime import (
+    PLATFORM_COMMAND,
+    node_archive,
+    node_build_name,
+    node_cache_directory,
+    node_cpu,
+)
+from reef.harness.harbor.rollouts import COMMAND_FILE, ReefEvalLab, TaskLab, TaskRolloutError
+from reef.harness.harbor.uv_runtime import uv_archive, uv_build_name, uv_cache_directory
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
 from reef.harness.tasks.trajectory import reader_for
@@ -55,8 +64,6 @@ from reef.harness.tree import HarnessTree, render_tree
 
 #: Where the rendered tree goes in the task's container: the run root of ``run.task``.
 CONTAINER_ROOT = "/reef-run"
-#: The file under the agent's log directory that holds the command's exit code and output.
-COMMAND_FILE = "command.json"
 #: The directory under the agent's log directory that receives the agent's session files.
 SESSIONS_DIR = "sessions"
 #: The ATIF document of the run under the agent's log directory, and the pattern of it and its continuations.
@@ -64,10 +71,31 @@ TRAJECTORY_FILE = "trajectory.json"
 TRAJECTORY_FILES = "trajectory*.json"
 #: The install kinds an agent can have in a task's container.
 CONTAINER_INSTALL_KINDS = frozenset({"npm", "uv", "git"})
-#: Where Astral's installer puts uv in a task's container, under the agent user's own home.
+#: Where Reef puts uv in a task's container, under the agent user's own home.
 CONTAINER_UV = "$HOME/.local/bin/uv"
 #: Where a git install keeps its checkout (``src``) and its venv (``venv``) in a task's container.
 CONTAINER_GIT_AGENT = "$HOME/.reef-agent"
+#: Where an npm agent lives in a task's container: ``npm`` is the npm prefix of the bundle that Reef uploads, and
+#: ``node`` the Node that Reef uploads into a glibc image. It is outside the user's home, which a task can keep small.
+CONTAINER_NPM_ROOT = "/opt/reef"
+CONTAINER_NPM_PREFIX = f"{CONTAINER_NPM_ROOT}/{BUNDLE_PREFIX}"
+#: The shell test that passes on a musl image, such as Alpine, as Harbor's own npm agents test it. musl's ldd
+#: prints its version and exits 1, so its exit code is dropped: with pipefail it would fail the pipe.
+MUSL_CHECK = "{ ldd --version 2>&1 || true; } | grep -qi musl || [ -f /etc/alpine-release ]"
+#: Where a glibc image gets the Node that Reef uploads, and where the uploaded archives wait for their unpacking.
+CONTAINER_NODE = f"{CONTAINER_NPM_ROOT}/node"
+CONTAINER_NODE_ARCHIVE = "/tmp/reef-node.tar.gz"
+CONTAINER_AGENT_ARCHIVE = "/tmp/reef-agent.tar.gz"
+#: The shell command that succeeds when the container's ``python3`` can run the bridge's relay and its client.
+RELAY_PYTHON_CHECK = "python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))'"
+#: The shell command that drops ``SSL_CERT_DIR`` when it names no directory. uv trusts no certificate then, and it
+#: uses its own certificates without the variable. Modal sets the variable also for an image with no certificates.
+UV_CERTIFICATES = '{ [ -d "${SSL_CERT_DIR:-/}" ] || unset SSL_CERT_DIR; }'
+#: Where Reef uploads the uv archive in a task's container, until uv is installed.
+CONTAINER_UV_ARCHIVE = "/tmp/reef-uv.tar.gz"
+#: The shell command that puts an npm agent on the PATH: the agent's commands, then the uploaded Node. A musl image
+#: has no uploaded Node, and the Node of its packages is on the PATH already.
+NPM_AGENT_PATH = f'export PATH="{CONTAINER_NPM_PREFIX}/bin:{CONTAINER_NODE}/bin:$PATH"'
 #: Where the bridge's relay lives in a task's container, and the loopback port on which it answers the bridge client.
 RELAY_DIR = "/tmp/reef-relay"
 RELAY_TUNNEL_PORT = 47811
@@ -103,13 +131,20 @@ class AdapterAgent(BaseInstalledAgent):
     ``writable_paths`` are directories under the root that the agent writes;
     ``sessions`` is the session directory under the root; ``files_dir`` is a
     local directory that holds the rendered tree as it lands under the root;
-    ``timeout_s`` bounds the command. ``bridge_port`` is the loopback port of
+    ``timeout_s`` bounds the command. ``task_skills`` is the directory under
+    the root where the agent reads a task's skills, or ``None`` when it reads
+    none: a run copies the task's ``skills_dir``, which Harbor names, there
+    before the tree, so the tree's file wins on one path. ``bridge_port`` is the loopback port of
     the rollout's capture proxy on this host when the container cannot reach
     it: the agent then bridges the container's ``127.0.0.1:<bridge_port>`` to
     it while the command runs (:meth:`bridged`).
     Purpose: :func:`run_harbor_task` names this class in the agent spec of a
     Harbor trial; Harbor builds it with these keyword arguments.
     """
+
+    #: Harbor refuses a task with a ``skills_dir`` for an agent that does not declare this. ``run`` copies the
+    #: task's skills for an adapter with ``task_skills``; ``task_agent_tools`` names the task for another adapter.
+    capabilities: ClassVar[AgentCapabilities] = AgentCapabilities(skills=True)
 
     def __init__(
         self,
@@ -128,6 +163,7 @@ class AdapterAgent(BaseInstalledAgent):
         install_kind: str = "npm",
         repository: str = "",
         ref: str = "",
+        task_skills: str | None = None,
         bridge_port: int | None = None,
         **kwargs: Any,
     ) -> None:
@@ -140,6 +176,7 @@ class AdapterAgent(BaseInstalledAgent):
         self.install_kind = install_kind
         self.repository = repository
         self.ref = ref
+        self.task_skills = task_skills
         self.bridge_port = bridge_port
         self.package = package
         self.binary = binary
@@ -161,36 +198,100 @@ class AdapterAgent(BaseInstalledAgent):
             return f'"{CONTAINER_UV}" --version'
         if self.install_kind == "git":
             return f'"{CONTAINER_GIT_AGENT}/venv/bin/{self.binary}" --version'
-        return f". ~/.nvm/nvm.sh; {shlex.quote(self.binary)} --version"
+        return f"{NPM_AGENT_PATH}; {shlex.quote(self.binary)} --version"
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        # nvm and Astral's installer need curl, and a git install needs git; a task image without them gets them
-        # from apt, as Harbor's own npm agents do.
-        tools = ("curl", "git") if self.install_kind == "git" else ("curl",)
+        if self.install_kind == "uv":
+            await self.install_uv(environment, str(self._version))
+        elif self.install_kind == "git":
+            # A git install needs git. A task image without it gets it from its package manager, as Harbor's own
+            # agents do.
+            await self.ensure_system_dependencies(environment, ("git",))
+            uv = get_adapter("python").install
+            if uv is None:
+                raise ProgramLaunchError("the python adapter declares no uv install for a git install")
+            await self.install_uv(environment, uv.version)
+            await self.exec_as_agent(environment, command=self.git_install_command())
+        else:
+            await self.install_npm_agent(environment)
+
+    async def install_npm_agent(self, environment: BaseEnvironment) -> None:
+        """Put the npm agent under ``CONTAINER_NPM_ROOT`` in the container, from a bundle that Reef built on its host.
+
+        npm on the host installed the package for the container's CPU and C library (``agent_bundle``), so the
+        container reaches no package registry: a task can break its network. The container unpacks the bundle and
+        runs the package's install scripts offline with ``npm rebuild``. A glibc image also gets the Node that Reef
+        uploads. The Node builds for musl need libraries that a bare musl image lacks, so a musl image uses the Node
+        of its packages.
+        """
+        root = shlex.quote(CONTAINER_NPM_ROOT)
+        if (await environment.exec(command=MUSL_CHECK)).return_code == 0:
+            libc: ContainerLibc = "musl"
+            cpu = node_cpu((await environment.exec(command="uname -m")).stdout or "")
+            await self.ensure_system_dependencies(environment, ("nodejs", "npm"))
+            unpack_node = f"mkdir -p {root}"
+        else:
+            libc = "glibc"
+            platform = (await environment.exec(command=PLATFORM_COMMAND)).stdout or ""
+            # The container needs no download tool for Node: a task can replace curl, or hold a glibc that is too
+            # old for the official build.
+            name = node_build_name(platform)
+            cpu = node_cpu(platform.splitlines()[0])
+            archive = await asyncio.to_thread(node_archive, name, node_cache_directory())
+            await environment.upload_file(archive, CONTAINER_NODE_ARCHIVE)
+            unpack_node = (
+                f"mkdir -p {CONTAINER_NODE} && "
+                f"tar -xzf {CONTAINER_NODE_ARCHIVE} -C {CONTAINER_NODE} --strip-components=1"
+            )
+        bundle = await asyncio.to_thread(
+            agent_bundle, self.package, str(self._version), cpu, libc, agent_cache_directory()
+        )
+        await environment.upload_file(bundle, CONTAINER_AGENT_ARCHIVE)
+        # Root unpacks under a directory that every user reads; the agent user may have a small home or none.
         await self.exec_as_root(
             environment,
-            command=" && ".join(
-                f"(command -v {tool} >/dev/null || (apt-get update && apt-get install -y {tool}))" for tool in tools
+            command=(
+                f"set -euo pipefail; {unpack_node} && tar -xzf {CONTAINER_AGENT_ARCHIVE} -C {root} && "
+                f"{NPM_AGENT_PATH} && node --version && "
+                f"npm rebuild --global --prefix={CONTAINER_NPM_PREFIX} --no-audit --no-fund && "
+                f"rm -f {CONTAINER_NODE_ARCHIVE} {CONTAINER_AGENT_ARCHIVE}"
             ),
-            env={"DEBIAN_FRONTEND": "noninteractive"},
         )
-        if self.install_kind == "uv":
-            command = uv_install_command(str(self._version))
-        elif self.install_kind == "git":
-            command = self.git_install_command()
-        else:
-            command = (
-                f"set -euo pipefail; {nvm_node_install_snippet()} && "
-                f"npm install -g {shlex.quote(f'{self.package}@{self._version}')} && "
-                f"command -v {shlex.quote(self.binary)}"
-            )
-        await self.exec_as_agent(environment, command=command)
+        await self.exec_as_agent(
+            environment, command=f"set -euo pipefail; {NPM_AGENT_PATH} && command -v {shlex.quote(self.binary)}"
+        )
+
+    async def install_uv(self, environment: BaseEnvironment, version: str) -> None:
+        """Put uv ``version`` at ``CONTAINER_UV`` in the container.
+
+        Reef downloads the build of the container's machine on its own host and uploads it, so the container needs
+        no download tool. The build is static: it runs on a glibc image and on a musl image.
+        """
+        machine = await environment.exec(command="uname -m")
+        name = uv_build_name(version, machine.stdout or "")
+        archive = await asyncio.to_thread(uv_archive, name, uv_cache_directory())
+        await environment.upload_file(archive, CONTAINER_UV_ARCHIVE)
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f'set -euo pipefail; mkdir -p "$HOME/.local/bin" && '
+                f'tar -xzf {CONTAINER_UV_ARCHIVE} -C "$HOME/.local/bin" --strip-components=1 && '
+                f'"{CONTAINER_UV}" --version'
+            ),
+        )
+        await self.exec_as_root(environment, command=f"rm -f {CONTAINER_UV_ARCHIVE}")
 
     @override
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         directories = [CONTAINER_ROOT, *(f"{CONTAINER_ROOT}/{path}" for path in self.writable_paths)]
         await self.exec_as_root(environment, command=f"mkdir -p {' '.join(map(shlex.quote, directories))}")
+        if self.skills_dir and self.task_skills is not None:
+            # The task's skills land before the tree, so the tree's file wins on one path.
+            skills = shlex.quote(f"{CONTAINER_ROOT}/{self.task_skills}")
+            await self.exec_as_root(
+                environment, command=f"mkdir -p {skills} && cp -R {shlex.quote(self.skills_dir)}/. {skills}/"
+            )
         await environment.upload_dir(self.files_dir, CONTAINER_ROOT)
         # The agent may run as a user other than root, and it writes its sessions under the root.
         await self.exec_as_root(environment, command=f"chmod -R a+rwX {CONTAINER_ROOT}")
@@ -204,11 +305,11 @@ class AdapterAgent(BaseInstalledAgent):
             find_agent = f'agent="{CONTAINER_GIT_AGENT}/venv/bin/{self.binary}"'
         elif self.install_kind == "uv":
             find_agent = (
-                f'agent="{CONTAINER_UV}" && export UV_CACHE_DIR="$HOME/.cache/uv" '
+                f'{UV_CERTIFICATES} && agent="{CONTAINER_UV}" && export UV_CACHE_DIR="$HOME/.cache/uv" '
                 'UV_PYTHON_INSTALL_DIR="$HOME/.local/share/uv/python"'
             )
         else:
-            find_agent = f'. "$HOME/.nvm/nvm.sh" && agent="$(command -v {shlex.quote(self.binary)})"'
+            find_agent = f'{NPM_AGENT_PATH} && agent="$(command -v {shlex.quote(self.binary)})"'
         command = f'{find_agent} && env {assignments} "$agent" {arguments} </dev/null'
         async with self.bridged(environment):
             result = await environment.exec(command=command, timeout_sec=int(self.timeout_s))
@@ -318,27 +419,33 @@ class AdapterAgent(BaseInstalledAgent):
         return {**answer, "data": base64.b64encode(data).decode(), "end": True, "sequence": 0}
 
     async def relay_python(self, environment: BaseEnvironment) -> str:
-        """The command that runs the relay: the container's ``python3``, else a Python from uv, which the agent
-        installs at the python adapter's pin unless it is the agent's own install."""
-        if (await environment.exec(command="command -v python3")).return_code == 0:
+        """The command that runs the relay: the container's ``python3`` when it is Python 3.7 or later, which the
+        relay needs, else the path of a Python 3.12 that uv installs. The agent installs uv at the python adapter's
+        pin unless it is the agent's own install. ``RuntimeError`` when uv cannot install the Python."""
+        if (await environment.exec(command=RELAY_PYTHON_CHECK)).return_code == 0:
             return "python3"
         if self.install_kind not in ("uv", "git"):
             install = get_adapter("python").install
             if install is None:
                 raise ProgramLaunchError("the python adapter declares no uv install for the bridge's relay")
-            await self.exec_as_agent(environment, command=uv_install_command(install.version))
-        return f'"{CONTAINER_UV}" run --no-project --python 3.12'
+            await self.install_uv(environment, install.version)
+        # One install, with its error, in place of a download at each call of the relay and of its client.
+        found = await self.exec_as_agent(
+            environment,
+            command=(
+                f'set -euo pipefail; {UV_CERTIFICATES}; "{CONTAINER_UV}" python install --quiet 3.12 && '
+                f'"{CONTAINER_UV}" python find --no-project 3.12'
+            ),
+        )
+        return shlex.quote((found.stdout or "").strip().splitlines()[-1])
 
     def git_install_command(self) -> str:
         """The shell command that installs the agent from a checkout at the pinned ref, as Reef does on a person's
         machine (``reef.harness.tasks.vendor_install``): editable into a venv, without the checkout's ``.git``. uv
-        is at the python adapter's pin, and builds the venv with Python 3.12."""
-        install = get_adapter("python").install
-        if install is None:
-            raise ProgramLaunchError("the python adapter declares no uv install for a git install")
+        that ``install`` put in the container builds the venv with Python 3.12."""
         source, venv = f"{CONTAINER_GIT_AGENT}/src", f"{CONTAINER_GIT_AGENT}/venv"
         return (
-            f'{uv_install_command(install.version)} && rm -rf "{CONTAINER_GIT_AGENT}" && '
+            f'set -euo pipefail; {UV_CERTIFICATES}; rm -rf "{CONTAINER_GIT_AGENT}" && '
             f"git clone --quiet --depth 1 --branch {shlex.quote(self.ref)} {shlex.quote(self.repository)} "
             f'"{source}" && rm -rf "{source}/.git" && "{CONTAINER_UV}" venv --quiet --python 3.12 "{venv}" && '
             f'"{CONTAINER_UV}" pip install --quiet --python "{venv}/bin/python" -e "{source}" && '
@@ -367,25 +474,24 @@ class AdapterAgent(BaseInstalledAgent):
             (self.logs_dir / names[index]).write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
-def uv_install_command(version: str) -> str:
-    """The shell command that installs uv ``version`` with Astral's installer under the user's own home."""
-    installer = f"https://astral.sh/uv/{shlex.quote(version)}/install.sh"
-    return (
-        f'set -euo pipefail; curl -LsSf {installer} | env UV_INSTALL_DIR="$HOME/.local/bin" '
-        f'UV_NO_MODIFY_PATH=1 sh && "{CONTAINER_UV}" --version'
-    )
-
-
 class TreeAgent(AdapterAgent):
     """An ``AdapterAgent`` that renders one harness tree for its model when Harbor builds it.
 
-    Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``model``, ``base_url``,
-    ``api_key`` and ``api`` are the values of a ``ModelBinding``. ``files_dir`` receives the rendered tree. ``bridge``
-    bridges the container's loopback to ``base_url``, a loopback URL of this host, as ``AdapterAgent``'s
-    ``bridge_port``. The other values are ``AdapterAgent``'s.
+    Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``mcp_servers``, which
+    Harbor passes, are the MCP servers of the task: the render writes them into the agent's config
+    (``task_mcp_overlays``). ``model``, ``base_url``,
+    ``api_key`` and ``api`` are the values of a ``ModelBinding``, with the token limits that ``extra_env``, the
+    environment that Harbor gives the agent (``tree_agent``'s ``env``), sets (``ModelBinding.with_env_limits``).
+    ``files_dir`` receives the rendered tree. ``bridge`` bridges the container's loopback to ``base_url``, a loopback
+    URL of this host, as ``AdapterAgent``'s ``bridge_port``. The other values are ``AdapterAgent``'s.
     Purpose: ``tree_agent`` names this class. The runner fills the placeholders of the binding in the agent's
     configuration, and the tree stays in a directory so that the runner does not fill them in the tree's own text.
     """
+
+    #: Harbor refuses a task with MCP servers for an agent that does not declare ``mcp_servers``. The render writes
+    #: them for an adapter with ``task_mcp``; ``task_agent_tools`` names the task for another adapter. No adapter's
+    #: agent gets a server's HTTP headers, so ``mcp_http_headers`` stays false.
+    capabilities: ClassVar[AgentCapabilities] = AgentCapabilities(skills=True, mcp_servers=True)
 
     def __init__(
         self,
@@ -402,8 +508,13 @@ class TreeAgent(AdapterAgent):
         **kwargs: Any,
     ) -> None:
         descriptor = get_adapter(adapter)
-        binding = ModelBinding(base_url, model, api_key, api)
-        files = render_tree(HarnessTree.read(Path(tree_dir)), descriptor, binding.config_overlays(descriptor))
+        binding = ModelBinding(base_url, model, api_key, api).with_env_limits(kwargs.get("extra_env") or {})
+        files = render_tree(
+            HarnessTree.read(Path(tree_dir)),
+            descriptor,
+            binding.config_overlays(descriptor),
+            task_overlays=task_mcp_overlays(descriptor, kwargs.get("mcp_servers") or ()),
+        )
         write_rendered(descriptor, files, Path(files_dir), CONTAINER_ROOT)
         if bridge:
             kwargs["bridge_port"] = urllib.parse.urlparse(base_url).port
@@ -428,6 +539,7 @@ def adapter_agent_kwargs(
         "trajectory_format": descriptor.trajectory_format,
         "files_dir": str(files_dir),
         "timeout_s": timeout,
+        "task_skills": descriptor.task_skills_path,
     }
 
 
@@ -439,10 +551,12 @@ def tree_agent(
     files_dir: Path,
     timeout: float,
     bridge: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """The Harbor agent configuration that runs the tree in ``tree_dir``, with the placeholders of the model binding,
     as ``TaskRolloutRunner``'s ``agent``. ``bridge`` bridges the container's loopback to the binding's loopback URL
-    (``TreeAgent``). ``ValueError`` for an adapter that cannot run in a task's container."""
+    (``TreeAgent``). ``env`` holds the variables that Harbor sets for each command of the agent; the adapter's own
+    variables win over them. ``ValueError`` for an adapter that cannot run in a task's container."""
     install = descriptor.install
     if install is None or not can_run_in_task_container(descriptor):
         raise ValueError(f"adapter {descriptor.name!r} cannot play a Harbor task directory in the task's container")
@@ -458,15 +572,52 @@ def tree_agent(
             "api": api,
             "bridge": bridge,
         },
+        **({"env": dict(env)} if env else {}),
     }
 
 
-def task_agent_tools(task: Path) -> tuple[str, ...]:
-    """The settings of the Harbor task directory ``task`` that ``AdapterAgent`` does not give its agent."""
+def task_mcp_overlays(
+    descriptor: AdapterDescriptor, servers: Sequence[MCPServerConfig]
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """The ``(config target, data)`` pair that gives ``descriptor``'s agent the MCP ``servers`` of a task, as
+    ``render_tree``'s ``task_overlays``, or nothing without servers.
+
+    ``ValueError`` when the adapter declares no ``run.task.mcp``, or no entry for the transport of a server.
+    """
+    if not servers:
+        return ()
+    mcp = descriptor.task_mcp
+    if mcp is None:
+        raise ValueError(f"adapter {descriptor.name!r} does not give its agent the MCP servers of a task")
+    entries: dict[str, Any] = {}
+    for server in servers:
+        if server.transport not in mcp.entries:
+            raise ValueError(
+                f"adapter {descriptor.name!r} cannot use the {server.transport} MCP server {server.name!r}"
+            )
+        entries[server.name] = mcp.entry(
+            server.transport, command=server.command or "", args=server.args, url=server.url or ""
+        )
+    return ((mcp.target, {mcp.key: entries}),)
+
+
+def task_agent_tools(descriptor: AdapterDescriptor, task: Path) -> tuple[str, ...]:
+    """The settings of the Harbor task directory ``task`` that ``TreeAgent`` does not give ``descriptor``'s agent.
+
+    ``mcp_servers`` for an adapter that names no ``task_mcp``, or none for the transport of one of the servers;
+    ``mcp_servers headers`` for a server with HTTP headers, which no adapter's agent gets; and ``skills_dir`` for
+    an adapter that names no ``task_skills_path``.
+    """
     environment = TaskConfig.model_validate_toml((task / "task.toml").read_text(encoding="utf-8")).environment
+    mcp, servers = descriptor.task_mcp, environment.mcp_servers
     return (
-        *(("mcp_servers",) if environment.mcp_servers else ()),
-        *(("skills_dir",) if environment.skills_dir else ()),
+        *(
+            ("mcp_servers",)
+            if servers and (mcp is None or any(server.transport not in mcp.entries for server in servers))
+            else ()
+        ),
+        *(("mcp_servers headers",) if any(server.headers for server in servers) else ()),
+        *(("skills_dir",) if environment.skills_dir and descriptor.task_skills_path is None else ()),
     )
 
 
@@ -584,5 +735,6 @@ __all__ = [
     "can_run_in_task_container",
     "run_harbor_task",
     "task_agent_tools",
+    "task_mcp_overlays",
     "tree_agent",
 ]

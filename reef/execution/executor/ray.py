@@ -9,8 +9,8 @@ from time import monotonic
 from typing import Any
 
 from reef.execution.executor.base import (
-    ExecutorConfig,
     ExecutorFuture,
+    ExecutorLaunch,
     SubmittingExecutor,
     WorkerSpec,
     check_rank,
@@ -68,7 +68,7 @@ class RayExecutorFuture(ExecutorFuture):
                 raise ExecutorFailedError(self._failure_state.failure or failure) from exc
 
 
-def actor_options(config: ExecutorConfig, spec: WorkerSpec) -> dict[str, Any]:
+def actor_options(config: ExecutorLaunch, spec: WorkerSpec) -> dict[str, Any]:
     """Ray actor options for one worker: executor defaults, per-worker overrides, node placement."""
     options = {"max_restarts": 0, "max_task_retries": 0, **config.options, **spec.options}
     if options["max_task_retries"] != 0:
@@ -119,7 +119,7 @@ class RayExecutor(SubmittingExecutor):
 
     @classmethod
     def from_workers(cls, workers: Sequence[Any], *, owned: bool = False) -> RayExecutor:
-        executor = cls(ExecutorConfig(backend=cls))
+        executor = cls(ExecutorLaunch(backend=cls))
         executor._workers = tuple(workers)
         executor._owned = owned
         return executor

@@ -481,7 +481,7 @@ class ScenarioStatus(TrainingStepCount):
         except (urllib.error.URLError, TimeoutError, ValueError):
             return None
         scenario = payload["scenarios"].get(self.scenario)
-        return 0 if scenario is None else int(scenario["scenario_step"])
+        return 0 if scenario is None else int(scenario["commit_number"])
 
 
 class TrainingPacer:

@@ -10,10 +10,11 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from reef.core.errors import InternalError
 from reef.storage.durable_files import write_json
 
 
-class RoutingOwnershipError(RuntimeError):
+class RoutingOwnershipError(InternalError):
     """A resource or registry does not belong to this managed deployment.
 
     The registry and the Docker runtime raise it instead of acting on a resource whose ownership they could

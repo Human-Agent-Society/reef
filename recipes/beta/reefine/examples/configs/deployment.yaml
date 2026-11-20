@@ -39,7 +39,7 @@ recipe:
     training-mode: manual
 
 # Every kept tree serves at once, except one that changes an extension: an evolved extension runs in pi's process
-# with your privileges, so a person activates it (POST /reef/scenarios/{scenario}/activate).
+# with your privileges, so a person activates it (`served` of POST /reef/scenarios/{scenario}/update).
 activation:
   module: always
   config:

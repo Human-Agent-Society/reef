@@ -1,4 +1,4 @@
-"""Lay out several component artifacts as one local multi-component release."""
+"""Lay out several component artifacts as one local multi-component snapshot."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, Snapsh
 
 
 def link_or_copy(source: str, destination: str) -> None:
-    """Hard-link an immutable released file into another tree; copy when the filesystem refuses.
+    """Hard-link an immutable published file into another tree; copy when the filesystem refuses.
 
     A symlink in the source resolves first: a plain link on Linux would link
     the symlink itself, and the tree would then carry a link into the cache.
@@ -35,7 +35,7 @@ def compose_snapshot(components: Mapping[str, Artifact], *, directory: Path) -> 
     Every component keeps its independently allocated ``artifact_id``, including
     an unpublished component. Each
     component keeps its own metadata in the manifest; a component's
-    release-level manifest key, if it was itself a flat snapshot, is not nested.
+    snapshot-level manifest key, if it was itself a flat snapshot, is not nested.
     """
     if len(components) < 2:
         raise ArtifactPublicationError("a composed snapshot binds at least two components")

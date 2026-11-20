@@ -53,7 +53,7 @@ def unchanged(item: WorkItem) -> bool:
 
 def get_processing(dispatcher: Dispatcher, scenario: str, task_id: str) -> dict[str, JsonValue] | None:
     """Return one task of the scenario, or None when the task is unknown or belongs to another scenario."""
-    item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
+    item = dispatcher.queue.read(SAMPLES_QUEUE, task_id)
     return None if item is None or item.scenario != scenario else processing_item(item)
 
 
@@ -73,7 +73,7 @@ def read_processing_log(
     lines (1 to 1000) with a number above ``after``. ``next`` is the ``after`` of the next page, or null when the page
     is the end of the lines kept so far. A task that no worker took has no attempt and no lines.
     """
-    item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
+    item = dispatcher.queue.read(SAMPLES_QUEUE, task_id)
     if item is None or item.scenario != scenario:
         return None
     chosen = item.attempt_count if attempt is None else attempt

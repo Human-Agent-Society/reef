@@ -35,7 +35,11 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
     async def rollouts(request: web.Request) -> web.Response:
         scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
-        views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id)
+        # ``calls=false`` leaves out the call totals: such a read reads the queue only. A ValueError answers HTTP 400.
+        calls = request.query.get("calls", "true")
+        if calls not in ("true", "false"):
+            raise ValueError("calls is true or false")
+        views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id, calls=calls == "true")
         if views is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(
@@ -144,7 +148,7 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 
 
 def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
-    """The start and the cancel of an evaluation, which control accepts."""
+    """The start, the cancel, the retry and the resume of an evaluation, which control accepts."""
 
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)
@@ -158,8 +162,28 @@ def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEva
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(stored.to_json())
 
+    async def retry(request: web.Request) -> web.Response:
+        evaluation_id = request.match_info["evaluation_id"]
+        # The body is optional: an empty one runs the rollouts again with the same request.
+        changes = await read_object(request) if request.body_exists else {}
+        stored = await asyncio.to_thread(evaluations.retry, request.match_info["scenario"], evaluation_id, changes)
+        if stored is None:
+            raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
+        return web.json_response(stored.to_json(), status=202)
+
+    async def resume(request: web.Request) -> web.Response:
+        evaluation_id = request.match_info["evaluation_id"]
+        # The body is optional: an empty one runs the rollouts again with the same request.
+        changes = await read_object(request) if request.body_exists else {}
+        stored = await asyncio.to_thread(evaluations.resume, request.match_info["scenario"], evaluation_id, changes)
+        if stored is None:
+            raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
+        return web.json_response(stored.to_json(), status=202)
+
     app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
     app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel", cancel)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry", retry)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume", resume)
 
 
 __all__ = ["register_evaluation_reads", "register_evaluation_writes"]

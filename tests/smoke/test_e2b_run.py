@@ -17,7 +17,7 @@ from reef.evaluation.harness import TaskEvaluationWorker, TaskScorer
 from reef.evaluation.harness.runner import TaskRun
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor
-from reef.execution.sandbox.process import ProgramTimeout
+from reef.execution.sandbox.process import ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import run_task
@@ -150,7 +150,7 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
         )
         assert outcome.exit_code == 0, outcome.stderr
         assert config.read_text() == "original" and (workspace / "answer.txt").read_text() == "ok"
-        with pytest.raises(ProgramTimeout):
+        with pytest.raises(ProgramTimeoutError):
             session.launch(
                 ["python3", "-c", "import subprocess,time; subprocess.Popen(['sleep','120']); time.sleep(120)"],
                 root=root,

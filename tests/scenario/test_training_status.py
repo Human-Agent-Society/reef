@@ -12,38 +12,31 @@ from __future__ import annotations
 import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Literal
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._threshold_processor import ThresholdJobData
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, live_objects
 from tests.support.samples import made_task
+from tests.support.threshold_processor import ThresholdJobData
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
-from reef.observability import ExperimentLogger
-from reef.pipeline_context import PipelineContext
-from reef.recipe import Recipe
+from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import NoSamples
-from reef.storage.job_data import read_job_data
-from reef.storage.records import RecordStore
-from reef.storage.samples import TrainerSamples, stage_item_id
+from reef.scenario.live_objects import LiveObjects
+from reef.storage.samples import stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
-from reef.train.pipeline import TrainingPipeline
-from reef.train.trainer import Trainer
+from reef.train.pipeline import PipelineSpec
 from reef.train.types import Sample
 
 pytestmark = pytest.mark.unit
@@ -56,7 +49,7 @@ def scenario_double(
     job_data_ready: bool = False,
     pipeline_status: dict | None = None,
     runtime=None,
-    last_committed_step: dict | None = None,
+    last_training_commit: dict | None = None,
     job_loop=None,
     state: dict | None = None,
 ) -> SimpleNamespace:
@@ -81,7 +74,7 @@ def scenario_double(
         trainers=(SimpleNamespace(component=None, trainer=trainer),),
         trainer_for=lambda component: trainer,
         runtime=runtime,
-        commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
+        commit_status={"commit_number": 0, "last_training_commit": last_training_commit},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
         served_artifact_id=lambda: "base",
         close=lambda: None,
@@ -121,15 +114,15 @@ def test_status_exposes_the_ready_state() -> None:
     assert dispatcher.build_training_status()["scenarios"]["s"]["job_data_ready"] is True
 
 
-def test_status_exposes_the_last_committed_step_outcome() -> None:
+def test_status_exposes_the_last_training_commit() -> None:
     committed = {
-        "step": 3,
+        "commit_number": 3,
         "recorded_at": 1_756_400_000.0,
         "metrics": {"skipped": "no proposal", "selection": {"reason": "candidate lost"}},
     }
-    dispatcher = bound_dispatcher(scenario_double(last_committed_step=committed))
+    dispatcher = bound_dispatcher(scenario_double(last_training_commit=committed))
 
-    assert dispatcher.build_training_status()["scenarios"]["s"]["last_committed_step"] == committed
+    assert dispatcher.build_training_status()["scenarios"]["s"]["last_training_commit"] == committed
 
 
 def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
@@ -157,7 +150,7 @@ def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
 
 
 def test_status_exposes_terminal_processor_outcomes() -> None:
-    outcome = {"failed_steps": [{"step": 1, "reason": "mixed_release_ids", "release_ids": ["old", "new"]}]}
+    outcome = {"failed_steps": [{"step": 1, "reason": "mixed_artifact_ids", "artifact_ids": ["old", "new"]}]}
     dispatcher = bound_dispatcher(scenario_double(pipeline_status=outcome))
 
     assert dispatcher.build_training_status()["scenarios"]["s"]["processor"] == outcome
@@ -165,28 +158,87 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
 
 def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer() -> None:
     finished = JobOutcome("job-2", "stub", "finished")
-    running = JobLoopState(
-        "stub:base", job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished
+    jobs = (
+        RunningJob("job-3", "stub:base", checkpoints_handled=1),
+        RunningJob("job-4", "stub:other", train_from="a1"),
     )
+    running = JobLoopState("stub:base", jobs, finished_jobs=2, last_job=finished)
     loop = JobLoop(StubTrainingComponent(), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["training_job"] == {"job_id": "job-3", "backend": "stub", "checkpoints_handled": 1}
+    assert status["training_jobs"] == [{**job.to_dict(), "backend": "stub"} for job in jobs]
+    assert status["training_jobs"][1] == {
+        "job_id": "job-4",
+        "start": "stub:other",
+        "checkpoints_handled": 0,
+        "train_from": "a1",
+        "backend": "stub",
+    }
     assert status["finished_jobs"] == 2
 
     dispatcher.registry.get_optional("s").trainer.state = JobLoopState(
         "stub:base", finished_jobs=3, last_job=finished
     ).to_dict()
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["training_job"] is None
+    assert status["training_jobs"] == []
     assert status["finished_jobs"] == 3
+
+
+class ResidencyRuntime(StubInferenceRuntime):
+    """A runtime that reports ``residency`` as its adapter residency, or raises ``failure`` when it is asked."""
+
+    def __init__(self, residency: Mapping[str, int] | None = None, failure: Exception | None = None) -> None:
+        super().__init__()
+        self.residency = residency
+        self.failure = failure
+
+    def adapter_residency_status(self) -> Mapping[str, int] | None:
+        if self.failure is not None:
+            raise self.failure
+        return self.residency
+
+
+def serving_status(recipe: Recipe, live: LiveObjects, tmp_path: Path) -> Mapping[str, object]:
+    """The ``serving`` block of the status that a dispatcher of ``recipe`` and ``live`` builds."""
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
+    try:
+        return dispatcher.build_training_status()["serving"]
+    finally:
+        dispatcher.close()
+
+
+def test_status_reports_the_adapter_residency_that_the_runtime_of_the_weights_reports(tmp_path: Path) -> None:
+    residency = {"resident": 1, "capacity": 2}
+    weights = TestPolicyRecipe()
+    resident = live_objects(runtime=ResidencyRuntime(residency))
+
+    assert serving_status(weights, resident, tmp_path) == {"test_policy": {"adapters": residency}}
+    # A composite holds the block under the name of its weight component.
+    composite = CompositeRecipe(components={"records": Recipe(), "policy": weights})
+    assert serving_status(composite, resident, tmp_path) == {"composite": {"policy": {"adapters": residency}}}
+    # A runtime that reports no residency, and a recipe that trains no weights, add nothing.
+    assert serving_status(TestPolicyRecipe(), live_objects(), tmp_path) == {}
+    assert serving_status(Recipe(), LiveObjects(runtime=ResidencyRuntime(residency)), tmp_path) == {}
+    no_weights = CompositeRecipe(components={"records": Recipe(), "other": Recipe()})
+    assert serving_status(no_weights, LiveObjects(), tmp_path) == {}
+    # A runtime that cannot answer leaves the rest of the status readable.
+    failing = live_objects(runtime=ResidencyRuntime(failure=RuntimeError("engines are down")))
+    assert serving_status(TestPolicyRecipe(), failing, tmp_path) == {
+        "test_policy": {"error": "RuntimeError: engines are down"}
+    }
 
 
 def test_status_of_a_trainer_without_a_job_loop_has_no_job_fields() -> None:
     status = bound_dispatcher(scenario_double()).build_training_status()["scenarios"]["s"]
 
-    assert "training_job" not in status
+    assert "training_jobs" not in status
     assert "finished_jobs" not in status
 
 
@@ -264,12 +316,14 @@ class BackgroundStep(NoSamples):
     """Run one step from no record, as the rounds of generated tasks do, and make the step's one task.
 
     The first look starts the step. The step runs until a look after ``finished`` is set; that look ends it, and
-    the stage then makes the step's one task from no record set.
+    the stage then makes the step's one task from no record set. ``finished`` is a class attribute, which
+    ``background_step_dispatcher`` replaces for each dispatcher.
     """
 
-    def __init__(self, finished: Event) -> None:
+    finished = Event()
+
+    def __init__(self) -> None:
         super().__init__()
-        self.finished = finished
         self.step: Literal["not started", "running", "ended"] = "not started"
         self.made = False
 
@@ -290,56 +344,32 @@ class BackgroundStep(NoSamples):
         return (("generated-task", made_task("generated-task")),)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class BackgroundStepRecipe(TestPolicyRecipe):
-    """A weights recipe that trains the task of a ``BackgroundStep``; ``step_finished`` ends the step."""
+    """A weights recipe that trains the task of a ``BackgroundStep``."""
 
-    step_finished: Event = field(default_factory=Event, compare=False)
-
-    def background_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        return TrainingPipeline(
-            context,
-            record2sample=BackgroundStep(self.step_finished),
-            sample2job=ThresholdJobData(context, None, 1),
-        )
-
-    def build(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, object] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: self.background_pipeline(context),
-            job_loop=JobLoop(self.training_component, scenario=scenario),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            root=root,
-        )
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(BackgroundStep, ThresholdJobData)
 
 
-def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundStepRecipe, StubTrainingComponent]:
-    """A dispatcher of ``BackgroundStepRecipe`` with no scenario yet, and the component that runs its jobs."""
+def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, Event, StubTrainingComponent]:
+    """A dispatcher of ``BackgroundStepRecipe`` with no scenario yet, the event that ends the step of its scenarios'
+    ``BackgroundStep``, and the component that runs its jobs."""
     initial = tmp_path / "initial"
     initial.mkdir()
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    recipe = BackgroundStepRecipe(**runtime_bindings(component))
+    BackgroundStep.finished = Event()
     dispatcher = Dispatcher(
-        recipe,
+        # One task is one job; the stage takes no config.
+        BackgroundStepRecipe(pipeline_stages=job_sized_stages(BackgroundStepRecipe.pipeline_spec())),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
     )
-    return dispatcher, recipe, component
+    return dispatcher, BackgroundStep.finished, component
 
 
 def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
@@ -349,7 +379,7 @@ def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted
-    assert [sample.task_path.name for sample in read_job_data(job.data_dir).samples] == [
+    assert [sample.task_path.name for sample in job.read_data().samples] == [
         stage_item_id("generated", "generated-task")
     ]
 
@@ -360,10 +390,10 @@ def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_w
     # What POST /reef/scenarios does for a recipe that needs no record, such as generated tasks: no record or
     # upload ever wakes the worker, so the worker must start with the scenario and poll while the step runs.
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    dispatcher, recipe, component = background_step_dispatcher(tmp_path)
+    dispatcher, step_finished, component = background_step_dispatcher(tmp_path)
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
-        recipe.step_finished.set()
+        step_finished.set()
         assert_trains_the_generated_task(component)
     finally:
         dispatcher.close()
@@ -387,12 +417,12 @@ def test_a_status_read_leaves_a_finished_step_to_the_worker_which_trains_its_job
         if waits == 2:
             # The worker ran its first step, which found the step running; no record wakes it again.
             ready.clear()
-            recipe.step_finished.set()
+            step_finished.set()
             read_ready.append(dispatcher.build_training_status()["scenarios"][scenario]["job_data_ready"])
         return wait(self, scenario, component, ready)
 
     monkeypatch.setattr(LocalTrainingWorkers, "wait", wait_after_a_status_read)
-    dispatcher, recipe, training_component = background_step_dispatcher(tmp_path)
+    dispatcher, step_finished, training_component = background_step_dispatcher(tmp_path)
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
         assert_trains_the_generated_task(training_component)

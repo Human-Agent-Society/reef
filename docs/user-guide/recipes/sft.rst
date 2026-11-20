@@ -53,8 +53,7 @@ SFT has two pipeline stages
   with the target as the final agent turn, the only turn that trains. The
   sample holds no tokens. ``max_tokens`` travels with it as
   ``extra.reef.max_tokens``. The stage never finds a sample stale. An SFT target
-  is fixed text, not tokens that an older model version sampled. Thus the
-  stage takes no ``max_staleness`` and refuses the key.
+  is fixed text, not tokens that an older model version sampled.
 - ``SFTJobData`` puts the samples into job data in use order: reports in
   arrival order, and uploaded ATIF trajectories in upload order, interleaved
   by arrival (see `Train on whole conversations`_). With the default

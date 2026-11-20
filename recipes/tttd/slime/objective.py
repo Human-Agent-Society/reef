@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-from reef.train.slime_backend.algorithm import objective
+from reef.train.slime_backend.algorithm import worker_hook
 
 
 def importance_sampling_surrogate(
@@ -29,7 +29,7 @@ def importance_sampling_surrogate(
     return -ratio * advantages.float()
 
 
-@objective("custom_loss_function_path")
+@worker_hook("custom_loss_function_path")
 def tttd_loss(
     args: Namespace,
     batch: dict[str, Any],
@@ -98,7 +98,7 @@ def tttd_loss(
     }
 
 
-@objective("custom_advantage_function_path")
+@worker_hook("custom_advantage_function_path")
 def tttd_advantages(args, rollout_data) -> None:
     """Apply the frozen-base, centered token KL from the reference algorithm.
 

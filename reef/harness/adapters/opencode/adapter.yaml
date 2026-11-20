@@ -16,7 +16,10 @@
 # pin the benchmarking traps: autoupdate off, sharing off, permissions
 # allowed (runs are isolated roots), and only provider reef, the model
 # binding's, so a model choice the render check misses cannot reach
-# opencode's own zen provider.
+# opencode's own zen provider. The binding gives the model its limits:
+# without a context limit, opencode never compacts a session and fails at
+# the endpoint's limit. A run's REEF_CONTEXT_WINDOW and
+# REEF_MAX_OUTPUT_TOKENS set them.
 name: opencode
 binary: opencode
 # The vendor's install channel at the pinned version. Harness evolution startup
@@ -62,7 +65,10 @@ model:
               baseURL: "{base_url}/v1"
               apiKey: "{api_key}"
             models:
-              "{model}": {}
+              "{model}":
+                limit:
+                  context: "{context_window}"
+                  output: "{max_output_tokens}"
         model: "reef/{model}"
   anthropic:
     - target: agent
@@ -74,15 +80,30 @@ model:
               baseURL: "{base_url}/v1"
               apiKey: "{api_key}"
             models:
-              "{model}": {}
+              "{model}":
+                limit:
+                  context: "{context_window}"
+                  output: "{max_output_tokens}"
         model: "reef/{model}"
 # How the agent runs: one evaluation run in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
   task:
-    argv: ["run", "--format", "json", "--auto", "{task}"]
+    # "--" ends the options: an instruction that starts with "-" is the message, not an option.
+    argv: ["run", "--format", "json", "--auto", "--", "{task}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    skills: opencode/skills
+    # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the
+    # entry of a server of each transport.
+    mcp:
+      target: agent
+      key: mcp
+      stdio: {type: local, command: "{argv}"}
+      # oauth: false stops opencode's OAuth detection on HTTP 401; a task's server names no OAuth.
+      sse: {type: remote, url: "{url}", oauth: false}
+      streamable-http: {type: remote, url: "{url}", oauth: false}
   # How a person's machine runs opencode on a snapshot: the person's own ~/.config/opencode stays.
   # register adds the plugin to its global plugin list, and opencode loads it in place in every
   # session; on a key or name both define, the snapshot's wins. opencode has no command that

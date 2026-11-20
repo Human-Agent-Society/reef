@@ -49,7 +49,7 @@ function fixture(context) {
   };
 }
 
-test("successful fetch caches complete statistics; a missing release is optional", (context) => {
+test("a complete fetch caches statistics and restores a corrupt generated file", (context) => {
   const site = fixture(context);
   const result = site.run();
   assert.equal(result.status, 0, result.stderr);
@@ -59,7 +59,13 @@ test("successful fetch caches complete statistics; a missing release is optional
   assert.equal(stats.contributors.length, 1);
   assert.equal(stats.mergedPulls.total, 351);
   assert.equal(stats.commitsByDay.reduce((sum, day) => sum + day.count, 0), 1);
-  assert.equal(readFileSync(site.cache, "utf8"), readFileSync(site.target, "utf8"));
+  const snapshot = readFileSync(site.cache, "utf8");
+  assert.equal(snapshot, readFileSync(site.target, "utf8"));
+
+  writeFileSync(site.target, "{");
+  const recovery = site.run("all");
+  assert.equal(recovery.status, 0, recovery.stderr);
+  assert.equal(readFileSync(site.target, "utf8"), snapshot);
 });
 
 for (const source of ["target", "cache"]) {
@@ -90,15 +96,5 @@ test("development can start offline, but its partial snapshot cannot pass a prod
   assert.equal(JSON.parse(previous).stars, null);
   assert.equal(existsSync(site.cache), false);
   assert.notEqual(site.run("all").status, 0);
-  assert.equal(readFileSync(site.target, "utf8"), previous);
-});
-
-test("a corrupt generated file falls back to the complete build cache", (context) => {
-  const site = fixture(context);
-  assert.equal(site.run().status, 0);
-  const previous = readFileSync(site.cache, "utf8");
-  writeFileSync(site.target, "{");
-  const result = site.run("all");
-  assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(site.target, "utf8"), previous);
 });

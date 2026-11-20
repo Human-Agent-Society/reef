@@ -5,7 +5,7 @@ it ever proposed, that program's per-instance validation scores, the Pareto
 front each instance induces, a round-robin cursor per candidate, and the
 metric-call budget spent so far. The method keeps this object in its
 ``state/archive.json`` (``Archive.to_state``), which Reef commits with each
-step, so a step that fails or is never committed cannot advance the search.
+job, so a job that fails or is never committed cannot advance the search.
 
 Two rules are GEPA's and are reproduced exactly:
 
@@ -41,7 +41,7 @@ class Candidate:
     texts: dict[str, str]
     parent: int | None = None
     #: One score per evaluation task, in task order. ``None`` until the next
-    #: step settles the candidate's validation pass, which is what makes a
+    #: job settles the candidate's validation pass, which is what makes a
     #: candidate eligible to become a parent.
     val_scores: list[float] | None = None
     minibatch_scores: list[float] | None = None
@@ -86,7 +86,7 @@ class Archive:
     ``steps``, ``rejections`` and ``iteration`` are ≥ 0, and the fields below
     say what each one holds. The constructor raises ``ValueError`` for a
     value outside these conditions.
-    Purpose: ``GEPA.step`` reads it from ``state/archive.json`` with
+    Purpose: ``GEPA.run`` reads it from ``state/archive.json`` with
     ``from_state``, folds in the latest evaluation with ``settle``, runs one
     iteration on it, and writes ``to_state`` back.
     """
@@ -94,10 +94,10 @@ class Archive:
     candidates: list[Candidate] = field(default_factory=list)
     #: The candidate whose texts the served tree holds, the tree each child is
     #: written over; ``pending`` is the candidate awaiting its validation
-    #: pass, at most one, because a step settles before the next.
+    #: pass, at most one, because a job settles before the next.
     served: int | None = None
     pending: int | None = None
-    #: The step that proposed the pending candidate: only that step's evaluation is its validation pass.
+    #: The job that proposed the pending candidate: only that job's evaluation is its validation pass.
     pending_step: int | None = None
     metric_calls: int = 0
     #: GEPA iterations that reached a child evaluation, and how many of those
@@ -107,8 +107,8 @@ class Archive:
     #: One row per reflection: the parent, the component, the minibatch scores
     #: on both sides and the result. GEPA keeps the same record in its run
     #: directory; without it a search outcome can only be inferred from the
-    #: candidate texts after the fact. The step's ``calls.json`` keeps what the
-    #: model was shown and what it wrote, so a row leaves both out: every step
+    #: candidate texts after the fact. The job's ``calls.json`` keeps what the
+    #: model was shown and what it wrote, so a row leaves both out: every job
     #: commits the archive whole.
     proposals: list[dict[str, Any]] = field(default_factory=list)
     #: GEPA's one random stream, in its order: a parent draw, then a reshuffle
@@ -230,14 +230,14 @@ class Archive:
     def settle(
         self, candidate_scores: Sequence[float], served_scores: Sequence[float], selected: bool, *, repeats: int
     ) -> None:
-        """Fold one evaluated step into the archive: GEPA's validation pass and the update of the served candidate.
+        """Fold one evaluated job into the archive: GEPA's validation pass and the update of the served candidate.
 
         Each score is one task's mean over the ``repeats`` runs the
-        evaluation ran for it. The pending candidate takes the step's
+        evaluation ran for it. The pending candidate takes the job's
         candidate scores and is charged one metric call per run,
         ``len(candidate_scores) * repeats``; a served candidate that has no
-        validation yet (the seed, on the first evaluated step) takes the
-        served scores, charged when it was seeded. A selected step serves the
+        validation yet (the seed, on the first evaluated job) takes the
+        served scores, charged when it was seeded. A selected job serves the
         pending candidate.
         """
         pending = self.pending

@@ -38,7 +38,7 @@ If you use a token, export it in both terminals and add
 
 ## 2. Create a scenario
 
-Open another terminal. Create a scenario to keep this harness's releases and
+Open another terminal. Create a scenario to keep this harness's snapshots and
 requests together, then read its first snapshot:
 
 ```bash
@@ -55,7 +55,7 @@ Note its `artifact_id`.
 
 ## 3. Ask for a change
 
-Send the request, with the release id from the previous step:
+Send the request, with the artifact ID from the previous step:
 
 ```bash
 curl -fsS -H 'x-reef-scenario: reefine-example' -H 'Content-Type: application/json' \
@@ -90,13 +90,13 @@ leave the active selection unchanged.
 
 A snapshot that changes an extension stays inactive, because an extension
 runs in pi's process with your privileges. Inspect its files and declared
-requirements on the page before you serve it. Then activate it with the
-artifact id the page names:
+requirements on the page before you serve it. Then activate it: set `served`
+to the artifact id the page names, with weight 100:
 
 ```bash
 curl -fsS -H 'Content-Type: application/json' \
-  -d '{"artifact_id": "<the artifact id the page names>"}' \
-  http://127.0.0.1:8901/reef/scenarios/reefine-example/activate
+  -d '{"served": {"<the artifact id the page names>": 100}}' \
+  http://127.0.0.1:8901/reef/scenarios/reefine-example/update
 ```
 
 ## 5. Pull the result

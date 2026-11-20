@@ -35,17 +35,15 @@ from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, Evaluati
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
-from reef.storage.data import (
-    MAX_QUERY_LIMIT,
-    DataStore,
-    ItemConflict,
-    NewItem,
-    StoredItem,
-    item_digest_matches,
-    record_source,
+from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, NewItem, StoredItem, record_source
+from reef.storage.item_kinds import (
+    copied_record,
+    evaluation_call_id,
+    evaluation_rollout_id_prefix,
+    evaluation_trajectory_id,
+    record_digest,
 )
-from reef.storage.item_kinds import copied_record, evaluation_call_id, evaluation_trajectory_id, record_digest
-from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordConflictError, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
 RECORD_PAGE_SIZE = 256
@@ -170,10 +168,19 @@ def evaluation_trajectory_items(
 
 
 def evaluation_call_items(
-    data: DataStore, owner: str, scenario: str, evaluation_id: str, *, content: bool
+    data: DataStore,
+    owner: str,
+    scenario: str,
+    evaluation_id: str,
+    *,
+    content: bool,
+    rollout: tuple[int, int] | None = None,
 ) -> Iterator[StoredItem]:
     """The evaluation calls of evaluation ``evaluation_id`` of ``scenario``, in sequence order, a page at a time: one
-    query of the record items of ``scenario`` with that ``evaluation_id`` for each page."""
+    query of the record items of ``scenario`` with that ``evaluation_id`` for each page. With ``rollout``, a pair
+    ``(task_index, repeat)``, only the calls of that rollout: the query keeps only the IDs that start with the
+    rollout's (``evaluation_rollout_id_prefix``), so the store does not return the other calls of the evaluation."""
+    id_prefix = None if rollout is None else f"{scenario}/{evaluation_rollout_id_prefix(evaluation_id, *rollout)}"
     after = 0
     while page := data.query(
         owner,
@@ -182,6 +189,7 @@ def evaluation_call_items(
         group=("evaluation_id", evaluation_id),
         after=after,
         content=content,
+        id_prefix=id_prefix,
     ):
         yield from (item for item in page if record_source(item.metadata) == "evaluation")
         after = page[-1].sequence
@@ -190,16 +198,6 @@ def evaluation_call_items(
 def origin_of(item: StoredItem) -> str:
     """The scenario that made the record item ``item``."""
     return item.metadata["origin"]["scenario"]
-
-
-def old_record_copied(data: DataStore, owner: str, scenario: str, record_id: str) -> bool:
-    """Whether the record ``record_id`` of the old record store of ``scenario`` is in ``data``: as its own record item,
-    or, for a copy of another scenario's record item from before RFC #1219, as that item."""
-    for item_id in (f"{scenario}/{record_id}", record_id):
-        item = data.read(owner, item_id)
-        if item is not None and item.kind == "record":
-            return True
-    return False
 
 
 def used_records(
@@ -212,10 +210,10 @@ def used_records(
     uses = data.scenario_items(
         owner, scenario, kinds=("record",), after=after_sequence, limit=limit, excluding_origin=scenario
     )
-    records = tuple(read_as(item, scenario) for _, item in uses)
+    records = tuple(read_as(use.item, scenario) for use in uses)
     if len(uses) == limit:
-        return uses[-1][0], records
-    return max(newest, uses[-1][0] if uses else after_sequence), records
+        return uses[-1].sequence, records
+    return max(newest, uses[-1].sequence if uses else after_sequence), records
 
 
 def used_record(data: DataStore, owner: str, scenario: str, record_id: str) -> AgentRecord | None:
@@ -305,13 +303,13 @@ class ItemRecordStore(RecordStore):
         for item in items:
             earlier = first.setdefault(item.agent_record_id, item)
             if record_digest(record_content(earlier)) != record_digest(record_content(item)):
-                raise RecordConflict(f"record {item.agent_record_id!r} is given twice with other content")
+                raise RecordConflictError(f"record {item.agent_record_id!r} is given twice with other content")
         try:
             created = self.data.create(
                 self.owner, [record_item(item) for item in first.values()], generation=self.generation
             )
-        except ItemConflict as error:
-            raise RecordConflict(str(error)) from error
+        except ItemConflictError as error:
+            raise RecordConflictError(str(error)) from error
         stored = dict(zip(first, created, strict=True))
         retried = {
             item.item_id: self.record(item)
@@ -331,11 +329,11 @@ class ItemRecordStore(RecordStore):
         stored = self.stored(item.scenario, item.agent_record_id)
         if stored is None:
             return None
-        if not item_digest_matches(stored, record_digest(record_content(item))):
-            raise RecordConflict(f"record {item.agent_record_id!r} is stored with other content")
+        if stored.digest != record_digest(record_content(item)):
+            raise RecordConflictError(f"record {item.agent_record_id!r} is stored with other content")
         return self.record(stored)
 
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         stored = self.stored(scenario, agent_record_id)
         return None if stored is None else self.record(stored)
 
@@ -374,7 +372,7 @@ class ItemRecordStore(RecordStore):
             return 0
         return self.data.last_sequence(self.owner, kind="record", scenario=scenario, origin=scenario)
 
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         stored = self.stored(scenario, agent_record_id)
         return None if stored is None else StoredRecord(stored.sequence, self.record(stored))
 
@@ -422,7 +420,6 @@ __all__ = [
     "evaluation_call_summary",
     "evaluation_trajectory_item",
     "evaluation_trajectory_items",
-    "old_record_copied",
     "record_content",
     "record_item",
     "stored_evaluation_call",

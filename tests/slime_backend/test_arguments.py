@@ -200,7 +200,7 @@ def test_finalize_arguments_requires_save(save: str | None) -> None:
 @pytest.mark.parametrize("interval", [0, -1])
 def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path, interval: int) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
-    from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
+    from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionSettings
 
     args = SlimeArguments(
         save_hf=str(tmp_path / "hf" / "{rollout_id}"),
@@ -212,7 +212,7 @@ def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path
         critic_save_interval=interval,
     )
     with pytest.raises(ValueError, match="critic_save_interval"):
-        prepare_checkpoint_storage(args, RetentionConfig())
+        prepare_checkpoint_storage(args, RetentionSettings())
     assert not (tmp_path / "megatron").exists()
 
 

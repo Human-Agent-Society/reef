@@ -12,6 +12,7 @@ from pathlib import Path
 
 import aiohttp
 
+from reef.core.errors import InternalError
 from reef.core.tasks import HarborTask
 from reef.harness.harbor.rollouts import TaskRollout
 from reef.record2sample.generator.designer import DesignerRequest
@@ -34,15 +35,15 @@ DEFAULT_TIMEOUT_S = 60.0
 DEFAULT_JOB_TIMEOUT_S = 4 * 3600.0
 
 
-class GeneratorError(RuntimeError):
+class GeneratorError(InternalError, RuntimeError):
     """The generator service refused a request, failed a job, or could not be reached."""
 
 
-class DuplicateTask(GeneratorError):
+class DuplicateTaskError(GeneratorError):
     """A task with the same content is already under the tasks root."""
 
 
-class TaskNameConflict(GeneratorError):
+class TaskNameConflictError(GeneratorError):
     """A different task already holds the name under the tasks root."""
 
 
@@ -89,8 +90,8 @@ class Generator(ABC):
         """Stage the task under the tasks root and return where it is.
 
         Writing the same task again returns the staged copy with ``created`` False, so rollouts that a stop
-        interrupted can stage the task and run again. Raises ``TaskNameConflict`` when a different task holds the name,
-        and ``DuplicateTask`` when the same content is staged under another name.
+        interrupted can stage the task and run again. Raises ``TaskNameConflictError`` when a different task holds the
+        name, and ``DuplicateTaskError`` when the same content is staged under another name.
         """
 
     @abstractmethod
@@ -229,9 +230,9 @@ class HttpGenerator(Generator):
     async def write_task(self, task: HarborTask) -> WrittenTask:
         status, document = await self.request("POST", "/tasks", body=task_document(task))
         if status == 409 and document.get("duplicate") is True:
-            raise DuplicateTask(str(document.get("error")))
+            raise DuplicateTaskError(str(document.get("error")))
         if status == 409 and document.get("duplicate") is False:
-            raise TaskNameConflict(str(document.get("error")))
+            raise TaskNameConflictError(str(document.get("error")))
         if status >= 400:
             raise GeneratorError(f"POST /tasks was refused ({status}): {document.get('error', document)}")
         return WrittenTask(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Literal
 
 from sqlalchemy import (
@@ -29,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflictError, EvaluationStore, StoredEvaluation
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
@@ -135,6 +136,32 @@ class SQLEvaluationStore(EvaluationStore):
             error=error,
         )
 
+    def reopen(self, evaluation_id: str) -> StoredEvaluation:
+        return self.move(
+            evaluation_id, ("finished", "failed"), state="running", finished_at=None, result_json=None, error=None
+        )
+
+    def limit_rollouts(self, evaluation_id: str, max_concurrent_rollouts: int | None) -> StoredEvaluation:
+        table = self.table.table
+        with self.database._transaction(write=True) as connection:
+            row = (
+                connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise EvaluationStateConflictError(f"no evaluation {evaluation_id!r}")
+            stored = stored_evaluation(row)
+            # ``replace`` checks the new limit as a request checks it.
+            request = replace(stored.request, max_concurrent_rollouts=max_concurrent_rollouts)
+            request_json = json.dumps(request.to_json(), ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                table.update()
+                .where(self.table.condition(), table.c.evaluation_id == evaluation_id)
+                .values(request_json=request_json)
+            )
+        return replace(stored, request=request)
+
     def move(
         self,
         evaluation_id: str,
@@ -154,7 +181,7 @@ class SQLEvaluationStore(EvaluationStore):
                 .one_or_none()
             )
             if row is None or row["state"] not in sources:
-                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} is not {' or '.join(sources)}")
+                raise EvaluationStateConflictError(f"evaluation {evaluation_id!r} is not {' or '.join(sources)}")
             moved = {"state": state, "finished_at": finished_at, "result_json": result_json, "error": error}
             # Check the moved row before it is written, so the table never holds an invalid evaluation.
             stored = stored_evaluation({**row, **moved})
@@ -163,7 +190,7 @@ class SQLEvaluationStore(EvaluationStore):
             )
         return stored
 
-    def get(self, evaluation_id: str) -> StoredEvaluation | None:
+    def read(self, evaluation_id: str) -> StoredEvaluation | None:
         table = self.table.table
         with self.database._transaction(write=False) as connection:
             row = (

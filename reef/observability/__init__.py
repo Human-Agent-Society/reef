@@ -9,7 +9,7 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.observability.factory import build_experiment_tracker, build_record_observer
-from reef.observability.tracing import TracingConfig
+from reef.observability.tracing import TracingSettings
 
 __all__ = [
     "ExperimentLogger",
@@ -17,7 +17,7 @@ __all__ = [
     "ExperimentTracker",
     "NullExperimentLogger",
     "NullExperimentTracker",
-    "TracingConfig",
+    "TracingSettings",
     "TrainFromExperimentEvent",
     "TrainingExperimentContext",
     "TrainingExperimentEvent",

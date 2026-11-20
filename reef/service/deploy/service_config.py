@@ -1,7 +1,7 @@
 """Typed HTTP, storage and shared runtime settings derived from component fields.
 
 CLI and YAML values use the shared parser in ``reef.core.config``. This module
-converts effective deployment configuration into ``ServiceConfig`` for app assembly.
+converts effective deployment configuration into ``ServiceSettings`` for app assembly.
 """
 
 from __future__ import annotations
@@ -18,26 +18,31 @@ from typing import Any
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.evaluation.rollout_worker import ON_STOP_CHOICES
+from reef.evaluation.task_templates import TaskTemplateBuilder
+from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import SegmentStore
 from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.tasks import TaskFileStore
+from reef.train.manager import TrainingManager
 
 
 @dataclass(frozen=True)
-class ServiceConfig:
+class ServiceSettings:
     """The HTTP service's settings, translated from a deployment config.
 
     Recipe-specific config fields (batch sizes, group counts)
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
-    ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
+    ``reef.service.deploy.training.training_recipe_config``, so their defaults live with the recipe.
 
     ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
     takes a blank value as not supplied, and nothing checks the file when the value is made.
@@ -49,7 +54,7 @@ class ServiceConfig:
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset (the launcher reserves --recipe).",
+        help="Recipe implementation or named deployment preset.",
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
@@ -104,7 +109,10 @@ class ServiceConfig:
     inference_num_gpus: int | None = config_option(
         None,
         public_path=("inference", "num_gpus"),
-        help="Total inference GPUs; defaults to tensor-parallel-size. Slime can launch multiple engines.",
+        help=(
+            "Total inference GPUs, or those of each component with inference.remote.slot-urls; defaults to "
+            "tensor-parallel-size. Slime can launch multiple engines."
+        ),
     )
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,
@@ -113,9 +121,10 @@ class ServiceConfig:
     inference_remote: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Run the engines that inference.backend names on a remote inference component: url, "
-            "control-token-env, inference-token-env and startup-timeout-s. Resolution replaces it with the "
-            "fields of the validated RemoteInferenceSettings.",
+            "Run the engines that inference.backend names on a remote inference component: url, slot-urls, "
+            "control-token-env, inference-token-env and startup-timeout-s. url is the component's base URL; "
+            "slot-urls lists further components, so that a full-weight scenario serves one checkpoint on each. "
+            "See the inference section of the configuration reference.",
             public_path=("inference", "remote"),
         ),
     )
@@ -144,8 +153,8 @@ class ServiceConfig:
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share prefix-cache entries between requests. Each snapshot load then retracts the requests in "
-            "flight, which prefill again on the new weights."
+            "Share the prefix cache among requests on the same snapshot (default: false). The engines finish their "
+            "requests and clear the cache before each snapshot load."
         ),
     )
     teacher_model_path: str | None = config_option(
@@ -201,8 +210,22 @@ class ServiceConfig:
     train_timeout_s: float | None = config_option(
         None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
     )
+    #: The jobs of one training component that one process of the training service runs at the same time.
+    training_max_jobs: int = config_option(
+        1,
+        public_path=("training", "max_jobs"),
+        help="The training jobs that one process of the training service runs at once for each training component.",
+    )
+    #: Unset, or a ``TrainingManager`` plugin: ``package.module:ClassName`` or module and config.
+    training_manager: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("training", "manager"),
+        help="A TrainingManager plugin reference: it decides what the scenarios in auto mode train.",
+    )
     inference_handler_factory: str | None = config_option(
-        None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
+        None,
+        public_path=("inference", "handler_factory"),
+        help="InferenceHandler subclass as package.module:ClassName.",
     )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict,
@@ -260,6 +283,35 @@ class ServiceConfig:
         public_path=("evaluation", "max_sandboxes"),
         help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
     )
+    #: What a stopping process of the evaluation service does with the rollouts that it runs (``ON_STOP_CHOICES`` of
+    #: ``reef.evaluation.rollout_worker``): ``requeue`` gives them back to the queue at once, ``finish`` finishes them.
+    evaluation_on_stop: str = config_option(
+        "requeue",
+        public_path=("evaluation", "on_stop"),
+        help="requeue or finish: what a stopping evaluation process does with the rollouts that it runs.",
+    )
+    #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
+    evaluation_trial_observer: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("evaluation", "trial_observer"),
+        help="A TrialObserver plugin reference that reads each evaluation trial before its directory is removed.",
+    )
+    #: Unset, or a ``TaskTemplateBuilder`` plugin: ``package.module:ClassName`` or module and config.
+    evaluation_task_template_builder: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("evaluation", "task_template_builder"),
+        help="A TaskTemplateBuilder plugin reference that makes the sandbox templates of each task of an e2b evaluation.",
+    )
+    #: Whether a rollout of an e2b evaluation runs a trial only from its task's prepared templates: a task whose
+    #: template item failed runs no trial, and a trial builds no missing template.
+    evaluation_require_prepared_templates: bool = config_option(
+        False,
+        public_path=("evaluation", "require_prepared_templates"),
+        help=(
+            "Run each e2b evaluation rollout only from the templates that its task's template item prepared; "
+            "a trial then never builds a template. Default: false."
+        ),
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -285,11 +337,15 @@ class ServiceConfig:
         public_path=("storage", "coordination_backend"),
         help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
     )
-    #: How many times a worker takes one work item before the item fails, for every queue.
+    #: How many times a worker takes one work item before the item fails, for every queue. An attempt that ends
+    #: because its worker stops, such as at a restart of the service, does not count.
     work_max_attempts: int = config_option(
         3,
         public_path=("storage", "work_max_attempts"),
-        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+        help=(
+            "Attempts of one work item (a job, a selection, a rollout, a data task) before it fails. "
+            "An attempt that ends because its service stops does not count."
+        ),
     )
     #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
     work_retention_s: float = config_option(
@@ -324,6 +380,13 @@ class ServiceConfig:
         ".reef/task-files",
         public_path=("storage", "task_file_dir"),
         help="Directory of the generated task files, or the local cache of a plugin store.",
+    )
+    #: The most bytes of the body of a task archive that the data routes take; a larger task uses a create by
+    #: reference. The body goes to a local file, so the limit bounds the disk that one upload uses.
+    max_task_archive_bytes: int = config_option(
+        DEFAULT_MAX_TASK_ARCHIVE_BYTES,
+        public_path=("data", "max_task_archive_bytes"),
+        help="The most bytes of the body of a task archive upload (POST and PUT .../data/tasks). Default: 512 MiB.",
     )
     task_import_manifest: str | None = config_option(
         None,
@@ -423,11 +486,11 @@ class ServiceConfig:
             raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
         if not isinstance(self.execution_config, Mapping):
-            raise TypeError("ServiceConfig.execution_config must be a mapping")
+            raise ValueError("ServiceSettings.execution_config must be a mapping")
         unknown_execution_keys = set(self.execution_config) - {"execution", "executors"}
         if unknown_execution_keys:
             raise ValueError(
-                "ServiceConfig.execution_config holds only the execution and executors sections, got "
+                "ServiceSettings.execution_config holds only the execution and executors sections, got "
                 + ", ".join(sorted(map(str, unknown_execution_keys)))
             )
         if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
@@ -435,6 +498,8 @@ class ServiceConfig:
         adapters = self.inference_max_loaded_adapters
         if isinstance(adapters, bool) or not isinstance(adapters, int) or adapters <= 0:
             raise ValueError("inference.max-loaded-adapters must be a positive int")
+        if not isinstance(self.inference_prefix_sharing, bool):
+            raise ValueError("inference.prefix-sharing must be true or false")
         if self.inference_serving is not None and (
             not isinstance(self.inference_serving, str) or not self.inference_serving.strip()
         ):
@@ -465,9 +530,24 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.training_manager is not None:
+            TrainingManager.reference(self.training_manager, setting="training.manager")
+        max_jobs = self.training_max_jobs
+        if isinstance(max_jobs, bool) or not isinstance(max_jobs, int) or max_jobs < 1:
+            raise ValueError("training.max_jobs must be a positive integer")
         sandboxes = self.evaluation_max_sandboxes
         if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
             raise ValueError("evaluation.max_sandboxes must be a positive integer")
+        if self.evaluation_on_stop not in ON_STOP_CHOICES:
+            raise ValueError(f"evaluation.on_stop must be one of {', '.join(ON_STOP_CHOICES)}")
+        if self.evaluation_trial_observer is not None:
+            TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
+        if self.evaluation_task_template_builder is not None:
+            TaskTemplateBuilder.reference(
+                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+            )
+        if not isinstance(self.evaluation_require_prepared_templates, bool):
+            raise ValueError("evaluation.require_prepared_templates must be true or false")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:
@@ -499,6 +579,9 @@ class ServiceConfig:
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
             TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
+        archive_bytes = self.max_task_archive_bytes
+        if isinstance(archive_bytes, bool) or not isinstance(archive_bytes, int) or archive_bytes < 1:
+            raise ValueError("data.max_task_archive_bytes must be a positive integer")
         if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":
@@ -527,7 +610,7 @@ def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: ``reef.*`` keys the service consumes under a different field name. The
-#: service's vocabulary is ``ServiceConfig``' fields plus these, so the
+#: service's vocabulary is ``ServiceSettings``' fields plus these, so the
 #: recipe-owned remainder of the section never includes them.
 SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 
@@ -544,16 +627,16 @@ def service_owned_keys() -> frozenset[str]:
     }
     return frozenset(
         settings_field.name
-        for settings_field in dataclasses.fields(ServiceConfig)
+        for settings_field in dataclasses.fields(ServiceSettings)
         if settings_field.name not in non_reef_fields
     ) | frozenset(SERVICE_CONFIG_ALIASES)
 
 
 @lru_cache(maxsize=1)
 def service_config_arguments() -> tuple[ConfigArgument, ...]:
-    """Public settings derive their types and defaults from ServiceConfig."""
+    """Public settings derive their types and defaults from ServiceSettings."""
     return (
-        *config_arguments(ServiceConfig),
+        *config_arguments(ServiceSettings),
         ConfigArgument(
             "routing_deployment",
             ("reef", "routing_deployment"),
@@ -576,7 +659,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
 
 
 def service_override(key: str, value: str) -> tuple[ConfigArgument, str] | None:
-    """Identify a declared option, retaining legacy names and dotted paths."""
+    """Identify a declared option by its flag."""
     flag = f"--{key}"
     for argument in service_config_arguments():
         if flag in argument.flags:
@@ -640,7 +723,7 @@ def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
+def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceSettings:
     """Read HTTP service settings from a resolved deployment's ``reef`` section."""
     values = parse_service_arguments(config)
     if not isinstance(values["recipe"], str) or not values["recipe"]:
@@ -655,6 +738,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}
-    return ServiceConfig(
+    return ServiceSettings(
         **values, recipe_settings=_reef_section(config), preset_config=preset, execution_config=execution
     )

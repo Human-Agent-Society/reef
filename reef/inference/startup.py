@@ -8,8 +8,8 @@ adds the report to the item's progress. The startup status reads the reports bac
 
 The serving worker also binds what a runtime reads while it serves (RFC #1299, ``serving_work``): whether a newer
 request replaced the work (``stopping``), and whether a person asked to deploy the engines again (``redeploying``). A
-runtime raises ``StartupStopped`` when it stops for ``stopping``, and ``StartupFailed`` for a failure whose message a
-person may read.
+runtime raises ``StartupStoppedError`` when it stops for ``stopping``, and ``StartupFailedError`` for a failure whose
+message a person may read.
 """
 
 from __future__ import annotations
@@ -20,21 +20,23 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+from reef.core.errors import InternalError
 from reef.core.values import JsonValue
 from reef.inference.interfaces import PHASES, StartupPhase, StartupStep, StartupSteps
 
 #: The key of a startup report in a serving work item's progress.
 PROGRESS_KEY = "startup"
-#: The start of the error of a serving work item that failed with ``StartupFailed``: the status gives the rest.
+#: The start of the error of a serving work item that failed with ``StartupFailedError``: the status gives the rest.
 STARTUP_FAILED_PREFIX = "startup failed: "
 
 
-class StartupFailed(Exception):
+class StartupFailedError(InternalError):
     """The artifact did not start, for a reason that a person can read and fix, such as an engine argument that the
     model refuses. The message must hold no secret: the startup status gives it."""
 
 
-class StartupStopped(Exception):
+class StartupStoppedError(InternalError):
     """The runtime stopped serving work because ``stopping`` became true."""
 
 
@@ -55,7 +57,7 @@ def serving_work(stop: threading.Event, *, redeploy: bool) -> Iterator[None]:
 
 def stopping() -> bool:
     """Whether the serving work that runs in this context should stop: a newer request replaced it, or its worker lost
-    it. A runtime reads it in long steps and then raises ``StartupStopped``. Outside a serving work, False."""
+    it. A runtime reads it in long steps and then raises ``StartupStoppedError``. Outside a serving work, False."""
     work = WORK.get()
     return work is not None and work[0].is_set()
 
@@ -149,9 +151,9 @@ def reported_steps(
 __all__ = [
     "PROGRESS_KEY",
     "STARTUP_FAILED_PREFIX",
-    "StartupFailed",
+    "StartupFailedError",
     "StartupReporter",
-    "StartupStopped",
+    "StartupStoppedError",
     "redeploying",
     "report_startup",
     "reported_steps",

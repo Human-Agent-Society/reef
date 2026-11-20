@@ -48,7 +48,7 @@ from urllib.parse import urlencode
 from reef_client import ReefClient, ReefClientError
 
 from recipes.beta.reefine.agent import launch_pi, tool_calls
-from reef.execution.sandbox.process import LocalExecutor, ProgramTimeout
+from reef.execution.sandbox.process import LocalExecutor, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.trajectory import final_assistant_text
@@ -69,7 +69,7 @@ WORK = HERE / "work"
 # The install writes the rendered tree and the snapshot metadata file here.
 INSTALL_ROOT = WORK / "harness"
 DEMOS = HERE / "demos"
-RELEASE_FILE = ".reef-harness-release"
+SNAPSHOT_FILE = ".reef-harness-release"
 #: pi's provider file: the model binding writes provider reef there, and pi sends that provider's headers.
 PI_MODELS = "pi-agent/models.json"
 SHOW_TIMEOUT_S = 600.0
@@ -218,7 +218,7 @@ def requires_of(items):
 def installed_artifact():
     """The ID of the installed artifact, or None when nothing is installed. Install again to replace an older install."""
     try:
-        metadata = json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8"))
+        metadata = json.loads((INSTALL_ROOT / SNAPSHOT_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return metadata.get("artifact_id")
@@ -279,7 +279,7 @@ def install(artifact_id=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     record = {"artifact_id": manifest["artifact_id"], "files": sorted(files)}
-    (INSTALL_ROOT / RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    (INSTALL_ROOT / SNAPSHOT_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     say(f"installed artifact {manifest['artifact_id']} at {INSTALL_ROOT}")
     return manifest["artifact_id"]
 
@@ -342,22 +342,22 @@ def wait_for_step(client, text, before, deadline):
 
 
 def activate(client, rows, row, run_dir):
-    """Save the inactive step's page beside the run, print its URL, activate the row's artifact; the id of the
-    active selection that the activation names."""
+    """Save the inactive step's page beside the run, print its URL, and make the row's artifact the one that the
+    scenario serves; the ID of that artifact."""
     step = rows.index(row)
     page = f"/reef/harness/artifacts/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
     say("activate: the demo is scripted; a person reads the page first")
-    body = {"artifact_id": row["artifact_id"]}
+    body = {"served": {row["artifact_id"]: 100}}
     if row.get("component"):
         body["component"] = row["component"]
-    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/activate", SCENARIO, body)
-    if answer.get("artifact_id") != row["artifact_id"]:
-        raise SystemExit(f"reef answered the activation without artifact {row['artifact_id']}: {answer}")
-    say(f"activated: artifact {answer['artifact_id']} is active")
-    return answer["artifact_id"]
+    answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/update", SCENARIO, body)
+    if answer.get("served") != body["served"]:
+        raise SystemExit(f"reef answered the update without artifact {row['artifact_id']}: {answer}")
+    say(f"activated: artifact {row['artifact_id']} is active")
+    return row["artifact_id"]
 
 
 # -- the show session -----------------------------------------------------------------------------------------
@@ -380,14 +380,14 @@ def show(mode, run_dir):
     files = {
         path.relative_to(INSTALL_ROOT).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(INSTALL_ROOT.rglob("*"))
-        if path.is_file() and path.name != RELEASE_FILE
+        if path.is_file() and path.name != SNAPSHOT_FILE
     }
     try:
         outcome, trajectory = launch_pi(
             descriptor, binary, executor, files, prompt, {}, root=root, timeout=SHOW_TIMEOUT_S
         )
         exit_code = outcome.exit_code
-    except ProgramTimeout:
+    except ProgramTimeoutError:
         exit_code, trajectory = None, []
     calls = [f"{call['tool']}({call.get('arguments', call.get('error', ''))[:60]})" for call in tool_calls(trajectory)]
     answer = (final_assistant_text(trajectory) or "").strip()
@@ -484,7 +484,7 @@ def demo(mode):
             write_record(record_path, record)
             raise SystemExit(2)
     else:
-        say(f"the active selection did not change: release {installed_before} stays installed")
+        say(f"the active selection did not change: artifact {installed_before} stays installed")
         installed = installed_before
     # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)

@@ -17,13 +17,11 @@ from reef.service.wire import ReportPayload, RequestHeaders, parse_request_heade
 from reef.storage.records import RecordStore
 from reef.evaluation import (
     ActivationRule,
-    AlwaysSelectMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
     EvaluationResult,
     MadeArtifact,
-    RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
 )
@@ -42,7 +40,6 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ActivationRule",
     "AgentRecord",
-    "AlwaysSelectMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
@@ -54,7 +51,6 @@ __all__ = [
     "RecipeConfigError",
     "RecordStore",
     "ReefError",
-    "RegressionCheckMixin",
     "ReportBase",
     "ReportPayload",
     "ReportValidationError",

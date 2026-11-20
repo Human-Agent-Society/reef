@@ -12,11 +12,12 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
-from reef.train.slime_backend.data_builder import build_policy_rollout_data
-from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.loss_families import register_loss_family
+from reef.train.slime_backend.objectives import SlimeObjective
+from reef.train.slime_backend.policy_rows import build_policy_rollout_data
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, trajectories
 
 _HINT_SELECTIONS = ("shortest", "token_optimal", "sequence_optimal")
@@ -104,7 +105,7 @@ def build_openclawrl_rollout_data(
         base_rows.append(list(row[:5]))
         cand_rows.append(row[5])
 
-    data = build_policy_rollout_data({**payload, "samples": base_rows}, base_rows, spec)
+    data = build_policy_rollout_data({**payload, "samples": base_rows}, base_rows, spec.loss_family)
     response_lengths = data["response_lengths"]
 
     teacher_tokens_cand: list[list[list[int]]] = []
@@ -245,7 +246,6 @@ class OpenclawrlAlgorithm(SlimeAlgorithm):
         return openclawrl_sample_row(sample)
 
 
-@register_slime_objective
 class OpenClawRLObjective(SlimeObjective):
     name = "openclawrl"
     loss_family = "openclawrl"

@@ -10,10 +10,10 @@ from tests.support.conversations import conversation
 
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.data import MemoryDataStore, ScenarioArchived
+from reef.storage.data import MemoryDataStore, ScenarioArchivedError
 from reef.storage.item_kinds import copied_record
 from reef.storage.record_items import ItemRecordStore, evaluation_call_item, record_item, used_record, used_records
-from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.records import AppendResult, RecordConflictError
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -96,7 +96,7 @@ def test_another_scenario_of_the_owner_reads_the_records_it_uses_and_stores_no_c
             assert records[1].references == ("math/i1",) and records[1].scenario == "code"
             assert used_records(data, "acme", "code", after_sequence=cursor) == (cursor, ()), "nothing new"
             assert used_record(data, "acme", "code", "math/r1").references == ("math/i1",)
-            assert session.records.get("code", "math/r1") is None, "the scenario stores no copy"
+            assert session.records.read("code", "math/r1") is None, "the scenario stores no copy"
             assert [item.item_id for item in data.query("acme")] == ["math/i1", "math/r1"]
 
             # A scenario does not read its own items as records of another scenario.
@@ -137,9 +137,9 @@ def test_a_scenario_reads_and_retries_its_records_as_record_items(item_records):
     retry = replace(original, created_at=456.0)
     assert item_records.append_result(retry) == AppendResult(original, False)
     assert item_records.existing_receipt(retry) == original
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.existing_receipt(replace(original, payload={"value": "changed"}))
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.append(replace(original, payload={"value": "changed"}))
     with pytest.raises(ValueError, match="scenario 'math'"):
         item_records.append(replace(original, scenario="code"))
@@ -158,15 +158,15 @@ def test_a_scenario_reads_and_retries_its_records_as_record_items(item_records):
     assert item_records.count("math", request_type=RequestType.REPORT) == 1
     assert item_records.count("math", after_sequence=sequence) == 4
     assert [stored.item for stored in item_records.audit_page("math", request_type=RequestType.REPORT)] == [report]
-    assert item_records.get_for_audit("math", "report").item == report
-    assert item_records.get("math", "missing") is None
-    assert item_records.get("code", "first") is None and item_records.replay("code") == ()
-    assert item_records.last_sequence("math") == item_records.get_for_audit("math", "report").sequence
+    assert item_records.read_for_audit("math", "report").item == report
+    assert item_records.read("math", "missing") is None
+    assert item_records.read("code", "first") is None and item_records.replay("code") == ()
+    assert item_records.last_sequence("math") == item_records.read_for_audit("math", "report").sequence
 
 
 def test_a_batch_of_records_stores_all_or_none_and_a_repeat_is_a_retry(item_records):
     first, second = plain("first"), plain("second")
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.append_many([first, second, replace(first, payload={"changed": True})])
     assert item_records.count("math") == 0
     assert item_records.append_many([first, second, first]) == (
@@ -175,9 +175,9 @@ def test_a_batch_of_records_stores_all_or_none_and_a_repeat_is_a_retry(item_reco
         AppendResult(first, False),
     )
     assert item_records.append_many([replace(first, created_at=9.0)]) == (AppendResult(first, False),)
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         item_records.append_many([plain("third"), replace(first, payload={"changed": True})])
-    assert item_records.get("math", "third") is None
+    assert item_records.read("math", "third") is None
 
 
 def test_an_archive_ends_the_writes_of_the_open_records_and_the_loss_is_the_data_stores(item_records):
@@ -185,8 +185,8 @@ def test_an_archive_ends_the_writes_of_the_open_records_and_the_loss_is_the_data
     item_records.append(plain("first"))
     assert data.prune_records(0) == 1
     assert item_records.loss("math").record_count == 1
-    data.remove_scenario("acme", "math")
-    with pytest.raises(ScenarioArchived):
+    data.delete_scenario("acme", "math")
+    with pytest.raises(ScenarioArchivedError):
         item_records.append(plain("late"))
     assert item_records.replay("math") == ()
 
@@ -209,8 +209,8 @@ def test_a_scenarios_records_and_its_trainers_never_read_its_evaluation_calls(it
     assert data.read("acme", call.item_id) is not None
     assert item_records.replay("math") == (own,)
     assert item_records.count("math") == 1 and item_records.count("math", request_type=RequestType.INFERENCE) == 1
-    assert item_records.get("math", "e1:0:0:1:0") is None
-    assert item_records.last_sequence("math") == item_records.get_for_audit("math", "call-1").sequence
+    assert item_records.read("math", "e1:0:0:1:0") is None
+    assert item_records.last_sequence("math") == item_records.read_for_audit("math", "call-1").sequence
     assert item_records.trajectory("math", "e1:0:0:1:0") == ()
     assert item_records.trajectory("math", "call-1") == ("call-1",)
     assert used_records(data, "acme", "code")[1] == () and used_record(data, "acme", "code", call.item_id) is None

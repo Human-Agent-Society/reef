@@ -15,7 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, TypeVar
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound
+from reef.artifact.artifact import Artifact, ArtifactConflictError, ArtifactError, ArtifactNotFoundError
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
@@ -24,6 +24,7 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
+from reef.scenario.live_objects import harness_served_model
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
@@ -32,7 +33,7 @@ from reef.service.request_page import STATE_WORDS, build_request_page, request_s
 from reef.service.routed_inference import (
     DispatcherRecords,
     InferenceRetryPolicy,
-    InferenceRetryTimeout,
+    InferenceRetryTimeoutError,
     RoutedInference,
 )
 from reef.service.routed_shadow import ShadowLimits, ShadowTasks
@@ -47,9 +48,10 @@ from reef.service.wire import (
     scenario_header,
     with_request_tags,
 )
-from reef.train.harness_backend.backend import StepProgress
-from reef.train.harness_backend.component import PROGRESS_FILE, STEPS_DIR, read_step_progress
-from reef.train.harness_backend.records import read_step_records
+from reef.train.harness_backend.backend import JobProgress
+from reef.train.harness_backend.records import read_job_records
+from reef.train.job_queue import job_records_content
+from reef.train.jobs import TRAINING_JOB_KEY, JobLoopState
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,7 @@ def request_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping[str
 
     A queued or recent request comes from its queue item. One whose item control deleted after the work retention
     comes from the catalog row that settled it, which records the request (``metrics["training_request"]``), without
-    ``created_at``. Raise ``ArtifactNotFound`` when neither holds it.
+    ``created_at``. Raise ``ArtifactNotFoundError`` when neither holds it.
     """
     item = None if scenario.training_requests is None else scenario.training_requests.get(request_id)
     if item is not None:
@@ -96,7 +98,7 @@ def request_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping[str
     metrics = rows[step].get("metrics") if step is not None else None
     request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
     if not isinstance(request, Mapping):
-        raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {request_id!r}")
+        raise ArtifactNotFoundError(f"scenario {scenario.name!r} has no harness request {request_id!r}")
     return {
         "agent_record_id": request_id,
         "payload": {key: value for key, value in request.items() if key != "id"},
@@ -220,7 +222,7 @@ class RequestService:
 
         ``artifact_id`` addresses one harness artifact instead of the
         active selection, so a consumer can pin or go back by pulling an older
-        tree; an unknown or unrestorable artifact raises ArtifactNotFound
+        tree; an unknown or unrestorable artifact raises ArtifactNotFoundError
         naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
         is the snapshot rendered for the scenario's adapter, ``source`` is
         its source tree, the paths a patch names, and ``client`` is the
@@ -247,11 +249,14 @@ class RequestService:
         manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
-            served = self._dispatcher.recipe.harness_served_model(
-                scenario.name, str(scenario.components.files_component)
+            served = harness_served_model(
+                self._dispatcher.recipe,
+                self._dispatcher.live,
+                scenario.name,
+                str(scenario.components.files_component),
             )
             if served is None:
-                raise ArtifactNotFound(f"scenario {scenario.name!r} evolves no harness that calls a model")
+                raise ArtifactNotFoundError(f"scenario {scenario.name!r} evolves no harness that calls a model")
             # The layer's model calls go to the inference service when the deployment names its address.
             model_url = service_url.rstrip("/") if self.inference_url is None else self.inference_url
             scenario_url = f"{model_url}/reef/scenarios/{scenario.name}"
@@ -281,7 +286,7 @@ class RequestService:
         tree that the activation rule held stays inactive, so a sync never
         serves a change that waits for review. A file that the active tree
         and the client both changed in a way its part's ``merge`` refuses
-        raises ``ArtifactConflict`` naming it. A merged tree that fails
+        raises ``ArtifactConflictError`` naming it. A merged tree that fails
         validation raises ``ValueError`` naming every problem. A sync that
         changes nothing publishes nothing. Otherwise the merged tree becomes
         the active selection and the harness trainer's training start in one
@@ -298,7 +303,7 @@ class RequestService:
         scenario = self._file_scenario(headers)
         component = scenario.components.files_component
         if component is None:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+            raise ArtifactNotFoundError(f"scenario {scenario.name!r} serves no harness component")
         if payload.get("base_artifact_id") is None:
             raise ValueError("base_artifact_id must be the artifact the client installed")
         base_artifact = self.harness_artifact(scenario, payload.get("base_artifact_id"))
@@ -323,7 +328,7 @@ class RequestService:
                 path if location is None or location.part.renders is None else location.part.render_path(location.name)
                 for path, location in located
             ]
-            raise ArtifactConflict(
+            raise ArtifactConflictError(
                 f"artifact {active_id} and your files both changed {', '.join(named)} since artifact {base_artifact_id}: "
                 "make each one match one side, or drop yours with sync --discard, then sync again"
             )
@@ -375,25 +380,32 @@ class RequestService:
 
     @staticmethod
     def harness_descriptor(scenario: Scenario) -> AdapterDescriptor:
-        """The adapter of the harness a client pulls; ArtifactNotFound when the scenario serves no harness tree."""
+        """The adapter of the harness a client pulls. Raise ``ArtifactNotFoundError`` when the scenario serves no
+        harness tree."""
         component = scenario.components.files_component
         files = None if component is None else scenario.components.components[component].files
         if not isinstance(files, HarnessFiles):
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"scenario {scenario.name!r} evolves no harness: the deployment's recipe is not a harness "
                 "evolution recipe"
             )
         return files.descriptor
 
-    def harness_state_dir(self, scenario: Scenario) -> Path | None:
-        """The state directory of the harness a client pulls (``Recipe.harness_state_dir``), or None."""
-        component = scenario.components.files_component
-        return None if component is None else self._dispatcher.recipe.harness_state_dir(scenario.name, component)
+    def step_progress(self, scenario: Scenario) -> JobProgress | None:
+        """The progress of the harness step that runs now, or None for none.
 
-    def step_progress(self, scenario: Scenario) -> StepProgress | None:
-        """The progress of the harness step that runs now, which the training component writes; None for none."""
-        root = self.harness_state_dir(scenario)
-        return None if root is None else read_step_progress(root / PROGRESS_FILE)
+        The training worker writes it into the item of the running job (``TrainingComponent.job_progress``), and
+        this reads it there: the first running job of the harness trainer that reports one.
+        """
+        trainer = self.files_trainer(scenario)
+        loop = trainer.job_loop
+        if loop is None:
+            return None
+        for job in JobLoopState.from_dict(trainer.state).jobs:
+            value = loop.component.job_progress(job.job_id)
+            if value is not None:
+                return JobProgress.from_json(value)
+        return None
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
@@ -410,7 +422,7 @@ class RequestService:
         component = scenario.components.files_component
         if not isinstance(artifact_id, str):
             if component is None:
-                raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+                raise ArtifactNotFoundError(f"scenario {scenario.name!r} serves no harness component")
             artifact_id = scenario.artifact_selection().components[component]
         _, selected = scenario.resolve_artifact(artifact_id, component)
         return selected
@@ -421,7 +433,7 @@ class RequestService:
     ) -> dict[str, Any]:
         component = scenario.components.files_component
         if component is None:
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"scenario {scenario.name!r} serves no files: the deployment's recipe "
                 "declares no harness component (record-only or weight-training recipes have "
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
@@ -432,7 +444,7 @@ class RequestService:
             else scenario.components.read_files(artifact)
         )
         if files is None:
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"scenario {scenario.name!r} serves no files: snapshot {artifact.ref.revision!r} holds no "
                 "harness tree. A root snapshot made from the default start holds the recipe's evolution.seed, so an empty seed serves "
                 "nothing until a step publishes a tree."
@@ -448,7 +460,8 @@ class RequestService:
             # The union over the chain, not this evaluation's list: a snapshot whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(catalog)), artifact_id),
         }
-        components = artifact.materialize().components
+        # The snapshot carries its manifest: no file is read for it.
+        components = artifact.components
         if components is not None:
             manifest["components"] = components.artifact_ids(artifact.ref.revision)
         return manifest
@@ -465,17 +478,20 @@ class RequestService:
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.harness_rows()))
         if not 0 <= step < len(rows):
-            raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
-        directory = (rows[step].get("metrics") or {}).get("step_record")
-        root = self.harness_state_dir(scenario)
-        if not directory or root is None:
+            raise ArtifactNotFoundError(f"scenario {scenario.name!r} has no step {step}")
+        metrics = rows[step].get("metrics") or {}
+        job = metrics.get(TRAINING_JOB_KEY)
+        if not metrics.get("step_record") or not isinstance(job, Mapping):
             return {"status": "not_recorded", "files": []}
-        if not isinstance(directory, str):
-            raise ValueError("invalid step record directory")
+        # The training service stored the job's record directory in the artifact store when the job ended.
         try:
-            return read_step_records(root / STEPS_DIR, directory, relative)
+            directory = scenario.repository.backend.materialize_content(job_records_content(str(job["job_id"])))
+        except ArtifactNotFoundError:
+            return {"status": "missing", "files": []}
+        try:
+            return read_job_records(directory.parent, str(directory), relative)
         except FileNotFoundError as error:
-            raise ArtifactNotFound("record file is not retained") from error
+            raise ArtifactNotFoundError("record file is not retained") from error
 
     def harness_artifact_page(
         self, headers: Mapping[str, str], step: int, link_query: Mapping[str, str] | None = None
@@ -489,7 +505,7 @@ class RequestService:
         restorable, so an updated file shows as a diff, else as its new text.
         ``link_query`` is carried to the Chain's links, so a page
         opened through query parameters links pages that open the same way.
-        An unknown step raises ArtifactNotFound naming the range.
+        An unknown step raises ArtifactNotFoundError naming the range.
         """
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.harness_rows()))
@@ -500,7 +516,7 @@ class RequestService:
             if running is not None:
                 return build_running_step_page(step, running, link_query)
         if not 0 <= step < len(rows):
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
             )
         before = before_artifact_id(rows[step])
@@ -535,7 +551,7 @@ class RequestService:
         ``link_query`` is carried to the version page link, so a page opened
         through query parameters links one that opens the same way. An
         unknown id, or one that is not a training request, raises
-        ArtifactNotFound naming it.
+        ArtifactNotFoundError naming it.
         """
         scenario = self._file_scenario(headers)
         # The step a request settled as counts the catalog rows, the ones the snapshot page opens.
@@ -557,7 +573,7 @@ class RequestService:
         and, once a row answers the request, the step it landed as. A client
         polls this to show a phase; the page itself stays the readable view.
         An unknown id, or one that is not a training request, raises
-        ArtifactNotFound naming it.
+        ArtifactNotFoundError naming it.
         """
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.harness_rows()))
@@ -589,21 +605,21 @@ class RequestService:
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
             "runs_total": None if mine is None else mine.runs_total,
-            "step_record": None if mine is None else mine.step_record,
+            "step_record": None if mine is None else mine.job_record,
             # What the method has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }
 
     def _file_scenario(self, headers: Mapping[str, str]) -> Scenario:
-        """The existing file-serving scenario the headers name; ArtifactNotFound for an unknown one or one without files."""
+        """The existing file-serving scenario the headers name; ArtifactNotFoundError for an unknown one or one without files."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if not self._dispatcher.has_scenario(parsed.scenario):
-            raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
+            raise ArtifactNotFoundError(f"unknown scenario {parsed.scenario!r}")
         scenario = self._dispatcher.get_or_create_scenario(parsed.scenario)
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
         if scenario.components.files_component is None:
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"scenario {parsed.scenario!r} serves no files: the deployment's recipe "
                 "declares no harness component (record-only or weight-training recipes have "
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
@@ -643,7 +659,7 @@ class RequestService:
 
 __all__ = [
     "InferenceRetryPolicy",
-    "InferenceRetryTimeout",
+    "InferenceRetryTimeoutError",
     "RequestService",
     "normalize_request_payload",
     "page_headers",

@@ -1,153 +1,210 @@
-"""Registry for loss families supported by the Slime training backend.
+"""Slime's loss families: their registration, and their resolution in the service, the driver and the workers.
 
-A method package may register a dotted reference to its spec in
-:mod:`reef.train.algos.registry`; this registry imports the reference the first
-time the name is resolved, and the ``@register_loss_family`` class decorator in
-the spec module registers the instance. This module never imports a method
-package. The same lazy path makes the reference available in the driver and in
-every worker. A family may instead register its
-:class:`SlimeAlgorithm` with :func:`register_loss_family` from a module imported
-at boot, or is named as a dotted ``"package.module:SPEC"`` reference wherever a
-loss family is named (a ``SlimeObjective.loss_family``).
-``SPEC`` is the ``@register_loss_family``-decorated class (an instance is
-accepted too). Resolving a dotted reference imports the module and registers
-the spec under its canonical ``loss_family`` name, so the wire payload's plain
-family name resolves from then on — in that process. A fresh worker process
-starts with an empty registry, which is why the driver also stamps the
-reference itself on ``args.loss_family_ref`` (see
-:func:`~reef.train.slime_backend.algorithm.resolve_args_loss_family`).
+A loss family is a :class:`~reef.train.slime_backend.algorithm.SlimeAlgorithm`. A family registers with
+:func:`register_loss_family`: the decorator of its class, in the module that defines it. A method package defines
+its family beside its objective, so the import of the objective's module registers the family too; the package's
+public half registers only the objective, by reference (``reef.train.slime_backend.objectives``). The built-in
+families are known by reference from the start. A family is also named as a dotted ``"package.module:SPEC"``
+reference wherever a loss family is named, where ``SPEC`` is a family class with a zero-argument constructor.
 
+A worker process starts without the driver's registrations. The driver therefore stamps the family's reference on
+``args.loss_family_ref`` (:func:`loss_family_reference`), and the worker imports it
+(:func:`resolve_args_loss_family`). This module never imports a method package by itself, and it imports no torch,
+Ray or Slime.
 """
 
 from __future__ import annotations
 
 import importlib
+from argparse import Namespace
+from typing import overload
 
-# Importing the objectives registers the references of the built-in families.
-import reef.train.slime_backend.objectives  # noqa: F401
-from reef.train.algos.registry import _unregister_loss_family_ref, loss_family_refs
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, _loss_families
+from reef.core.errors import InternalError
+from reef.core.plugins import PluginConfigError, import_plugin_class
+from reef.train.slime_backend.algorithm import WORKER_HOOKS, SlimeAlgorithm
 
 
-class UnknownLossFamilyError(RuntimeError):
+class UnknownLossFamilyError(InternalError, RuntimeError):
     """Raised when the driver is asked to boot an unsupported loss family."""
 
 
-class LossFamilyRegistry:
-    """Referenced families are imported lazily from the name → reference table.
+#: The loss families that this process imported, by name. ``register_loss_family`` and ``resolve_loss_family``
+#: fill it.
+LOSS_FAMILIES: dict[str, SlimeAlgorithm] = {}
+#: Where a process imports a family from: ``{name: "package.module:SPEC"}``. It holds the built-in families from
+#: the start, so that only the driver and the workers import their modules, and every family that registered as a
+#: class or resolved from a reference. The driver sends a family's reference to the workers.
+LOSS_FAMILY_REFERENCES: dict[str, str] = {
+    "sft": "reef.train.slime_backend.sft:SftAlgorithm",
+    "importance_sampling": "reef.train.slime_backend.importance_sampling:ImportanceSamplingAlgorithm",
+    "slime": "reef.train.slime_backend.native:SlimeNativeAlgorithm",
+}
 
-    Their specs land in ``_loss_families`` through the decorator. Families
-    registered directly on this registry are tracked separately so test and
-    plugin teardown can unregister them without altering package registrations.
+
+@overload
+def register_loss_family(family: type[SlimeAlgorithm]) -> type[SlimeAlgorithm]: ...
+
+
+@overload
+def register_loss_family(family: SlimeAlgorithm) -> SlimeAlgorithm: ...
+
+
+def register_loss_family(family: SlimeAlgorithm | type[SlimeAlgorithm]) -> SlimeAlgorithm | type[SlimeAlgorithm]:
+    """Register a family under its ``loss_family`` name: decorate its zero-argument class, or pass an instance.
+
+    A class at module level also registers its reference, which a worker process imports. An instance is known in
+    this process only. Registering the same instance twice changes nothing. ``TypeError``: the value is no
+    ``SlimeAlgorithm``. ``ValueError``: the family declares no name, or its name holds another family.
     """
-
-    def __init__(self) -> None:
-        self._external: dict[str, SlimeAlgorithm] = {}
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return tuple(sorted(set(loss_family_refs()) | set(_loss_families) | set(self._external)))
-
-    def register(self, spec: SlimeAlgorithm) -> SlimeAlgorithm:
-        """Register an external loss-family spec under its ``loss_family`` name."""
-        if not isinstance(spec, SlimeAlgorithm):
-            raise TypeError(f"a loss family registers a SlimeAlgorithm, got {type(spec).__name__}")
-        existing = self._external.get(spec.loss_family)
-        if existing is spec:
-            return spec
-        decorated = _loss_families.get(spec.loss_family)
-        if decorated is spec:
-            return spec
-        if decorated is not None or existing is not None:
-            raise ValueError(
-                f"loss family {spec.loss_family!r} is already registered; registered families: {', '.join(self.names)}"
-            )
-        self._external[spec.loss_family] = spec
-        return spec
-
-    def unregister(self, loss_family: str) -> None:
-        """Remove a loss family by name."""
-        runtime = self._external.pop(loss_family, None)
-        decorated = _loss_families.pop(loss_family, None)
-        referenced = _unregister_loss_family_ref(loss_family)
-        if runtime is None and decorated is None and not referenced:
-            registered = ", ".join(self.names) or "none"
-            raise KeyError(f"loss family {loss_family!r} is not registered; registered families: {registered}")
-
-    def resolve(self, loss_family: str) -> SlimeAlgorithm:
-        """Resolve a registered family name or a dotted ``"package.module:SPEC"`` reference."""
-        spec = _loss_families.get(loss_family) or self._external.get(loss_family)
-        if spec is not None:
-            return spec
-        reference = loss_family_refs().get(loss_family)
-        if reference is not None:
-            return self._resolve_dotted(reference)
-        if ":" in loss_family:
-            return self._resolve_dotted(loss_family)
-        available = ", ".join(self.names)
-        raise UnknownLossFamilyError(
-            f"unsupported Slime loss family: {loss_family!r}; available families: {available}. "
-            f"A family can be registered with register_loss_family() from a module "
-            f"imported at boot, or named as a dotted 'package.module:SPEC' reference."
+    if isinstance(family, type):
+        if not issubclass(family, SlimeAlgorithm):
+            raise TypeError(f"a loss family registers a SlimeAlgorithm, got {family.__name__}")
+        spec = family()
+        # Only a class at module level can be imported by its reference.
+        reference = None if "<locals>" in family.__qualname__ else f"{family.__module__}:{family.__qualname__}"
+    elif isinstance(family, SlimeAlgorithm):
+        spec = family
+        reference = None
+    else:
+        raise TypeError(f"a loss family registers a SlimeAlgorithm, got {type(family).__name__}")
+    name = spec.loss_family
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("a loss family must declare a non-empty loss_family")
+    if LOSS_FAMILIES.get(name) is spec:
+        return family
+    if name in LOSS_FAMILIES or LOSS_FAMILY_REFERENCES.get(name, reference) != reference:
+        raise ValueError(
+            f"loss family {name!r} is already registered; registered families: {', '.join(loss_family_names())}"
         )
-
-    def _resolve_dotted(self, reference: str) -> SlimeAlgorithm:
-        """Import a dotted spec reference and register it under its family name."""
-        module_name, _, attribute = reference.partition(":")
-        if not module_name or not attribute:
-            raise UnknownLossFamilyError(f"dotted loss family {reference!r} must be 'package.module:SPEC'")
-        try:
-            candidate = getattr(importlib.import_module(module_name), attribute)
-        except (ImportError, AttributeError) as exc:
-            raise UnknownLossFamilyError(f"cannot import loss family {reference!r}: {exc}") from exc
-        if isinstance(candidate, type) and issubclass(candidate, SlimeAlgorithm):
-            # The decorated class: importing it already registered an
-            # instance under its family name. Use that one.
-            registered = _loss_families.get(candidate.loss_family)
-            candidate = registered if isinstance(registered, candidate) else candidate()
-        if not isinstance(candidate, SlimeAlgorithm):
-            raise UnknownLossFamilyError(
-                f"loss family {reference!r} is not a SlimeAlgorithm (got {type(candidate).__name__})"
-            )
-        registered_ref = loss_family_refs().get(candidate.loss_family)
-        if registered_ref is not None and registered_ref != reference and candidate.loss_family not in _loss_families:
-            # A referenced family is imported on first resolve; load it before
-            # another reference can claim its name.
-            self._resolve_dotted(registered_ref)
-        decorated = _loss_families.get(candidate.loss_family)
-        if decorated is candidate:
-            return candidate
-        if decorated is not None:
-            raise UnknownLossFamilyError(
-                f"dotted loss family {reference!r} names family {candidate.loss_family!r}, which is "
-                f"already registered to a different spec; pick a family name not among: "
-                f"{', '.join(self.names)}"
-            )
-        existing = self._external.get(candidate.loss_family)
-        if existing is candidate:
-            return candidate
-        if existing is not None:
-            raise UnknownLossFamilyError(
-                f"dotted loss family {reference!r} names family {candidate.loss_family!r}, which is "
-                f"already registered to a different spec; pick a family name not among: "
-                f"{', '.join(self.names)}"
-            )
-        self._external[candidate.loss_family] = candidate
-        return candidate
-
-
-LOSS_FAMILIES = LossFamilyRegistry()
-
-
-def register_loss_family(spec: SlimeAlgorithm) -> SlimeAlgorithm:
-    """Register an external loss-family spec (module-level convenience)."""
-    return LOSS_FAMILIES.register(spec)
+    LOSS_FAMILIES[name] = spec
+    if reference is not None:
+        LOSS_FAMILY_REFERENCES[name] = reference
+    return family
 
 
 def unregister_loss_family(loss_family: str) -> None:
-    """Remove an external loss family registered by :func:`register_loss_family`."""
-    LOSS_FAMILIES.unregister(loss_family)
+    """Remove a loss family and its reference, for extension teardown. ``KeyError``: no family has the name."""
+    spec = LOSS_FAMILIES.pop(loss_family, None)
+    reference = LOSS_FAMILY_REFERENCES.pop(loss_family, None)
+    if spec is None and reference is None:
+        registered = ", ".join(loss_family_names()) or "none"
+        raise KeyError(f"loss family {loss_family!r} is not registered; registered families: {registered}")
+
+
+def loss_family_names() -> tuple[str, ...]:
+    """The names that ``resolve_loss_family`` resolves in this process, sorted."""
+    return tuple(sorted({*LOSS_FAMILIES, *LOSS_FAMILY_REFERENCES}))
+
+
+def loss_family_reference(loss_family: str) -> str | None:
+    """The ``package.module:SPEC`` reference that another process imports the family from, or None without one."""
+    return LOSS_FAMILY_REFERENCES.get(loss_family)
 
 
 def resolve_loss_family(loss_family: str) -> SlimeAlgorithm:
-    return LOSS_FAMILIES.resolve(loss_family)
+    """The family of a registered name or of a dotted ``"package.module:SPEC"`` reference.
+
+    A reference is imported at its first resolution (``reef.core.plugins.import_plugin_class``), and its family
+    registers under its ``loss_family`` name with that reference. ``UnknownLossFamilyError``: the name is unknown,
+    the reference is malformed or does not import, it names no concrete ``SlimeAlgorithm`` class, or its family
+    name holds another family.
+    """
+    spec = LOSS_FAMILIES.get(loss_family)
+    if spec is not None:
+        return spec
+    reference = LOSS_FAMILY_REFERENCES.get(loss_family)
+    if reference is None:
+        if ":" not in loss_family:
+            raise UnknownLossFamilyError(
+                f"unsupported Slime loss family: {loss_family!r}; available families: "
+                f"{', '.join(loss_family_names())}. A family registers with register_loss_family() in the module "
+                f"that its objective names, or is named as a dotted 'package.module:SPEC' reference."
+            )
+        reference = loss_family
+    try:
+        family_class = import_plugin_class(
+            reference,
+            SlimeAlgorithm,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="loss family",
+        )
+    except PluginConfigError as exc:
+        raise UnknownLossFamilyError(str(exc)) from exc
+    candidate = family_class()
+    # The import of a decorated class already registered its instance. Use that one.
+    registered = LOSS_FAMILIES.get(candidate.loss_family)
+    if type(registered) is family_class:
+        candidate = registered
+    name = candidate.loss_family
+    if LOSS_FAMILIES.get(name) is not candidate:
+        if name in LOSS_FAMILIES or LOSS_FAMILY_REFERENCES.get(name, reference) != reference:
+            raise UnknownLossFamilyError(
+                f"dotted loss family {reference!r} names family {name!r}, which is already registered to a "
+                f"different spec; pick a family name not among: {', '.join(loss_family_names())}"
+            )
+        LOSS_FAMILIES[name] = candidate
+    LOSS_FAMILY_REFERENCES.setdefault(name, reference)
+    return candidate
+
+
+def resolve_args_loss_family(args: Namespace) -> SlimeAlgorithm:
+    """Resolve the loss family a worker's ``args`` names.
+
+    The driver stamps the canonical ``loss_family``, and the family's
+    reference on ``loss_family_ref`` when it has one: the driver's
+    registrations do not travel with the Namespace, so a fresh worker process
+    has to import the module itself. The reference wins when present.
+    """
+    return resolve_loss_family(getattr(args, "loss_family_ref", None) or args.loss_family)
+
+
+def resolve_objective_paths(args: Namespace) -> None:
+    """Resolve custom objective function paths onto ``args`` (worker-side).
+
+    Called during worker init.  Imports the algorithm's ``objective`` module
+    (triggering ``@worker_hook`` decorators) and projects each registered
+    dotted path onto ``args``.  A family without an ``objective`` module is
+    skipped when it declares no hooks.  Import failures raised from
+    inside an objective module propagate so a broken worker dependency cannot
+    silently disable the training objective.
+    """
+    loss_family = getattr(args, "loss_family", None)
+    if not loss_family:
+        return
+    spec = resolve_args_loss_family(args)
+    required_hooks = set(spec.required_objective_hooks)
+    if spec.loss_type == "custom_loss":
+        required_hooks.add("custom_loss_function_path")
+    if spec.uses_pg_loss_primitive:
+        required_hooks.add("custom_pg_loss_function_path")
+
+    module_path = f"{spec.__class__.__module__}.objective"
+    try:
+        importlib.import_module(module_path)
+    except ModuleNotFoundError as error:
+        if error.name == module_path:
+            if not required_hooks:
+                return
+            hooks = ", ".join(sorted(required_hooks))
+            raise RuntimeError(
+                f"loss family {loss_family!r} requires objective hooks {hooks}, but {module_path} is missing"
+            ) from error
+        raise
+
+    registered = WORKER_HOOKS.get(module_path, {})
+    missing_hooks = required_hooks.difference(registered)
+    if missing_hooks:
+        hooks = ", ".join(sorted(missing_hooks))
+        raise RuntimeError(f"loss family {loss_family!r} did not register required objective hooks: {hooks}")
+    for arg_name, fn_name in registered.items():
+        setattr(args, arg_name, f"{module_path}.{fn_name}")
+
+
+def reset_objective_paths(args: Namespace) -> None:
+    """Clear every objective hook path a family registered in this worker, before another family resolves its own.
+
+    A job of another loss family re-points the worker (see
+    ``worker_hooks.switch_loss_family``); a hook the previous family
+    registered and the next one does not must not stay on ``args``.
+    """
+    for arg_name in {name for hooks in WORKER_HOOKS.values() for name in hooks}:
+        setattr(args, arg_name, None)

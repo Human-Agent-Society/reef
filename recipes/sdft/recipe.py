@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from recipes.sdft.processor import SDFTSamples
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
-from reef.recipe.errors import RecipeConfigError
 from reef.sample2job import DistillJobData
 from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
@@ -38,6 +37,11 @@ class SDFTRecipe(WeightTrainingRecipe):
     """
 
     name: str = "sdft"
+    refused_sections: ClassVar[Mapping[str, str]] = {
+        "optimization": (
+            "SDFT objective options are backend-owned; configure the Slime implementation with training.options"
+        )
+    }
 
     @property
     def report_type(self) -> type[ReportBase]:
@@ -50,10 +54,3 @@ class SDFTRecipe(WeightTrainingRecipe):
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=SDFTSamples, sample2job=DistillJobData)
-
-    @classmethod
-    def _validate_config(cls, settings: Mapping[str, Any]) -> None:
-        if settings.get("optimization"):
-            raise RecipeConfigError(
-                "SDFT objective options are backend-owned; configure the Slime implementation with training.options"
-            )

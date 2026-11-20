@@ -18,7 +18,7 @@ def ids(listing: dict) -> list[str]:
 
 
 def train_body(record_id: str, *samples: str) -> dict:
-    body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "artifact_id": "release-1"}
+    body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "artifact_id": "artifact-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 
@@ -55,11 +55,11 @@ def test_a_client_lists_the_samples_and_a_request_trains_the_ones_that_it_names(
             # The job trains the named samples in store order; the others wait.
             trained = await client.post("/reef/train", headers=train, json=train_body("r1", "t3", "t1"))
             assert trained.status == 200, await trained.text()
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 while not recipe.batches:
                     await asyncio.sleep(0.01)
             assert [sample.trajectory["session_id"] for sample in recipe.batches[0].samples] == ["t1", "t3"]
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 while True:
                     listing = await (await client.get("/reef/scenarios/s/samples", headers=AUTH)).json()
                     counts = {sample["sample_id"]: sample["train_counts"] for sample in listing["samples"]}
@@ -70,7 +70,7 @@ def test_a_client_lists_the_samples_and_a_request_trains_the_ones_that_it_names(
             # A trained sample can train again.
             again = await client.post("/reef/train", headers=train, json=train_body("r2", "t1"))
             assert again.status == 200, await again.text()
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 while len(recipe.batches) < 2:
                     await asyncio.sleep(0.01)
             assert [sample.trajectory["session_id"] for sample in recipe.batches[1].samples] == ["t1"]
@@ -111,9 +111,9 @@ def test_sample_processing_reads_retained_tasks_and_rejects_cross_scenario_detai
             await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
             # An unknown work kind remains in the queue, without a worker racing these reads.
             queue = dispatcher.queue
-            first = queue.add(NewWork("samples", "first", "s", "inspection", {"component": "weights"}))
-            queue.add(NewWork("samples", "last", "s", "inspection", {"component": "weights"}))
-            queue.add(NewWork("samples", "foreign", "other", "inspection"))
+            first = queue.append(NewWork("samples", "first", "s", "inspection", {"component": "weights"}))
+            queue.append(NewWork("samples", "last", "s", "inspection", {"component": "weights"}))
+            queue.append(NewWork("samples", "foreign", "other", "inspection"))
             queue.cancel("samples", first.id, "test failure")
             path = "/reef/scenarios/s/sample-processing"
             response = await client.get(path + "?limit=1", headers=AUTH)
@@ -144,8 +144,8 @@ def test_sample_processing_folds_tasks_that_changed_nothing_and_shows_triggers_a
 
     def task(name: str, changed: bool | None) -> None:
         # An unknown work kind, so no samples worker takes these tasks while the test reads them.
-        queue.add(NewWork(SAMPLES_QUEUE, name, "s", "inspection", {"component": "probe"}))
-        queue.set_metadata(SAMPLES_QUEUE, name, "trigger:background" if changed is False else "trigger:records", 1.0)
+        queue.append(NewWork(SAMPLES_QUEUE, name, "s", "inspection", {"component": "probe"}))
+        queue.write_metadata(SAMPLES_QUEUE, name, "trigger:background" if changed is False else "trigger:records", 1.0)
         if changed is None:
             return
         assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == name
@@ -154,14 +154,14 @@ def test_sample_processing_folds_tasks_that_changed_nothing_and_shows_triggers_a
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
-            queue.add(NewWork(SAMPLES_QUEUE, "oldest", "s", "inspection", {"component": "probe"}))
+            queue.append(NewWork(SAMPLES_QUEUE, "oldest", "s", "inspection", {"component": "probe"}))
             assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == "oldest"
             queue.finish(SAMPLES_QUEUE, "oldest", "w", {})
             for name, changed in [("a", True), ("b", False), ("c", False), ("d", True), ("e", False)]:
                 task(name, changed)
             task("running", None)
             assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == "running"
-            queue.set_metadata(
+            queue.write_metadata(
                 SAMPLES_QUEUE, "running", "progress", {"attempt": 1, "records_read": 7, "samples_created": 2}
             )
             path = "/reef/scenarios/s/sample-processing"
@@ -201,7 +201,7 @@ def test_sample_processing_reads_the_log_of_each_attempt_of_a_task(tmp_path):
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
             # An unknown work kind, so no samples worker takes the task while the test reads it.
-            queue.add(NewWork(SAMPLES_QUEUE, "task", "s", "inspection", {"component": "probe"}))
+            queue.append(NewWork(SAMPLES_QUEUE, "task", "s", "inspection", {"component": "probe"}))
             path = "/reef/scenarios/s/sample-processing/task/logs"
             waiting = await (await client.get(path, headers=AUTH)).json()
             assert (waiting["attempt"], waiting["lines"], waiting["running"]) == (None, [], False)
@@ -241,7 +241,7 @@ def test_sample_processing_counts_the_records_after_the_last_one_that_each_train
         assert list_processing(dispatcher, "s")["records_waiting"] is None, "no task says what a trainer read"
         for number, component in enumerate(components):
             # An unknown work kind, so no samples worker takes the task.
-            queue.add(NewWork(SAMPLES_QUEUE, f"read-{number}", "s", "inspection", {"component": component}))
+            queue.append(NewWork(SAMPLES_QUEUE, f"read-{number}", "s", "inspection", {"component": component}))
             assert queue.take(SAMPLES_QUEUE, "w", ["inspection"]).id == f"read-{number}"
             queue.finish(SAMPLES_QUEUE, f"read-{number}", "w", {"changed": True, "record_sequences": [1, 1]})
         expected = records.count("s", after_sequence=1) if components else None

@@ -9,6 +9,9 @@ from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.samples import LocalSampleProducers
+from reef.record2sample.service import SamplesWorker
+from reef.train.job_queue import TrainingCheckWorker
 
 
 def report(record_id: str) -> AgentRecord:
@@ -48,6 +51,8 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
         dispatcher.set_scenario_owner("t", "s")
         dispatcher.accept_record(report("r1"))
         record_item_ids(dispatcher, 1)
+        # The test reads the records itself from here on: the samples service must not read them first.
+        dispatcher.workers.stop()
         dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": "train"}})
         dispatcher.sync_items("s", ["t"])
         with dispatcher.locked_scenario("t") as current:
@@ -55,7 +60,7 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
             assert trainer.holds_untrained_records()
             assert trainer.produce_samples().records_read == 1
             assert trainer.produce_samples().records_read == 0, "a process reads each record once"
-            assert current.store.records.get("t", "s/r1") is None, "t stores no copy"
+            assert current.store.records.read("t", "s/r1") is None, "t stores no copy"
             assert current.used_record("s/r1").payload == {"score": 1.0}
 
         # A new process reads the item again: no commit consumed it.
@@ -69,16 +74,39 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
             assert current.used_record("s/r1") is None
         dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": "train"}})
 
+        # The services run again: control's cleanup holds the control lease to withdraw the scenario, and waits
+        # for the samples service and the training service to answer the delete.
+        assert dispatcher.publisher is not None and dispatcher.publisher.run_once()
+        dispatcher.workers.add(
+            SamplesWorker(
+                dispatcher.queue,
+                LocalSampleProducers(dispatcher.registry, dispatcher.local_workers),
+                worker_id="samples",
+            )
+        )
+        for component in dispatcher.job_components:
+            dispatcher.workers.add(
+                TrainingCheckWorker(
+                    component,
+                    dispatcher.queue,
+                    dispatcher.job_directory_store,
+                    dispatcher.backend_factory,
+                    worker_id=f"checks-{component.name}",
+                    poll_seconds=0.02,
+                )
+            )
+        dispatcher.workers.start()
         # Archiving t releases the item; the record stays an item of its origin.
         dispatcher.delete_scenario("t")
+        dispatcher.sweeper.sweep()
         (item,) = dispatcher.data_store.query("s", kind="record")
         assert item.scenarios == {"s": "train"}
 
-        # Deleting the origin releases its record items too, so a new scenario with its name reads none of them.
+        # Deleting the origin releases its record items too: no scenario reads them.
         dispatcher.delete_scenario("s")
+        dispatcher.sweeper.sweep()
         (item,) = dispatcher.data_store.query("s", kind="record")
         assert item.scenarios == {}
-        dispatcher.get_or_create_scenario("s")
         assert dispatcher.data_store.query("s", scenario="s") == ()
     finally:
         dispatcher.close()

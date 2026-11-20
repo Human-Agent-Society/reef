@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor
-from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, host_sandbox, remote_executor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
-from reef.train.harness_backend.agent.run import AgentExecution
+from reef.train.harness_backend.contract import AgentExecution
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ class AgentSettings:
     the agent's isolation, not yet bound to the adapter's program.
     ``timeout_s`` > 0 bounds one run. ``binary`` is the agent's binary,
     ``None`` for the adapter's pinned install.
-    Purpose: ``agent_settings`` reads it from the deployment, and the recipe
-    binds it for each scenario.
+    Purpose: ``agent_settings`` reads it from the deployment, and the harness
+    training component binds it for each scenario.
     """
 
     adapter: str
@@ -64,25 +64,24 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
     ``binary`` names its binary in place of the pinned install.
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host
     port but the gateway's, and refuses to start where bwrap or pasta is
-    missing. A cloud sandbox (``sandbox: e2b`` or ``sandbox: modal``, with
+    missing. ``sandbox: seatbelt`` does the same on macOS with a Seatbelt
+    profile, and refuses to start where sandbox-exec is missing; the host's
+    LAN addresses stay reachable there. A cloud sandbox (``sandbox: e2b`` or ``sandbox: modal``, with
     that provider's options in the section; its image is the adapter's
     pinned binary, built on first use, unless an option names one) runs it
     where it reaches the gateway through a tunnel and nothing else of the
     host, and carries the deployment that ``state_dir`` names, so a later
     start stops the sandboxes a stopped run left. ``sandbox: none`` runs it
     unisolated with the service's privileges, and must be chosen. Left empty
-    (and ``REEF_AGENT_SANDBOX`` unset), the agent is jailed where the host
-    can, and off where it cannot. No section runs no agent. The variable's
-    old name, ``REEF_PROPOSER_SANDBOX``, is refused, so a deployment that
-    still sets it does not start without the isolation it names. Raises
+    (and ``REEF_AGENT_SANDBOX`` unset), the agent is jailed in the host's
+    local sandbox (bwrap on Linux, seatbelt on macOS) where the host can,
+    and off where it cannot. No section runs no agent. Raises
     ValueError for a bad value.
     """
     if section is None:
         return None
     if not isinstance(section, Mapping):
         raise ValueError("evolution.agent must be a mapping")
-    if "REEF_PROPOSER_SANDBOX" in environ:
-        raise ValueError("REEF_PROPOSER_SANDBOX is no longer read: set REEF_AGENT_SANDBOX instead")
     adapter = section.get("adapter", DEFAULT_ADAPTER)
     binary = section.get("binary")
     if not isinstance(adapter, str) or not adapter.strip():
@@ -104,18 +103,19 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
         try:
             remote = remote_executor(sandbox, section, environ, timeout_s=timeout_s, owner_anchor=state_dir)
             remote.preflight()
-        except SandboxUnavailable as exc:
+        except SandboxUnavailableError as exc:
             raise ValueError(f"evolution.agent.sandbox is {sandbox}, but {exc}") from exc
         return AgentSettings(adapter, remote, timeout_s, binary)
-    if sandbox not in ("", "bwrap"):
-        choices = ", ".join(f"'{name}'" for name in ("bwrap", *sorted(REMOTE_EXECUTORS), "none"))
-        raise ValueError(f"evolution.agent.sandbox must be one of {choices}")
-    executor = SandboxExecutor(network="isolated")
+    local = host_sandbox()
+    if sandbox not in ("", local.kind):
+        choices = ", ".join(f"'{name}'" for name in (local.kind, *sorted(REMOTE_EXECUTORS), "none"))
+        raise ValueError(f"evolution.agent.sandbox must be one of {choices} on this host")
+    executor = local(network="isolated")
     try:
         executor.preflight()
-    except SandboxUnavailable as exc:
-        if sandbox == "bwrap":
-            raise ValueError(f"evolution.agent.sandbox is bwrap, but {exc}") from exc
+    except SandboxUnavailableError as exc:
+        if sandbox:
+            raise ValueError(f"evolution.agent.sandbox is {sandbox}, but {exc}") from exc
         logger.warning(
             "the agent is off: %s. Set evolution.agent.sandbox: none to run the agent without isolation", exc
         )

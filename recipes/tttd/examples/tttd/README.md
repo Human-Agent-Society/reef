@@ -264,8 +264,8 @@ harness route remains `/v1/chat/completions`; inside the inference backend,
 Reef renders the prompt once and calls SGLang `/generate`. Serving records no
 tokens or log-probabilities: the training component renders each rollout with
 the model's chat template, and the actor computes the old-policy
-log-probabilities with the weights of the step's start. With
-`max_staleness: 0` these are the weights that sampled the grid. Slime refuses
+log-probabilities with the weights of the step's start. The stage is
+on-policy, so these are the weights that sampled the grid. Slime refuses
 `--use-rollout-logprobs`. Reef routes every request to the scenario's own
 adapter revision; the harness never selects one and the
 backend never injects a fallback.

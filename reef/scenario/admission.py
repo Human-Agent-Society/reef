@@ -15,7 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from reef.core.errors import ScenarioLimitReached
+from reef.core.errors import ScenarioLimitReachedError
 from reef.core.plugins import ConfiguredPlugin
 
 
@@ -53,7 +53,7 @@ class ScenarioAdmission(ConfiguredPlugin, ABC):
         """Check whether the new ``scenario`` may be created.
 
         ``registered_count`` is the number of registered scenarios, without
-        ``scenario``. To refuse the scenario, raise ``ScenarioLimitReached``.
+        ``scenario``. To refuse the scenario, raise ``ScenarioLimitReachedError``.
         """
 
     @abstractmethod
@@ -62,8 +62,8 @@ class ScenarioAdmission(ConfiguredPlugin, ABC):
 
         ``loaded`` contains every scenario with a load slot, also the
         scenarios that still load. If fewer candidates are idle than
-        ``unload_count``, Reef refuses the load with ``ScenarioCapacityFull``.
-        To refuse the load directly, raise ``ScenarioCapacityFull``.
+        ``unload_count``, Reef refuses the load with ``ScenarioCapacityFullError``.
+        To refuse the load directly, raise ``ScenarioCapacityFullError``.
         """
 
 
@@ -83,7 +83,7 @@ class ScenarioLimits(ScenarioAdmission):
 
     def check_creation(self, scenario: str, *, registered_count: int) -> None:
         if self.max_scenarios is not None and registered_count >= self.max_scenarios:
-            raise ScenarioLimitReached(
+            raise ScenarioLimitReachedError(
                 f"cannot create scenario {scenario!r}: the service holds its limit of {self.max_scenarios} "
                 "scenarios (reef.max_scenarios); delete a scenario first"
             )

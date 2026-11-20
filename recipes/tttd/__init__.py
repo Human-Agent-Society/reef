@@ -8,25 +8,25 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
   its barrier and makes the grouped policy samples, and
   ``TTTDJobData`` makes one batch from one complete step.
 - ``report`` — the method-specific grouped rollout wire contract.
-- ``objective`` — the training signal that both backends' objectives train
-  (adaptive-entropic grouped advantages).
+- ``objective`` — the adaptive-entropic grouped advantages that both backends'
+  objectives train. It names no backend.
 - ``slime`` — the Slime objective, loss family and torch objective hooks. It is
   imported by the Slime training component and workers only; this package's
   public surface never loads it, so a service without Slime training stays
   free of the Slime stack.
-- ``tinker`` — the Tinker objective on Tinker's built-in importance-sampling
-  loss, imported only when that backend resolves the family.
+- ``tinker`` — the Tinker objective and loss family, on Tinker's built-in
+  importance-sampling loss. It is imported only when that backend resolves the
+  objective.
 """
 
 from recipes.tttd.processor import TTTDJobData, TTTDSamples, TTTDSettings
 from recipes.tttd.recipe import TTTDRecipe
 from recipes.tttd.report import TTTDGroupedRolloutReport
-from reef.train.algos.registry import register_loss_family_ref, register_objective_ref
+from reef.train.slime_backend.objectives import register_objective as register_slime_objective
+from reef.train.tinker_backend.objectives import register_objective as register_tinker_objective
 
-register_objective_ref("tttd", "recipes.tttd.slime:TttdObjective")
-register_objective_ref("tttd", "recipes.tttd.tinker:TttdTinkerObjective", backend="tinker")
-register_loss_family_ref("tttd", "recipes.tttd.slime:TttdAlgorithm")
-register_loss_family_ref("tttd", "recipes.tttd.tinker:TttdTinkerLoss", backend="tinker")
+register_slime_objective("tttd", "recipes.tttd.slime:TttdObjective")
+register_tinker_objective("tttd", "recipes.tttd.tinker:TttdTinkerObjective")
 
 __all__ = [
     "TTTDGroupedRolloutReport",

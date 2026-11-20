@@ -19,8 +19,8 @@ class RoutingDeploymentSettings:
     digits or hyphens, starting with a letter or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``;
     ``max_restarts`` is an int ≥ 0, and ≥ 1
     when bounded. ``restart_backoff_seconds`` is a non-empty tuple of finite numbers ≥ 0, in order, with
-    repeats allowed. The ready, finalization and container stop timeouts and ``sr_cpus`` are finite and
-    positive; ``drain_timeout_seconds`` is finite and ≥ 0. ``sr_management_port`` is an int from 1 to 65535,
+    repeats allowed. The ready, finalization, container stop and image build timeouts and ``sr_cpus`` are finite
+    and positive; ``drain_timeout_seconds`` is finite and ≥ 0. ``sr_management_port`` is an int from 1 to 65535,
     ``selection_timeout_seconds`` an int from 1 to 300, ``preview_max_concurrency`` an int from 1 to 4096,
     and ``sr_memory_bytes`` a positive int. ``shadow_max_concurrency``, ``shadow_timeout_seconds`` and
     ``shadow_max_response_bytes`` have the domains of ``ShadowLimits``.
@@ -31,6 +31,7 @@ class RoutingDeploymentSettings:
     a managed deployment without one. With ``managed``, ``reef serve`` runs the container and reads every
     setting. With ``external``, another system runs the router beside ``reef serve --component inference``;
     only the port, preview, finalization and per-replica shadow settings apply.
+    ``image_build_timeout_seconds`` bounds the managed startup's image build and is excluded from the render.
     """
 
     lifecycle: str = config_option(
@@ -44,6 +45,9 @@ class RoutingDeploymentSettings:
     drain_timeout_seconds: float = config_option(30.0, help="Seconds allowed for accepted requests to drain.")
     finalization_timeout_seconds: float = config_option(5.0, help="Seconds allowed for pending record writes.")
     container_stop_timeout_seconds: float = config_option(10.0, help="Container stop command deadline in seconds.")
+    image_build_timeout_seconds: float = config_option(
+        3600.0, help="Seconds a managed startup may spend building the Semantic Router image it has not cached."
+    )
     sr_management_port: int = config_option(
         50053, help="Host loopback port of the router's authenticated HTTP API (preview and configuration)."
     )
@@ -91,6 +95,7 @@ class RoutingDeploymentSettings:
             ("ready_timeout_seconds", self.ready_timeout_seconds),
             ("finalization_timeout_seconds", self.finalization_timeout_seconds),
             ("container_stop_timeout_seconds", self.container_stop_timeout_seconds),
+            ("image_build_timeout_seconds", self.image_build_timeout_seconds),
             ("sr_cpus", self.sr_cpus),
         ):
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:

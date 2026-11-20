@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
 from tests.support.runtime_stubs import (
@@ -23,36 +22,39 @@ from tests.support.runtime_stubs import (
     StubInferenceRuntime,
     StubTrainingComponent,
     job_sized_stages,
-    runtime_bindings,
+    live_objects,
 )
 from tests.support.samples import data_storage, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.stored_checkpoints import store_checkpoints
+from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOJobData, SAOSamples
+from recipes.sao.processor import SAOJobData, SAOSamples, SAOSettings
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.record2sample.assembly import SampleAssemblySettings
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
-from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
@@ -61,12 +63,12 @@ EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 def sao_processor(context: PipelineContext, job_samples: int | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2sample=SAOSamples(context, SampleAssemblySettings()),
+        record2sample=SAOSamples(context, SAOSettings()),
         sample2job=SAOJobData(context, None, job_samples),
     )
 
 
-def single_rollout_steps() -> PipelineConfig:
+def single_rollout_steps() -> PipelineSettings:
     """SAO's default stages with jobs of one sample; with a runtime batch size of 1 each rollout is one optimizer step."""
     return job_sized_stages(SAORecipe.pipeline_spec())
 
@@ -113,7 +115,7 @@ def test_sao_recipe_resolves_by_dotted_reference() -> None:
     assert recipe_class_for(reference) is SAORecipe
     assert recipe_class_for("sao") is None
 
-    recipe = build_recipe(reference, {}, **runtime_bindings())
+    recipe = build_recipe(reference, {})
 
     assert isinstance(recipe, SAORecipe)
     assert recipe.name == "sao"
@@ -121,30 +123,28 @@ def test_sao_recipe_resolves_by_dotted_reference() -> None:
 
 @pytest.mark.unit
 def test_sao_recipe_defaults_are_reef_side_only() -> None:
-    recipe = SAORecipe(**runtime_bindings())
+    recipe = SAORecipe()
 
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only its stages.
     stages = recipe.stages()
     assert (stages.record2sample.plugin_class, stages.sample2job.plugin_class) == (SAOSamples, SAOJobData)
     # Without a configured buffer_size the buffer holds the data of one job.
-    sized = SAORecipe(
-        **runtime_bindings(), pipeline_stages=job_sized_stages(SAORecipe.pipeline_spec(), job_samples=128)
-    )
-    assert sized.build_pipeline(PipelineContext("math")).buffer_size == 128
+    sized = SAORecipe(pipeline_stages=job_sized_stages(SAORecipe.pipeline_spec(), job_samples=128))
+    assert sized.stages().build(PipelineContext("math")).buffer_size == 128
 
 
 @pytest.mark.unit
 def test_sao_recipe_reads_reef_side_config() -> None:
-    recipe = SAORecipe.from_environment(
-        {},
-        config={
+    recipe = load_recipe(
+        SAORecipe,
+        {
             "pipeline": {"sample2job": {"config": {"job_samples": 2, "buffer_size": 16}}},
         },
-        **runtime_bindings(),
+        {},
     )
 
-    sample2job = recipe.build_pipeline(PipelineContext("math")).sample2job
+    sample2job = recipe.stages().build(PipelineContext("math")).sample2job
     assert (sample2job.job_samples, sample2job.buffer_size) == (2, 16)
 
 
@@ -153,13 +153,13 @@ def test_sao_recipe_reads_reef_side_config() -> None:
 def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     deployment = yaml.safe_load((EXAMPLES / example).read_text(encoding="utf-8"))
     pipeline_section = interpolate_config_values(deployment, deployment["pipeline"])
-    recipe = SAORecipe.from_environment({}, config={"pipeline": pipeline_section}, **runtime_bindings())
+    recipe = load_recipe(SAORecipe, {"pipeline": pipeline_section}, {})
     # One job is one optimizer step: job_samples names Slime's global batch size.
     global_batch_size = deployment["training"]["config"]["global_batch_size"]
     assert deployment["training"]["options"]["global-batch-size"] == "${training.config.global_batch_size}"
     assert deployment["pipeline"]["sample2job"]["config"]["job_samples"] == "${training.config.global_batch_size}"
 
-    pipeline = recipe.build_pipeline(PipelineContext("math"))
+    pipeline = recipe.stages().build(PipelineContext("math"))
     assert pipeline.sample2job.job_samples == global_batch_size
 
     assert isinstance(pipeline.record2sample, SAOSamples)
@@ -172,7 +172,7 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
 @pytest.mark.parametrize("key", ["batch_size", "batch-size"])
 def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SAORecipe.from_environment({}, config={"data": {key: 2}}, **runtime_bindings())
+        load_recipe(SAORecipe, {"data": {key: 2}}, {})
 
 
 @pytest.mark.unit
@@ -183,15 +183,15 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
         ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
         ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"record2sample": {"config": {"batch_size": 2}}}, "SAOSamples: unknown config fields: batch_size"),
-        ({"record2sample": {"config": {"max_staleness": -1}}}, "max_staleness must be a non-negative int"),
+        ({"record2sample": {"config": {"max_artifact_lag": -1}}}, "max_artifact_lag must be a non-negative int"),
     ],
 )
 def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
     pipeline: dict[str, Any], message: str
 ) -> None:
-    recipe = SAORecipe.from_environment({}, config={"pipeline": pipeline}, **runtime_bindings())
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("math"))
+    recipe = load_recipe(SAORecipe, {"pipeline": pipeline}, {})
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("math"))
 
 
 @pytest.mark.unit
@@ -199,11 +199,7 @@ def test_sao_recipe_rejects_backend_objective_config() -> None:
     from reef.recipe.errors import RecipeConfigError
 
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
-        SAORecipe.from_environment(
-            {},
-            config={"optimization": {"eps_low": 0.8}},
-            **runtime_bindings(),
-        )
+        load_recipe(SAORecipe, {"optimization": {"eps_low": 0.8}}, {})
 
 
 # --- processor -------------------------------------------------------------
@@ -230,7 +226,7 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
 
 
 @pytest.mark.unit
-def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_a_release() -> None:
+def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_an_artifact_id() -> None:
     # The producing artifact lives in payload["artifact_id"], set by the
     # inference service. The sample must still record it, or the staleness
     # check finds the sample stale and no SAO step ever runs.
@@ -373,7 +369,7 @@ class _SAOComponent(StubTrainingComponent):
         self.payloads: list[dict[str, Any]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        data, left_out = rendered_job_data(read_job_data(job.data_dir), CharTemplate())
+        data, left_out = rendered_job_data(job.read_data(), CharTemplate())
         assert left_out == ()
         prepared = prepare_slime_job(
             data,
@@ -399,6 +395,7 @@ def _repository(tmp_path: Path) -> CachedRepositoryBackendFactory:
 def _sao_dispatcher(
     tmp_path: Path,
     recipe: SAORecipe,
+    live: LiveObjects,
     *,
     repository: CachedRepositoryBackendFactory | None = None,
     agent_dir: Path | None = None,
@@ -406,6 +403,7 @@ def _sao_dispatcher(
     return Dispatcher(
         recipe,
         _repository(tmp_path) if repository is None else repository,
+        live=live,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_dir),
         coordination=memory_coordination(),
@@ -437,7 +435,7 @@ def _checkpoint_commits(dispatcher: Dispatcher) -> list[CommitRecord]:
 
 @pytest.mark.unit
 def test_sao_submits_every_batch_with_the_sao_objective() -> None:
-    parameters = SAORecipe(**runtime_bindings()).parameters_by_kind()["trajectory"]
+    parameters = SAORecipe().parameters_by_kind()["trajectory"]
 
     assert parameters == {"objective": "sao"}, "the training component owns the step schedule"
 
@@ -445,9 +443,7 @@ def test_sao_submits_every_batch_with_the_sao_objective() -> None:
 @pytest.mark.integration
 def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     component = _SAOComponent(tmp_path / "checkpoints")
-    dispatcher = _sao_dispatcher(
-        tmp_path, SAORecipe(**runtime_bindings(component), pipeline_stages=single_rollout_steps())
-    )
+    dispatcher = _sao_dispatcher(tmp_path, SAORecipe(pipeline_stages=single_rollout_steps()), live_objects(component))
     try:
         _rollout(dispatcher, 1, 0.9)
 
@@ -456,12 +452,12 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
 
         [job] = component.submitted
-        assert [source_record_id(item) for item in read_job_data(job.data_dir).samples] == ["i1"]
+        assert [source_record_id(item) for item in job.read_data().samples] == ["i1"]
         [payload] = component.payloads
         assert payload["loss"] == "sao"
         # SAO defers advantages to the critic in the backend; reef ships none.
         assert "advantages" not in payload
-        assert trajectory_reward(read_job_data(job.data_dir).samples[0]) == pytest.approx(0.9)
+        assert trajectory_reward(job.read_data().samples[0]) == pytest.approx(0.9)
     finally:
         dispatcher.close()
 
@@ -470,12 +466,12 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
 def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_serving(tmp_path) -> None:
     component = _SAOComponent(tmp_path / "checkpoints")
     inference = StubInferenceRuntime()
-    recipe = SAORecipe.from_environment(
+    recipe = load_recipe(
+        SAORecipe,
+        {"pipeline": {"sample2job": {"config": {"job_samples": 1}}}, "activation": {"module": "never"}},
         {},
-        config={"pipeline": {"sample2job": {"config": {"job_samples": 1}}}, "activation": {"module": "never"}},
-        **runtime_bindings(component, inference),
     )
-    dispatcher = _sao_dispatcher(tmp_path, recipe)
+    dispatcher = _sao_dispatcher(tmp_path, recipe, live_objects(component, inference))
     try:
         scenario = dispatcher.get_or_create_scenario("math")
         wait_for_serving(dispatcher)
@@ -485,7 +481,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
 
         _wait_for_finished_jobs(dispatcher, 1)
 
-        # The checkpoint is published as the chain tip, but never serves: only the root release was activated.
+        # The checkpoint is published as the chain tip, but never serves: only the root snapshot was activated.
         assert inference.activated == base
         [job] = component.submitted
         [record] = _checkpoint_commits(dispatcher)
@@ -510,7 +506,8 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
     inference = StubInferenceRuntime()
     dispatcher = _sao_dispatcher(
         tmp_path,
-        SAORecipe(**runtime_bindings(component, inference), pipeline_stages=single_rollout_steps()),
+        SAORecipe(pipeline_stages=single_rollout_steps()),
+        live_objects(component, inference),
         agent_dir=tmp_path / "records",
     )
     try:
@@ -524,7 +521,7 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
         head = scenario.repository.require_current_artifact()
         wait_for_serving(dispatcher)
-        # The new head is the saved release of the trained checkpoint, and it
+        # The new head is the saved snapshot of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.revision != pre_head.revision
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.
@@ -546,8 +543,8 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
     repository = _repository(tmp_path)
 
     def _make_dispatcher() -> Dispatcher:
-        recipe = SAORecipe(**runtime_bindings(component), pipeline_stages=single_rollout_steps())
-        return _sao_dispatcher(tmp_path, recipe, repository=repository, agent_dir=agent_dir)
+        recipe = SAORecipe(pipeline_stages=single_rollout_steps())
+        return _sao_dispatcher(tmp_path, recipe, live_objects(component), repository=repository, agent_dir=agent_dir)
 
     first = _make_dispatcher()
     try:
@@ -564,7 +561,7 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
         recovered = second.get_or_create_scenario("math")
 
         state = JobLoopState.from_dict(recovered.trainer.state)
-        assert (state.finished_jobs, state.job) == (1, None)  # from the commit history
+        assert (state.finished_jobs, state.jobs) == (1, ())  # from the commit history
         assert state.start == str(tmp_path / "checkpoints" / "1")
         assert recovered.store.durable
         # SAO's async telemetry is carried opaquely on the durable record, so a
@@ -580,7 +577,7 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
             component.base_start,
             str(tmp_path / "checkpoints" / "1"),
         ]
-        assert source_record_id(read_job_data(component.submitted[-1].data_dir).samples[0]) == "i2"
+        assert source_record_id(component.submitted[-1].read_data().samples[0]) == "i2"
     finally:
         second.close()
 
@@ -599,8 +596,8 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             session.records,
             pipeline_factory=lambda context: sao_processor(context, job_samples=1),
-            job_loop=JobLoop(component, scenario="math"),
-            job_parameters=SAORecipe(**runtime_bindings(component)).parameters_by_kind(),
+            job_loop=JobLoop(store_checkpoints(component, "math", None), scenario="math"),
+            job_parameters=SAORecipe().parameters_by_kind(),
             root=STUB_ROOT,
             algorithm_state=algorithm_state,
             samples=sample_store(storage, "math", session).for_trainer(""),
@@ -623,12 +620,12 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         result = first.advance_job()
         assert result is not None
         prepared = first.prepare_commit(result)
-        first_session.commit_step(
-            expected_step=step - 1,
+        first_session.append_commit(
+            expected_commit_number=step - 1,
             commit=CommitRecord(
                 scenario="math",
-                step=step,
-                snapshot=SnapshotRef("release:base", "base"),
+                commit_number=step,
+                snapshot=SnapshotRef("snapshot:base", "base"),
                 checkpoint=False,
                 algorithm_state=prepared.algorithm_state,
                 high_water_sequence=prepared.high_water_sequence,
@@ -651,7 +648,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         make_samples(second)
         assert JobLoopState.from_dict(second.state).finished_jobs == 1
         assert second.advance_job() is not None
-        assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.submitted] == [
+        assert [source_record_id(job.read_data().samples[0]) for job in component.submitted] == [
             "i1",
             "i2",
         ]

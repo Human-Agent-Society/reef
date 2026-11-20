@@ -24,14 +24,24 @@ Rules:
 - A body that the engine's handler refuses (``request_payload``): 400.
 - No row: 503 while its artifact starts or after startup fails; 404 for an unknown model.
   A replica that cannot read ``served_models`` and has no recent cached read answers 503.
-- An engine that fails or cannot be reached: 502; one that does not answer within the timeout: 504.
-- An answer that the engine aborted is retried once after the replica reads the row again; then 409.
+- An engine that refuses the request with a 4xx: that status and the engine's message, which an agent reads to
+  repair its next call; an engine that fails otherwise or cannot be reached: 502; one that does not answer within
+  the timeout: 504. A refusal of the selected model name (HTTP 421) is the exception: the next rule retries it.
+- A non-streaming answer that the engine aborted, and an engine's refusal of the selected model name (HTTP 421)
+  before any output, are retried once after the replica reads the row again, without running the split again. A
+  request that selected its artifact keeps it: the split's artifact, the named row, or the artifact whose ID is the
+  request's ``model``. When no row serves that artifact at the retry: 503 with ``Retry-After``. Any other request
+  reads the row for its model again, so its retry can reach a new active artifact. A second abort: 409; a second
+  refusal: 503 with ``Retry-After``. A stream is never retried after its response started.
 - A scenario's traffic split (``TrafficWeights``) selects the row of a request that means ``active``: the replica puts
   the conversation in a bucket, and each bucket belongs to one artifact. A request without an identified conversation,
   a rollout's call and a request that names a row skip the split. The replica selects the model. The engine of the
   artifact selects its own replica.
 - A record that cannot be appended: 503. A replica never answers a recorded request without its record. A stream goes
   out as the engine sends it, so its record is appended when it ends, and its receipt is the stream's last frame.
+  A stream that fails after its headers went out gets no terminal event and no receipt: the replica closes the
+  connection, so the client reads a transport error, and the record keeps the incomplete delivery. A stream that the
+  engine aborted keeps its terminal event, without a receipt.
 """
 
 from __future__ import annotations
@@ -54,14 +64,22 @@ from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.trajectory_index import SHADOW_PURPOSE
 from reef.core.values import JsonValue
-from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
-from reef.inference.provider_protocol import SSEFrameDecoder
+from reef.inference.interfaces import (
+    EngineClients,
+    EngineState,
+    InferenceArtifact,
+    InferenceHandler,
+    RuntimeLoadMismatchError,
+    StartupSteps,
+)
+from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
 from reef.inference.startup import STARTUP_FAILED_PREFIX, reported_steps
 from reef.service.streaming import (
     chat_completion_chunk_identity,
     frame_for_codex,
     is_terminal_sse_event,
     receipt_sse_events,
+    sse_failure,
     stream_record,
 )
 from reef.service.web import service_application
@@ -79,7 +97,6 @@ BUCKET_COUNT = 100
 RECORD_HEADER = "x-reef-agent-record-id"
 #: The header that carries the ID of the artifact that answered.
 ARTIFACT_HEADER = "x-reef-artifact-id"
-# Kept for clients deployed before artifact identity became the public contract.
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
 
@@ -99,18 +116,18 @@ def claims_shadow_call(payload: Mapping[str, Any]) -> bool:
 
 
 def startup_error(error: str | None) -> str:
-    """What a failed startup status says: the message of a runtime's ``StartupFailed`` (RFC #1299), else a fixed text,
-    since other errors can hold paths or secrets."""
+    """What a failed startup status says: the message of a runtime's ``StartupFailedError`` (RFC #1299), else a fixed
+    text, since other errors can hold paths or secrets."""
     if error is not None and error.startswith(STARTUP_FAILED_PREFIX):
         return error.removeprefix(STARTUP_FAILED_PREFIX)
     return "The inference engine did not start. Check the service logs."
 
 
-class NotServed(ReefError):
+class NotServedError(ReefError):
     """The scenario serves no model under the request's name."""
 
 
-class StaleServedModels(ReefError):
+class StaleServedModelsError(ReefError):
     """The replica could not read ``served_models`` for longer than it may serve from its cache."""
 
 
@@ -136,7 +153,7 @@ class TrafficWeights:
             if type(weight) is not int or not 0 <= weight <= BUCKET_COUNT:
                 raise ValueError(f"the traffic weight of {artifact_id!r} must be an integer from 0 to {BUCKET_COUNT}")
         if self.by_artifact and sum(self.by_artifact.values()) != BUCKET_COUNT:
-            raise ValueError(f"traffic_weights must sum to {BUCKET_COUNT}")
+            raise ValueError(f"the traffic weights must sum to {BUCKET_COUNT}")
 
     @classmethod
     def from_json(cls, value: object) -> TrafficWeights:
@@ -144,7 +161,7 @@ class TrafficWeights:
         if value is None:
             return cls()
         if not isinstance(value, Mapping):
-            raise ValueError("traffic_weights must map each artifact ID to its weight, or be null")
+            raise ValueError("the traffic weights must map each artifact ID to its weight")
         return cls(dict(value))
 
     @property
@@ -235,12 +252,12 @@ class ScenarioServing:
 
 
 def row_for_model(scenario: str, rows: Mapping[str, ServedArtifact], model: object) -> ServedArtifact:
-    """The row that answers a request for ``model``: the row of that name, else the active row. Raise ``NotServed``
-    when that row does not exist."""
+    """The row that answers a request for ``model``: the row of that name, else the active row. Raise
+    ``NotServedError`` when that row does not exist."""
     name = model if isinstance(model, str) and model in rows else ACTIVE
     served = rows.get(name)
     if served is None:
-        raise NotServed(f"scenario {scenario!r} serves no model {name!r}")
+        raise NotServedError(f"scenario {scenario!r} serves no model {name!r}")
     return served
 
 
@@ -282,7 +299,7 @@ class ServedModelsCache:
             if held is not None and now - held.read_at < self.max_cache_age_seconds:
                 logger.warning("serving %s from a cached read of served_models: %s", scenario, exc)
                 return held
-            raise StaleServedModels(f"served_models cannot be read: {exc}") from exc
+            raise StaleServedModelsError(f"served_models cannot be read: {exc}") from exc
         self.reads[scenario] = ScenarioServing(now, sequence, rows, serving_config, weights)
         return self.reads[scenario]
 
@@ -298,10 +315,10 @@ class ServedModelsCache:
         return row_for_model(scenario, self.scenario_rows(scenario, refresh=refresh), model)
 
     def read_named(self, scenario: str, name: str, *, refresh: bool = False) -> ServedArtifact:
-        """The ``ServedArtifact`` of the row ``name`` of ``scenario``; ``NotServed`` when there is none."""
+        """The ``ServedArtifact`` of the row ``name`` of ``scenario``; ``NotServedError`` when there is none."""
         served = self.scenario_rows(scenario, refresh=refresh).get(name)
         if served is None:
-            raise NotServed(f"scenario {scenario!r} serves no artifact {name!r}")
+            raise NotServedError(f"scenario {scenario!r} serves no artifact {name!r}")
         return served
 
 
@@ -328,18 +345,22 @@ class SSERelay:
 
     Values: ``path`` is the route; ``response`` the client's stream; ``for_codex`` whether frames are rewritten for
     a Codex client; ``chat_identity`` the chat-completion identity of the first frame that carries one; ``terminal``
-    the held-back terminal frame, once it arrived.
+    the held-back terminal frame, once it arrived. ``captured_stream`` requires consuming and checking bytes
+    after that frame; an opaque proxy instead ends at the first terminal frame, regardless of chunk boundaries.
+    ``error`` is None until a decoded frame reports failure, then retains the first failure description.
 
     Purpose: the replica writes the record's receipt frames before the terminal event.
     """
 
-    def __init__(self, path: str, response: web.StreamResponse, *, for_codex: bool) -> None:
+    def __init__(self, path: str, response: web.StreamResponse, *, for_codex: bool, captured_stream: bool) -> None:
         self.path = path
         self.response = response
         self.for_codex = for_codex
+        self.captured_stream = captured_stream
         self.decoder = SSEFrameDecoder()
         self.chat_identity: dict[str, Any] = {}
         self.terminal: bytes | None = None
+        self.error: str | None = None
 
     async def feed(self, chunk: bytes) -> bool:
         """Write the frames that ``chunk`` completes; return whether the terminal event arrived."""
@@ -348,23 +369,33 @@ class SSERelay:
     async def finish(self) -> bool:
         """Write what the decoder still holds; return whether the terminal event arrived."""
         frames, remainder = self.decoder.finalize()
-        if await self.write(frames):
-            return True
+        await self.write(frames)
         if remainder:
+            if self.terminal is not None and remainder.strip():
+                raise ValueError("the engine sent data after its terminal event")
             await self.response.write(remainder)
-        return False
+        return self.terminal is not None
 
     async def write(self, frames: Iterable[bytes]) -> bool:
         for frame in frames:
+            if self.terminal is not None:
+                if not self.captured_stream:
+                    return True
+                if frame_data(frame) == SSE_DONE or all(
+                    not line or line.startswith(b":") for line in frame.splitlines()
+                ):
+                    continue
+                raise ValueError("the engine sent data after its terminal event")
+            self.error = self.error or sse_failure(frame)
             if self.for_codex:
                 frame = frame_for_codex(frame)
             if is_terminal_sse_event(self.path, frame):
                 self.terminal = frame
-                return True
+                continue
             if not self.chat_identity:
                 self.chat_identity = chat_completion_chunk_identity(frame)
             await self.response.write(frame)
-        return False
+        return self.terminal is not None
 
 
 @dataclass
@@ -394,7 +425,7 @@ class InferenceReplica:
         """The row that answers ``payload``, with the choice of the scenario's traffic split.
 
         The choice is None when the scenario has no split, the request names another row, Reef cannot identify the
-        conversation, or the selected artifact has no route. Then ``row_for_model`` gives the row. Only a split computes
+        conversation, or the selected artifact has no route, as while it starts. Then ``row_for_model`` gives the row. Only a split computes
         a bucket.
         """
         serving = self.cache.serving(scenario, refresh=refresh)
@@ -407,7 +438,7 @@ class InferenceReplica:
             selected = serving.rows.get(artifact_id)
             if selected is not None:
                 return selected, TrafficChoice(artifact_id, bucket, weights)
-            logger.warning("scenario %s: artifact %s has a traffic weight but no route", scenario, artifact_id)
+            # The artifact has no route yet, or the scenario stopped serving it: the active artifact answers.
         return row_for_model(scenario, serving.rows, model), None
 
     def record(
@@ -474,7 +505,7 @@ class InferenceReplica:
             artifact_id = model
         try:
             route = self.cache.read(scenario, model)
-        except (NotServed, StaleServedModels, LookupError):
+        except (NotServedError, StaleServedModelsError, LookupError):
             route = None
         if item.state == "finished" or (route is not None and route.artifact_id == artifact_id):
             # A published route serves the artifact already: the request that starts another artifact beside it, or
@@ -504,7 +535,7 @@ class InferenceReplica:
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
-        except (NotServed, StaleServedModels, LookupError):
+        except (NotServedError, StaleServedModelsError, LookupError):
             return None, None, None
         engine = handler.engine_state(served)
         if engine != "starting":
@@ -530,7 +561,7 @@ class InferenceReplica:
             if use_split:
                 return await asyncio.to_thread(self.route, scenario, payload, session_key, refresh=refresh)
             return await asyncio.to_thread(self.cache.read, scenario, payload.get("model"), refresh=refresh), None
-        except NotServed as exc:
+        except NotServedError as exc:
             status = await asyncio.to_thread(self.startup_status, scenario, ACTIVE if name is None else name)
             if status["state"] in ("pending", "starting"):
                 raise web.HTTPServiceUnavailable(
@@ -546,8 +577,38 @@ class InferenceReplica:
                     content_type="application/json",
                 ) from exc
             raise web.HTTPServiceUnavailable(text="The inference route is unavailable.") from exc
-        except StaleServedModels as exc:
+        except StaleServedModelsError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+
+    async def row_for_retry(
+        self, scenario: str, payload: Mapping[str, Any], *, kept_row: str | None, kept_artifact: str | None
+    ) -> ServedArtifact:
+        """The row for the retry of a request to ``scenario``, read again without running the split.
+
+        At most one of ``kept_row`` and ``kept_artifact`` is set. ``kept_row`` is the row that the request selected:
+        the artifact of a split's choice, or a named route's row. ``kept_artifact`` is the artifact that the
+        request's ``model`` named and that was selected for the first attempt. Such a request keeps its artifact:
+        the retry reads the row ``kept_row``, or the row for ``payload``'s model, which must still serve
+        ``kept_artifact``. When that row is gone, or serves another artifact, the retry answers 503 with
+        ``Retry-After``; a new request selects again. Any other request reads the row for its model again, as
+        ``resolve`` reads it without a split, so its retry can reach a new active artifact.
+        """
+        if kept_row is None and kept_artifact is None:
+            return (await self.resolve(scenario, payload, name=None, refresh=True))[0]
+        gone = f"artifact {kept_row or kept_artifact!r} of scenario {scenario!r} has no route any more"
+        try:
+            if kept_row is not None:
+                return await asyncio.to_thread(self.cache.read_named, scenario, kept_row, refresh=True)
+            # The row of the model's name, else the active row, as at the first read.
+            served = await asyncio.to_thread(self.cache.read, scenario, kept_artifact, refresh=True)
+        except NotServedError as exc:
+            raise web.HTTPServiceUnavailable(text=gone, headers={"Retry-After": "1"}) from exc
+        except StaleServedModelsError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        if served.artifact_id != kept_artifact:
+            # The artifact lost its row: the model now reaches the active artifact, which is another one.
+            raise web.HTTPServiceUnavailable(text=gone, headers={"Retry-After": "1"})
+        return served
 
     def handler(self, served: ServedArtifact) -> InferenceHandler:
         try:
@@ -560,7 +621,7 @@ class InferenceReplica:
         scenario's serving config; 400 when its handler refuses it."""
         try:
             serving_config = self.cache.serving_config(scenario)
-        except StaleServedModels as exc:
+        except StaleServedModelsError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
         try:
             return self.handler(served).request_payload(payload, serving_config=serving_config)
@@ -568,17 +629,25 @@ class InferenceReplica:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The answer of the engine of ``served`` to ``payload`` under the row's model name: 502 for an error status,
-        an unreachable engine or an answer that is no JSON object, 504 when the engine does not answer in time."""
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name. An engine's 4xx keeps its
+        status and message; a 5xx, an unreachable engine or an answer that is no JSON object is 502, and an engine
+        that does not answer in time 504. ``RuntimeLoadMismatchError`` when the engine refuses the row's model name
+        (421); ``answer`` then retries once."""
         handler = self.handler(served)
         try:
             return await asyncio.wait_for(
                 handler.inference(
-                    InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
+                    InferenceArtifact(served.artifact_id, served_model=served.model_name),
+                    path,
+                    handler.address_model(payload, served.model_name),
                 ),
                 timeout=self.timeout_seconds,
             )
-        except (UpstreamStatusError, aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
+        except UpstreamStatusError as exc:
+            if exc.status == 421:
+                raise RuntimeLoadMismatchError("the engine refused the selected binding") from exc
+            raise
+        except (aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
@@ -615,21 +684,34 @@ class InferenceReplica:
             use_split=not rollout,
             session_key=request.headers.get(SESSION_KEY_HEADER),
         )
-
-        if payload.get("stream") is True:
-            if rollout:
-                raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
-            sent = self.request_payload(parsed.scenario, served, payload)
-            return await self.relay_stream(request, path, parsed, sent, served, record=record, traffic=traffic)
+        streaming = payload.get("stream") is True
+        if streaming and rollout:
+            raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
+        # A retry keeps an artifact that the request selected: a split's choice, a named route's row, or the artifact
+        # whose ID the body's model is. Any other request reads its row again, which can name a new active artifact.
+        kept_row = name if traffic is None else traffic.artifact_id
+        model = payload.get("model")
+        body_names_artifact = kept_row is None and model != ACTIVE and model == served.artifact_id
+        kept_artifact = served.artifact_id if body_names_artifact else None
+        # Each attempt builds its body and handler from its row: a row read again can name another engine.
         for attempt in range(2):
             sent = self.request_payload(parsed.scenario, served, payload)
-            response = await self.forward(served, path, sent)
+            try:
+                if streaming:
+                    return await self.relay_stream(request, path, parsed, sent, served, record=record, traffic=traffic)
+                response = await self.forward(served, path, sent)
+            except RuntimeLoadMismatchError as exc:
+                if attempt == 1:
+                    raise web.HTTPServiceUnavailable(text=str(exc), headers={"Retry-After": "1"}) from exc
+                served = await self.row_for_retry(
+                    parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact
+                )
+                continue
             if not inference_aborted(response):
                 break
             if attempt == 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
-            retry_name = name if traffic is None else traffic.artifact_id
-            served, _ = await self.resolve(parsed.scenario, payload, name=retry_name, refresh=True)
+            served = await self.row_for_retry(parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact)
         reply_headers = {ARTIFACT_HEADER: served.artifact_id}
         if record:
             try:
@@ -652,14 +734,36 @@ class InferenceReplica:
         record: bool,
         traffic: TrafficChoice | None = None,
     ) -> web.StreamResponse:
-        """Stream the engine's answer to the client and, for a recorded call, append its record at the end. An SSE
-        stream gets the record's receipt before its terminal event."""
+        """Stream the engine's answer to the client and, for a recorded call, append its record at the end, once. An
+        SSE stream gets the record's receipt before its terminal event.
+
+        The stream is complete when the engine answered with a 2xx status, reported no error or abort, ended an SSE
+        stream with a successful terminal event, and delivered a promised capture
+        (``InferenceStream.record_response_pending``). After the client response started, a failure (the engine's
+        error, a transport error, a handler's ``RuntimeLoadMismatchError``, the timeout, a missing capture or
+        terminal event) ends it without its terminal event and closes the connection, so the client reads a
+        transport error and no receipt.
+        An engine abort keeps its terminal event, without a receipt.
+        An exception before the client response started is raised again: an engine's 4xx keeps its status and
+        message, and its refusal of the row's model name (421) is ``RuntimeLoadMismatchError``. That error leaves
+        this method only then, so the caller can retry the refusal without a second response.
+        """
         handler = self.handler(served)
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         try:
-            upstream = await handler.inference_stream(
-                InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
+            upstream = await asyncio.wait_for(
+                handler.inference_stream(
+                    InferenceArtifact(served.artifact_id, served_model=served.model_name),
+                    path,
+                    handler.address_model(payload, served.model_name),
+                ),
+                timeout=self.timeout_seconds,
             )
-        except (UpstreamStatusError, aiohttp.ClientError) as exc:
+        except UpstreamStatusError as exc:
+            if exc.status == 421:
+                raise RuntimeLoadMismatchError("the engine refused the selected binding") from exc
+            raise
+        except aiohttp.ClientError as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
@@ -668,6 +772,7 @@ class InferenceReplica:
         error: str | None = None
         recorded = False
         response: web.StreamResponse | None = None
+        captured_stream = upstream.record_response_pending or upstream.record_response is not None
         try:
             headers = {
                 key: value
@@ -678,21 +783,37 @@ class InferenceReplica:
             content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
             response = web.StreamResponse(status=upstream.status, headers=headers)
             await response.prepare(request)
-            if "text/event-stream" in content_type.lower():
-                relay = SSERelay(path, response, for_codex=self.for_codex)
+            relay = (
+                SSERelay(path, response, for_codex=self.for_codex, captured_stream=captured_stream)
+                if "text/event-stream" in content_type.lower()
+                else None
+            )
+            async with asyncio.timeout_at(deadline):
                 async for chunk in upstream.chunks:
                     body.extend(chunk)
-                    if await relay.feed(chunk):
-                        break
-                if relay.terminal is None:
+                    if relay is None:
+                        await response.write(chunk)
+                    else:
+                        terminal = await relay.feed(chunk)
+                        if terminal and not captured_stream:
+                            # Ordinary opaque proxies keep their terminal-frame contract; they are not qualified pins.
+                            break
+                if relay is not None and (captured_stream or relay.terminal is None):
                     await relay.finish()
-                if relay.terminal is None:
-                    error = "the engine's SSE stream ended without a terminal event"
-                elif upstream.record_response is not None and inference_aborted(upstream.record_response):
-                    error = INFERENCE_ABORT_ERROR
-                    await response.write(relay.terminal)
-                else:
-                    complete = True
+            if not 200 <= upstream.status < 300:
+                error = f"the engine's stream returned HTTP {upstream.status}"
+            elif upstream.record_response_pending and upstream.record_response is None:
+                error = "the engine's stream ended without its promised capture"
+            elif upstream.record_response is not None and inference_aborted(upstream.record_response):
+                error = INFERENCE_ABORT_ERROR
+            elif relay is not None and relay.error is not None:
+                error = relay.error
+            elif relay is not None and relay.terminal is None:
+                error = "the engine's SSE stream ended without a terminal event"
+            else:
+                complete = True
+            if relay is not None and relay.terminal is not None:
+                if complete:
                     frames: tuple[bytes, ...] = (relay.terminal,)
                     if record:
                         recorded = True
@@ -708,17 +829,23 @@ class InferenceReplica:
                         frames = receipt_sse_events(path, relay.chat_identity, relay.terminal, record_id)
                     for frame in frames:
                         await response.write(frame)
-            else:
-                async for chunk in upstream.chunks:
-                    body.extend(chunk)
-                    await response.write(chunk)
-                complete = not (upstream.record_response is not None and inference_aborted(upstream.record_response))
-                if not complete:
-                    error = INFERENCE_ABORT_ERROR
+                elif error == INFERENCE_ABORT_ERROR:
+                    await response.write(relay.terminal)
         except ConnectionResetError:
             if response is None:
                 raise
+            complete = False
             error = "the client disconnected"
+        except (aiohttp.ClientError, ValueError, RuntimeLoadMismatchError, TimeoutError) as exc:
+            if response is None or not response.prepared:
+                # Setup failed before the client response started: the error is the answer.
+                raise
+            complete = False
+            error = "the engine's stream timed out" if isinstance(exc, TimeoutError) else str(exc)
+        except asyncio.CancelledError:
+            complete = False
+            error = "the stream was cancelled"
+            raise
         finally:
             await upstream.close()
             if error is not None:
@@ -736,6 +863,11 @@ class InferenceReplica:
                     )
                 except Exception:
                     logger.exception("could not append the record of a stream of %s", parsed.scenario)
+        if response.prepared and 200 <= upstream.status < 300 and not complete and error != INFERENCE_ABORT_ERROR:
+            # Standard SDKs accept a clean HTTP EOF even without an SSE terminal event.
+            transport = request.transport
+            if transport is not None:
+                transport.abort()
         return response
 
 
@@ -840,9 +972,9 @@ __all__ = [
     "RECORD_HEADER",
     "SESSION_KEY_HEADER",
     "InferenceReplica",
-    "NotServed",
+    "NotServedError",
     "ServedModelsCache",
-    "StaleServedModels",
+    "StaleServedModelsError",
     "TrafficChoice",
     "TrafficWeights",
     "add_inference_routes",

@@ -22,7 +22,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from reef.train.slime_backend.algorithm import PolicyGradientWeight, resolve_args_loss_family
+from reef.train.slime_backend.algorithm import PolicyGradientWeight
+from reef.train.slime_backend.loss_families import resolve_args_loss_family
 from reef.train.slime_backend.score_centering import (
     TOPK_INDICES_KEY,
     TOPK_LOG_PROBS_KEY,

@@ -11,7 +11,7 @@ def test_request_normalization_preserves_text_and_cleans_optional_fields() -> No
     payload = {
         "text": "  Improve the harness\n",
         "session": "session-1",
-        "artifact_id": "release-1",
+        "artifact_id": "artifact-1",
         "id": "untrusted-id",
         "requires": [{"name": "TOKEN", "kind": "env", "prompt": "  Set the token  ", "extra": True}],
         "client": {
@@ -24,7 +24,7 @@ def test_request_normalization_preserves_text_and_cleans_optional_fields() -> No
     expected = {
         "text": "  Improve the harness\n",
         "session": "session-1",
-        "artifact_id": "release-1",
+        "artifact_id": "artifact-1",
         "requires": [{"name": "TOKEN", "kind": "env", "prompt": "Set the token"}],
         "client": {"platform": "darwin", "commands": {"git": True, "node": False}},
     }

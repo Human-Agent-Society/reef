@@ -7,6 +7,7 @@ implementations may use a database transaction or a recoverable journal.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,8 +25,8 @@ from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
-class ScenarioStoreConflict(ReefError):
-    """A commit's expected step or content conflicts with the stored history."""
+class ScenarioStoreConflictError(ReefError):
+    """A commit's expected commit number or content conflicts with the stored history."""
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,12 @@ class ScenarioSettings:
     ``check_owner``. It is ``None`` only for a scenario that the data sync has
     not opened yet; the first open sets it. ``serving_config`` is the serving fields that the scenario sets over
     the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
-    Construction checks these types.
+    ``serves`` is a boolean. When it is true, control asks inference to serve the scenario's active selection and
+    the artifacts beside it. When it is false, the scenario serves nothing: control withdraws its routes, and no
+    artifact answers its inference requests. ``record2sample_config`` maps the name of a component of the scenario
+    to a JSON object. Each key of that object replaces the same key of the deployment's
+    ``pipeline.record2sample.config`` for the trainer of that component. An empty mapping changes no trainer.
+    Construction checks these types, and keeps its own copies of ``record2sample_config``.
 
     Purpose: the scenario registry and the dispatcher write the settings
     through ``ScenarioStorage.write_settings`` and read them back when a
@@ -55,6 +61,8 @@ class ScenarioSettings:
     activation: Mapping[str, object] | None = None
     owner: str | None = None
     serving_config: ServingConfig = field(default_factory=ServingConfig)
+    serves: bool = True
+    record2sample_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.training_mode is not None and not isinstance(self.training_mode, str):
@@ -67,6 +75,19 @@ class ScenarioSettings:
             check_owner(self.owner)
         if not isinstance(self.serving_config, ServingConfig):
             raise ValueError("scenario settings serving_config must be a ServingConfig")
+        if not isinstance(self.serves, bool):
+            raise ValueError("scenario settings serves must be a boolean")
+        configs = self.record2sample_config
+        if not isinstance(configs, Mapping) or not all(
+            isinstance(component, str) and component and isinstance(config, Mapping)
+            for component, config in configs.items()
+        ):
+            raise ValueError("scenario settings record2sample_config maps component names to objects")
+        try:
+            copied = json.loads(json.dumps(configs, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"scenario settings record2sample_config must encode as JSON: {exc}") from exc
+        object.__setattr__(self, "record2sample_config", copied)
 
 
 class ScenarioStore(ABC):
@@ -117,20 +138,20 @@ class ScenarioStore(ABC):
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:
-        """Read committed steps in increasing order: training steps, activations and new training starts."""
+        """Read commits in increasing commit number order: training steps, activations and new training starts."""
 
     @abstractmethod
     def training_run_position(self) -> tuple[int, int]:
-        """Return the step of the last new training start and the training count after it."""
+        """Return the commit number of the last new training start and the training count after it."""
 
     @abstractmethod
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        """Persist exactly ``expected_step + 1`` with its consumption progress.
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
+        """Persist the commit numbered ``expected_commit_number + 1`` with its consumption progress.
 
         Conflicting writers are serialized across sessions. An identical retry
         (ignoring only ``recorded_at``) returns the original record, even after
-        later steps. Different content or
-        a stale expected step raises ``ScenarioStoreConflict``.
+        later commits. Different content or
+        a stale expected commit number raises ``ScenarioStoreConflictError``.
 
         An exception can occur after the commit becomes durable. Callers
         inspect history or retry the same commit before repeating training.
@@ -140,7 +161,7 @@ class ScenarioStore(ABC):
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
         """Reconcile a checkpoint commit with history.
 
-        ``None`` denotes initial registration before any committed step.
+        ``None`` denotes initial registration before any commit.
         A checkpoint ahead of history is adopted durably.
         Validate scenario identity and continuity after the checkpoint. Return
         the committed head, or ``None`` at creation, without publishing artifacts.
@@ -191,11 +212,13 @@ class ScenarioStorage(Plugin, ABC):
 
     @abstractmethod
     def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
-        """Replace the scenario's settings durably; the caller serializes writers of one scenario."""
+        """Replace the scenario's settings durably; the caller serializes writers of one scenario. Raise
+        ``ScenarioDeletedError`` for a scenario that ``archive`` archived."""
 
     @abstractmethod
     def open(self, scenario: str) -> ScenarioStore:
-        """Open an independently owned session for this scenario."""
+        """Open an independently owned session for this scenario. Raise ``ScenarioDeletedError`` for a scenario
+        that ``archive`` archived, so that no late writer makes a new store of a deleted scenario."""
 
     def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
         """The data items that ``scenario`` trains on, with the training state of its open ``session`` (RFC #1140).
@@ -211,4 +234,4 @@ class ScenarioStorage(Plugin, ABC):
         """Release shared storage resources; repeated closes are harmless."""
 
 
-__all__ = ["ScenarioSettings", "ScenarioStorage", "ScenarioStore", "ScenarioStoreConflict"]
+__all__ = ["ScenarioSettings", "ScenarioStorage", "ScenarioStore", "ScenarioStoreConflictError"]

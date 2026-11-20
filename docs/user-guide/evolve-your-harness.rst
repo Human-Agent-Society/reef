@@ -131,19 +131,16 @@ Online: learn from your sessions
    reef-client harness connect <scenario> --reef http://127.0.0.1:8901
    pi
 
-   # Score the session over its model calls: 0 fails, 1 succeeds.
-   CALLS=$(curl -s "http://127.0.0.1:8901/reef/scenarios/<scenario>/records?request_type=inference&limit=100" \
-     | jq -c '[.records[].agent_record_id]')
-   curl -s -X POST http://127.0.0.1:8901/reef/report \
-     -H "x-reef-scenario: <scenario>" -H "Content-Type: application/json" \
-     -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
+After the session, `report feedback on its last model call
+<../getting-started/harness-tutorial.rst#tell-reef-how-it-went>`__.
+Then check for a new harness:
 
-   # The steps and their results; a row with "selected": true is a new snapshot.
+.. code:: bash
+
+   # A row with "selected": true is a new snapshot.
    curl -s -H "x-reef-scenario: <scenario>" http://127.0.0.1:8901/reef/harness/artifacts
 
-The next ``pi`` session starts on the new active selection. `Tutorial: evolve your
-agent's harness <../getting-started/harness-tutorial.rst>`__ walks through
-these steps.
+The next ``pi`` session uses the active selection.
 
 Offline: learn from uploaded tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -191,11 +188,10 @@ The example runs the online way without a person:
    cd tutorials/evolve-your-harness && ./run.sh
 
 ``configs/serve.yaml`` holds the endpoint, the model and the token. Three
-exact-answer tasks go through Reef, and each graded reply is one step. The
-run succeeds when a row of ``/reef/harness/artifacts`` shows ``selected:
-true``. When both sides score nothing, no run gave an answer: vLLM, for
-example, needs ``--enable-auto-tool-choice --tool-call-parser hermes``. See
-`Troubleshooting <troubleshooting.rst>`__.
+exact-answer tasks go through Reef, and each graded reply starts one step.
+A row of ``/reef/harness/artifacts`` with ``selected: true`` means a new harness
+was published. Tied or unchanged candidates keep the current harness.
+See `Troubleshooting <troubleshooting.rst>`__.
 
 The harness tree
 ----------------
@@ -354,8 +350,9 @@ Running runs
    * - ``local`` (default)
      - a plain subprocess, with no isolation; for development
    * - ``sandbox``
-     - a bubblewrap jail: read-only base, explicit credentials only, no
-       network unless ``evolution.sandbox.egress_hosts`` is set
+     - a local sandbox: read-only base, explicit credentials only, no
+       network unless ``evolution.sandbox.egress_hosts`` is set. Linux uses
+       a bubblewrap jail; macOS uses a Seatbelt profile
    * - ``e2b``, ``modal``
      - one cloud sandbox per run (``reef-infra[e2b]`` or
        ``reef-infra[modal]``), with outbound internet
@@ -487,17 +484,17 @@ the deployment's top-level ``activation`` section (`Configuration
 
 An inactive artifact sits in ``GET /reef/harness/artifacts`` with ``active:
 false`` and ``activated: false``, and Reef serves it to no client. The next
-steps train from it in the meantime. To serve it, send the row's
-``artifact_id`` to the activate route. The same route serves an earlier
+steps train from it in the meantime. To serve it, set ``served`` to the row's
+``artifact_id`` with weight 100. The same request serves an earlier
 snapshot again. Clients install the active selection at their next sync:
 
 .. code:: bash
 
-   curl -sS -X POST -H "Content-Type: application/json" -d '{"artifact_id": "<artifact_id>"}' \
-     http://127.0.0.1:8901/reef/scenarios/<scenario>/activate
+   curl -sS -X POST -H "Content-Type: application/json" -d '{"served": {"<artifact_id>": 100}}' \
+     http://127.0.0.1:8901/reef/scenarios/<scenario>/update
 
-`Activate an artifact <operate.rst#activate-an-artifact>`__ describes
-activation, and `Train from an artifact
+`Set what a scenario serves <operate.rst#set-what-a-scenario-serves>`__ describes
+the request, and `Train from an artifact
 <operate.rst#train-from-an-artifact>`__ describes how to make the steps train
 from another snapshot.
 

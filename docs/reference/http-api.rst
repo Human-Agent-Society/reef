@@ -66,17 +66,27 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/trajectories``                                                                   | create trajectory items from JSON Lines           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz of Harbor tasks   |
+| ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz, or by reference  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                                                      | replace a task item's files, or by reference      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data``                                                                                 | the owner's items, in arrival order               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/groups/{key}``                                                                    | the owner's items grouped by a metadata value     |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/sets/{kind}``                                                                     | the owner's benchmarks or trajectory sets         |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/{id}``                                                                            | one item, with its content                        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/metadata``                                                                       | patch the metadata of items                       |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/data/{id}``                                                                         | delete one item                                   |
+| ``DELETE /reef/namespaces/{owner}/data/{id}``                                                                         | delete one item; restore it for 30 days           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/deleted-items``                                                                        | the owner's deleted items, newest first           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/deleted-items/restore``                                                               | restore deleted items                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/deleted-items/{id}``                                                                | purge one deleted item for good                   |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/{id}/archive``                                                                    | one item to download: a task's files as tar.gz,   |
 |                                                                                                                       | another item's content as JSON                    |
@@ -88,6 +98,28 @@ Routes
 | ``POST /reef/namespaces/{owner}/data/exports``                                                                        | export items to a tar.gz at a URI                 |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/exports/{id}``                                                                    | the status of one export                          |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/collections``                                                                          | the owner's collections of benchmarks             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/collections/{name}``                                                                   | create or replace one collection                  |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/collections/{name}``                                                                   | one collection, with its task counts              |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/collections/{name}``                                                                | delete one collection                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``                                                        | make a scenario hold a collection's benchmarks    |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks``                                                      | the benchmarks that a scenario holds              |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{name}``                                               | make a scenario hold a benchmark in a split       |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{name}``                                            | end a scenario's hold of a benchmark              |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets``                                                 | the trajectory sets that a scenario holds         |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets/{name}``                                          | make a scenario hold a trajectory set             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets/{name}``                                       | end a scenario's hold of a trajectory set         |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                                                                 | submit feedback about one or more trajectories    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -101,7 +133,8 @@ Routes
 | ``GET /reef/scenarios/{scenario}/inference/status``                                                                   | artifact startup state; ``?model=active`` by      |
 |                                                                                                                       | default                                           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``                                                                            | update a scenario's settings                      |
+| ``POST /reef/scenarios/{scenario}/update``                                                                            | update a scenario's settings, and set the         |
+|                                                                                                                       | artifacts that it serves                          |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/settings``                                                                           | read a scenario's settings                        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -122,17 +155,10 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts``                                                                         | import a directory as a new artifact              |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/activate``                                                                          | make an existing artifact the one that serves     |
-+-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the complete selection at an earlier step |
+| ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the selection of an earlier commit        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/train-from``                                                                        | set the artifact a trainer starts its next job or |
 |                                                                                                                       | step from                                         |
-+-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/serve``                                                                             | serve an artifact beside the active selection     |
-+-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/stop-serving``                                                                      | stop serving an artifact beside the active        |
-|                                                                                                                       | release                                           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/redeploy``                                                                          | deploy the served engines again (RFC #1299)       |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -141,6 +167,8 @@ Routes
 | ``GET /reef/scenarios/{scenario}/jobs``                                                                               | the scenario's training jobs in the jobs queue    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``                                                              | cancel one training job of the scenario           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel``                                                      | cancel one training request of the scenario       |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                                                            | the scenario's training samples, in use order     |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -156,6 +184,10 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``                                                | cancel one evaluation                             |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``                                                 | run the failed rollouts again                     |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume``                                                | run the cancelled and the unstarted rollouts      |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations``                                                                        | artifact evaluations, newest first                |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                                                        | one evaluation: its state and result              |
@@ -170,7 +202,7 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``                                           | the trajectories of an evaluation, as NDJSON      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``                                                                                 | remove a scenario; its state is archived          |
+| ``DELETE /reef/scenarios/{scenario}``                                                                                 | delete a scenario; the sweep archives its state   |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                                                                                                 | the harness tree of the active selection, rendered|
 |                                                                                                                       | for the adapter, as its source tree, or bound for |
@@ -210,7 +242,7 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | Header                            | Required for                                            |
 +===================================+=========================================================+
-| ``x-reef-scenario``               | inference, report, harness manifest, releases and       |
+| ``x-reef-scenario``               | inference, report, harness manifest, artifacts and      |
 |                                   | import. Names the workload a record belongs to.         |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
@@ -223,7 +255,7 @@ Headers
 |                                   | artifact, use ``?artifact_id=``.                        |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: context stored under             |
-|                                   | ``metadata.tags``; see `Client release tags`_ below.    |
+|                                   | ``metadata.tags``; see `Client artifact tags`_ below.   |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
 |                                   | runs itself. It is served like any other call, but no   |
@@ -283,7 +315,7 @@ request. These checks precede Scenario creation and provider execution:
 * A missing Scenario or model, an unknown target, a private router entrypoint
   as ``model``, a repeated ``x-reef-*`` header, a client-supplied
   ``x-reef-routing-*``, ``x-reef-sr-decision`` or ``x-selected-model`` header,
-  and a nonempty ``x-reef-artifact-id`` or legacy ``x-reef-release-id`` return 400.
+  and a nonempty ``x-reef-artifact-id`` return 400.
 * A disabled target returns 503.
 * A managed deployment returns 408 when the request body does not finish
   uploading within 30 seconds.
@@ -326,8 +358,9 @@ Routing deployments are record-only. These markers do not prevent a custom
 processor from selecting an exported or imported shadow record for training.
 
 A shadow keeps its original Scenario storage binding until its record is finalized.
-If that Scenario is archived or replaced meanwhile, Reef rejects the late write
-instead of storing it in a replacement Scenario; the primary result is unaffected.
+Managed routing rejects the write if the Scenario instance is unloaded, reloaded
+or deleted in the meantime. External replicas reject writes from an archived
+record generation. A deleted Scenario ID stays retired.
 Before deleting or archiving a Scenario, stop and drain its external inference
 replicas so their storage sessions close. The record binding does not coordinate
 archival across processes; in particular, it does not make live SQLite archival safe.
@@ -342,7 +375,9 @@ may keep these marks: an import is not proof that Reef made the call.
 ``model_revision`` is declared by the deployment manifest, with
 ``identity_source: deployment_manifest``. The external model serves the request.
 Its record has no Reef ``artifact_id``. The declared revision identifies the
-configured target; it does not prove which weights the provider loaded.
+configured target; it does not prove which weights the provider loaded. Reef
+sends the target no artifact identity. It preserves the provider's returned
+log probabilities in the response and the record.
 
 ``execution_outcome`` is ``completed``, ``aborted``, ``error``, ``timeout`` or
 ``cancelled``; interrupted streams whose execution cannot be established use
@@ -471,8 +506,11 @@ The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
 not mean a training step has finished. Identical retries return the existing
 receipt, including after capacity eviction; reusing the ID with different content
 returns HTTP 409. Authentication failures return 401 and invalid envelopes,
-report schemas or references return 400. Scenario selection comes only from
-headers; envelope fields other than the three shown above are rejected.
+report schemas or references return 400. An inference record with an image also
+returns 400 when the deployment's recipes include a weight-training recipe,
+because training renders text only; a batch then stores nothing. Scenario
+selection comes only from headers; envelope fields other than the three shown
+above are rejected.
 
 ``request_type`` may be ``inference`` or ``report``. Inference payloads follow
 the selected recipe's recorded-input contract: native provider request fields
@@ -514,7 +552,7 @@ Batch imports and resume
 ``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
 record uses the same three-field envelope as ``POST /reef/records``. The batch
 must contain 1 to 1000 records and fit within the 10 MiB request-body limit.
-All records share the request's scenario, release and tag headers. Put an
+All records share the request's scenario and tag headers. Put an
 inference before reports that reference it, including within the same batch.
 
 Reef validates the entire batch and persists it in one database transaction.
@@ -585,12 +623,17 @@ for the deployment (RFC #1028). An item is content and metadata:
   ``origin``: the scenario that made a record or an artifact. A record's
   ``origin.source`` is ``inference`` or ``evaluation``; a record without it is
   ``inference``. ``kind``, ``owner``, ``origin`` and ``evaluation_id`` never
-  change. You can add other keys.
+  change. A task can have ``benchmarks``: the names of the benchmarks that
+  it is in (`Benchmarks and collections`_). A trajectory can have
+  ``trajectory_sets``: the names of the trajectory sets that it is in
+  (`The sets that a scenario holds`_). You can add other keys.
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
-the item to its split, ``train`` or ``eval``. A trajectory is always
-``train``. An artifact item has no ``scenarios``: a scenario uses it by
+the item by this mark to its split, ``train`` or ``eval``. A trajectory is always
+``train``. A scenario can also use a task through a benchmark that it holds,
+and a trajectory through a trajectory set, with no mark on the item
+(`The sets that a scenario holds`_). An artifact item has no ``scenarios``: a scenario uses it by
 importing it (`Artifact items`_).
 
 The data service answers the data routes. A one-process ``reef serve`` runs
@@ -649,6 +692,11 @@ returns 409. A line that is not an ATIF document returns 400 and names the
 line. ``POST /reef/namespaces/{owner}/data`` refuses a trajectory; it creates
 record items only.
 
+When the deployment's recipes include a weight-training recipe, Reef first
+refuses a trajectory or a record item with an image, also one that names no
+scenario, because training renders text only. The refusal returns 400, names
+the item, and stores nothing.
+
 Before Reef stores the items, it checks each scenario that they name. The
 scenario must have the owner, and its recipe must train on the items:
 
@@ -675,12 +723,39 @@ scenario that does not exist yet when the scenario opens.
 Create task items
 ~~~~~~~~~~~~~~~~~
 
-Send a gzip-compressed tar archive to ``POST
-/reef/namespaces/{owner}/data/tasks`` with ``Content-Type:
-application/gzip``. Each top-level entry is one Harbor task directory, named
-by its task name: a lowercase letter or a digit, then lowercase letters,
-digits, ``.``, ``_`` and ``-``. The task name is the item's ID. The query
-parameter ``metadata`` is the JSON metadata of every task of the archive:
+``POST /reef/namespaces/{owner}/data/tasks`` creates one task item for each
+Harbor task directory. The task name is the item's ID: a lowercase letter or a
+digit, then lowercase letters, digits, ``.``, ``_`` and ``-``. A request
+holds 1 to 1000 tasks. The request has one of two forms:
+
+- An archive (``Content-Type: application/gzip``). The data service unpacks
+  the archive and copies each task directory into the task file store.
+- A reference (``Content-Type: application/json``). The client wrote each task
+  directory into the task file store itself. The data service copies no file.
+  Use this form for a task that is too large for an archive.
+
+Every task must be within the limits on its files. The module
+``reef.storage.tasks`` defines them, so a client can check a task before it
+sends it (``task_limit_errors``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Limit
+     - Value
+   * - Size of one file
+     - 500 GB (``MAX_TASK_FILE_BYTES``)
+   * - Entries, files and directories, directly in one directory
+     - 10,000 (``MAX_TASK_DIRECTORY_ENTRIES``)
+   * - Files in one task
+     - 100,000 (``MAX_TASK_FILES``)
+   * - Size of one task
+     - no limit
+
+In the archive form, each top-level entry of the gzip-compressed tar archive
+is one task directory, named by its task name. The query parameter
+``metadata`` is the JSON metadata of every task of the archive:
 
 .. code:: bash
 
@@ -692,18 +767,87 @@ parameter ``metadata`` is the JSON metadata of every task of the archive:
      -H 'Content-Type: application/gzip' \
      --data-binary @tasks.tar.gz
 
-The response is the same as for trajectory items, in name order. Reef
-returns:
+The data service writes the body to a local file before it unpacks it. The
+setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see
+`The data section <configuration.rst#the-data-section>`__). The files of one
+archive unpack to at most 8 GiB; create larger tasks in the reference form.
+Harbor's task loader must accept each task directory.
+
+In the reference form, first write each task directory into the owner's
+partition of the task file store, in the layout of the deployment's
+``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner
+``<owner>`` is ``data/<owner>``. The directory has the task name as its name.
+Compute its digest with ``reef.storage.tasks.FilesDigest``, or with
+``files_digest`` for a local directory. Then send the task names and digests
+as JSON. ``metadata`` is optional, as in the archive form:
+
+.. code:: bash
+
+   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks" \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"tasks": [{"name": "sum-391", "digest": "<files digest>"}],
+          "metadata": {"scenarios": {"my-agent": "train"}}}'
+
+For each task, the task file store must hold a complete directory with that
+name and digest in the owner's partition (``TaskFileStore.contains``). The
+item then gets that digest. The data service does not run Harbor's task
+loader on a reference: the client that wrote the files checks them.
+
+Both forms return the same response as for trajectory items, with the items in
+name order. Reef returns:
 
 - 400, and stores nothing, for an archive that is not tar.gz, a link or a
   device in it, a path outside its task directories, a file at the top level,
-  a name that is not a task name, more than 1000 tasks or 10,000 entries, more
-  than 256 MiB unpacked, a directory that Harbor's task loader refuses, or
-  metadata that is not a JSON object of kind ``task``;
-- 413 for a body larger than 256 MiB;
+  a task over a limit of the table above, or a directory that Harbor's task
+  loader refuses;
+- 400, and stores nothing, for a reference body that is not
+  ``{"tasks": [{"name", "digest"}], "metadata"}``, or a digest that is not 64
+  lowercase hexadecimal digits;
+- 400, and stores nothing, for a name that is not a task name, more than 1000
+  tasks, or metadata that is not a JSON object of kind ``task``;
+- 404, and stores nothing, for a reference to a task directory that the
+  owner's partition does not hold;
 - 409, and stores nothing, for a task name that the owner holds with other
-  files. To change a task, give it a new name;
+  files. To change the files of a task, replace them (below);
+- 413 for an archive body larger than ``data.max-task-archive-bytes``;
 - 415 for another content type.
+
+Replace a task's files
+~~~~~~~~~~~~~~~~~~~~~~
+
+``PUT /reef/namespaces/{owner}/data/tasks/{id}`` gives the task item ``id``
+new files. The new task directory has the item's ID as its name. The request
+has the same two forms as a create:
+
+- An archive of that one directory (``Content-Type: application/gzip``):
+
+  .. code:: bash
+
+     tar -czf sum-391.tar.gz -C /data/benchmark/tasks sum-391
+     curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks/sum-391" \
+       -X PUT \
+       -H "Authorization: Bearer $REEF_TOKEN" \
+       -H 'Content-Type: application/gzip' \
+       --data-binary @sum-391.tar.gz
+
+- A reference (``Content-Type: application/json``) to a directory that the
+  client wrote into the owner's partition of the task file store:
+  ``{"digest": "<files digest>"}``.
+
+The item keeps its ID, metadata and splits. Each evaluation attempt reads
+the task's current files, so a new evaluation and a retry of a started one
+(``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``) run
+the new files. An attempt that already runs finishes with the old files, so one
+evaluation can hold scores of both. A trainer of a scenario that uses the
+task reads it again. The same files again change nothing.
+
+The response is ``{"owner", "item", "synced"}``, without content. Reef
+returns 400, and changes nothing, for an archive of no task or of several, a
+directory with another name, a directory that Harbor's task loader refuses,
+a reference body that is not ``{"digest"}``, or an item that is not a task;
+404 for an unknown item or a reference to a directory that the owner's
+partition does not hold; 413 and 415 as for a create.
 
 Record items
 ~~~~~~~~~~~~
@@ -818,7 +962,7 @@ The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
 Its ``source_uri`` comes from the artifact backend: a backend
-that keeps releases where other deployments can read them, such as an object
+that keeps snapshots where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
 backend gives none, so its items have a null ``source_uri``.
 
@@ -841,24 +985,31 @@ an artifact item: see `Create a scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&group_key=&group_value=&after=&limit=&content=``
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&trajectory_set=&id_prefix=&group_key=&group_value=&after=&before=&limit=&content=``
   lists the owner's items in the order they arrived: ``{"owner", "items",
-  "next"}``. ``kind`` and ``scenario`` filter the items. ``group_key`` keeps
+  "next"}``. ``kind`` and ``scenario`` filter the items. ``benchmark`` keeps
+  only the tasks of one benchmark, and ``trajectory_set`` only the
+  trajectories of one trajectory set. ``id_prefix`` keeps only the items
+  whose ID starts with it. ``group_key`` keeps
   only the items of one group of the groups route below: those with the
   string ``group_value`` under ``group_key`` in their metadata, or with no
   string there when ``group_value`` is not given. ``group_value`` without
   ``group_key`` returns 400. ``after`` is the
   ``sequence`` of the last item of the previous page, 0 by default. ``limit``
   is 1 to 1000, 1000 by default. ``next`` is the ``after`` of the next page,
-  or null after the last item. With ``content=1``, each item has its
+  or null after the last item. ``before`` pages backward: the items come
+  newest first, from the one just before the sequence ``before``, and ``next``
+  is the ``before`` of the next page. For example, ``trajectory_set=week-12``,
+  ``before`` set to a trajectory's sequence and ``limit=1`` give the trajectory
+  before it in the set. With ``content=1``, each item has its
   ``content``, as a read of the item gives it; the default ``content=0``
   leaves it out. Use it with ``kind=artifact`` to read the artifact library's
   kinds and sources in one page; a page of trajectories with content can be
   large.
 - ``GET /reef/namespaces/{owner}/data/groups/{key}?kind=&scenario=&before=&limit=``
   groups the owner's items of ``kind`` by the string under ``key`` in their
-  metadata, for example the trajectories of each uploaded file by
-  ``set_id``: ``{"owner", "groups", "next"}``. Each group is ``{"value",
+  metadata, for example the evaluation calls by ``evaluation_id``:
+  ``{"owner", "groups", "next"}``. Each group is ``{"value",
   "item_count", "first_sequence", "last_sequence", "metadata"}``. ``value`` is
   null for the items without a string under ``key``. ``metadata`` is that of
   the group's first item. The groups come newest first, by
@@ -871,6 +1022,17 @@ Read, query, update and delete items
   To read the items of one group, query with ``group_key`` and its
   ``value``, and page with ``after`` from its ``first_sequence``. Give the
   same ``scenario`` to that query.
+- ``GET /reef/namespaces/{owner}/data/sets/{kind}?scenario=&before=&limit=``
+  lists the owner's sets of ``kind``, ``benchmark`` or ``trajectory_set``, that
+  have at least one item: ``{"owner", "sets", "next"}``. ``scenario`` lists
+  only the sets with an item that the scenario uses, and counts only those
+  items. Each set is ``{"name",
+  "item_count", "first_sequence", "last_sequence", "metadata"}``.
+  ``metadata`` is that of the set's first item. The sets come newest first, by
+  ``first_sequence``. ``before`` and ``limit`` page them as in the groups
+  route. Reef reads a table of the items' sets, not the items, so a listing
+  takes the same time for sets of ten items and of ten thousand. To read the
+  items of one set, query with ``benchmark`` or ``trajectory_set``.
 - ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
   ``content``. A task's ``content`` is null.
 - ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],
@@ -885,16 +1047,21 @@ Read, query, update and delete items
   ``{"owner", "id", "deleted": true, "synced"}``. The scenarios that used a
   trajectory or a task lose its copy. A record stays in the record store of the
   scenario that made it. The item of an artifact that a scenario made returns 400 while
-  the scenario exists, because the next copy would make it again.
+  the scenario exists, because the next copy would make it again. Reef keeps the
+  deleted item for 30 days, so you can restore it (`Restore deleted items`_).
 
 An unknown ID returns 404. A deployment without a data store returns 503.
 An item that leaves a scenario keeps its train counts there, so ``auto`` does
 not train it again if it comes back.
 
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
-[{"name", "split", "files_digest", "trained"}]}``: the tasks that the
-scenario uses, in the order they joined it. ``trained`` is true once a
-committed task job of any trainer of the scenario trained the task.
+[{"name", "split", "benchmark", "files_digest", "trained"}]}``: the uses of
+tasks by the scenario, in the order that they began. ``benchmark`` is the held
+benchmark that gives the use (`The sets that a scenario holds`_), or ``null``
+for the task's own mark. A task
+that the scenario uses more than once is listed once for each use. ``trained``
+is true once a committed task job of any trainer of the scenario trained the
+task.
 
 Two GET routes come before the item routes, because an item ID can hold
 ``/``. A GET of ``.../data/<id>/archive`` downloads the item ``<id>``, and a
@@ -902,6 +1069,150 @@ GET of ``.../data/imports/<x>`` or ``.../data/exports/<x>`` reads a transfer.
 So GET cannot read an item whose ID ends in ``/archive``, or whose ID is
 ``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment. Give such
 items other IDs.
+
+Restore deleted items
+~~~~~~~~~~~~~~~~~~~~~
+
+A delete does not remove an item at once. Reef keeps it as a deleted item of
+its owner for 30 days, and then purges it. A deleted item is in no listing,
+set, scenario or read of the routes above. A new item can take its ID.
+
+- ``GET /reef/namespaces/{owner}/deleted-items?kind=&before=&limit=`` lists
+  the owner's deleted items, newest item first by ``sequence``: ``{"owner",
+  "items", "next"}``. Each item is ``{"id", "sequence", "digest", "metadata",
+  "deleted_at", "purge_at"}``, without content. ``deleted_at`` and
+  ``purge_at`` are seconds since the epoch. ``kind`` keeps one kind of item.
+  ``before`` and ``limit`` page the items as in the item query; ``next`` is the
+  ``before`` of the next page, or null after the last item.
+- ``POST /reef/namespaces/{owner}/deleted-items/restore`` takes ``{"ids":
+  [...]}``, 1 to 1000 IDs, and restores the items, all or none. An item comes
+  back with its ``sequence``, metadata and content, and in its sets. Reef checks
+  its ``scenarios`` as for a create call. Each scenario that uses it again
+  reads it again, also through a held set. The response is ``{"owner",
+  "items", "synced"}``, without content. An ID without a deleted item returns
+  404. An ID that the owner uses for an item again returns 409.
+- ``DELETE /reef/namespaces/{owner}/deleted-items/{id}`` purges one deleted
+  item for good and returns ``{"owner", "id", "purged": true}``. An ID without
+  a deleted item returns 404.
+
+The archive of a scenario removes it from the ``scenarios`` of the deleted
+items too. A reader that pages items with ``after`` and is past the
+``sequence`` of a restored item does not see it again; a scenario reads it
+again through its uses.
+
+Benchmarks and collections
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A benchmark is a name for a set of the owner's tasks. Reef does not store it:
+a task is in a benchmark when the list ``benchmarks`` of its metadata has the
+name. Set the list when you create the tasks, or with a metadata patch:
+``metadata={"benchmarks": ["terminal-bench"]}``. It holds distinct non-empty
+strings, so a task can be in several benchmarks. Only a task has it.
+
+A collection is a stored list of benchmarks under one name. Use it to make a
+scenario hold several benchmarks in one call, and to evaluate an artifact on
+them (`Evaluate an artifact`_).
+
+.. code:: bash
+
+   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/collections/coding \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"benchmarks": ["terminal-bench", "swe-bench-lite"]}'
+
+- ``PUT /reef/namespaces/{owner}/collections/{name}`` creates the collection,
+  or replaces the one with the name. The body takes ``benchmarks``,
+  ``collections`` and ``average``. ``collections`` names other collections of
+  the owner: the collection also has their benchmarks. Each list is empty
+  by default, so ``{}`` creates an empty collection. ``average`` is ``task`` (the default) or
+  ``benchmark``: how an evaluation on the collection computes its
+  ``mean_score``. The response is ``{"owner", "name", "benchmarks",
+  "collections", "average"}``. Reef returns 400 for a name in ``collections``
+  that the owner does not store, and for collections that name each other in
+  a cycle.
+- ``GET /reef/namespaces/{owner}/collections`` lists the owner's collections
+  by name: ``{"owner", "collections"}``.
+- ``GET /reef/namespaces/{owner}/collections/{name}`` returns one collection
+  with ``benchmark_task_counts``, a list of ``{"benchmark", "task_count"}``
+  for each of its benchmarks, and ``task_count``. ``task_count`` counts a task
+  that is in two benchmarks once.
+- ``DELETE /reef/namespaces/{owner}/collections/{name}`` deletes the
+  collection and returns ``{"owner", "name", "deleted": true}``. No task
+  changes. Reef returns 400 while another collection names it.
+- ``POST /reef/namespaces/{owner}/collections/{name}/scenarios`` takes
+  ``{"scenario", "split"}``. The scenario then holds each benchmark that the
+  collection has now, in that split (`The sets that a scenario holds`_). A
+  benchmark that joins the collection later is not held. The response is
+  ``{"owner", "name", "scenario", "split", "holds", "task_count", "synced"}``:
+  ``holds`` lists the holds, and ``task_count`` counts a task of two
+  benchmarks once. A collection without a benchmark returns 400.
+
+An unknown collection returns 404.
+
+The sets that a scenario holds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A scenario holds sets of items (RFC #1420): benchmarks, which are sets of
+tasks, and trajectory sets. It then uses the items of the set. A hold writes
+no item, so it takes the same time for a set of ten items and of ten
+thousand.
+
+A trajectory set is a name for a set of the owner's trajectories, as a
+benchmark is for tasks: a trajectory is in the set when the list
+``trajectory_sets`` of its metadata has the name. Set the list when you
+upload the trajectories, or with a metadata patch:
+``metadata={"trajectory_sets": ["week-12"]}``. It holds distinct non-empty
+strings, so a trajectory can be in several sets. Only a trajectory has it.
+The trajectories that a scenario's trainer makes from its records are in the
+set ``samples:<scenario>``.
+
+.. code:: bash
+
+   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/scenarios/my-agent/benchmarks/terminal-bench \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"split": "eval"}'
+
+   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/scenarios/my-agent/trajectory-sets/week-12 \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{}'
+
+The routes of benchmarks are under
+``/reef/namespaces/{owner}/scenarios/{scenario}/benchmarks``, and those of
+trajectory sets under ``…/trajectory-sets``.
+
+- ``PUT …/{name}`` makes the scenario hold the set. For a benchmark the body
+  is ``{"split"}``, ``train`` or ``eval``. A scenario can hold one benchmark
+  in both splits, with one call for each: the two holds are apart. For a
+  trajectory set the body is ``{}``: a trajectory always trains.
+  The response is ``{"owner", "scenario", "kind", "name", "split",
+  "item_count", "synced"}``; ``kind`` is ``benchmark`` or ``trajectory_set``.
+  A ``train`` hold of a benchmark needs a recipe that trains imported tasks,
+  and a hold of a trajectory set one that takes uploaded trajectories, as a
+  mark does; else Reef returns 400.
+- ``DELETE …/{name}?split=<split>`` ends the hold in that split: ``{"owner",
+  "scenario", "kind", "name", "split", "released", "synced"}``. A benchmark
+  needs ``split``; a trajectory set does not. ``released`` is false when the
+  scenario did not hold the set in that split.
+- ``GET`` of the two base paths returns ``{"owner", "scenario", "kind",
+  "holds"}``: each hold with its ``split`` and its ``item_count``, in the
+  order of the names.
+
+The membership is live. An item that joins a held set, by a create or by a
+metadata patch, joins the scenario, and an item that leaves the set leaves it.
+
+A scenario uses an item once for each held set that the item is in, and once
+more when the item's own ``scenarios`` metadata names the scenario. Reef
+compares no item lists and refuses no overlap:
+
+- A task in two held ``train`` benchmarks has two uses. A trainer reads the
+  train uses as a set of items, so a job holds the task once, and the task has
+  one train count. The same holds for a trajectory with a mark and a held set.
+- A task in a ``train`` benchmark and in an ``eval`` benchmark is trained, and
+  an evaluation runs it. The same holds for each task of a benchmark that the
+  scenario holds in both splits. Reef does not prevent it: hold a benchmark in
+  one split when the evaluation must not see trained tasks.
 
 Download an item
 ~~~~~~~~~~~~~~~~
@@ -932,12 +1243,18 @@ data service worker:
   /reef/namespaces/{owner}/data/exports/{id}`` read the status. An unknown
   ID, or the ID of another owner's transfer, returns 404.
 
-The status is ``{"id", "kind", "state", "request", "result", "error"}``:
+The status is ``{"id", "kind", "state", "request", "progress", "result",
+"error"}``:
 
 - ``kind`` is ``data_import`` or ``data_export``.
 - ``state`` is ``queued``, ``assigned``, ``running``, ``finished`` or
   ``failed``.
 - ``request`` is the body that started the transfer.
+- ``progress`` is ``{"items"}`` after a trajectory import stores its first
+  transaction: the count of items stored so far. It is ``null`` before
+  that, and for a task import and an export. A retry stores the same
+  transactions again, which changes no item, and ``progress`` does not go
+  back: it changes only when the retry stores more than the attempts before.
 - ``result`` is set when the transfer finished: ``{"items"}``, the item count,
   for an import, and ``{"items", "bytes"}`` for an export.
 - ``error`` tells why a run failed.
@@ -952,11 +1269,19 @@ adds. It finds the items as follows:
   named after the last segment of the URI's path. Otherwise each directory
   directly under the root that holds ``task.toml`` is one task, named after
   the directory.
-- ``trajectory``: each ``*.jsonl`` file at the root holds one ATIF document a
-  line, as the upload takes them. Each document's ``session_id`` is its item
-  ID; two documents of the import never share one. Reef stores the items in
-  transactions of at most 1000, so an import that fails can leave the items of
-  its earlier transactions. Reef reads no other file.
+- ``trajectory``: each ``*.jsonl`` file and each gzip ``*.jsonl.gz`` file at
+  the root holds one ATIF document a line, as the upload takes them. Each
+  document's ``session_id`` is its item ID; two documents of the import never
+  share one. Reef reads no other file. Reef reads the files in name order,
+  in two passes, and holds one transaction of at most 1000 items and about
+  32 MiB of lines in memory:
+
+  1. Reef checks every line. A bad line, or a ``session_id`` that an earlier
+     line has, fails the import, and Reef stores no item.
+  2. Reef stores the items one transaction at a time. A check that only the
+     data store makes, such as a conflict with an item that the owner
+     stores already, stops the import. The items of the earlier transactions
+     stay.
 
 The import checks and stores the items as the create routes do. It does not
 wait for the syncs of the scenarios that it touched.
@@ -1023,13 +1348,15 @@ the sequence ``after`` (default 0):
 
    {"scenario": "my-agent", "next": null, "samples": [
      {"sample_id": "trajectory-0001", "sequence": 1, "kind": "trajectory", "split": "train",
-      "component": null, "group": null, "train_counts": {}},
+      "component": null, "group": null, "held_set": null, "train_counts": {}},
      {"sample_id": "my-agent.report-17:0", "sequence": 2, "kind": "trajectory", "split": "train",
-      "component": "", "group": null, "train_counts": {"": 1}}]}
+      "component": "", "group": null, "held_set": null, "train_counts": {"": 1}}]}
 
 ``component`` is the trainer that made the sample from records (``""`` for the
 only trainer of a scenario), or ``null`` for an upload or an imported task.
-Samples that share a ``group`` train together. ``train_counts`` holds, for each
+Samples that share a ``group`` train together. ``held_set`` is the name of
+the held benchmark or trajectory set that gives the use, or ``null``; an item
+that the scenario uses more than once has one entry for each use. ``train_counts`` holds, for each
 trainer, the number of committed jobs that trained the sample. ``next`` is the
 ``after`` of the next page, or ``null`` after the last one.
 
@@ -1075,9 +1402,10 @@ artifact with (`Automatic evaluation`_).
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter``
 component) with a Harbor agent, on a runtime that serves any artifact on
-request: the Tinker runtime. Reef refuses a harness artifact, a model artifact
-on another runtime, and a scenario whose artifacts also hold a harness, with
-400.
+request (``InferenceRuntime.serves_any_artifact``). The Tinker runtime is the
+built-in runtime that does. Reef refuses a harness artifact, a model artifact
+on a runtime without that capability, and a scenario whose artifacts also hold
+a harness, with 400.
 
 First create the tasks as task items in the scenario's ``eval`` split
 (`Create task items <#create-task-items>`__). Then start the evaluation:
@@ -1109,18 +1437,52 @@ The body takes these fields:
   Reef's sandbox relay and Harbor's exec, also for a task with several compose
   services (RFC #986). Reef refuses a task that declares MCP servers or skills. This
   evaluation does not reach the activation rule, and an automatic evaluation
-  cannot use an item.
+  cannot use an item. ``{"item": "<item id>", "env": {"NAME": "value"}}``
+  also gives each command of the agent these variables. A name is a shell
+  variable name, and a value is text without ``${``. ``REEF_CONTEXT_WINDOW``
+  and ``REEF_MAX_OUTPUT_TOKENS`` also set the model's token limits in the
+  rendered tree, each a positive number of tokens (`Token limits
+  <../developer-guide/harness-adapters.rst#token-limits>`__). A Harbor agent
+  takes variables in its own ``env`` key. ``"config": {"<target>": {...}}``
+  merges each JSON object into the tree's ``config/<target>.json``, as if the
+  tree held it. The tree with the config must pass the adapter's validation
+  (`Config checks <../developer-guide/harness-adapters.rst#config-checks>`__),
+  so the config sets no key that Reef's model binding writes. Reef refuses the
+  evaluation with 400 otherwise.
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.
   The stored request names the tasks that the evaluation runs.
+- ``collection``: a collection of the scenario's owner (`Benchmarks and
+  collections`_). Reef runs the eval tasks that are in the collection, each
+  one once. A request sets ``collection`` or ``task_names``, not both. Reef
+  returns 400 for an unknown collection, and for one with no eval task.
+- ``num_samples``: the most tasks to run, a positive integer, or null (the
+  default) to run every task that ``task_names`` or ``collection`` selects.
+  Use it to score an artifact on part of a large benchmark. When more tasks
+  are selected, Reef runs the ``num_samples`` tasks whose names have the
+  smallest SHA-256 digests. The choice depends on the task names only, so
+  evaluations of the same tasks with the same ``num_samples`` run the same
+  tasks, and their scores compare. The stored request names the tasks in
+  ``task_names``, and a stored ``collection`` leaves out a benchmark with no
+  chosen task.
+- ``sample_seed``: an integer, or null (the default). With a seed, Reef runs
+  the tasks in a random order that the seed fixes: it ranks the SHA-256
+  digests of ``"<sample_seed>:<task name>"``. With ``num_samples``, the
+  evaluation runs the first ``num_samples`` tasks of that order, so a new
+  random seed runs another random part of the tasks. Without ``num_samples``,
+  it runs every task in that order. The same seed gives the same tasks in the
+  same order again. The stored ``task_names`` are in the order that the
+  evaluation runs them.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
 - ``max_concurrent_rollouts``: the most rollouts of this evaluation that run
   at once, or null (the default) for no limit. Each rollout holds a task
   sandbox and sends model calls to the candidate, so set it to what the
   sandbox provider and the candidate's serving can take. Reef adds the next
-  rollouts to the queue as earlier ones end.
+  rollouts to the queue as earlier ones end. On ``e2b``, Reef adds a task's
+  rollouts only after it built the task's sandbox templates, and a build holds
+  no place of this limit.
 - ``max_failed_fraction``: the largest fraction of failed rollouts, a number
   greater than 0 and less than 1, or null (the default) for no limit. A
   rollout fails when its work fails or when it ends with no score. After at
@@ -1130,6 +1492,24 @@ The body takes these fields:
   (82%), over the limit of 50%``. Each rollout that did not end fails with
   ``stopped: too many rollouts failed``, and the rollouts that wait never
   start (RFC #1287).
+- ``log_probs``: ``true`` to keep the sampled tokens' log probabilities and
+  token IDs in each model call of the evaluation; ``false`` by default. Reef
+  adds the request fields that ask for them to each call that any agent sends,
+  over the agent's own values:
+
+  - ``/v1/chat/completions``: ``logprobs``, ``return_token_ids`` and
+    ``return_prompt_token_ids``, all ``true``.
+  - ``/v1/messages``: ``logprobs`` and ``return_token_ids``, all ``true``
+    (Reef's extension; see `Inference`_).
+  - ``/v1/responses``: ``message.output_text.logprobs`` in ``include``.
+
+  The kept call holds the engine's answer with these fields, and its ATIF
+  trajectory step holds them in ``metrics``. The candidate's engine must accept
+  the fields. Reef's SGLang and vLLM handlers accept all of them. SGLang's and
+  vLLM's OpenAI servers accept the Chat Completions and Responses fields. A
+  provider such as Anthropic's API refuses unknown fields, so do not set
+  ``log_probs`` for an artifact that a provider serves. Each call's body grows
+  with one entry for each sampled token.
 
 The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
@@ -1139,15 +1519,16 @@ it runs and after it ends:
 
    {"evaluation_id": "1d0e...", "state": "finished",
     "request": {"artifact_id": "8f3c...", "component": "weights", "harness": {"name": "terminus-2"},
-                "model": null, "task_names": ["sum-391"], "rollouts_per_task": 2, "environment": "docker",
+                "model": null, "task_names": ["sum-391"], "collection": null, "rollouts_per_task": 2,
+                "environment": "docker",
                 "max_concurrent_rollouts": null, "max_failed_fraction": 0.5},
     "created_at": 1793169552.2, "finished_at": 1793169840.7,
     "policy_evaluation": {"harness": {"base": "terminus-2", "plugin": {}},
                           "model": {"name": "Qwen/Qwen3-8B", "adapter": "tinker://.../sampler"},
                           "scores": [{"task": "sum-391", "scores": [1.0, 0.0]}]},
-    "mean_score": 0.5, "error": null,
+    "mean_score": 0.5, "benchmark_scores": [], "error": null,
     "progress": {"total": 2, "ended": 2, "scored": 2, "failed": 0, "cancelled": 0, "running": 0,
-                 "mean_score": 0.5, "eta_seconds": null}}
+                 "mean_score": 0.5, "eta_seconds": null, "benchmarks": []}}
 
 ``state`` is ``queued``, ``running``, ``finished`` or ``failed``. A finished
 evaluation holds its ``policy_evaluation``: the harness and the model that its
@@ -1158,6 +1539,16 @@ does not resume it. ``mean_score`` is the mean of the rollouts that have a
 score: a failed rollout does not count as 0. ``GET
 /reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first,
 at most ``limit`` (50 by default).
+
+For an evaluation on a collection, the stored ``collection`` is ``{"name",
+"average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark",
+"task_names"}`` for each benchmark that has a task in the evaluation.
+``benchmark_scores`` then gives ``{"benchmark", "task_count",
+"mean_score"}`` for each of them: the number of its tasks in the evaluation,
+and the mean of their rollouts that have a score. A task in two benchmarks
+counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts
+that have a score. With ``benchmark``, it is the mean of the benchmark means.
+``benchmark_scores`` is empty for another evaluation.
 
 ``progress`` counts the rollouts of the evaluation, also while it runs. It is
 null when the evaluations queue no longer holds them:
@@ -1173,6 +1564,11 @@ null when the evaluations queue no longer holds them:
 - ``eta_seconds`` estimates the seconds until every rollout ends: the
   rollouts left at the rate at which rollouts ended in the last 20 minutes. It
   is null when no rollout ended in that time, or when the evaluation ended.
+- ``benchmarks`` gives the progress of each benchmark of an evaluation on a
+  collection, in the collection's order: ``{"benchmark", "total", "ended",
+  "scored", "failed", "cancelled", "running", "mean_score"}``, with the same
+  meaning for the rollouts of the benchmark's tasks. A task in two benchmarks
+  counts in both. It is empty for another evaluation.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
 shows the progress of an evaluation while it runs. It answers ``{scenario,
@@ -1182,7 +1578,9 @@ score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
   ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
-  while ``max_concurrent_rollouts`` keeps the rollout out of the queue.
+  while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also
+  when a retry runs the rollout again. On ``e2b``, it is also ``waiting`` while
+  the task's sandbox templates build.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.
@@ -1201,7 +1599,11 @@ score, rewards, error, calls, verifier_calls}``.
 - ``verifier_calls`` holds the same totals of the calls that the rollout's
   verifier wrote (`Calls that a verifier writes`_), or null.
 
-An unknown evaluation returns 404.
+To add up the totals, Reef reads every kept call of the evaluation. The query
+``calls=false`` leaves out ``calls`` and ``verifier_calls``. Reef then reads
+the rollouts only, so the read stays fast for an evaluation with many calls.
+``calls`` is ``true`` or ``false``, and ``true`` when absent. Another value
+returns 400. An unknown evaluation returns 404.
 
 Reef returns:
 
@@ -1224,11 +1626,82 @@ cancels one evaluation. It answers the evaluation after the cancel, as ``GET
   request``. Each of its rollouts that did not end fails with the same error.
 - A worker that runs one of these rollouts stops its trial and the trial's
   sandbox within seconds.
-- The rollouts that wait for ``max_concurrent_rollouts`` never start. They
-  stay ``waiting`` in the rollouts list.
+- The rollouts that wait for ``max_concurrent_rollouts`` do not start. They
+  stay ``waiting`` in the rollouts list until a resume.
 - An evaluation that ended stays as it is, so a second cancel changes nothing.
 
 An unknown scenario or evaluation returns 404. Control answers this route.
+
+Two routes run rollouts of an evaluation again. Each one answers 202 with the
+evaluation, which is ``running``:
+
++------------+----------------------------------------------------------------+
+| Route      | Rollouts that it runs again                                    |
++============+================================================================+
+| ``retry``  | The failed rollouts: the rollouts whose own run ended with no  |
+|            | score. The run failed, or it finished with a failed score.     |
++------------+----------------------------------------------------------------+
+| ``resume`` | The rollouts that a cancel or a ``max_failed_fraction`` stop   |
+|            | ended, also in the middle of their run, and the rollouts that  |
+|            | never started.                                                 |
++------------+----------------------------------------------------------------+
+
+The routes are ``POST
+/reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry`` and ``POST
+/reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume``. Both work in
+the same way:
+
+- Each rollout runs from the start of its task. A rollout that a cancel
+  stopped in its run does not continue from where it stopped.
+- Its earlier attempts stay, so its ``attempt_count`` goes on and the calls of
+  each attempt stay readable.
+- Both keep ``max_concurrent_rollouts``, unless the body changes it. When the
+  evaluation has fewer free places than rollouts to run, the others are
+  ``waiting`` and go back to the queue as earlier rollouts end.
+- A rollout that has a score keeps it. A rollout that has not ended stays as
+  it is.
+- An evaluation that runs goes on, with those rollouts in the queue again.
+- An evaluation that ended is ``running`` again, with no result and no error.
+- When the rollouts are final, Reef ends the evaluation as it ends a first
+  run: it stores the scores, and it gives a finished evaluation to the
+  scenario's activation rule, which can activate the artifact.
+
+The body is optional. With no body, or ``{}``, the evaluation keeps its
+request. ``{"max_concurrent_rollouts": 8}`` changes the most rollouts of the
+evaluation that run at once, and ``{"max_concurrent_rollouts": null}``
+removes the limit. The value is a positive integer or ``null``, as in a start
+request. The evaluation keeps the new value in its ``request`` for the rest of
+its run, also for the rollouts that wait:
+
+.. code-block:: bash
+
+   curl -X POST \
+       -H "Authorization: Bearer $REEF_TOKEN" \
+       -H 'Content-Type: application/json' \
+       -d '{"max_concurrent_rollouts": 8}' \
+       "$REEF_URL/reef/scenarios/$SCENARIO/evaluations/$EVALUATION_ID/resume"
+
+A higher limit sends more waiting rollouts to the queue at once. A lower limit
+does not stop a rollout that runs. Fewer rollouts start until the rollouts that
+are not final are fewer than the limit.
+
+A retry of a cancelled or stopped evaluation does not run its cancelled
+rollouts and does not start its other rollouts. When the failed rollouts end,
+the evaluation fails again. Its error is ``cancelled by request`` after a
+cancel. After a stop, it starts with ``too many rollouts failed``, as the
+error of the stop does. While a cancelled rollout waits for a resume,
+``max_failed_fraction`` does not count it. To finish an evaluation that too many failures stopped, retry it first,
+and then resume it. A resume first counts the same failures, so it can stop
+again.
+
+``retry`` returns 409 for an evaluation with no failed rollout. ``resume``
+returns 409 for an evaluation with no cancelled rollout and no rollout that
+never started. Both return 400, and change nothing, for a body with another
+key or with a ``max_concurrent_rollouts`` that is not a positive integer or
+``null``. Both return 409 for an ended evaluation whose rollouts Reef no
+longer keeps: Reef deletes the rollouts of an ended evaluation after their
+retention. An unknown scenario or evaluation returns 404. Control answers
+both routes.
 
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1324,7 +1797,9 @@ without a 200 call has no trajectory.
 - Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
   the call's record ID (`Evaluation calls`_), and its
   ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
-  body plus ``response``, the response body.
+  body without the conversation, the tools and the response
+  (``call_summary``), such as ``model`` and ``chat_template_kwargs``. The
+  steps hold the conversation.
 - ``extra.reef.reward`` is the rollout's score for each trajectory of the
   attempt that was scored: the last attempt of a finished rollout. It is null
   for every other attempt, and for a failed score.
@@ -1389,11 +1864,23 @@ A request is not a record: it waits in the deployment's training request queue
 until a training commit consumes it, and the commit keeps it in its
 ``training_request`` metrics. It takes the user's ``text``,
 originating ``session`` and ``artifact_id``. These fields identify the session
-and release the request came from. The backend operates on the current
-committed state; it does not restore the originating release. The API
+and artifact the request came from. The backend operates on the current
+committed state; it does not restore the originating artifact. The API
 requires no inference receipts or score. ``samples`` names the samples that
 the request's job trains (see `Choose the samples that train
-<#choose-the-samples-that-train>`__).
+<#choose-the-samples-that-train>`__). ``train_from`` names the artifact that
+the job starts from, by artifact ID; without it the job starts from the
+scenario's training start. A ``train_from`` that names no artifact of the
+scenario is HTTP 400.
+
+A job without ``train_from`` continues the training start and moves it to
+each checkpoint that it saves, so the next such job begins where it ended;
+Reef runs one such job at a time. A job with ``train_from`` never moves the
+training start, and Reef does not wait for another job before it submits it.
+It runs beside the other jobs when the training component allows it and a
+training worker is free (``training.max-jobs``); the Tinker component allows
+it. Requests start in the order they came, so a request that waits for the
+running job also holds the requests after it.
 
 A request may also carry ``requires``: what the change needs where the
 harness runs, at most 8 ``{name, kind, check, prompt}`` items, default none.
@@ -1429,10 +1916,12 @@ when nothing was refused. A step whose merged list holds more than 8 items is
 skipped. Reef never runs a check: the
 client runs the checks where the harness runs, after the person read them.
 
-The two modes differ in what starts a step and what it trains. ``auto``, the
-default, trains on traffic when ``job_samples`` samples wait, and refuses a
-request with HTTP 400. ``manual`` starts a step only for a request,
-oldest first, one per step. The step trains the samples that the request
+The two modes differ in what starts a job. ``auto``, the default, also
+starts a job on its own: when ``job_samples`` samples wait, or when the
+deployment's training manager says so (``training.manager``, see
+`Configuration <configuration.rst>`__). ``manual`` starts a job only for a
+request. In both modes a request trains, oldest first, one per step, and
+before the samples that wait. The step trains the samples that the request
 names, whatever ``job_samples``:
 
 - A weight recipe needs ``samples``, and refuses a request without it
@@ -1498,7 +1987,7 @@ rules still determine whether the result becomes served.
 requests also report ``pending_requests`` (accepted requests that
 no commit consumed yet, read from the queue).
 Committed step metrics include ``training_request`` with the request
-id, text, session, release id and ``requires``; the snapshots row of a step
+id, text, session, artifact id and ``requires``; the snapshots row of a step
 that answered a request carries, for example:
 
 .. code:: json
@@ -1528,7 +2017,7 @@ Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after capacity eviction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
-session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
+session/artifact fields, or a request to an ``auto`` scenario returns HTTP 400.
 Text that carries a credential shaped literal or an instruction override
 phrasing is refused with HTTP 400 and a reason that names the rule, never
 the text; nothing is stored. The scenario must exist: an unknown scenario
@@ -1575,8 +2064,8 @@ Create a scenario
 ~~~~~~~~~~~~~~~~~
 
 ``POST /reef/scenarios`` takes the object ``{"name", "owner"?,
-"artifact_id"?, "component"?}``. Any other key is HTTP 400, and the message
-names the keys that the route takes:
+"artifact_id"?, "component"?, "serves"?}``. Any other key is HTTP 400, and the
+message names the keys that the route takes:
 
 - ``name``: the scenario's name, a non-empty string.
 - ``owner``: the owner whose `data items <#data-items>`__ the scenario uses.
@@ -1589,6 +2078,10 @@ names the keys that the route takes:
   <../user-guide/operate.rst#starting-artifacts>`__).
 - ``component``: the component that holds the item. Leave it out when the
   scenario has one component. It needs ``artifact_id``.
+- ``serves``: a boolean, true by default. With ``false``, the new scenario
+  serves nothing: Reef starts no engine for it, and its inference requests
+  answer HTTP 404. It serves after an update sets ``served`` (`Serve nothing`_).
+  An existing scenario ignores ``serves``.
 
 Reef stores the starting artifacts and registers the scenario with their
 component mapping. With ``artifact_id``, Reef reads the item's files and checks
@@ -1625,7 +2118,8 @@ returns HTTP 404, and you create the scenario first:
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
 | ``POST /reef/scenarios``                    | ``{"name", "owner"?, "artifact_id"?,        |
-|                                             | "component"?}`` → ``{scenario, owner,       |
+|                                             | "component"?, "serves"?}`` → ``{scenario,   |
+|                                             | owner,                                      |
 |                                             | components, artifact_id?}``;                |
 |                                             | 201 created, 200 already existed            |
 +---------------------------------------------+---------------------------------------------+
@@ -1643,7 +2137,9 @@ returns HTTP 404, and you create the scenario first:
 |                                             | for each kind whose schema the training     |
 |                                             | component declares                          |
 +---------------------------------------------+---------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
+| ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``: the scenario is |
+|                                             | deleted, and the sweep removes its state;   |
+|                                             | 404 unknown                                 |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/jobs``     | → ``{scenario, jobs}``: the scenario's      |
 |                                             | training jobs in the jobs queue, oldest     |
@@ -1660,7 +2156,12 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
 - ``attempt_count``: how many times a training worker took the job, an
   integer from 0.
 - ``checkpoints``: the saved checkpoints that the job reported, in step
-  order, each ``{step, path, artifact_path, metrics}``.
+  order, each ``{step, path, content, metrics, changed_parts}``. ``path`` is a
+  directory of the training service. ``content`` is the name under which the
+  training service stored the checkpoint's files in the artifact backend;
+  Reef removes that content after it commits the checkpoint.
+  ``changed_parts`` lists the parts of the scenario component that the
+  checkpoint changed from the job's start, ``[]`` for a weight job.
 - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job
   finished, else ``null``.
 - ``error``: the error of a failed job, or the last retryable error of a
@@ -1701,7 +2202,8 @@ For example:
      "attempt_count": 1,
      "checkpoints": [
        {"step": 1, "path": "/jobs/4f2a9c1e/step-1",
-        "artifact_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41}}
+        "content": "4f2a9c1e:1", "metrics": {"loss": 0.41},
+        "changed_parts": []}
      ],
      "result": {"state": "finished", "metrics": {"loss": 0.41}},
      "error": null,
@@ -1731,23 +2233,63 @@ The trainer reads the failed job and records its end. An unknown scenario, or
 a job that the scenario does not have, returns 404. Control answers this
 route.
 
+``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel`` cancels one
+training request of the scenario (``POST /reef/train``), so that it trains no
+job, or no further. ``request_id`` is the ``agent_record_id`` of the request.
+It answers ``{scenario, request_id, queued, job}``:
+
+- A request that waits in the queue fails with the error ``cancelled by
+  request``. The trainer consumes it with a commit that has ``skipped:
+  "request failed"`` and that error, reads none of its samples, and submits no
+  job. ``queued`` is ``true``.
+- Each job of the request that has not ended is cancelled, as ``POST
+  /reef/scenarios/{scenario}/jobs/{job_id}/cancel`` does. ``job`` is the newest
+  job of the request after the cancel, or ``null`` for a request with no job.
+- A job that control adds for the request after the cancel, because it was
+  building the job's data, is cancelled when it enters the queue.
+- A request whose job ended stays as it is, so a second cancel changes nothing.
+
+An unknown scenario, or a request that the scenario does not have, returns
+404. Control answers this route.
+
 Deleting a scenario
 -------------------
 
-``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
-service and frees its name. Nothing is destroyed: the record store and commit
-log move under ``<agent_record_dir>/archived/``, the recipe's own directories
-(a harness scenario's history and step records) move under an
-``archived/`` sibling, and the
-scenario's ref in the artifact repository is renamed into
-``refs/reef/archived/``, so every snapshot it published stays reachable. A
-later create of the same name writes a new root snapshot. A local step in flight for the scenario ends without a
-commit. Only a local artifact repository can be archived; a remote one
-answers 501.
+``DELETE /reef/scenarios/{scenario}`` deletes the scenario. The request
+renames the scenario's ref in the artifact repository into
+``refs/reef/archived/`` and returns ``{"scenario", "archived"}``, where
+``archived`` names the archived ref. From then on the scenario does not
+exist:
 
-For a scenario that trains weights, the delete also cancels the scenario's
-running training job at its training component, since nothing would read the
-job's checkpoints afterwards. On a runtime that serves per-scenario adapters,
+- A read of the scenario and a second delete answer 404.
+- A create with the ID, and a record that would create the scenario
+  implicitly, answer 409. A scenario ID is never used again, so a new
+  scenario needs a new ID.
+- The inference service answers the scenario 404.
+- A local step in flight for the scenario ends without a commit.
+- The training service does not run a job of the scenario. When it takes
+  such a job, or stores for one, it finds no registration, cancels the job
+  and discards what the job stored.
+
+Control's sweep of ended work then removes the scenario's state. The delete
+wakes the sweep, so it starts at once. The sweep cancels the scenario's
+training jobs, discards its stored content, and moves its record store and
+commit log under ``<agent_record_dir>/archived/``. It asks the training
+service to move the recipe's own directories (a harness scenario's history
+and step records) under an ``archived/`` sibling; that request waits while no
+training service runs. It archives the storage only after the samples
+service has ended the scenario's selections; a selection that runs past the
+delete writes no sample. Each service that does not run control drops its
+instance, its clone and its cached snapshots of the scenario within seconds.
+Every snapshot that the scenario published stays reachable under the
+archived ref. When a step of the sweep fails, for
+example because the artifact store does not answer, the scenario stays
+deleted and the next sweep, an hour later, tries again. The first sweep
+after a restart finishes a delete that stopped.
+Only a local artifact repository can be archived; a remote one answers 501
+and changes nothing.
+
+On a runtime that serves per-scenario adapters,
 the scenario's adapter stays resident in the serving engines until the
 adapter residency evicts it.
 
@@ -1763,8 +2305,11 @@ body holds one or more of these settings. Reef rejects other fields:
 - ``activation``: the scenario's activation rule, below.
 - ``serving_config``: the serving fields that the scenario sets over the
   deployment's values (`Serving config`_).
-- ``traffic_weights``: how Reef divides the scenario's model requests between
-  its artifacts (`Traffic weights`_).
+- ``served``: the artifacts that the scenario serves of one component, each
+  with its weight (`Set what a scenario serves`_). ``component`` names that
+  component, and is valid only together with ``served``.
+- ``record2sample_config``: the record-to-sample config keys that the scenario
+  sets over the deployment's (`Record-to-sample config`_).
 
 The response holds the scenario name and each setting that the request
 changed. To change the data processor's mode:
@@ -1863,29 +2408,54 @@ the scenario's settings, so a reload and a restart keep it. A stored field that
 the deployment no longer accepts is ignored with a warning, and the scenario
 serves with the deployment's values until a person changes the config.
 
-Traffic weights
-~~~~~~~~~~~~~~~
+Record-to-sample config
+~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``traffic_weights`` setting divides the scenario's model requests between
-its artifacts. For example, it can send 5% of the requests to a new artifact. It
-maps artifact IDs to integers from 0 to 100 that sum to 100:
+The ``record2sample_config`` setting gives one scenario its own config for the
+record-to-sample stage of each trainer. It maps a component name to config
+keys. Each key replaces the same key of the deployment's
+`pipeline.record2sample.config <configuration.rst#the-pipeline-section>`__ for
+the trainer of that component. The stage class stays the deployment's:
 
 .. code:: json
 
-   {"traffic_weights": {"artifact:a": 95, "artifact:b": 5}}
+   {"record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}}}
 
-To start a split:
+The request replaces the stored mapping as a whole. Send ``{}`` to use the
+deployment's config again. The response holds the stored
+``record2sample_config``.
 
-1. Serve each artifact with ``POST /reef/scenarios/{scenario}/serve``, unless it is
-   the active artifact.
-2. Wait until each artifact has started.
-3. Send the weights. Inference replicas use them within a few seconds, without a
-   restart.
+Reef applies a change by loading the scenario again, as a restart does. Each
+trainer then builds its stage with the new config and reads the records after
+its committed progress again. A samples service in another process loads the
+scenario again before its next selection. Reef answers HTTP 400 and keeps the
+stored setting and the loaded scenario when the mapping names a component that
+has no trainer, or when a stage refuses its config. Reef stores the setting
+with the scenario's settings, so a restart keeps it.
 
-The request replaces the stored weights. ``null`` ends the split, so the active
-artifact answers again. Reef answers HTTP 400 for invalid weights, and for an
-artifact with a weight above 0 that has no route. An artifact that stops serving
-keeps its weight, and its requests go to the active artifact.
+Traffic split
+~~~~~~~~~~~~~
+
+When the ``served`` setting gives more than one artifact a weight above 0, the
+weights divide the scenario's model requests between those artifacts (`Set
+what a scenario serves`_). For example, this mapping sends 5% of the requests
+to a new artifact:
+
+.. code:: json
+
+   {"served": {"artifact:a": 95, "artifact:b": 5}}
+
+Reef starts each artifact of the mapping that does not serve yet. Until an
+artifact has started, the active artifact answers its requests. Without a
+ready active route, as at the first startup or when the scenario serves again
+after serving nothing, they get HTTP 503 until a route is ready. Inference
+replicas use new weights within a few seconds, without a restart. A mapping
+with one weight above 0 ends the split, so the active artifact answers again.
+
+The activation rule can make a newer artifact active during a split. The split
+keeps its weights. The new active artifact then answers the requests of each
+artifact of the split that the scenario no longer serves, and the other
+artifacts keep their shares.
 
 The weights apply to a model request that names ``active``, or a model that the
 scenario does not serve under that name:
@@ -1912,16 +2482,19 @@ scenario does not serve under that name:
 
 - **Reef does not move a failed request.** A request to a failed artifact fails.
   To stop new requests to an artifact, set its weight to 0.
+- **A retry keeps its artifact.** Reef does not compute the bucket again when
+  it retries a request (see `Request`_). When the artifact has no route at
+  the retry, Reef answers HTTP 503 with ``Retry-After``.
 
 The weights select the artifact. The engine of the artifact selects its own
 replica.
 
 The record names the artifact that answered in ``artifact_id``, and holds the
-bucket and the weights in ``metadata.traffic``. These records train like other
-records, because the staleness check accepts an artifact that the scenario serves
-beside its active selection. That check does not read the weights. A job can then
-hold samples of several artifacts. Each sample keeps its own ``artifact_id`` and
-recorded log probabilities.
+bucket and the weights in ``metadata.traffic``. While the scenario serves an
+artifact, the samples service does not mark its records' samples stale, whatever its weight
+(`Call one served artifact`_). A job can then hold samples of several
+artifacts. Each sample keeps its own ``artifact_id`` and recorded log
+probabilities.
 
 Read the settings
 ~~~~~~~~~~~~~~~~~
@@ -1939,6 +2512,8 @@ scenario:
      "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
      "serving_config": {"weights": {"temperature": 0.6}},
      "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
+     "served": {"weights": {"artifact:a": 95, "artifact:b": 5}},
+     "record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}},
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
@@ -1949,10 +2524,16 @@ scenario:
   class of its own, ``module`` is the ``package.module:ClassName`` of that class.
 - ``serving_config`` is the stored `serving config <#serving-config>`__, ``{}``
   when the scenario sets no field.
-- ``traffic_weights`` is the scenario's `traffic split <#traffic-weights>`__, ``{}``
-  without one.
+- ``served`` maps each component to the artifacts that the scenario serves of
+  it, each with its weight (`Set what a scenario serves`_). Without a traffic
+  split, the active artifact has 100 and each other served artifact has 0. With
+  a split, each artifact has its weight. The active artifact also has the
+  weight of each artifact of the split that the scenario no longer serves,
+  because it answers their requests.
 - ``effective_serving_config`` maps the served component to each of its serving
   fields that has a value: the scenario's value, else the deployment's.
+- ``record2sample_config`` is the stored `record-to-sample config
+  <#record-to-sample-config>`__, ``{}`` when the scenario sets no key.
 - ``job_parameters`` maps a sample kind (``trajectory`` or ``task``) to the
   recipe's parameters of a job of that kind. A training request's
   ``parameters`` merge into them. A kind that the recipe gives no parameters is
@@ -1977,31 +2558,37 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
+   {"artifact_id": "artifact-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
     "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
                            "detail": "Quantizing to NVFP4"},
                           {"phase": "start", "started_at": 1794150480.6, "ended_at": null,
                            "detail": "Waiting for a GPU"}],
                 "estimate_seconds": null}}
 
-``model`` defaults to ``active``. It can also name an active artifact alias
-or an artifact selected for serving beside the active one. An unknown name
-returns 404. One request serves the active artifact and each artifact beside
-it. An artifact that a published route of ``model`` serves already is
-``ready``, whatever the state of the request: the start of another artifact,
-or its failure, does not change it.
+The query parameter ``model`` defaults to ``active``. It can also name an
+active artifact alias or an artifact selected for serving beside the active
+one. An unknown name returns 404. One startup covers the active artifact and
+each artifact beside it, but an artifact with a published route stays
+``ready`` while another artifact starts or fails. To read the state of an
+artifact beside the active one, name it:
+
+.. code:: text
+
+   GET /reef/scenarios/{scenario}/inference/status?model=<artifact-id>
+
+``state`` is one of:
 
 * ``pending``: no worker has taken the startup work.
 * ``starting``: inference has taken it. Downloads, conversion, loading, and
   retries are part of this state.
 * ``ready``: startup succeeded and inference published the route.
 * ``failed``: startup ended with an error. ``error`` gives a safe message:
-  the message of a runtime's ``StartupFailed`` (RFC #1299), such as an engine
+  the message of a runtime's ``StartupFailedError`` (RFC #1299), such as an engine
   argument that the model refuses, else a fixed text. The service logs hold the
   diagnostic details. Control retries a failed startup by itself: 60 seconds
   after the failure, and then after a wait that doubles at each failed retry,
-  up to one hour. A retry returns the state to ``pending``. Activate the active
-  artifact again to retry at once.
+  up to one hour. A retry returns the state to ``pending``. Resend the complete
+  accepted ``served`` mapping to retry at once.
 
 A newer request, such as one for a changed serving config, replaces the
 current one at once. The work of the replaced request stops within seconds
@@ -2069,8 +2656,9 @@ Send the same body you would send to the provider. Reef never touches your
 sampling parameters, and no artifact adds to the request.
 
 Reef answers the request from the scenario's row in ``served_models``. The
-request's ``model`` selects the row of an artifact served beside the active
-selection when it names one; any other ``model`` selects the active row. Reef
+request's ``model`` selects the row of a served artifact when it names one;
+any other ``model`` selects the active row, or the row that a `traffic split
+<#traffic-split>`__ gives the request. Reef
 keeps that row for the whole request. It sends the request to the engine at
 the row's URL under the row's model name, and records the snapshot of the row's
 artifact, even if an activation completes mid-request. `Run the services in
@@ -2078,10 +2666,48 @@ separate processes
 <../user-guide/operate.rst#run-the-services-in-separate-processes>`__ gives the
 status codes of an inference request.
 
-On a weight-serving deployment, the engine handler adds its bookkeeping keys:
-``lora_path`` to address the served adapter and ``return_meta_info`` so the
-record shows which weights answered. It replaces a ``lora_path`` that the body
-names. Set ``"stream": true`` and read the SSE response for streaming.
+To require a specific artifact, use
+``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/chat/completions``.
+
+Reef retries a request once when the engine aborts a non-streaming answer, or
+refuses the row's model name before any output. It reads the row again for the
+retry. Three kinds of request keep their artifact: a request to an artifact's
+route, a request whose ``model`` names its artifact, and a request of a
+traffic split. When no row serves that artifact at the retry, Reef answers
+HTTP 503 with ``Retry-After``. The retry of any other request can reach a new
+active artifact.
+
+On a weight-serving deployment, the engine handler selects the served adapter
+itself, and it replaces a ``lora_path`` that the body names. Set
+``"stream": true`` and read the SSE response for streaming.
+
+Log probabilities depend on what answers the request:
+
+- **A provider or routed target.** Reef forwards ``logprobs`` and
+  ``top_logprobs`` in the body. It preserves the provider's returned log
+  probabilities in the response and the record.
+- **Reef's SGLang or vLLM backend.** On ``/v1/chat/completions`` with
+  ``"logprobs": true``, ``choices[0].logprobs.content`` has one entry for each
+  sampled token, in output order. A stream sends the entries with their text,
+  and the record holds the same entries. Each entry's ``top_logprobs`` holds
+  only the sampled token. The SGLang backend returns the engine's alternatives
+  in SGLang's own format, in ``choices[0].meta_info.output_top_logprobs``; a
+  stream sends them in its last chunk. The vLLM backend returns no
+  alternatives.
+- **Reef's SGLang or vLLM backend on ``/v1/messages``.** Anthropic Messages
+  has no log probabilities. Reef extends it: a buffered request with
+  ``"logprobs": true`` gets the same entries in a top-level ``logprobs``
+  (``{"content": [...]}``) of the message. A streamed message has none.
+
+Token IDs follow the same rule. On ``/v1/chat/completions``, a request to
+Reef's SGLang or vLLM backend with ``"return_token_ids": true`` gets the
+rendered prompt's IDs in ``prompt_token_ids`` and the sampled IDs in
+``choices[0].token_ids``, as vLLM's extension returns them. A stream sends both
+in its last chunk. On ``/v1/messages``, a buffered message gets both at its top
+level, as ``prompt_token_ids`` and ``token_ids``. The record holds the same
+fields. A request without the flag gets no token IDs. When Reef stores a record as ATIF, the reply's step keeps
+the token IDs and the ``logprob`` of each entry in its ``metrics``
+(``prompt_token_ids``, ``completion_token_ids`` and ``logprobs``).
 
 The receipt identifies the stored record:
 
@@ -2096,15 +2722,27 @@ The receipt identifies the stored record:
 | Anthropic SSE | the same field on ``message_stop``                        |
 +---------------+-----------------------------------------------------------+
 
-Streams carry it only after the record is stored. A stream that ends without
-its terminal event carries no receipt. A stream from Reef's SGLang or vLLM
-backend that the engine aborts also carries no receipt, because Reef cannot
-restart a stream after it sent frames. In both cases a harness that reports by
-receipt does not reference the record. Reef stores it as an incomplete delivery
-record and preserves the provider response.
-The record-to-record stage excludes aborted records from sample creation and
-training, including when a report references their IDs directly or retained
-records are replayed after a restart.
+Streams carry it only after the record is stored, so an incomplete stream
+carries no receipt. A stream that fails after its response headers also
+carries no terminal event: Reef closes the connection, so a client SDK
+reports a transport error instead of a complete answer. These failures end
+a stream in this way:
+
+- an engine or transport error;
+- a missing terminal event;
+- a handler's report that the engine does not serve the selected weights;
+- the inference timeout.
+
+A stream from Reef's SGLang or vLLM backend that the engine aborts keeps its
+terminal event. It is still incomplete, because Reef cannot restart a stream
+after it sent frames.
+
+Reef stores each incomplete stream as an incomplete delivery record and
+preserves the provider response. A harness that reports by receipt does not
+reference these records. Reef excludes them from sample creation and
+training, also when a report references their IDs directly or retained
+records are replayed after a restart. A routed stream follows `Routed
+external-model requests`_ instead.
 
 An inference response from a served Reef artifact carries ``x-reef-artifact-id``,
 the ID of the artifact that answered. Routed external models have no such header.
@@ -2123,8 +2761,8 @@ Artifact of a recorded response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An inference record holds the provider exchange and ``artifact_id``, the
-artifact that answered: the same ID as ``x-reef-artifact-id``. The staleness
-check reads it (see `Staleness
+artifact that answered: the same ID as ``x-reef-artifact-id``. The samples
+service's staleness check reads it (see `Staleness
 <../developer-guide/processors.rst#staleness>`__). Serving returns no training
 tensors. Reef removes any ``training`` block that an engine handler returns
 from the record, from the client's answer, and from rollout and evaluation
@@ -2422,8 +3060,7 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 | ``activated``         | true when the artifact has been active at some time  |
 +-----------------------+------------------------------------------------------+
 | ``served``            | true when the scenario serves the artifact beside    |
-|                       | its active selection (`Serve an artifact beside the  |
-|                       | active selection`_)                                  |
+|                       | the active artifact (`Set what a scenario serves`_)  |
 +-----------------------+------------------------------------------------------+
 | ``metrics``,          | training rows only: the step's metrics and the       |
 | ``record_progress``   | record high-water mark that the step consumed        |
@@ -2477,15 +3114,12 @@ field and checks it. An artifact without a setting is served with the
 deployment's model.
 
 You can change a setting at any time. The runtime applies it when inference
-next serves the scenario. A release that runs keeps its engine.
+next serves the scenario. An artifact that runs keeps its engine.
 
 An artifact that training makes names its training starts in its own metadata,
 ``training_starts``: the artifact ID of its training start, then that start's
 own training starts. A runtime uses them, so that a training artifact is served
 as its start is, unless it has its own setting.
-
-Items that RFC #1233 made can have ``serving_profile`` in their metadata. Reef
-ignores it, and a metadata patch can remove it.
 
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
@@ -2556,12 +3190,25 @@ component makes. The training backend and its configuration decide it:
 |                             |                                                | validation       |
 +-----------------------------+------------------------------------------------+------------------+
 
+A weight component of the Slime or the Tinker backend also takes a base root:
+a directory that holds ``base.json`` alone. The file names a deployment's
+default start by its inputs, for example
+``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``,
+and the artifact stands for the base model with no adapter (`Artifact imports
+<python-api.rst#artifact-imports>`__). Reef accepts it only when the inputs
+equal the inputs of this deployment's default start, which the ``source`` of
+a scenario's ``creation`` row shows. Another base model, rank or service
+answers HTTP 400 and names each input that differs. Serving such an artifact
+serves the base model, and training from it starts at the base model. A new
+scenario of these backends starts from a base root that Reef writes
+(`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
+
 A component without a layout, such as the records of a trainer that serves
 nothing, takes no import.
 
 Reef stores the new artifact and appends an ``import`` operation. Serving
 selections and training starts stay unchanged, and the activation rule does
-not run. Activate the artifact or train from it as from any other artifact.
+not run. Serve the artifact or train from it as from any other artifact.
 The answer comes after the artifact is durable, so give a large import a
 long client timeout.
 
@@ -2583,58 +3230,226 @@ long client timeout.
 | 503    | the source failed, for example S3 refused the read                 |
 +--------+--------------------------------------------------------------------+
 
-Activate an artifact
-~~~~~~~~~~~~~~~~~~~~
+Set what a scenario serves
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pulling an older artifact changes only your local copy. A scenario keeps
-one selected ``artifact_id`` per component. ``GET /reef/harness`` serves the
-selected harness tree. Inference serves the last selection that completed
-startup.
-To select another artifact, send ``POST /reef/scenarios/{scenario}/activate``:
+Pulling an older artifact changes only your local copy. A scenario serves one
+or more artifacts of each component, and one of them is the active artifact.
+``GET /reef/harness`` serves the active harness tree. The default inference
+routes answer from the active artifact that completed startup.
+
+The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` sets what
+the scenario serves of one component. It maps artifact IDs to weights:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/activate"
+     -d '{"served": {"<id>": 100}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
 
-The body is ``{"artifact_id": "<id>", "component": "<name>"}``. Leave out
-``component`` when the scenario has one component. The answer is
-``{scenario, component, artifact_id}``: the selected artifact and its
-component.
+Afterwards the scenario serves exactly the artifacts of the mapping. These
+examples use the artifacts ``a`` and ``b`` of one component, where ``a`` is
+the active artifact before the request:
 
-The response accepts the selection. Poll `Startup status`_ before sending
-requests that require the new artifact. A repeated activation retries a
-failed startup at once without writing another activation record, and sets
-the wait of the automatic retries back to 60 seconds.
++--------------------------+-------------------------------------------------+
+| ``served``               | Result                                          |
++==========================+=================================================+
+| ``{"b": 100}``           | ``b`` becomes the active artifact, and Reef     |
+|                          | stops every other served artifact               |
++--------------------------+-------------------------------------------------+
+| ``{"a": 95, "b": 5}``    | a traffic split: ``b`` answers 5% of the        |
+|                          | requests                                        |
++--------------------------+-------------------------------------------------+
+| ``{"a": 100, "b": 0}``   | Reef loads ``b``, which answers only the        |
+|                          | requests that name it                           |
++--------------------------+-------------------------------------------------+
+| ``{"a": 100}``           | Reef stops serving ``b``                        |
++--------------------------+-------------------------------------------------+
+| ``{}``                   | the scenario serves nothing (`Serve nothing`_)  |
++--------------------------+-------------------------------------------------+
 
-Activation atomically replaces the selected artifact of ``component`` and
-appends an ``activate`` operation with the complete component mapping.
-Other components keep their IDs. It creates no artifact or repository
-revision, whether the scenario has one component or several.
+The body is ``{"served": {"<id>": <weight>, ...}, "component": "<name>"}``:
 
-Activating the active artifact changes nothing. Activation never changes a
-trainer's training start. A full-weight serving runtime that activates the
-root snapshot after it served a checkpoint loads the root's files.
+- ``served`` holds one or more artifact IDs of one component. Each weight is
+  an integer from 0 to 100, and the weights sum to 100. An empty object makes
+  the scenario serve nothing.
+- ``component`` names the component. Leave it out when the scenario has one
+  component. A scenario with several components requires it. Leave it out with
+  an empty ``served``, which applies to the whole scenario.
+
+Reef reads the mapping as follows:
+
+- **The largest weight selects the active artifact.** Among equal weights, the
+  first ID in sorted order is active. The active artifact answers each request
+  that names no artifact, unless a traffic split gives the request to another
+  artifact.
+- **More than one weight above 0 is a traffic split.** `Traffic split`_
+  describes how Reef divides the requests.
+- **Weight 0 loads an artifact.** The artifact answers only the requests that
+  name it (`Call one served artifact`_).
+- **An artifact that the mapping leaves out stops serving.**
+
+Reef checks the mapping before it changes anything. A mapping that names an
+unknown artifact, an artifact of another component, or more weight artifacts
+than the runtime keeps loaded at once, changes nothing. `Runtime limits
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ gives that number,
+and the wait before a stopped checkpoint frees its place.
+
+The answer is ``{"scenario": "<name>", "served": {...}}`` with the mapping
+that Reef accepted for the component. The answer does not show that the
+artifacts serve: inference loads them in the background, and publishes the
+new routes when the startup completes. Poll `Startup status`_ for ``ready``
+or ``failed`` before sending requests that require a new artifact; name an
+artifact that serves beside the active one with ``?model=<artifact-id>``. A
+startup can fail after Reef accepted the mapping, for example when a new
+checkpoint finds no free inference component. A repeated request retries a
+failed startup at once without writing another operation, and sets the wait
+of the automatic retries back to 60 seconds.
+
+Reef appends one operation for each artifact that changes: ``activate`` for a
+new active artifact, ``serve`` for an artifact that starts to serve beside it,
+and ``stop_serving`` for one that stops. Each operation holds the complete
+component mapping, so a restart keeps what the scenario serves. Other
+components keep their artifacts. The request creates no artifact or
+repository revision, and it never changes a trainer's training start. A
+full-weight serving runtime that makes the root snapshot active after it
+served a checkpoint loads the root's files.
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 200    | Reef accepted the mapping; the artifacts load in the background    |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body; a ``served`` that is no object, a weight that is |
+|        | not an integer from 0 to 100, or weights that do not sum to 100;   |
+|        | an empty ``served`` with ``component``;                            |
+|        | ``component`` without ``served``; an unknown ``component``, or     |
+|        | ``component`` is missing in a scenario with several components;    |
+|        | an artifact has no durable bytes; the runtime cannot serve the     |
+|        | artifact; the mapping names more weight artifacts than the         |
+|        | runtime keeps loaded at once, or several artifacts of another      |
+|        | component in a scenario whose weights the runtime loads; the       |
+|        | mapping names several artifacts, and the store keeps no durable    |
+|        | commit history                                                     |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario; an artifact that is not one of the component     |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
+|        | after the commit                                                   |
++--------+--------------------------------------------------------------------+
+
+`Activation rule <../user-guide/operate.rst#activation-rule>`__ explains when
+Reef makes a new artifact active automatically. `Go back to an older artifact
+<../user-guide/operate.rst#go-back-to-an-older-artifact>`__ explains how to
+go back to an older one for good.
+
+Serve nothing
+~~~~~~~~~~~~~
+
+A scenario can serve nothing. Use this state to train without an engine for
+the scenario, for example on uploaded trajectories. A scenario
+enters the state in two ways:
+
+- ``POST /reef/scenarios`` with ``"serves": false`` creates it in this state.
+- ``{"served": {}}`` without ``component`` puts an existing scenario in it.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"served": {}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
+
+The state applies to the whole scenario, with every component. While the
+scenario serves nothing:
+
+- Reef withdraws the scenario's routes and its traffic split, and stops the
+  artifacts that it served beside the active one. The engines stop after the
+  delay that a replaced route gets.
+- The inference routes and `Startup status`_ answer HTTP 404 for the scenario.
+- ``GET /reef/scenarios/{scenario}/settings`` returns an empty ``served``
+  mapping for each component.
+- The scenario keeps its active selection, and the artifact list still marks
+  it ``active``. ``GET /reef/harness`` still serves the active harness tree.
+- Training and imports run as before. An activation, also an automatic one,
+  changes the active selection and starts no engine.
+
+The scenario serves again when ``served`` names one or more artifacts. The
+other components then serve the artifacts of the active selection. The state
+is stored, so it holds after a restart.
+
+A nonempty mapping can follow at once: it need not wait for the delayed stop.
+The runtime can reuse a verified binding; a retired checkpoint loads again.
+Poll the `Startup status`_ of each requested artifact before calling it. A checkpoint that the scenario did not serve
+before still needs a free inference component (`Replace a checkpoint
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__).
+
+Call one served artifact
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default inference routes answer from the active artifact, or from the
+artifact that a traffic split selects. Each served artifact also answers at
+its own URL. Give an artifact weight 0 to:
+
+- keep an older artifact answering while a newer one is active;
+- try a new artifact before it is active.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"served": {"<active id>": 100, "<id>": 0}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
+
+Send an inference call to
+``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where
+``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
+``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
+never creates a scenario. Reef records it like a call to ``/v1/{route}``,
+and the record names the ``artifact_id`` that answered. A call to ``/v1/{route}``
+whose ``model`` is the ``artifact_id`` of a served artifact is answered by that
+artifact too. An artifact that the scenario does not serve has no URL: its
+calls answer HTTP 404.
+
+In a scenario with several components, an artifact served beside the active
+one stays bound to the artifacts of the other components that were active
+when it started to serve. A later activation does not change that binding.
+
+The activation rule and a restore change the active artifact alone. The
+artifacts served beside it stay served. Training continues from each
+trainer's independently selected training start.
+
+The samples service does not mark a sample stale while the scenario serves the
+artifact that produced it beside the active one. After that artifact stops
+serving, the check counts only the artifacts that the scenario served as
+active: an on-policy stage marks a sample whose artifact is not the active
+one.
+
+The runtime limits how many weight artifacts a scenario serves together
+(`Runtime limits <../user-guide/operate.rst#set-what-a-scenario-serves>`__).
+A scenario whose components load nothing into a runtime, such as a harness
+scenario, can serve any of its artifacts together. A store without a durable
+commit history refuses a mapping of several artifacts.
 
 Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To restore every component's active artifact together, send
-``POST /reef/scenarios/{scenario}/restore`` with ``{"step": 12}``.
-The step names an existing operation. Reef restores the active selection
-as it stood after that step. Use ``{"step": 0}`` for the starting artifacts.
+``POST /reef/scenarios/{scenario}/restore`` with ``{"commit_number": 12}``.
+The commit number names an existing operation. Reef restores the active selection
+as it stood after that commit. Use ``{"commit_number": 0}`` for the starting artifacts.
 
 The answer is ``{scenario, components}``, where ``components`` maps every
 component name to its restored ``artifact_id``. A changed selection appends
 a ``restore`` operation. It creates no artifact or repository revision and
-leaves each trainer's start and separately served artifacts unchanged.
+leaves each trainer's start, the other served artifacts and the traffic
+split unchanged.
 Restoring the current selection is a no-op. Poll `Startup status`_ before
 using the restored inference artifact.
 
-The body must contain only a non-negative integer ``step``. An invalid or
-unknown step, or a step whose selection cannot be reconstructed from the
+The body must contain only a non-negative integer ``commit_number``. An invalid or
+unknown commit number, or one whose selection cannot be reconstructed from the
 retained history, returns HTTP 400; an unknown scenario returns 404. A pending
 training commit returns 409. Artifact validation and runtime capabilities
 still apply.
@@ -2675,100 +3490,18 @@ Whether a trainer can start from an artifact depends on the trainer:
 A weight artifact without optimizer state, such as a root snapshot made from
 the default start, starts training with a new optimizer state.
 
-Both routes answer these statuses:
+The route answers these statuses:
 
 +--------+--------------------------------------------------------------------+
 | Status | Cause                                                              |
 +========+====================================================================+
-| 200    | the artifact is active (``activate``) or is the trainer's start    |
-|        | (``train-from``)                                                   |
+| 200    | the artifact is the trainer's start                                |
 +--------+--------------------------------------------------------------------+
 | 400    | a malformed body; the artifact has no durable bytes; an unknown    |
 |        | ``component``, or ``component`` is missing in a scenario with      |
-|        | several components; ``activate``: the runtime cannot serve the     |
-|        | artifact; ``train-from``: the trainer cannot start from the        |
-|        | artifact                                                           |
+|        | several components; the trainer cannot start from the artifact     |
 +--------+--------------------------------------------------------------------+
 | 404    | unknown scenario or artifact                                       |
-+--------+--------------------------------------------------------------------+
-| 409    | a training result waits for its commit; send the request again     |
-|        | after the commit                                                   |
-+--------+--------------------------------------------------------------------+
-
-`Activate an artifact <../user-guide/operate.rst#activate-an-artifact>`__
-explains when Reef activates a new artifact automatically. `Go back to an
-older artifact <../user-guide/operate.rst#go-back-to-an-older-artifact>`__
-explains how to go back to an older one for good.
-
-Serve an artifact beside the active selection
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The default inference routes answer from the active selection. Serve an
-artifact beside the active selection to:
-
-- keep an older artifact answering while a newer one is active;
-- try a new artifact before it is active.
-
-.. code:: bash
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/serve"
-
-The body and answer are as for ``activate``: ``{scenario, component,
-artifact_id}``. Reef records the served selection without creating an
-artifact or repository revision. In a scenario with several components, the
-other selected artifacts stay bound to this served selection, including after
-a later activation.
-
-A served artifact answers at its own URL. Send an inference call to
-``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where
-``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
-``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
-never creates a scenario. Reef records it like a call to ``/v1/{route}``,
-and the record names the ``artifact_id`` that answered. A call to ``/v1/{route}``
-whose ``model`` is the ``artifact_id`` of a served artifact is answered by that
-artifact too. An artifact that is not served beside the active selection has no
-URL: its calls answer HTTP 404.
-
-A serve appends a ``serve`` record, so the artifact stays served after a
-restart. It changes neither the active selection, nor the chain tip, nor a
-training start. An activation does not change what is served: serve the
-active artifact first to keep it answering after you activate another one.
-Serving a served artifact changes nothing. Training continues from each
-trainer's independently selected training start.
-The staleness check of a recipe counts only the artifacts that the scenario
-served as active, so it refuses the records of a served artifact that was not
-active within ``max_staleness`` artifacts.
-
-``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
-"<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers
-``{scenario, component, artifact_id}``. The artifact's URL
-answers HTTP 404 afterwards.
-
-The runtime must answer each call from the artifact that the call names.
-The Tinker runtime does, so a Tinker scenario can serve any of its
-artifacts. A runtime that loads weights into engines answers only from the
-snapshot it has loaded, so Reef refuses a serve there. A scenario whose
-components load nothing into a runtime, such as a harness scenario, can serve
-any of its artifacts. A store without a durable commit history also refuses
-a serve.
-
-+--------+--------------------------------------------------------------------+
-| Status | Cause                                                              |
-+========+====================================================================+
-| 200    | the artifact is served (``serve``) or no longer served beside the  |
-|        | active selection (``stop-serving``)                                |
-+--------+--------------------------------------------------------------------+
-| 400    | a malformed body; ``serve``: the artifact has no durable bytes, an |
-|        | unknown ``component`` or a missing one in a scenario of several    |
-|        | components, the runtime answers only from the snapshot it has      |
-|        | loaded, or the store keeps no durable commit history;              |
-|        | ``stop-serving``: the body names a ``component``                   |
-+--------+--------------------------------------------------------------------+
-| 404    | unknown scenario or artifact; ``stop-serving``: the scenario does  |
-|        | not serve the artifact beside its active selection                 |
 +--------+--------------------------------------------------------------------+
 | 409    | a training result waits for its commit; send the request again     |
 |        | after the commit                                                   |
@@ -2783,7 +3516,8 @@ a tree whose patch changes a file of a kind listed in the ``always`` rule's
 ``native_loop``). The step creates an artifact but does not activate it. Its row carries ``active: false`` and
 ``activated: false``. The manifest keeps serving the active selection, and
 ``?artifact_id=`` pulls the inactive tree for a trial run. To make it serve,
-send the row's ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.
+send ``{"served": {"<artifact_id>": 100}}`` with the row's ``artifact_id`` to
+``POST /reef/scenarios/{scenario}/update`` (`Set what a scenario serves`_).
 
 ``GET /reef/harness/artifacts`` lists only the harness component's artifacts.
 A weights update does not create another harness artifact. Each row's
@@ -2803,7 +3537,7 @@ The page shows why the step ran (the request, or a failure in the job data),
 ``method_summary``, the patch against the artifact the step ran on,
 the evaluation's numbers, ``method_notes`` and ``requires``. It also links
 the parent step and later training or sync operations. The selected artifact's
-page retains the legacy ``Active release`` label. A step that made an artifact that was never activated
+page reads ``Active selection``. A step that made an artifact that was never activated
 (``activated: false``) reads ``Waiting for activation``. The row itself is in
 a ``<script type="application/json">`` block at the end of the page. A step
 outside the catalog, or one that is not a number of at most nine digits, is
@@ -2825,7 +3559,7 @@ step settles the request, the page reloads every five seconds and shows the
 request's state and the step's activity (its latest 80 lines). The catalog row
 whose ``metrics.training_request.id`` is the record id settles the page: it
 then shows the result, the next action (``GET /reef/harness`` for an active
-selection, the activate request for an inactive one), ``method_summary``, the
+selection, the update request that serves an inactive one), ``method_summary``, the
 patch with each file's kind of the harness tree (from the row's
 ``patch_parts``), and ``method_notes``. An unknown id, or one that is not a
 training request, is HTTP 404.
@@ -2921,10 +3655,10 @@ a training job runs or an update is being published.
      "preload_errors": {},
      "scenarios": {
        "hello-reef": {
-         "scenario_step": 3,
+         "commit_number": 3,
          "artifact_head_sync": {"state": "synchronized", "error": null},
-         "last_committed_step": {
-           "step": 3,
+         "last_training_commit": {
+           "commit_number": 3,
            "recorded_at": 1756400000.0,
            "metrics": {"selected": false, "selection": {"reason": "candidate lost"}}
          },
@@ -2934,7 +3668,8 @@ a training job runs or an update is being published.
          "processor": {"...": "..."},
          "inference_admission": {"...": "..."},
          "artifacts": {"weights": {"active": "5e1c...", "training_start": "5e1c..."}},
-         "training_job": {"job_id": "9c41...", "backend": "slime", "checkpoints_handled": 0},
+         "training_jobs": [{"job_id": "9c41...", "start": "/checkpoints/iter_0000004", "checkpoints_handled": 0,
+                            "train_from": null, "backend": "slime"}],
          "finished_jobs": 2
        }
      },
@@ -2958,12 +3693,18 @@ automatic job takes, from recorded traffic and uploaded trajectories;
 (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most
 samples that one automatic job takes, beside the rest of a group.
 
-A scenario that trains weights also reports its training job.
-``training_job`` is the job that the scenario's training component runs. It
-holds the ``job_id``, the ``backend`` that runs the job, and
-``checkpoints_handled``. ``checkpoints_handled`` is the number of the job's
-saved checkpoints that Reef has evaluated and committed. ``training_job`` is
-``null`` while no job runs. ``finished_jobs`` counts the jobs of the scenario
+A scenario that trains weights also reports its training jobs.
+``training_jobs`` lists the jobs that the scenario's training component runs,
+in the order of their submission. Each holds the ``job_id``, the ``backend``
+that runs the job, the ``start`` that the job trains from,
+``checkpoints_handled`` and ``train_from``. ``start`` is a checkpoint's path
+as the component reads it, or ``snapshot:`` and a JSON object
+``{revision, root}`` that names the snapshot of the scenario that the job
+starts from. ``checkpoints_handled``
+is the number of the job's saved checkpoints that Reef has committed.
+``train_from`` is the artifact that the job's request named as its start, or
+``null`` for a job that continues the training start. The list is empty while
+no job runs. ``finished_jobs`` counts the jobs of the scenario
 that ended, finished or failed. A runtime that serves each scenario its own
 adapter adds ``adapter_runtime_load_id``. It is the runtime load ID of the
 scenario's served adapter, or ``null`` while the scenario samples the base
@@ -2972,24 +3713,25 @@ model.
 A scenario whose recipe runs one trainer per recipe component adds a
 ``components`` object. For each recipe component, it holds the component's
 own ``job_data_ready``, ``training_mode``, ``processor`` status and
-``last_committed_step``. The scenario-wide ``job_data_ready``, ``training_mode``
+``last_training_commit``. The scenario-wide ``job_data_ready``, ``training_mode``
 and ``processor`` describe the first trainer that trains, else the first
-trainer. The scenario-wide ``last_committed_step`` is the latest commit of
+trainer. The scenario-wide ``last_training_commit`` is the latest training commit of
 any recipe component.
 
 Every row of ``GET /reef/scenarios/{scenario}/artifacts`` names the
 ``component`` whose artifact it is.
 
-``last_committed_step`` reports the latest durable training step number,
-commit time, and its recipe-owned metrics; it is ``null`` before the first
+``last_training_commit`` reports the commit number of the latest durable training commit,
+its commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
 step that skipped or rejected its candidate. An activation, a train-from, an
-import or a sync advances ``scenario_step`` without replacing the latest
-training outcome.
+import or a sync advances ``commit_number`` without replacing the latest
+training outcome. ``commit_number`` is the number of the scenario's newest commit.
 
-``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
-that serves per-scenario adapters reports the engines' shared adapter
-residency there, under ``adapters``.
+``serving`` is runtime-wide and keyed by recipe name. The runtime of a
+weight-training recipe that serves per-scenario adapters reports the engines'
+shared adapter residency there, under ``adapters``. For a composite recipe,
+``adapters`` is under the name of the weight component.
 
 Status codes
 ------------
@@ -2999,16 +3741,19 @@ Status codes
 +========+=============================================================+
 | 400    | malformed body, a missing or empty ``x-reef-scenario`` on a |
 |        | scenario-scoped route, a report violating the recipe's      |
-|        | declared schema, or an activation or a train-from naming an |
-|        | artifact that Reef cannot serve or train from               |
+|        | declared schema, or a ``served`` mapping or a train-from    |
+|        | naming an artifact that Reef cannot serve or train from     |
 +--------+-------------------------------------------------------------+
 | 401    | missing or wrong bearer token, or ``x-api-key`` when no     |
 |        | Authorization header is sent; the two harness pages also    |
 |        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
-| 403    | never issued by Reef: an unaccepted token is 401, and       |
+| 403    | a routed request for an unconfigured Scenario or a pin to a |
+|        | target outside it (see Routed external-model requests), a   |
+|        | console origin, method or headers that are not allowed, or  |
+|        | an engine's own 403; an unaccepted token is 401, and        |
 |        | per-scenario authorization belongs to the gateway in front  |
-|        | of Reef.                                                    |
+|        | of Reef                                                     |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (on inference, on ``POST /reef/train``,    |
 |        | or with implicit creation off), a scenario that serves no   |
@@ -3016,18 +3761,27 @@ Status codes
 |        | configured harness recipe, or a scenario that serves no     |
 |        | files                                                       |
 +--------+-------------------------------------------------------------+
-| 409    | a record id resent with different content, an activation or |
-|        | a train-from while a training result waits for its commit,  |
-|        | or an engine that answered under another model name or      |
-|        | aborted the request on both attempts                        |
+| 409    | a record id resent with different content, a ``served``     |
+|        | mapping or a train-from while a training result waits for   |
+|        | its commit, or an engine that aborted the request on both   |
+|        | attempts                                                    |
 +--------+-------------------------------------------------------------+
-| 502    | the engine failed or could not be reached; the body carries |
-|        | the engine's status and message                             |
+| 4xx    | an engine's own 4xx, with its message, such as for a prompt |
+|        | that fills the model's context window: an engine's 400,     |
+|        | 401, 403, 404, 408, 409, 422 or 429 passes through as sent, |
+|        | and any other engine 4xx becomes 400                        |
++--------+-------------------------------------------------------------+
+| 502    | the engine failed with a 5xx, answered with no JSON object, |
+|        | or could not be reached; the body carries the engine's      |
+|        | status and message for a 5xx, and the engine's URL and the  |
+|        | connection error for an engine that could not be reached    |
 +--------+-------------------------------------------------------------+
 | 503    | the artifact store is unreachable, no loaded scenario is    |
 |        | idle at ``reef.max_loaded_scenarios`` (with                 |
-|        | ``Retry-After``), ``served_models`` cannot be read, or the  |
-|        | record store does not take an inference record              |
+|        | ``Retry-After``), ``served_models`` cannot be read, the     |
+|        | record store does not take an inference record, the engine  |
+|        | did not serve the selected weights on either attempt, or a  |
+|        | retry found no row for its artifact (with ``Retry-After``)  |
 +--------+-------------------------------------------------------------+
 | 504    | the engine did not answer within ``inference.timeout-s``    |
 +--------+-------------------------------------------------------------+
@@ -3056,8 +3810,7 @@ requests may use GET, POST or DELETE with Authorization, Content-Type and
 x-reef-scenario headers. Cookies are not enabled through CORS.
 
 CORS headers also cover errors and streamed responses, exposing
-``x-reef-agent-record-id``, ``x-reef-artifact-id`` and ``x-reef-artifact-version``
-to the browser. Clients without an Origin header keep their existing behavior.
+``x-reef-agent-record-id`` and ``x-reef-artifact-id`` to the browser. Clients without an Origin header keep their existing behavior.
 A browser can also require local network permission or HTTPS. An origin that
 Reef allows does not override browser policy.
 
@@ -3084,15 +3837,15 @@ and the stored ``payload``. A missing body returns 404: it may have expired or
 never been retained. Reading never reactivates records or changes retention.
 
 ``GET /reef/scenarios/{scenario}/operations`` returns ``{scenario,
-operations, next_after_step}``, oldest first. ``after_step`` defaults to 0;
-``limit`` defaults to 50 and accepts 1–100. ``next_after_step`` is null at
+operations, next_after_commit_number}``, oldest first. ``after_commit_number`` defaults to 0;
+``limit`` defaults to 50 and accepts 1–100. ``next_after_commit_number`` is null at
 the end. ``/commits`` remains an alias with the array named ``commits``.
 
 Repeat ``record_id`` to filter operations whose ``consumed_ids`` contain any
 requested ID (at most 100 IDs of 1–256 characters). This tests exact set
 membership, not whether a record was eligible for training.
 
-Each row exposes ``step``, ``operation``, ``operation_verified``,
+Each row exposes ``commit_number``, ``operation``, ``operation_verified``,
 ``recorded_at``, ``components``, ``component``, ``activated``,
 ``consumed_ids`` and ``metrics``. ``components`` maps component names to
 artifact IDs associated with the operation. ``component`` identifies the
@@ -3110,7 +3863,12 @@ The operations are:
 - ``import``: create an artifact from an external source.
 - ``sync``: create a harness artifact and select it for serving and training
   in one operation. Its ``activated`` value is true.
-- ``serve`` and ``stop_serving``: add or remove a separately served artifact.
+- ``serve`` and ``stop_serving``: add or remove an artifact that the scenario
+  serves beside the active one.
+
+A ``served`` request appends ``activate``, ``serve`` and ``stop_serving``
+operations, one for each artifact that changes (`Set what a scenario
+serves`_).
 
 Activation, restore and serving do not create artifacts or repository
 revisions. An import or training step can create an artifact without changing

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+from reef.service.assembly import connect_weight_objects
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 
@@ -15,6 +16,10 @@ def load_deployment(path):
         {
             "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
             "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
+            # The paths that the AutoEnvScaling Slime example reads from the shell.
+            "REEF_AUTOENVSCALING_MODEL_PATH": os.environ.get("REEF_AUTOENVSCALING_MODEL_PATH") or "/tmp/reef-model",
+            "REEF_AUTOENVSCALING_STATE_DIR": os.environ.get("REEF_AUTOENVSCALING_STATE_DIR") or "/tmp/reef-aes",
+            "REEF_AUTOENVSCALING_SEEDS_PATH": os.environ.get("REEF_AUTOENVSCALING_SEEDS_PATH") or "/tmp/reef-seeds",
         },
     ):
         return resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
@@ -31,6 +36,10 @@ def deployment_layout(config):
             "REEF_TOKEN": os.environ.get("REEF_TOKEN") or "test-token",
             "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
             "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
+            # The paths that the AutoEnvScaling Slime example reads from the shell.
+            "REEF_AUTOENVSCALING_MODEL_PATH": os.environ.get("REEF_AUTOENVSCALING_MODEL_PATH") or "/tmp/reef-model",
+            "REEF_AUTOENVSCALING_STATE_DIR": os.environ.get("REEF_AUTOENVSCALING_STATE_DIR") or "/tmp/reef-aes",
+            "REEF_AUTOENVSCALING_SEEDS_PATH": os.environ.get("REEF_AUTOENVSCALING_SEEDS_PATH") or "/tmp/reef-seeds",
         },
     ):
         return resolve_deployment_config(config, None, Path(__file__).resolve().parents[2] / "<example>")[0]
@@ -42,3 +51,12 @@ def load_harness_deployment(path):
     raw = load_config(path)
     config = load_deployment(path)
     return {**config, **recipe_config_from_file_layout(raw)}
+
+
+def connect_training_objects(settings, *, model_path, default_parameters):
+    """The training component and the serving runtime that a training service builds for ``settings``
+    (``connect_weight_objects`` with ``runs_training``)."""
+    live = connect_weight_objects(
+        settings, model_path=model_path, default_parameters=default_parameters, runs_training=True
+    )
+    return live.training_component, live.runtime

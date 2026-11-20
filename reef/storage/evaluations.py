@@ -5,7 +5,9 @@ A client asks Reef to evaluate one artifact of a scenario
 artifact with the scenario's settings. The evaluation store keeps each request,
 its state and its result, so a client reads them after the evaluation ends and
 after a restart. Reef does not resume an evaluation that was queued or running
-when its service stopped: a later read reports it failed. Archiving the
+when its service stopped: a later read reports it failed. A client can run the
+rollouts of an ended evaluation that have no score again; the evaluation then
+runs and ends again (``reopen``). Archiving the
 scenario retires its evaluations with its records.
 """
 
@@ -24,7 +26,7 @@ EvaluationState = Literal["queued", "running", "finished", "failed"]
 EVALUATION_STATES: tuple[EvaluationState, ...] = ("queued", "running", "finished", "failed")
 
 
-class EvaluationStateConflict(ReefError):
+class EvaluationStateConflictError(ReefError):
     """An evaluation is not in the state that a change of state needs, or does not exist."""
 
 
@@ -80,7 +82,18 @@ class StoredEvaluation:
             raise ValueError("a stored evaluation's error is a non-empty string")
 
     def to_json(self) -> dict[str, object]:
-        """The evaluation as an evaluation route answers it: the request, the state, and the result or error."""
+        """The evaluation as an evaluation route answers it: the request, the state, and the result or error.
+
+        ``mean_score`` and ``benchmark_scores`` follow the request's collection (``EvaluationCollection``). Without
+        a collection, ``mean_score`` is the mean of every rollout and ``benchmark_scores`` is empty.
+        """
+        collection = self.request.collection
+        if self.result is None:
+            mean_score = None
+        elif collection is None:
+            mean_score = self.result.mean_score
+        else:
+            mean_score = collection.mean_score(self.result.scores)
         return {
             "evaluation_id": self.evaluation_id,
             "state": self.state,
@@ -88,7 +101,10 @@ class StoredEvaluation:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "policy_evaluation": None if self.result is None else self.result.to_json(),
-            "mean_score": None if self.result is None else self.result.mean_score,
+            "mean_score": mean_score,
+            "benchmark_scores": (
+                [] if self.result is None or collection is None else collection.benchmark_scores(self.result.scores)
+            ),
             "error": self.error,
         }
 
@@ -98,14 +114,17 @@ class EvaluationStore(ABC):
 
     Values: the state of a store is a finite set of stored evaluations with
     distinct IDs. An evaluation is created ``queued`` or ``running``; a queued
-    one starts running once (``begin``). It ends once, as ``finished`` from
-    ``running``, or as ``failed`` from either; an ended evaluation does not
-    change.
+    one starts running once (``begin``). It ends as ``finished`` from
+    ``running``, or as ``failed`` from either. An ended evaluation does not
+    change until ``reopen`` makes it ``running`` again, after which it ends
+    again.
 
     Purpose: the evaluation service creates an evaluation when it accepts a
     request (``create``), starts a queued one when a run is free (``begin``),
-    ends it when its rollouts end (``finish``, ``fail``), and reads the store
-    for the evaluation routes (``get``, ``newest``).
+    ends it when its rollouts end (``finish``, ``fail``), runs an ended one
+    again when a client retries its rollouts (``reopen``), changes how many of
+    its rollouts run at once when a client runs them again (``limit_rollouts``), and reads the store
+    for the evaluation routes (``read``, ``newest``).
     """
 
     @abstractmethod
@@ -125,19 +144,30 @@ class EvaluationStore(ABC):
 
     @abstractmethod
     def begin(self, evaluation_id: str) -> StoredEvaluation:
-        """Start a queued evaluation and return it, ``running``; ``EvaluationStateConflict`` for any other."""
+        """Start a queued evaluation and return it, ``running``; ``EvaluationStateConflictError`` for any other."""
 
     @abstractmethod
     def finish(self, evaluation_id: str, *, result: PolicyEvaluation, finished_at: float) -> StoredEvaluation:
-        """End a running evaluation with ``result`` and return it; ``EvaluationStateConflict`` for any other."""
+        """End a running evaluation with ``result`` and return it; ``EvaluationStateConflictError`` for any other."""
 
     @abstractmethod
     def fail(self, evaluation_id: str, *, error: str, finished_at: float) -> StoredEvaluation:
-        """End a queued or running evaluation with ``error`` and return it; ``EvaluationStateConflict`` for any
+        """End a queued or running evaluation with ``error`` and return it; ``EvaluationStateConflictError`` for any
         other."""
 
     @abstractmethod
-    def get(self, evaluation_id: str) -> StoredEvaluation | None:
+    def reopen(self, evaluation_id: str) -> StoredEvaluation:
+        """Make a finished or failed evaluation ``running`` again and return it, without its result, its error and
+        its ``finished_at``; ``EvaluationStateConflictError`` for any other."""
+
+    @abstractmethod
+    def limit_rollouts(self, evaluation_id: str, max_concurrent_rollouts: int | None) -> StoredEvaluation:
+        """Store ``max_concurrent_rollouts`` as the most rollouts of the evaluation that run at once, and return the
+        evaluation; ``EvaluationStateConflictError`` when the store holds no such evaluation, and ``ValueError`` for
+        a value that ``ArtifactEvaluationRequest`` refuses. The rest of the evaluation stays as it is."""
+
+    @abstractmethod
+    def read(self, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id``, or None when the store holds none."""
 
     @abstractmethod
@@ -145,4 +175,10 @@ class EvaluationStore(ABC):
         """At most ``limit`` evaluations, newest ``created_at`` first; ``ValueError`` unless ``limit`` is positive."""
 
 
-__all__ = ["EVALUATION_STATES", "EvaluationState", "EvaluationStateConflict", "EvaluationStore", "StoredEvaluation"]
+__all__ = [
+    "EVALUATION_STATES",
+    "EvaluationState",
+    "EvaluationStateConflictError",
+    "EvaluationStore",
+    "StoredEvaluation",
+]

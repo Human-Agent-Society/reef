@@ -13,35 +13,34 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select, update
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select
 from sqlalchemy.engine import Connection
 
 from reef.storage.commit_history import CommitHistory, same_commit
 from reef.storage.commits import CommitHistoryError, CommitRecord, encode_commit
-from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
 def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
-    """Define the ``scenario_commit`` table in ``metadata``: one row per committed step.
+    """Define the ``scenario_commit`` table in ``metadata``: one row per commit.
 
     ``commit_json`` holds the canonical JSON object of ``CommitRecord.to_dict``.
     If ``foreign_key`` names a column, the table also has the column
     ``storage_id``, which refers to it. The adapter then gives ``storage_id``
-    in ``ScopedTable.scope``. Steps are unique in each namespace.
+    in ``ScopedTable.scope``. Commit numbers are unique in each namespace.
     """
     if foreign_key is None:
         return Table(
             "scenario_commit",
             metadata,
-            Column("step", Integer, primary_key=True, autoincrement=False),
+            Column("commit_number", Integer, primary_key=True, autoincrement=False),
             Column("commit_json", Text, nullable=False),
         )
     return Table(
         "scenario_commit",
         metadata,
         Column("storage_id", String(32), ForeignKey(foreign_key), primary_key=True),
-        Column("step", BigInteger, primary_key=True),
+        Column("commit_number", BigInteger, primary_key=True),
         Column("commit_json", Text, nullable=False),
     )
 
@@ -51,20 +50,17 @@ class SQLCommitHistory(CommitHistory):
 
     Values: ``database`` is the open scenario database whose transactions the
     history uses. ``table`` is the commit table and the namespace of this
-    generation. ``train_counts`` is the train count table
-    (``sample_train_count_table``) in the same namespace. ``label`` names the table for error messages, and ``durable``
+    generation. ``label`` names the table for error messages, and ``durable``
     is true when the database outlives the process. ``records()`` is the rows
-    of the namespace in step order, decoded. The cached records are always a
-    prefix of those rows, so a read fetches only the steps after them; a
+    of the namespace in commit number order, decoded. The cached records are always a
+    prefix of those rows, so a read fetches only the commits after them; a
     locked block that rolls back clears the cache. A row deleted by anything
     but this class is outside the contract.
 
-    ``append`` stores a new commit and adds one to the train count of the
-    commit's trainer (``record.component``, or ``""`` when it names none) for
-    each sample whose ``consumed_sample_id`` the commit lists, in one
-    transaction. An
-    append of a commit that is already stored changes nothing, so a retry
-    counts no sample twice.
+    ``append`` stores a new commit. An append of a commit that is already
+    stored changes nothing. The train counts of the scenario's samples are a
+    count over these rows (``SQLTrainingState``), so a retry counts no sample
+    twice.
 
     Purpose: a SQL scenario database makes it in ``commit_history()``.
     ``CommitHistoryScenarioStore`` reads and appends through it.
@@ -83,14 +79,12 @@ class SQLCommitHistory(CommitHistory):
         self,
         database: SQLScenarioDatabase,
         table: ScopedTable,
-        train_counts: ScopedTable,
         *,
         label: str,
         durable: bool,
     ) -> None:
         self.database = database
         self.table = table
-        self.train_counts = train_counts
         self._label = label
         self._durable = durable
         self._lock = RLock()
@@ -116,7 +110,7 @@ class SQLCommitHistory(CommitHistory):
                     finally:
                         self._connection = None
             except BaseException:
-                # The transaction rolled back, so the cache may hold a step that was never stored.
+                # The transaction rolled back, so the cache may hold a commit that was never stored.
                 self._cached = ()
                 raise
 
@@ -128,42 +122,20 @@ class SQLCommitHistory(CommitHistory):
         encoded = encode_commit(record)
         with self._lock, self._transaction(write=True) as connection:
             records = self._read(connection)
-            existing = next((item for item in records if item.step == record.step), None)
+            existing = next((item for item in records if item.commit_number == record.commit_number), None)
             if existing is not None:
                 if same_commit(existing, record):
                     return
-                raise CommitHistoryError(f"commit step {record.step} conflicts with its existing record")
-            if records and record.step < records[-1].step:
-                raise CommitHistoryError(f"commit step {record.step} precedes existing step {records[-1].step}")
-            connection.execute(
-                self.table.table.insert().values(**self.table.scope, step=record.step, commit_json=encoded)
-            )
-            sample_ids = sorted(
-                consumed.removeprefix(CONSUMED_SAMPLE_PREFIX)
-                for consumed in record.consumed_ids
-                if consumed.startswith(CONSUMED_SAMPLE_PREFIX)
-            )
-            if sample_ids:
-                counts = self.train_counts.table
-                component = record.component or ""
-                self.database._insert_if_absent(
-                    connection,
-                    counts,
-                    [
-                        {**self.train_counts.scope, "sample_id": sample_id, "component": component, "train_count": 0}
-                        for sample_id in sample_ids
-                    ],
+                raise CommitHistoryError(f"commit {record.commit_number} conflicts with its existing record")
+            if records and record.commit_number < records[-1].commit_number:
+                raise CommitHistoryError(
+                    f"commit {record.commit_number} precedes existing commit {records[-1].commit_number}"
                 )
-                for batch in batches(sample_ids):
-                    connection.execute(
-                        update(counts)
-                        .where(
-                            self.train_counts.condition(),
-                            counts.c.component == component,
-                            counts.c.sample_id.in_(batch),
-                        )
-                        .values(train_count=counts.c.train_count + 1)
-                    )
+            connection.execute(
+                self.table.table.insert().values(
+                    **self.table.scope, commit_number=record.commit_number, commit_json=encoded
+                )
+            )
 
     @contextmanager
     def _transaction(self, *, write: bool) -> Iterator[Connection]:
@@ -175,9 +147,11 @@ class SQLCommitHistory(CommitHistory):
 
     def _read(self, connection: Connection) -> tuple[CommitRecord, ...]:
         table = self.table.table
-        last_step = self._cached[-1].step if self._cached else 0
+        last_commit_number = self._cached[-1].commit_number if self._cached else 0
         rows = connection.execute(
-            select(table.c.commit_json).where(self.table.condition(), table.c.step > last_step).order_by(table.c.step)
+            select(table.c.commit_json)
+            .where(self.table.condition(), table.c.commit_number > last_commit_number)
+            .order_by(table.c.commit_number)
         ).scalars()
         added = tuple(CommitRecord.from_dict(json.loads(row)) for row in rows)
         if added:

@@ -15,11 +15,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.trajectories import source_record_id
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
-from reef.train.slime_backend.distill import DistillAlgorithm, DistillSettings, settings_from_args
+from reef.train.slime_backend.distill import DistillAlgorithm, DistillAlgorithmSettings, settings_from_args
 from reef.train.slime_backend.loss_families import register_loss_family, resolve_loss_family, unregister_loss_family
 from reef.train.types import TrajectorySample
 
@@ -30,7 +30,7 @@ TEACHER_TOKENS = [9, 9, 9, 9, 1, 2, 3]
 
 
 @dataclass(frozen=True)
-class ToySettings(DistillSettings):
+class ToySettings(DistillAlgorithmSettings):
     """A recipe's defaults: a separate teacher with the reverse KL at the sampled token."""
 
     teacher: str = "separate"
@@ -92,7 +92,7 @@ def test_flags_carry_the_family_prefix_and_land_on_args_under_distill_names(toy_
     args = SimpleNamespace()
     toy_family.apply_driver_options(args, settings)
     assert args.loss_family == "toydistill"
-    assert settings_from_args(args) == DistillSettings(
+    assert settings_from_args(args) == DistillAlgorithmSettings(
         teacher="self",
         divergence="jsd",
         top_k=0,
@@ -107,7 +107,7 @@ def test_flags_carry_the_family_prefix_and_land_on_args_under_distill_names(toy_
     # The recipe's own defaults apply when the driver passes no flags.
     defaults = SimpleNamespace()
     toy_family.apply_driver_options(defaults, None)
-    assert settings_from_args(defaults) == DistillSettings(**vars(ToySettings()))
+    assert settings_from_args(defaults) == DistillAlgorithmSettings(**vars(ToySettings()))
     assert (defaults.distill_teacher, defaults.distill_divergence, defaults.distill_top_k) == (
         "separate",
         "reverse",
@@ -140,21 +140,21 @@ def test_flags_carry_the_family_prefix_and_land_on_args_under_distill_names(toy_
 )
 def test_settings_reject_invalid_values(name: str, value: Any) -> None:
     with pytest.raises(ValueError, match=name):
-        DistillSettings(**{name: value})
+        DistillAlgorithmSettings(**{name: value})
 
 
 @pytest.mark.unit
 def test_a_separate_teacher_needs_its_checkpoint() -> None:
     with pytest.raises(ValueError, match="teacher_checkpoint"):
-        DistillSettings(teacher="separate")
-    assert DistillSettings(teacher="separate", teacher_checkpoint="/models/teacher").teacher == "separate"
+        DistillAlgorithmSettings(teacher="separate")
+    assert DistillAlgorithmSettings(teacher="separate", teacher_checkpoint="/models/teacher").teacher == "separate"
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), True])
 def test_advantage_clipping_rejects_invalid_bounds(value: float) -> None:
     with pytest.raises(ValueError, match="advantage_clip"):
-        DistillSettings(divergence="reverse", top_k=1, advantage_clip=value)
+        DistillAlgorithmSettings(divergence="reverse", top_k=1, advantage_clip=value)
 
 
 @pytest.mark.unit
@@ -169,7 +169,9 @@ def test_advantage_clipping_rejects_invalid_bounds(value: float) -> None:
 )
 def test_advantage_clipping_requires_sampled_reverse_kl(divergence: str, top_k: int, distribution: str) -> None:
     with pytest.raises(ValueError, match="advantage_clip requires sampled reverse KL"):
-        DistillSettings(divergence=divergence, top_k=top_k, top_k_distribution=distribution, advantage_clip=1.0)
+        DistillAlgorithmSettings(
+            divergence=divergence, top_k=top_k, top_k_distribution=distribution, advantage_clip=1.0
+        )
 
 
 @pytest.mark.unit

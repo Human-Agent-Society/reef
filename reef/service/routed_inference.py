@@ -14,7 +14,7 @@ from typing import Any, TypeVar
 
 from aiohttp import ClientError
 
-from reef.core.errors import ReefError, UnknownScenario, UpstreamStatusError, inference_aborted
+from reef.core.errors import ReefError, ScenarioNotFoundError, UpstreamStatusError, inference_aborted
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectory_index import SHADOW_PURPOSE
 from reef.core.values import JsonValue
@@ -50,7 +50,7 @@ class InferenceRetryPolicy:
             raise ValueError("inference retry policy requires 0 < initial_s <= max_s and timeout_s > 0")
 
 
-class InferenceRetryTimeout(ReefError):
+class InferenceRetryTimeoutError(ReefError):
     """The routed request exhausted its provider deadline."""
 
 
@@ -181,9 +181,10 @@ class DispatcherShadowWriter(ShadowRecordWriter):
     def accept_record(self, item: AgentRecord) -> AgentRecord:
         if item.scenario != self.scenario.name:
             raise ValueError("a shadow record must name its bound Scenario")
+        self.dispatcher.check_record_images((item,))
         with self.dispatcher.registry.lock_instance(self.scenario) as state:
             if state is not InstanceState.CURRENT:
-                raise UnknownScenario(f"shadow Scenario {item.scenario!r} is no longer the loaded instance")
+                raise ScenarioNotFoundError(f"shadow Scenario {item.scenario!r} is no longer the loaded instance")
             stored, inserted = ingest.append_record(self.scenario, item)
             if inserted:
                 self.dispatcher.process_accepted_records(self.scenario)
@@ -202,7 +203,7 @@ class RoutedRecords(ABC):
 
     @abstractmethod
     def open_scenario(self, name: str) -> RoutedScenario:
-        """The Scenario ``name``. Raise ``UnknownScenario`` when the deployment cannot serve it."""
+        """The Scenario ``name``. Raise ``ScenarioNotFoundError`` when the deployment cannot serve it."""
 
     @abstractmethod
     def open_shadow_scenario(self, name: str) -> tuple[RoutedScenario, ShadowRecordWriter]:
@@ -222,14 +223,14 @@ class DispatcherRecords(RoutedRecords):
     def open_scenario(self, name: str) -> RoutedScenario:
         scenario = self.dispatcher.get_or_create_scenario(name)
         if scenario is None:
-            raise UnknownScenario(f"unknown scenario {name!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {name!r}")
         return RoutedScenario(scenario.operations, scenario.served_serving_config())
 
     def open_shadow_scenario(self, name: str) -> tuple[RoutedScenario, ShadowRecordWriter]:
         with self.dispatcher.registry.lock_for(name):
             scenario = self.dispatcher.get_or_create_scenario(name)
             if scenario is None:
-                raise UnknownScenario(f"unknown scenario {name!r}")
+                raise ScenarioNotFoundError(f"unknown scenario {name!r}")
             return (
                 RoutedScenario(scenario.operations, scenario.served_serving_config()),
                 DispatcherShadowWriter(self.dispatcher, scenario),
@@ -327,7 +328,7 @@ class RoutedInference:
 
         # ServerTimeoutError is both a TimeoutError and a ClientError. Its timeout takes precedence.
         if isinstance(exc, TimeoutError):
-            raise InferenceRetryTimeout("routed inference timed out") from exc
+            raise InferenceRetryTimeoutError("routed inference timed out") from exc
         if isinstance(exc, ClientError):
             raise UpstreamStatusError("routed inference upstream connection failed", status=502) from exc
 
@@ -357,7 +358,7 @@ class RoutedInference:
                 sent = handler.request_payload(payload, serving_config=scenario.serving_config)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise InferenceRetryTimeout("routed inference retry deadline exceeded")
+                    raise InferenceRetryTimeoutError("routed inference retry deadline exceeded")
                 attempt = self.attempt(parsed, sent, decision, request_id, prior_ids, measurement)
                 try:
                     response = await asyncio.wait_for(handler.post_json(path, sent), timeout=remaining)

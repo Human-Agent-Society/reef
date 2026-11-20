@@ -16,7 +16,7 @@ import yaml
 from reef.service.components import COMPONENT_APPS, build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.containers import ContainerRuntime
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 
 pytestmark = pytest.mark.unit
 
@@ -146,9 +146,15 @@ def run_managed_owner(tmp_path: Path, phase: str, previous_handler: str) -> dict
 LIFECYCLE_EVENTS = ["prepare", "start", "steady", "stopping", "shutdown", "cleanup", "release"]
 
 
-@pytest.mark.parametrize("phase", LIFECYCLE_EVENTS)
-def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(tmp_path: Path, phase: str) -> None:
-    owner = run_managed_owner(tmp_path, phase, "default")
+@pytest.mark.parametrize(
+    ("phase", "previous_handler", "previous_calls"),
+    [pytest.param(phase, "default", [], id=phase) for phase in LIFECYCLE_EVENTS]
+    + [pytest.param("prepare", "custom", [signal.SIGHUP], id="prepare-custom-handler")],
+)
+def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(
+    tmp_path: Path, phase: str, previous_handler: str, previous_calls: list[signal.Signals]
+) -> None:
+    owner = run_managed_owner(tmp_path, phase, previous_handler)
     # The owner survives and completes every cleanup step; the signal became one reload request.
     assert owner["code"] == 0
     assert owner["events"] == LIFECYCLE_EVENTS
@@ -157,14 +163,8 @@ def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(tmp_path: 
     assert owner["ticks"] == 2
     # After the last cleanup the handler that was installed before reef serve is back.
     assert owner["restored"] is True
-
-
-def test_managed_owner_restores_a_custom_sighup_handler_it_never_calls(tmp_path: Path) -> None:
-    owner = run_managed_owner(tmp_path, "prepare", "custom")
-    assert owner["reloads"] == ["prepare"]
-    assert owner["restored"] is True
     # Only the SIGHUP sent after reef serve returned reached the earlier handler.
-    assert owner["previous_calls"] == [signal.SIGHUP]
+    assert owner["previous_calls"] == previous_calls
 
 
 def test_an_ordinary_deployment_never_installs_a_sighup_handler(
@@ -208,7 +208,7 @@ def test_managed_routing_refuses_standalone_components(
         pytest.fail("a managed deployment started a standalone component")
 
     monkeypatch.setattr(COMPONENT_APPS[component], "build", refuse_start)
-    settings = ServiceConfig(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
+    settings = ServiceSettings(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
     with pytest.raises(ValueError, match="requires reef serve without --component"):
         build_component_app(component, settings)
     with pytest.raises(orchestrator.DeployConfigError, match="requires reef serve without --component"):
@@ -223,7 +223,7 @@ def test_managed_object_config_prepares_controller_and_private_child(
     class Controller:
         """Stands in for the routing controller: records what the orchestrator passes and calls, nothing else."""
 
-        def __init__(self, settings: ServiceConfig, runtime: ContainerRuntime) -> None:
+        def __init__(self, settings: ServiceSettings, runtime: ContainerRuntime) -> None:
             observed["deployment_id"] = settings.routing_deployment.deployment_id
             self.directory = tmp_path / "generation"
             self.stop_requested = False

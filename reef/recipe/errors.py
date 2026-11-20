@@ -1,7 +1,7 @@
 """Errors raised while selecting and configuring a deployment recipe."""
 
-from reef.core.errors import ReefError
+from reef.core.errors import ConfigError
 
 
-class RecipeConfigError(ReefError):
+class RecipeConfigError(ConfigError):
     """Raised when a recipe's environment or YAML config is invalid."""
