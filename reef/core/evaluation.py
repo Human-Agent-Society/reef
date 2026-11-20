@@ -151,6 +151,12 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
 
+def mean_benchmark_score(benchmark_means: Iterable[float | None]) -> float | None:
+    """Give each benchmark with a score equal weight. Return None if none have a score."""
+    means = [score for score in benchmark_means if score is not None]
+    return math.fsum(means) / len(means) if means else None
+
+
 #: How an evaluation on a collection computes its mean score: ``task`` is the mean of every rollout, and ``benchmark``
 #: is the mean of the mean scores of the benchmarks.
 CollectionAverage = Literal["task", "benchmark"]
@@ -218,8 +224,7 @@ class EvaluationCollection:
         mean of the benchmark means that are not None, or None when there is none."""
         if self.average == "task":
             return mean_score(scores.rollouts())
-        means = [entry["mean_score"] for entry in self.benchmark_scores(scores) if entry["mean_score"] is not None]
-        return math.fsum(means) / len(means) if means else None
+        return mean_benchmark_score(entry["mean_score"] for entry in self.benchmark_scores(scores))
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -1049,5 +1054,6 @@ __all__ = [
     "RolloutScores",
     "SelectionDecision",
     "UpdateCandidate",
+    "mean_benchmark_score",
     "mean_score",
 ]

@@ -39,11 +39,33 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
         calls = request.query.get("calls", "true")
         if calls not in ("true", "false"):
             raise ValueError("calls is true or false")
-        views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id, calls=calls == "true")
-        if views is None:
+        if "limit" in request.query:
+            offset = int(request.query.get("offset", "0"))
+            limit = int(request.query["limit"])
+            state = request.query.get("state", "all")
+            sort = request.query.get("sort", "task")
+            if offset < 0 or not 1 <= limit <= 500:
+                raise ValueError("offset must be at least 0, and limit must be from 1 to 500")
+            if state not in ("all", "running", "failed") or sort not in ("task", "score"):
+                raise ValueError("state is all, running or failed, and sort is task or score")
+            page = await asyncio.to_thread(
+                evaluations.rollout_page_json,
+                scenario,
+                evaluation_id,
+                offset=offset,
+                limit=limit,
+                calls=calls == "true",
+                state=state,
+                benchmark=request.query.get("benchmark"),
+                lowest_first=sort == "score",
+            )
+        else:
+            views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id, calls=calls == "true")
+            page = None if views is None else {"rollouts": views}
+        if page is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(
-            {"scenario": scenario, "evaluation_id": evaluation_id, "rollouts": views},
+            {"scenario": scenario, "evaluation_id": evaluation_id, **page},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -150,6 +172,9 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
 def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
     """The start, the cancel, the retry and the resume of an evaluation, which control accepts."""
 
+    async def capabilities(request: web.Request) -> web.Response:
+        return web.json_response({"evaluation_start_id": True}, headers={"Cache-Control": "no-store"})
+
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)
         stored = await asyncio.to_thread(evaluations.start, request.match_info["scenario"], body)
@@ -180,6 +205,7 @@ def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEva
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(stored.to_json(), status=202)
 
+    app.router.add_get("/reef/scenarios/{scenario}/evaluation-capabilities", capabilities)
     app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
     app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel", cancel)
     app.router.add_post("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry", retry)

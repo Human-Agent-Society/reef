@@ -20,6 +20,7 @@ from typing import Literal
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
+from reef.storage.work_queue import NewWork
 
 #: The state of an evaluation: it waits for its turn, it runs, it finished with a result, or it failed with an error.
 EvaluationState = Literal["queued", "running", "finished", "failed"]
@@ -28,6 +29,43 @@ EVALUATION_STATES: tuple[EvaluationState, ...] = ("queued", "running", "finished
 
 class EvaluationStateConflictError(ReefError):
     """An evaluation is not in the state that a change of state needs, or does not exist."""
+
+
+class EvaluationStartConflictError(ReefError):
+    """A start ID is already in use, or its evaluation has a different request."""
+
+
+@dataclass(frozen=True)
+class EvaluationStart:
+    """The start ID, request fingerprint and first queue item of one evaluation.
+
+    The ID is a non-empty client string, at most 256 characters, with no NUL or surrogate code point.
+    The fingerprint is a 64-digit lowercase SHA-256 hex string.
+    The first work item lets control complete admission after an interruption.
+    """
+
+    start_id: str
+    fingerprint: str
+    first_work: NewWork
+
+    def __post_init__(self) -> None:
+        check_evaluation_start_id(self.start_id)
+        if len(self.fingerprint) != 64 or any(digit not in "0123456789abcdef" for digit in self.fingerprint):
+            raise ValueError("the request fingerprint must be a SHA-256 hex string")
+        if not isinstance(self.first_work, NewWork):
+            raise TypeError("the first work item must be NewWork")
+
+
+def check_evaluation_start_id(start_id: object) -> str:
+    """Return a valid evaluation start ID or raise ValueError."""
+    if (
+        not isinstance(start_id, str)
+        or not start_id.strip()
+        or len(start_id) > 256
+        or any(char == "\0" or 0xD800 <= ord(char) <= 0xDFFF for char in start_id)
+    ):
+        raise ValueError("start_id must be a non-empty string of at most 256 characters without NUL or surrogates")
+    return start_id
 
 
 @dataclass(frozen=True)
@@ -81,6 +119,15 @@ class StoredEvaluation:
         if self.error is not None and (not isinstance(self.error, str) or not self.error):
             raise ValueError("a stored evaluation's error is a non-empty string")
 
+    @property
+    def mean_score(self) -> float | None:
+        """The result's mean score by the request's weighting, or None without a score."""
+        if self.result is None:
+            return None
+        if self.request.collection is None:
+            return self.result.mean_score
+        return self.request.collection.mean_score(self.result.scores)
+
     def to_json(self) -> dict[str, object]:
         """The evaluation as an evaluation route answers it: the request, the state, and the result or error.
 
@@ -88,12 +135,6 @@ class StoredEvaluation:
         a collection, ``mean_score`` is the mean of every rollout and ``benchmark_scores`` is empty.
         """
         collection = self.request.collection
-        if self.result is None:
-            mean_score = None
-        elif collection is None:
-            mean_score = self.result.mean_score
-        else:
-            mean_score = collection.mean_score(self.result.scores)
         return {
             "evaluation_id": self.evaluation_id,
             "state": self.state,
@@ -101,7 +142,7 @@ class StoredEvaluation:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "policy_evaluation": None if self.result is None else self.result.to_json(),
-            "mean_score": mean_score,
+            "mean_score": self.mean_score,
             "benchmark_scores": (
                 [] if self.result is None or collection is None else collection.benchmark_scores(self.result.scores)
             ),
@@ -136,11 +177,33 @@ class EvaluationStore(ABC):
         request: ArtifactEvaluationRequest,
         created_at: float,
         state: Literal["queued", "running"] = "running",
+        start: EvaluationStart | None = None,
     ) -> StoredEvaluation:
         """Save a new evaluation in ``state`` and return it.
 
-        Raises ``ValueError`` when the store holds ``evaluation_id`` already.
+        With ``start``, reserve its ID and save the first work item in the same transaction.
+        Raise ``ValueError`` when the store holds ``evaluation_id``.
+        Raise ``EvaluationStartConflictError`` when the start ID is already in use.
         """
+
+    @abstractmethod
+    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, NewWork | None] | None:
+        """Read the evaluation and its pending first work item, or return None for an unused start ID.
+
+        Raise ``EvaluationStartConflictError`` if the stored fingerprint differs.
+        """
+
+    @abstractmethod
+    def pending_starts(self) -> tuple[tuple[str, NewWork], ...]:
+        """Return the evaluation ID and first work item of each start whose admission is pending."""
+
+    @abstractmethod
+    def pending_start(self, evaluation_id: str) -> NewWork | None:
+        """Return the first work item if admission of this evaluation is pending, else None."""
+
+    @abstractmethod
+    def complete_start(self, evaluation_id: str) -> None:
+        """Clear the pending first work item after the work queue stores it."""
 
     @abstractmethod
     def begin(self, evaluation_id: str) -> StoredEvaluation:

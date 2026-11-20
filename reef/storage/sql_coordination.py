@@ -28,6 +28,7 @@ from pathlib import Path
 from threading import RLock
 from typing import cast
 
+import sqlalchemy
 from sqlalchemy import (
     URL,
     BigInteger,
@@ -43,7 +44,6 @@ from sqlalchemy import (
     Text,
     and_,
     case,
-    cast as sql_cast,
     create_engine,
     delete,
     exists,
@@ -1409,11 +1409,12 @@ class SQLWorkQueue(WorkQueue):
     ) -> dict[str, tuple[int, str, bool]]:
         item_id = self.database.code_point_order(self.table.c.item_id)
         with self.database.read() as connection:
+            marked: ColumnElement[bool]
             if connection.dialect.name == "sqlite":
                 keys = func.json_each(self.table.c.metadata_json).table_valued("key", "type")
                 marked = exists(select(1).select_from(keys).where(keys.c.key == marker, keys.c.type == "true"))
             else:
-                marked = sql_cast(self.table.c.metadata_json, JSONB).contains({marker: True})
+                marked = sqlalchemy.cast(self.table.c.metadata_json, JSONB).contains({marker: True})
             query = (
                 select(self.table.c.state, func.count(), func.max(item_id), func.max(case((marked, 1), else_=0)))
                 .where(

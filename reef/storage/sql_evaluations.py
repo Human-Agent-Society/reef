@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, Literal
 
 from sqlalchemy import (
@@ -30,8 +30,15 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.evaluations import EvaluationStateConflictError, EvaluationStore, StoredEvaluation
+from reef.storage.evaluations import (
+    EvaluationStart,
+    EvaluationStartConflictError,
+    EvaluationStateConflictError,
+    EvaluationStore,
+    StoredEvaluation,
+)
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
+from reef.storage.work_queue import NewWork
 
 
 def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -71,12 +78,30 @@ def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> T
     )
 
 
+def evaluation_start_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
+    """Define the start IDs of one scenario or of the stores that share the database."""
+    scope = (
+        () if foreign_key is None else (Column("storage_id", String(32), ForeignKey(foreign_key), primary_key=True),)
+    )
+    return Table(
+        "artifact_evaluation_start",
+        metadata,
+        *scope,
+        Column("start_id", Text, primary_key=True),
+        Column("evaluation_id", Text, nullable=False),
+        Column("fingerprint", String(64), nullable=False),
+        Column("first_work_json", Text),
+        Index("artifact_evaluation_start_evaluation", *(column.name for column in scope), "evaluation_id"),
+    )
+
+
 class SQLEvaluationStore(EvaluationStore):
     """The artifact evaluations of one scenario in its record database."""
 
-    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable) -> None:
+    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable, starts: ScopedTable) -> None:
         self.database = database
         self.table = table
+        self.starts = starts
 
     def create(
         self,
@@ -86,6 +111,7 @@ class SQLEvaluationStore(EvaluationStore):
         request: ArtifactEvaluationRequest,
         created_at: float,
         state: Literal["queued", "running"] = "running",
+        start: EvaluationStart | None = None,
     ) -> StoredEvaluation:
         if state not in ("queued", "running"):
             raise ValueError(f"an evaluation is created queued or running, not {state!r}")
@@ -97,6 +123,18 @@ class SQLEvaluationStore(EvaluationStore):
             ).scalar_one_or_none()
             if held is not None:
                 raise ValueError(f"evaluation {evaluation_id!r} is stored already")
+            if start is not None and not self.database._write_if_absent(
+                connection,
+                self.starts.table,
+                {
+                    **self.starts.scope,
+                    "start_id": start.start_id,
+                    "evaluation_id": evaluation_id,
+                    "fingerprint": start.fingerprint,
+                    "first_work_json": json.dumps(asdict(start.first_work), ensure_ascii=True),
+                },
+            ):
+                raise EvaluationStartConflictError("start_id is already stored")
             connection.execute(
                 table.insert().values(
                     **self.table.scope,
@@ -108,6 +146,56 @@ class SQLEvaluationStore(EvaluationStore):
                 )
             )
         return stored
+
+    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, NewWork | None] | None:
+        table, starts = self.table.table, self.starts.table
+        with self.database._transaction(write=False) as connection:
+            row = (
+                connection.execute(
+                    select(table, starts.c.fingerprint, starts.c.first_work_json)
+                    .join(starts, table.c.evaluation_id == starts.c.evaluation_id)
+                    .where(self.table.condition(), self.starts.condition(), starts.c.start_id == start_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            return None
+        if row["fingerprint"] != fingerprint:
+            raise EvaluationStartConflictError("start_id already names a different evaluation request")
+        first_work_json = row["first_work_json"]
+        return stored_evaluation(row), None if first_work_json is None else NewWork(**json.loads(first_work_json))
+
+    def pending_starts(self) -> tuple[tuple[str, NewWork], ...]:
+        starts = self.starts.table
+        with self.database._transaction(write=False) as connection:
+            rows = connection.execute(
+                select(starts.c.evaluation_id, starts.c.first_work_json).where(
+                    self.starts.condition(), starts.c.first_work_json.is_not(None)
+                )
+            ).all()
+        return tuple(
+            (evaluation_id, NewWork(**json.loads(first_work_json))) for evaluation_id, first_work_json in rows
+        )
+
+    def pending_start(self, evaluation_id: str) -> NewWork | None:
+        starts = self.starts.table
+        with self.database._transaction(write=False) as connection:
+            first_work_json = connection.execute(
+                select(starts.c.first_work_json).where(
+                    self.starts.condition(), starts.c.evaluation_id == evaluation_id
+                )
+            ).scalar_one_or_none()
+        return None if first_work_json is None else NewWork(**json.loads(first_work_json))
+
+    def complete_start(self, evaluation_id: str) -> None:
+        starts = self.starts.table
+        with self.database._transaction(write=True) as connection:
+            connection.execute(
+                starts.update()
+                .where(self.starts.condition(), starts.c.evaluation_id == evaluation_id)
+                .values(first_work_json=None)
+            )
 
     def begin(self, evaluation_id: str) -> StoredEvaluation:
         return self.move(evaluation_id, ("queued",), state="running", finished_at=None, result_json=None, error=None)
@@ -233,4 +321,4 @@ def stored_evaluation(row: RowMapping | Mapping[str, Any]) -> StoredEvaluation:
     )
 
 
-__all__ = ["SQLEvaluationStore", "evaluation_table", "stored_evaluation"]
+__all__ = ["SQLEvaluationStore", "evaluation_start_table", "evaluation_table", "stored_evaluation"]

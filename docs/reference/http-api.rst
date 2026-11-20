@@ -182,6 +182,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                                                       | evaluate one artifact of a snapshot               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluation-capabilities``                                                            | check support for evaluation start IDs            |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``                                                | cancel one evaluation                             |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``                                                 | run the failed rollouts again                     |
@@ -1102,7 +1104,10 @@ them (`Evaluate an artifact`_).
   that the owner does not store, and for collections that name each other in
   a cycle.
 - ``GET /reef/namespaces/{owner}/collections`` lists the owner's collections
-  by name: ``{"owner", "collections"}``.
+  by name: ``{"owner", "collections"}``. Use ``?counts=true`` to add
+  ``benchmark_count`` and ``task_count`` to each collection. The counts
+  include benchmarks of nested collections. Reef counts each benchmark and
+  each current task item once per collection.
 - ``GET /reef/namespaces/{owner}/collections/{name}`` returns one collection
   with ``benchmark_task_counts``, a list of ``{"benchmark", "task_count"}``
   for each of its benchmarks, and ``task_count``. ``task_count`` counts a task
@@ -1392,6 +1397,9 @@ The body takes these fields:
 
 - ``artifact_id`` (required): one of the scenario's artifacts, by the
   ``artifact_id`` that ``GET /reef/scenarios/{scenario}/artifacts`` lists.
+- ``start_id``: a client ID for safely repeating a start request in this
+  scenario. Use a non-blank string of at most 256 characters without NUL or
+  surrogate code points.
 - ``component``: the component to evaluate. Leave it out when the artifacts
   hold one component with a kind.
 - ``harness``: the Harbor agent that runs a model artifact. ``{"name":
@@ -1482,7 +1490,18 @@ The body takes these fields:
   ``log_probs`` for an artifact that a provider serves. Each call's body grows
   with one entry for each sampled token.
 
-The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
+The answer is 202 with the stored evaluation, whose initial ``state`` is
+``running``. Repeat the request with the same ``start_id`` to get the same
+evaluation in its current state, including after a restart. JSON object key
+order and whitespace can differ. Changing a value or adding or removing a
+field returns 409 for a start ID already in use. If the request omits
+``start_id``, each successful POST creates an evaluation.
+If an interrupted start has no initial work after the queue retention period,
+Reef marks the evaluation failed. A replay still returns its original ID.
+
+``GET /reef/scenarios/{scenario}/evaluation-capabilities`` on control returns
+``{"evaluation_start_id": true}`` when this operation is available.
+
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
 it runs and after it ends:
 
@@ -1518,7 +1537,9 @@ For an evaluation on a collection, the stored ``collection`` is ``{"name",
 "mean_score"}`` for each of them: the number of its tasks in the evaluation,
 and the mean of their rollouts that have a score. A task in two benchmarks
 counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts
-that have a score. With ``benchmark``, it is the mean of the benchmark means.
+that have a score. With ``benchmark``, it is the mean of the benchmark scores.
+Reef skips benchmarks without a score.
+The built-in ``evaluated`` activation rule compares this mean score with ``min_mean_score``.
 ``benchmark_scores`` is empty for another evaluation.
 
 ``progress`` counts the rollouts of the evaluation, also while it runs. It is
@@ -1531,7 +1552,7 @@ null when the evaluations queue no longer holds them:
 - ``cancelled`` counts the rollouts that a cancel or a stop for failed
   rollouts ended. They are not in ``ended``.
 - ``running`` counts the rollouts that a worker holds now.
-- ``mean_score`` is the mean of the scores so far, or null.
+- ``mean_score`` applies the evaluation's weighting to the scores so far. It is null when there are no scores.
 - ``eta_seconds`` estimates the seconds until every rollout ends: the
   rollouts left at the rate at which rollouts ended in the last 20 minutes. It
   is null when no rollout ended in that time, or when the evaluation ended.
@@ -1540,6 +1561,11 @@ null when the evaluations queue no longer holds them:
   "scored", "failed", "cancelled", "running", "mean_score"}``, with the same
   meaning for the rollouts of the benchmark's tasks. A task in two benchmarks
   counts in both. It is empty for another evaluation.
+
+Both the evaluation and benchmark progress objects include ``score_levels``.
+It counts rollouts with scores of at least one (``full``), between zero and one
+(``part``), and zero or below (``zero``).
+``failed`` counts failures and cancellations. ``pending`` counts the other rollouts.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
 shows the progress of an evaluation while it runs. It answers ``{scenario,
@@ -1569,6 +1595,16 @@ score, rewards, error, calls, verifier_calls}``.
   ``calls`` counts the agent's calls only.
 - ``verifier_calls`` holds the same totals of the calls that the rollout's
   verifier wrote (`Calls that a verifier writes`_), or null.
+
+Add ``limit`` to get 1 to 500 rollouts. ``offset`` skips that many rollouts and
+defaults to zero. The response also includes ``offset`` and ``total``, the number
+of rollouts that match the filters. ``state`` defaults to ``all``. It can also
+be ``running`` (assigned or running) or ``failed`` (including rollouts with a
+failed score). ``benchmark`` selects the tasks of one benchmark of a collection.
+``sort=score`` orders tasks by their mean score, with unscored tasks last.
+The default, ``sort=task``, keeps task order. Each task's rollouts keep repeat
+order. For each page, call totals use only the rollouts it returns.
+Without ``limit``, the route gives the original full response.
 
 To add up the totals, Reef reads every kept call of the evaluation. The query
 ``calls=false`` leaves out ``calls`` and ``verifier_calls``. Reef then reads
