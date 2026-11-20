@@ -30,7 +30,12 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
         stored = await asyncio.to_thread(evaluations.get, scenario, evaluation_id)
         if stored is None:
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
-        [view] = await asyncio.to_thread(evaluations.status_json, scenario, [stored])
+        score_levels = request.query.get("score_levels", "false")
+        if score_levels not in ("true", "false"):
+            raise ValueError("score_levels is true or false")
+        [view] = await asyncio.to_thread(
+            evaluations.status_json, scenario, [stored], score_levels=score_levels == "true"
+        )
         return web.json_response(view, headers={"Cache-Control": "no-store"})
 
     async def rollouts(request: web.Request) -> web.Response:

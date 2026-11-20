@@ -693,9 +693,14 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
             scored(first, 1.0)
             still_queued, third = await queued_rollouts(2)
             assert still_queued.id == second.id and third.id.endswith(":00001:00000")
-            for item in (second, third):
-                assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == item.id
-                scored(item, 0.0)
+            assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == second.id
+            running = await client.get(f"{rollouts_route}?limit=2&state=running&calls=false", headers=AUTH)
+            page = await running.json()
+            assert len(page["rollouts"]) == 1 and page["rollouts"][0]["score"] is None
+            assert page["task_means"] == {"0": 1.0}
+            scored(second, 0.0)
+            assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == third.id
+            scored(third, 0.0)
             [last] = await queued_rollouts(1)
             assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == last.id
             scored(last, 1.0)
@@ -706,7 +711,10 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
                 {"task": "add", "scores": [1.0, 0.0]},
                 {"task": "sort", "scores": [0.0, 1.0]},
             ]
-            assert answer["progress"]["score_levels"] == {"full": 2, "part": 0, "zero": 2, "failed": 0, "pending": 0}
+            assert "score_levels" not in answer["progress"]
+            view = await client.get(f"{rollouts_route.removesuffix('/rollouts')}?score_levels=true", headers=AUTH)
+            summary = (await view.json())["progress"]
+            assert summary["score_levels"] == {"full": 2, "part": 0, "zero": 2, "failed": 0, "pending": 0}
 
     asyncio.run(run())
 

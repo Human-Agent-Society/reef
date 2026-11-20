@@ -851,24 +851,31 @@ def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, mo
 
     finishing = threading.Event()
     publish = threading.Event()
+    retirement_waiting = threading.Event()
     retired = threading.Event()
     finish = worker.finish_item
+    wait = worker.serving_work_changed.wait
+
+    def wait_for_result(timeout=None):
+        retirement_waiting.set()
+        return wait(timeout)
 
     def finish_item(item, result):
         if item.kind != STOP_SERVING_KIND:
             finishing.set()
-            assert publish.wait(5)
+            assert publish.wait(15)
         finish(item, result)
         if item.kind == STOP_SERVING_KIND:
             retired.set()
 
     monkeypatch.setattr(worker, "finish_item", finish_item)
+    monkeypatch.setattr(worker.serving_work_changed, "wait", wait_for_result)
     assert worker.run_once()
     try:
         assert finishing.wait(5)
         routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=control.publisher.lease_number)
         assert worker.run_once()
-        assert not retired.wait(0.25)
+        assert retirement_waiting.wait(5)
     finally:
         publish.set()
     assert retired.wait(5)

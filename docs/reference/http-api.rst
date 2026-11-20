@@ -1562,8 +1562,9 @@ null when the evaluations queue no longer holds them:
   meaning for the rollouts of the benchmark's tasks. A task in two benchmarks
   counts in both. It is empty for another evaluation.
 
-Both the evaluation and benchmark progress objects include ``score_levels``.
-It counts rollouts with scores of at least one (``full``), between zero and one
+Use ``score_levels=true`` when reading one evaluation to add ``score_levels``
+to its progress and the progress of each benchmark. It counts rollouts with
+scores of at least one (``full``), between zero and one
 (``part``), and zero or below (``zero``).
 ``failed`` counts failures and cancellations. ``pending`` counts the other rollouts.
 
@@ -1603,7 +1604,9 @@ be ``running`` (assigned or running) or ``failed`` (including rollouts with a
 failed score). ``benchmark`` selects the tasks of one benchmark of a collection.
 ``sort=score`` orders tasks by their mean score, with unscored tasks last.
 The default, ``sort=task``, keeps task order. Each task's rollouts keep repeat
-order. For each page, call totals use only the rollouts it returns.
+order. Filtered pages and pages sorted by score include ``task_means``.
+It gives the mean of all scored repeats for each task on the page, by task index.
+For each page, call totals use only the rollouts it returns.
 Without ``limit``, the route gives the original full response.
 
 To add up the totals, Reef reads every kept call of the evaluation. The query

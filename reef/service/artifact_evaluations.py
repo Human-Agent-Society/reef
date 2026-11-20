@@ -1539,15 +1539,16 @@ class ArtifactEvaluations:
             names = next((set(names) for key, names in request.collection.benchmarks if key == benchmark), set())
             task_indexes = [index for index, name in enumerate(request.task_names) if name in names]
         items: tuple[WorkItem, ...] | None = None
+        means: dict[int, float | None] = {}
         if state != "all" or lowest_first:
             items = self.results.rollouts(evaluation_id, scenario)
-        if lowest_first:
             scores: dict[int, list[RolloutScore]] = {}
-            for item in items or ():
+            for item in items:
                 if item.state == "finished" and not rollout_waits(item):
                     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
                     scores.setdefault(cast(int, item.payload["task_index"]), []).append(score)
             means = {index: mean_score(values) for index, values in scores.items()}
+        if lowest_first:
             task_indexes = sorted(task_indexes, key=lambda index: (means.get(index) is None, means.get(index) or 0))
         if state == "all":
             total = len(task_indexes) * per_task
@@ -1574,9 +1575,16 @@ class ArtifactEvaluations:
             positions = matching_positions[offset : offset + limit]
         page_ids = {rollout_item_id(evaluation_id, index, repeat) for index, repeat in positions}
         views = self.rollout_views(
-            scenario, stored, [item for item in items or () if item.id in page_ids and item.scenario == scenario], positions=positions, calls=calls
+            scenario,
+            stored,
+            [item for item in items or () if item.id in page_ids and item.scenario == scenario],
+            positions=positions,
+            calls=calls,
         )
-        return {"rollouts": views, "total": total, "offset": offset}
+        page: dict[str, object] = {"rollouts": views, "total": total, "offset": offset}
+        if state != "all" or lowest_first:
+            page["task_means"] = {index: means.get(index) for index, _ in positions}
+        return page
 
     def rollouts_json(self, scenario: str, evaluation_id: str, *, calls: bool = True) -> list[dict[str, Any]] | None:
         """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
@@ -1836,7 +1844,9 @@ class ArtifactEvaluations:
         with self.dispatcher.locked_scenario(scenario) as current:
             return current.store.evaluations.read(evaluation_id)
 
-    def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
+    def status_json(
+        self, scenario: str, evaluations: Sequence[StoredEvaluation], *, score_levels: bool = False
+    ) -> list[dict[str, object]]:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
         ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the rollouts
         of these evaluations only, not those of the scenario's other evaluations, and not those of an ended
@@ -1848,6 +1858,13 @@ class ArtifactEvaluations:
             if progress is None and (items := self.results.rollouts(stored.evaluation_id, scenario)):
                 progress = evaluation_progress(stored, items, now)
                 self.ended_progress.add(scenario, stored, items, progress)
+            if progress is not None and not score_levels:
+                benchmarks = cast(list[dict[str, JsonValue]], progress["benchmarks"])
+                progress = {key: value for key, value in progress.items() if key != "score_levels"}
+                progress["benchmarks"] = [
+                    {key: value for key, value in benchmark.items() if key != "score_levels"}
+                    for benchmark in benchmarks
+                ]
             views.append({**stored.to_json(), "progress": progress})
         return views
 
