@@ -995,18 +995,25 @@ class ArtifactEvaluations:
             templates = self.results.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             ended = stored.state in ("finished", "failed")
             # Off e2b, the queue holds a prefix of the rollouts in task and repeat order (``settle``). On e2b it holds
-            # the rollouts of tasks whose template items it holds, and those items are a prefix of the tasks. Anything
-            # else means that the queue deleted some items after their retention, which it does only after the
-            # evaluation ended. A template item ends before the task's rollouts start, so it goes first.
-            if request.environment == "e2b":
+            # template items for a range of tasks with no gap, and rollouts only of those tasks and of the tasks before
+            # the range. Each task before the range has all its rollouts. The range starts at the first task, or at a
+            # later one: an evaluation that started before Reef had template items ran its first tasks without them,
+            # and the retention deletes a task's template item before its rollouts. Anything else means that the
+            # retention deleted some rollouts.
+            per_task = request.rollouts_per_task
+            start = min(templates, default=len(request.task_names))
+            before = [item.id for item in items if cast(int, item.payload["task_index"]) < start]
+            kept = before == [
+                rollout_item_id(evaluation_id, *divmod(position, per_task)) for position in range(len(before))
+            ]
+            if templates:
                 tasks = {cast(int, item.payload["task_index"]) for item in items}
-                kept = sorted(templates) == list(range(len(templates))) and tasks <= set(templates)
-            else:
-                expected = [
-                    rollout_item_id(evaluation_id, *divmod(position, request.rollouts_per_task))
-                    for position in range(len(items))
-                ]
-                kept = [item.id for item in items] == expected
+                kept = (
+                    kept
+                    and len(before) == start * per_task
+                    and sorted(templates) == list(range(start, start + len(templates)))
+                    and tasks <= set(range(start)) | set(templates)
+                )
             if ended and (
                 (not items and not templates) or not kept or (stored.state == "finished" and len(items) < total)
             ):

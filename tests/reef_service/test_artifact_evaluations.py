@@ -52,6 +52,7 @@ from reef.evaluation.rollout_worker import (
     EvaluationRolloutWorker,
     LocalCandidateEndpoints,
     TaskTemplateWorker,
+    rollout_item_id,
     template_item_id,
 )
 from reef.evaluation.task_templates import TaskTemplateBuilder
@@ -660,7 +661,10 @@ def test_a_failed_template_item_still_adds_its_tasks_rollouts_and_a_cancel_ends_
 
 
 @pytest.mark.integration
-def test_a_resume_refuses_an_e2b_evaluation_whose_first_template_item_the_queue_deleted(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rollout_kept", [True, False])
+def test_a_resume_of_an_e2b_evaluation_needs_the_rollouts_of_the_tasks_before_its_first_template_item(
+    tmp_path: Path, rollout_kept: bool
+) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -671,7 +675,8 @@ def test_a_resume_refuses_an_e2b_evaluation_whose_first_template_item_the_queue_
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "environment": "e2b"}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
-            route = f"/reef/scenarios/s/evaluations/{(await response.json())['evaluation_id']}"
+            evaluation_id = (await response.json())["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
             add_template = queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND])
             queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
             for _ in range(200):
@@ -679,11 +684,17 @@ def test_a_resume_refuses_an_e2b_evaluation_whose_first_template_item_the_queue_
                     break
                 await asyncio.sleep(0.05)
             assert (await client.post(f"{route}/cancel", headers=AUTH)).status == 200
-            # The retention deletes the template item of "add", which ended first; its rollout stays.
-            kept = [item.id for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if item.id != add_template.id]
+            # The template item of "add" goes, as after its retention or in an evaluation that ran "add" before Reef
+            # had template items. Its rollout goes too when the retention deleted it.
+            deleted = {add_template.id} if rollout_kept else {add_template.id, rollout_item_id(evaluation_id, 0, 0)}
+            kept = [item.id for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if item.id not in deleted]
             queue.delete_final(finished_before=time.time() + 1, keep={EVALUATIONS_QUEUE: kept})
             resumed = await client.post(f"{route}/resume", headers=AUTH)
-            assert resumed.status == 409, await resumed.text()
+            if rollout_kept:
+                assert resumed.status == 202, await resumed.text()
+                assert queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1)).state == "queued"
+            else:
+                assert resumed.status == 409, await resumed.text()
 
     asyncio.run(run())
 
