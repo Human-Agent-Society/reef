@@ -52,6 +52,7 @@ from reef.core.evaluation import (
     RolloutRequest,
     RolloutScore,
 )
+from reef.core.job_data import FILES_DIGEST_PATTERN
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
@@ -203,6 +204,7 @@ class EvaluationRollout:
     ``requires_prepared_templates``, the rollout runs a trial only from its task's prepared templates; only a rollout
     on ``e2b`` has it. The names are non-empty strings and the two numbers are non-negative integers. An item that an
     older Reef queued has neither field: its owner is None, and it does not require prepared templates.
+    ``task_digest`` is the lowercase hex SHA-256 of the accepted task's files, or None for work without a pin.
 
     Purpose: control makes it when it adds an evaluation (``to_payload``); a worker reads it (``from_item``).
     """
@@ -222,6 +224,7 @@ class EvaluationRollout:
     log_probs: bool = False
     owner: str | None = None
     requires_prepared_templates: bool = False
+    task_digest: str | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -250,6 +253,10 @@ class EvaluationRollout:
             raise TypeError("requires_prepared_templates is a bool")
         if self.requires_prepared_templates and self.environment != "e2b":
             raise ValueError("only a rollout on e2b requires prepared templates")
+        if self.task_digest is not None and (
+            not isinstance(self.task_digest, str) or FILES_DIGEST_PATTERN.fullmatch(self.task_digest) is None
+        ):
+            raise ValueError("task_digest must be a files digest")
 
     def item_id(self) -> str:
         return rollout_item_id(self.evaluation_id, self.task_index, self.repeat)
@@ -277,6 +284,7 @@ class EvaluationRollout:
                 "log_probs": self.log_probs,
                 "owner": self.owner,
                 "requires_prepared_templates": self.requires_prepared_templates,
+                **({"task_digest": self.task_digest} if self.task_digest is not None else {}),
             },
         )
 
@@ -301,6 +309,7 @@ class EvaluationRollout:
             payload.get("log_probs", False),
             payload.get("owner"),
             payload.get("requires_prepared_templates", False),
+            payload.get("task_digest"),
         )
 
 
@@ -339,6 +348,10 @@ class CandidateEndpoints(ABC):
     def task_directory(self, rollout: EvaluationRollout) -> Path:
         """The Harbor task directory of ``rollout``'s task, on this process's file system."""
 
+    def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
+        """The task directory and its stored files digest, or None when the digest is unavailable."""
+        return self.task_directory(rollout), rollout.task_digest
+
     def task_owner(self, rollout: EvaluationRollout) -> str | None:
         """The owner that the record of ``rollout``'s scenario stores now, whose data holds the task's item; None when
         the record stores none. These endpoints read no scenario record, so the owner is None; endpoints that read
@@ -373,7 +386,14 @@ class LocalCandidateEndpoints(CandidateEndpoints):
         self.artifacts = artifacts
 
     def task_directory(self, rollout: EvaluationRollout) -> Path:
-        return self.artifacts.candidate_task(rollout.scenario, rollout.task_name)
+        if rollout.task_digest is None:
+            return self.artifacts.candidate_task(rollout.scenario, rollout.task_name)
+        return self.artifacts.candidate_task_for_digest(rollout.scenario, rollout.task_name, rollout.task_digest)
+
+    def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
+        if rollout.task_digest is None:
+            return self.artifacts.candidate_task_version(rollout.scenario, rollout.task_name)
+        return super().task_version(rollout)
 
     def task_owner(self, rollout: EvaluationRollout) -> str | None:
         return self.artifacts.task_owner(rollout.scenario)
@@ -850,7 +870,7 @@ class TaskTemplateWorker(QueueWorker):
     Values: as ``QueueWorker``, on the template items of the evaluations queue (``TASK_TEMPLATE_KIND``), with one
     item in each slot. An item's payload is the payload of the task's first rollout (``EvaluationRollout``).
     ``endpoints`` gives each task's directory and the owner that the scenario's record stores now, and ``builder``
-    makes the task's templates ready for that owner (``TaskTemplateBuilder.build_for_owner``). An item whose payload
+    makes the task's templates ready for that owner (``TaskTemplateBuilder.build_for_version``). An item whose payload
     names an owner fails for good, with no build, when the record stores another owner or none. An item that an older
     Reef queued names no owner, so the record's owner alone counts. Every failure of a build is retryable, until the
     item uses up its attempts. Control adds a task's rollouts once its item is final, also when the build failed. The
@@ -894,16 +914,19 @@ class TaskTemplateWorker(QueueWorker):
                 f"scenario {rollout.scenario!r} has {found} now, not {rollout.owner!r}, the owner of the evaluation's "
                 f"tasks: the templates of task {rollout.task_name!r} are not built for another owner"
             )
+        task_directory, task_digest = self.endpoints.task_version(rollout)
         asyncio.run(
             run_while_held(
-                self.build_task_template(owner, rollout, self.endpoints.task_directory(rollout)),
+                self.build_task_template(owner, rollout, task_directory, task_digest),
                 lease_lost,
                 self.stopped,
             )
         )
         return {}
 
-    async def build_task_template(self, owner: str | None, rollout: EvaluationRollout, task_directory: Path) -> None:
+    async def build_task_template(
+        self, owner: str | None, rollout: EvaluationRollout, task_directory: Path, task_digest: str | None
+    ) -> None:
         """Make the e2b templates of the task of ``rollout``, at ``task_directory``, ready for ``owner`` with
         ``builder``. A build that found no free builder in the task's build time limit (``TimeoutError``) waits again,
         at most ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the item is retried.
@@ -912,7 +935,9 @@ class TaskTemplateWorker(QueueWorker):
         deadline = loop.time() + TEMPLATE_WAIT_S
         while True:
             try:
-                await self.builder.build_for_owner(owner, rollout.scenario, rollout.task_name, task_directory)
+                await self.builder.build_for_version(
+                    owner, rollout.scenario, rollout.task_name, task_directory, task_digest=task_digest
+                )
                 return
             except TimeoutError as error:
                 if loop.time() >= deadline:

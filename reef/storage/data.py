@@ -45,7 +45,7 @@ from reef.storage.job_data import (
 )
 from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.task_collections import TaskCollection, check_names
-from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
+from reef.storage.tasks import FILES_DIGEST_PATTERN, SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
@@ -982,6 +982,17 @@ class DataStore(Plugin, JobDataReader, ABC):
                 uri = self.job_directories.write_directory(name, directory)
         self.write_job_directory_use(key, time.time())
         return JobDataRef(uri, key, data.data_id, len(data.samples), job_data_kind(data), self)
+
+    def task_path_for_digest(self, owner: str, digest: str) -> Path:
+        """Materialize the task directory with ``digest`` in ``owner``'s partition.
+
+        Replacing or deleting a task item leaves its files in the partition. Raises ``TaskStoreError`` when the
+        partition does not hold the digest, and ``ValueError`` for an invalid owner or digest.
+        """
+        check_owner(owner)
+        if not isinstance(digest, str) or FILES_DIGEST_PATTERN.fullmatch(digest) is None:
+            raise ValueError(f"{digest!r} is not a files digest")
+        return self.task_files.path(task_partition(owner), digest)
 
     def item_task_files(self, item: StoredItem) -> TaskFiles:
         """The name in the task file store of the directory of the task item ``item``, which ``task_path`` returns."""

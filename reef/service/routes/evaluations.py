@@ -150,7 +150,9 @@ def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEval
     async def newest(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         # A limit that is not a positive integer is a ValueError, which answers HTTP 400.
-        listed = await asyncio.to_thread(evaluations.newest, scenario, limit=int(request.query.get("limit", "50")))
+        listed = await asyncio.to_thread(
+            evaluations.newest_for_list, scenario, limit=int(request.query.get("limit", "50"))
+        )
         views = await asyncio.to_thread(evaluations.status_json, scenario, listed)
         return web.json_response(
             {"scenario": scenario, "evaluations": views},

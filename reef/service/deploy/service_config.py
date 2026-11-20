@@ -312,6 +312,11 @@ class ServiceSettings:
             "a trial then never builds a template. Default: false."
         ),
     )
+    evaluation_pin_task_files: bool = config_option(
+        False,
+        public_path=("evaluation", "pin_task_files"),
+        help="Use the task files selected at evaluation acceptance for all attempts. Default: false.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )

@@ -4,8 +4,8 @@ The evaluation service gives each task of an evaluation on e2b one template item
 ``reef.evaluation.rollout_worker``). The item calls the deployment's ``TaskTemplateBuilder``, which the setting
 ``evaluation.task_template_builder`` names. Without the setting, ``DockerfileTemplateBuilder`` builds the templates from
 the task's Dockerfiles, as a trial would. A deployment that keeps task images elsewhere, such as in a registry, names
-its own builder, so that the templates come from those images. Such a builder finds a task's image by the owner of the
-scenario's items and the task's name (``build_for_owner``), never by the scenario's name.
+its own builder, so that the templates come from those images. A builder can select an image by the owner of the
+scenario's items, the task's name, and its stored files digest (``build_for_version``).
 """
 
 from __future__ import annotations
@@ -29,11 +29,14 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
     ``build_for_owner`` gets the same arguments after ``owner``: the owner that the dispatcher's record of the scenario
     stores (``ScenarioSettings.owner``), whose data holds the task's item. A scenario created without an owner has its
     own name as its owner. ``owner`` is None when the worker knows no owner, such as a worker whose endpoints read no
-    scenario record. The worker calls ``build_for_owner``. Its default calls ``build`` without the owner, so a builder
+    scenario record. Its default calls ``build`` without the owner, so a builder
     that needs no owner implements ``build`` alone. A builder that finds templates by owner overrides
     ``build_for_owner``; it must raise for an owner that it cannot use, None too, and never choose another owner.
 
-    Purpose: the evaluation service's ``TaskTemplateWorker`` calls ``build_for_owner`` for each template item.
+    ``build_for_version`` also receives the stored files digest of the evaluation's task, or None if unavailable.
+    Its default calls ``build_for_owner``. A builder that selects a template by the stored digest overrides it.
+
+    Purpose: the evaluation service's ``TaskTemplateWorker`` calls ``build_for_version`` for each template item.
     """
 
     @abstractmethod
@@ -41,6 +44,17 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
 
     async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
         await self.build(scenario, task_name, task_directory)
+
+    async def build_for_version(
+        self,
+        owner: str | None,
+        scenario: str,
+        task_name: str,
+        task_directory: Path,
+        *,
+        task_digest: str | None,
+    ) -> None:
+        await self.build_for_owner(owner, scenario, task_name, task_directory)
 
 
 class DockerfileTemplateBuilder(TaskTemplateBuilder):

@@ -346,6 +346,19 @@ class EndedProgress:
                 self.entries.popitem(last=False)
 
 
+def planned_rollout(
+    seed: EvaluationRollout, request: ArtifactEvaluationRequest, task_index: int, repeat: int
+) -> EvaluationRollout:
+    """The rollout at ``task_index`` and ``repeat`` with the accepted task and the seed's shared inputs."""
+    return replace(
+        seed,
+        task_index=task_index,
+        task_name=request.task_names[task_index],
+        repeat=repeat,
+        task_digest=request.task_digest(task_index),
+    )
+
+
 def rollout_work(rollout: EvaluationRollout) -> NewWork:
     """The work item of ``rollout`` in the evaluations queue."""
     return NewWork(
@@ -662,9 +675,7 @@ class EvaluationResults:
             first = EvaluationRollout.from_item(item)
             for position in positions:
                 index, repeat = divmod(position, per_task)
-                self.queue.append(
-                    rollout_work(replace(first, task_index=index, task_name=request.task_names[index], repeat=repeat))
-                )
+                self.queue.append(rollout_work(planned_rollout(first, request, index, repeat)))
         return started
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
@@ -757,7 +768,7 @@ class EvaluationResults:
                     for index in tasks[:TEMPLATE_TASKS_AHEAD]:
                         template = templates.get(index)
                         if template is None:
-                            task = replace(first, task_index=index, task_name=request.task_names[index])
+                            task = planned_rollout(first, request, index, 0)
                             templates[index] = self.queue.append(template_work(task))
                         elif rollout_cancelled(template):
                             templates[index] = self.queue.retry(EVALUATIONS_QUEUE, template.id) or template
@@ -770,11 +781,7 @@ class EvaluationResults:
                     if request.environment == "e2b" and not (index in templates and templates[index].final):
                         continue
                     added += 1
-                    self.queue.append(
-                        rollout_work(
-                            replace(first, task_index=index, task_name=request.task_names[index], repeat=repeat)
-                        )
-                    )
+                    self.queue.append(rollout_work(planned_rollout(first, request, index, repeat)))
             if (waiting > 0 and not cancelled) or retry_waiting or not all(item.final for item in items):
                 started = any(item.state in ("assigned", "running") for item in (*items, *templates.values()))
                 if stored.state == "queued" and started:
@@ -911,11 +918,13 @@ class ArtifactEvaluations:
     """Accepts, queues and reads the artifact evaluations of a service's scenarios.
 
     Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts
-    to the evaluation service's workers. ``sources`` reads the harness tree of an artifact item. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
-    scenario's settings, or is None for no automatic evaluation. ``requires_prepared_templates`` is the deployment's
-    ``evaluation.require_prepared_templates``: each evaluation on e2b that it accepts runs a trial only from its task's
-    prepared templates (``EvaluationRollout.requires_prepared_templates``). ``results`` ends each evaluation as its
-    rollouts end. ``ended_progress`` keeps the progress of ended evaluations for ``status_json``.
+    to the evaluation service's workers. ``sources`` reads the harness tree of an artifact item. ``new_artifacts``
+    reports the new artifacts that Reef evaluates with each scenario's settings, or is None for no automatic evaluation.
+    ``requires_prepared_templates`` is the deployment's ``evaluation.require_prepared_templates``: each new evaluation
+    on e2b runs a trial only from its task's prepared templates (``EvaluationRollout.requires_prepared_templates``).
+    If ``pin_task_files`` is true, Reef stores the task files digests when it accepts an evaluation.
+    ``results`` ends each evaluation as its rollouts end. ``ended_progress`` keeps the progress of ended evaluations
+    for ``status_json``.
 
     Purpose: the evaluation routes call ``start``, ``cancel``, ``retry``, ``resume``, ``get``, ``newest``,
     ``rollouts_json``, ``calls_json``, ``call_json``, ``trajectories_json``, ``exported_rollouts`` and
@@ -932,13 +941,17 @@ class ArtifactEvaluations:
         new_artifacts: NewArtifacts | None = None,
         sources: ArtifactSources | None = None,
         requires_prepared_templates: bool = False,
+        pin_task_files: bool = False,
     ) -> None:
         if not isinstance(requires_prepared_templates, bool):
             raise TypeError("requires_prepared_templates is a bool")
+        if not isinstance(pin_task_files, bool):
+            raise TypeError("pin_task_files is a bool")
         self.dispatcher = dispatcher
         self.sources = ArtifactSources.from_setting(()) if sources is None else sources
         self.new_artifacts = new_artifacts
         self.requires_prepared_templates = requires_prepared_templates
+        self.pin_task_files = pin_task_files
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
         self.ended_progress = EndedProgress()
@@ -1401,13 +1414,10 @@ class ArtifactEvaluations:
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             # The listing reads no task files: the eval split can hold many more tasks than the evaluation runs.
             # A scenario can use a task more than once (RFC #1420): an evaluation runs it once.
-            held = tuple(
-                dict.fromkeys(
-                    listed.sample_id
-                    for listed in (() if samples is None else samples.listed_imported_tasks())
-                    if listed.split == "eval"
-                )
-            )
+            held: dict[str, str] = {}
+            for listed in () if samples is None else samples.listed_imported_tasks():
+                if listed.split == "eval":
+                    held.setdefault(listed.sample_id, listed.digest)
         held_names = frozenset(held)
         unknown = sorted(set(request.task_names) - held_names)
         if unknown:
@@ -1419,12 +1429,12 @@ class ArtifactEvaluations:
             collection_names = collection.task_names()
             names = tuple(name for name in held if name in collection_names)
         else:
-            names = request.task_names or held
+            names = request.task_names or tuple(held)
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
-        sampled = settings.sampled_task_names(names)
+        sampled = settings.sampled_task_names(names, collection)
         if collection is not None and len(sampled) < len(names):
-            # The stored collection names the tasks that run: a benchmark with no sampled task is left out.
+            # A stored benchmark contains only the tasks that run.
             sampled_names = frozenset(sampled)
             collection = replace(
                 collection,
@@ -1445,8 +1455,13 @@ class ArtifactEvaluations:
             )
         )
         agent = None if tree is not None else harbor_agent(request.harness)
-        # The stored request names its tasks, so that the rollouts that wait can be added later.
-        request = replace(request, task_names=names, collection=collection)
+        # Deferred rollouts use the task names and, when pinned, the digests recorded here.
+        request = replace(
+            request,
+            task_names=names,
+            collection=collection,
+            task_digests=tuple(held[name] for name in names) if self.pin_task_files else None,
+        )
         planned_rollouts = (
             EvaluationRollout(
                 scenario,
@@ -1464,6 +1479,7 @@ class ArtifactEvaluations:
                 request.log_probs,
                 owner=owner,
                 requires_prepared_templates=self.requires_prepared_templates and request.environment == "e2b",
+                task_digest=request.task_digest(index),
             )
             for index, name in enumerate(names)
             for repeat in range(request.rollouts_per_task)
@@ -1884,6 +1900,11 @@ class ArtifactEvaluations:
         """At most ``limit`` evaluations of ``scenario``, newest first."""
         with self.dispatcher.locked_scenario(scenario) as current:
             return current.store.evaluations.newest(limit=limit)
+
+    def newest_for_list(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
+        """At most ``limit`` evaluations of ``scenario`` for an HTTP list, newest first."""
+        with self.dispatcher.locked_scenario(scenario) as current:
+            return current.store.evaluations.newest_for_list(limit=limit)
 
 
 __all__ = [

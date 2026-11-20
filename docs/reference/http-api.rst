@@ -750,7 +750,7 @@ In the reference form, first write each task directory into the owner's
 partition of the task file store, in the layout of the deployment's
 ``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner
 ``<owner>`` is ``data/<owner>``. The directory has the task name as its name.
-Compute its digest with ``reef.storage.tasks.FilesDigest``, or with
+Compute its digest with ``reef.storage.tasks.TaskDirectoryDigest``, or with
 ``files_digest`` for a local directory. Then send the task names and digests
 as JSON. ``metadata`` is optional, as in the archive form:
 
@@ -808,12 +808,13 @@ has the same two forms as a create:
   client wrote into the owner's partition of the task file store:
   ``{"digest": "<files digest>"}``.
 
-The item keeps its ID, metadata and splits. Each evaluation attempt reads
-the task's current files, so a new evaluation and a retry of a started one
-(``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``) run
-the new files. An attempt that already runs finishes with the old files, so one
-evaluation can hold scores of both. A trainer of a scenario that uses the
-task reads it again. The same files again change nothing.
+The item keeps its ID, metadata and splits. By default, each evaluation
+attempt reads the task's current files. An attempt that already runs finishes
+with the old files, so an evaluation can contain scores from both versions.
+With ``evaluation.pin_task_files`` enabled, every attempt uses the files that
+Reef selected when it accepted the evaluation. Start a new evaluation to
+score the replacement files. A trainer of a scenario that uses the task reads
+it again. The same files again change nothing.
 
 The response is ``{"owner", "item", "synced"}``, without content. Reef
 returns 400, and changes nothing, for an archive of no task or of several, a
@@ -1438,20 +1439,25 @@ The body takes these fields:
   returns 400 for an unknown collection, and for one with no eval task.
 - ``num_samples``: the most tasks to run, a positive integer, or null (the
   default) to run every task that ``task_names`` or ``collection`` selects.
-  Use it to score an artifact on part of a large benchmark. When more tasks
-  are selected, Reef runs the ``num_samples`` tasks whose names have the
-  smallest SHA-256 digests. The choice depends on the task names only, so
-  evaluations of the same tasks with the same ``num_samples`` run the same
-  tasks, and their scores compare. The stored request names the tasks in
-  ``task_names``, and a stored ``collection`` leaves out a benchmark with no
-  chosen task.
+  Use it to score an artifact on part of a large benchmark. Reef ranks tasks
+  by the SHA-256 digests of their names unless you set ``sample_seed``.
+  For a benchmark or a collection with the ``task`` average, Reef takes the
+  first ``num_samples`` in rank order. The stored request names the selected
+  tasks in ``task_names`` and omits benchmarks with no selected task.
+
+  For the ``benchmark`` average, Reef first selects the highest-ranked eval
+  task of each benchmark. A shared task counts once toward ``num_samples``
+  and covers every benchmark it belongs to. If those choices exceed the
+  budget, Reef starts over and chooses tasks that cover the most uncovered
+  benchmarks first. It uses rank to break ties. Reef returns 400 if this
+  selection cannot cover all benchmarks with eval tasks within the budget.
+  After it covers the benchmarks, Reef fills the remaining places by rank.
 - ``sample_seed``: an integer, or null (the default). With a seed, Reef runs
   the tasks in a random order that the seed fixes: it ranks the SHA-256
   digests of ``"<sample_seed>:<task name>"``. With ``num_samples``, the
-  evaluation runs the first ``num_samples`` tasks of that order, so a new
-  random seed runs another random part of the tasks. Without ``num_samples``,
-  it runs every task in that order. The same seed gives the same tasks in the
-  same order again. The stored ``task_names`` are in the order that the
+  seed sets the rank for selection, including benchmark coverage. Without
+  ``num_samples``, Reef runs every task in rank order. With the same tasks,
+  membership and settings, each run selects the same tasks in the same order. The stored ``task_names`` are in the order that the
   evaluation runs them.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.

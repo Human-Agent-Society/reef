@@ -21,6 +21,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Select,
     String,
     Table,
     Text,
@@ -77,6 +78,18 @@ def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> T
     )
 
 
+def evaluation_digest_table(metadata: MetaData) -> Table:
+    """The optional task digests of an evaluation, kept outside its list row."""
+    return Table(
+        "artifact_evaluation_digest",
+        metadata,
+        Column(
+            "sequence", BigInteger, ForeignKey("artifact_evaluation.sequence", ondelete="CASCADE"), primary_key=True
+        ),
+        Column("task_digests_json", Text, nullable=False),
+    )
+
+
 def evaluation_start_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
     """Define the start IDs of one scenario or of the stores that share the database."""
     scope = (
@@ -97,10 +110,20 @@ def evaluation_start_table(metadata: MetaData, *, foreign_key: str | None = None
 class SQLEvaluationStore(EvaluationStore):
     """The artifact evaluations of one scenario in its record database."""
 
-    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable, starts: ScopedTable) -> None:
+    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable, starts: ScopedTable, digests: Table) -> None:
         self.database = database
         self.table = table
         self.starts = starts
+        self.digests = digests
+
+    def selection(self, *, include_task_digests: bool = True) -> Select[Any]:
+        """Select evaluations and, when requested, the digests keyed by their unique sequence."""
+        table = self.table.table
+        if include_task_digests:
+            return select(table, self.digests.c.task_digests_json).outerjoin(
+                self.digests, self.digests.c.sequence == table.c.sequence
+            )
+        return select(table)
 
     def create(
         self,
@@ -134,16 +157,24 @@ class SQLEvaluationStore(EvaluationStore):
                 },
             ):
                 raise EvaluationStartConflictError("start_id is already stored")
-            connection.execute(
-                table.insert().values(
+            sequence = connection.execute(
+                table.insert()
+                .values(
                     **self.table.scope,
                     evaluation_id=evaluation_id,
                     owner=owner,
-                    request_json=json.dumps(request.to_json(), ensure_ascii=False, sort_keys=True),
+                    request_json=json.dumps(
+                        request.to_json(include_task_digests=False), ensure_ascii=False, sort_keys=True
+                    ),
                     state=state,
                     created_at=created_at,
                 )
-            )
+                .returning(table.c.sequence)
+            ).scalar_one()
+            if request.task_digests is not None:
+                connection.execute(
+                    self.digests.insert().values(sequence=sequence, task_digests_json=json.dumps(request.task_digests))
+                )
         return stored
 
     def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, str | None] | None:
@@ -151,8 +182,9 @@ class SQLEvaluationStore(EvaluationStore):
         with self.database._transaction(write=False) as connection:
             row = (
                 connection.execute(
-                    select(table, starts.c.fingerprint, starts.c.first_work_json)
-                    .join(starts, table.c.evaluation_id == starts.c.evaluation_id)
+                    self.selection()
+                    .add_columns(starts.c.fingerprint, starts.c.first_work_json)
+                    .join_from(table, starts, table.c.evaluation_id == starts.c.evaluation_id)
                     .where(self.table.condition(), self.starts.condition(), starts.c.start_id == start_id)
                 )
                 .mappings()
@@ -228,7 +260,9 @@ class SQLEvaluationStore(EvaluationStore):
         table = self.table.table
         with self.database._transaction(write=True) as connection:
             row = (
-                connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
+                connection.execute(
+                    self.selection().where(self.table.condition(), table.c.evaluation_id == evaluation_id)
+                )
                 .mappings()
                 .one_or_none()
             )
@@ -237,7 +271,7 @@ class SQLEvaluationStore(EvaluationStore):
             stored = stored_evaluation(row)
             # ``replace`` checks the new limit as a request checks it.
             request = replace(stored.request, max_concurrent_rollouts=max_concurrent_rollouts)
-            request_json = json.dumps(request.to_json(), ensure_ascii=False, sort_keys=True)
+            request_json = json.dumps(request.to_json(include_task_digests=False), ensure_ascii=False, sort_keys=True)
             connection.execute(
                 table.update()
                 .where(self.table.condition(), table.c.evaluation_id == evaluation_id)
@@ -259,7 +293,9 @@ class SQLEvaluationStore(EvaluationStore):
         table = self.table.table
         with self.database._transaction(write=True) as connection:
             row = (
-                connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
+                connection.execute(
+                    self.selection().where(self.table.condition(), table.c.evaluation_id == evaluation_id)
+                )
                 .mappings()
                 .one_or_none()
             )
@@ -277,20 +313,28 @@ class SQLEvaluationStore(EvaluationStore):
         table = self.table.table
         with self.database._transaction(write=False) as connection:
             row = (
-                connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
+                connection.execute(
+                    self.selection().where(self.table.condition(), table.c.evaluation_id == evaluation_id)
+                )
                 .mappings()
                 .one_or_none()
             )
         return None if row is None else stored_evaluation(row)
 
     def newest(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
+        return self._newest(limit, include_task_digests=True)
+
+    def newest_for_list(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
+        return self._newest(limit, include_task_digests=False)
+
+    def _newest(self, limit: int, *, include_task_digests: bool) -> tuple[StoredEvaluation, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         table = self.table.table
         with self.database._transaction(write=False) as connection:
             rows = (
                 connection.execute(
-                    select(table)
+                    self.selection(include_task_digests=include_task_digests)
                     .where(self.table.condition())
                     .order_by(table.c.created_at.desc(), table.c.sequence.desc())
                     .limit(limit)
@@ -304,10 +348,13 @@ class SQLEvaluationStore(EvaluationStore):
 def stored_evaluation(row: RowMapping | Mapping[str, Any]) -> StoredEvaluation:
     """Return the stored evaluation of one table row."""
     result_json = row["result_json"]
+    request = json.loads(str(row["request_json"]))
+    if (task_digests_json := row.get("task_digests_json")) is not None:
+        request["task_digests"] = json.loads(task_digests_json)
     return StoredEvaluation(
         evaluation_id=str(row["evaluation_id"]),
         owner=str(row["owner"]),
-        request=ArtifactEvaluationRequest.from_json(json.loads(str(row["request_json"]))),
+        request=ArtifactEvaluationRequest.from_json(request),
         state=row["state"],
         created_at=float(row["created_at"]),
         finished_at=None if row["finished_at"] is None else float(row["finished_at"]),
@@ -316,4 +363,10 @@ def stored_evaluation(row: RowMapping | Mapping[str, Any]) -> StoredEvaluation:
     )
 
 
-__all__ = ["SQLEvaluationStore", "evaluation_start_table", "evaluation_table", "stored_evaluation"]
+__all__ = [
+    "SQLEvaluationStore",
+    "evaluation_digest_table",
+    "evaluation_start_table",
+    "evaluation_table",
+    "stored_evaluation",
+]

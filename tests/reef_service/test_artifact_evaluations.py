@@ -295,13 +295,18 @@ def test_a_pending_evaluation_start_recovers_after_an_interrupted_append(
 ) -> None:
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), factory, live=LiveObjects(runtime=ArtifactRuntime()))
-    evaluations = ArtifactEvaluations(dispatcher)
+    evaluations = ArtifactEvaluations(dispatcher, pin_task_files=True)
     original_append = dispatcher.queue.append
     restored_body: dict[str, object] = {}
+    accepted_digest = ""
 
     async def interrupted() -> str:
+        nonlocal accepted_digest
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
             artifact_id = await created(client, tmp_path, "add")
+            original = dispatcher.data_store.read("s", "add")
+            assert original is not None
+            accepted_digest = original.digest
             restored_body.update(artifact_id=artifact_id, harness={"name": "terminus-2"}, start_id="request-1")
 
             def interrupt(work: NewWork) -> WorkItem:
@@ -342,6 +347,10 @@ def test_a_pending_evaluation_start_recovers_after_an_interrupted_append(
                         assert replay.evaluation_id == stored.evaluation_id
                         assert replay.state == "failed" and replay.error == STOPPED_ERROR
                         assert not dispatcher.queue.items(EVALUATIONS_QUEUE, scenario="s")
+            if interruption == "before_append":
+                replacement = write_harbor_task(task_for("add", "record-2", 9000), tmp_path / "changed")
+                changed = dispatcher.data_store.replace_task("s", "add", replacement)
+                assert changed.digest != accepted_digest
             return stored.evaluation_id
 
     evaluation_id = asyncio.run(interrupted())
@@ -363,7 +372,9 @@ def test_a_pending_evaluation_start_recovers_after_an_interrupted_append(
             replay = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=restored_body)
             assert replay.status == 202
             assert (await replay.json())["evaluation_id"] == evaluation_id
-            assert len(restarted.queue.items(EVALUATIONS_QUEUE, scenario="s")) == 1
+            [rollout] = restarted.queue.items(EVALUATIONS_QUEUE, scenario="s")
+            path = LocalCandidateEndpoints(restarted).task_directory(EvaluationRollout.from_item(rollout))
+            assert files_digest(path) == accepted_digest
 
     asyncio.run(after_restart())
 
@@ -1316,15 +1327,54 @@ def test_an_evaluation_with_num_samples_runs_that_many_tasks_chosen_by_their_nam
             assert [order[:1] for order in orders] == seeded
             assert len({tuple(order) for order in orders}) > 1
 
-            # On a collection, the choice is among its eval tasks, and a benchmark with no chosen task is left out.
-            for item_id, benchmarks in (("add", ["lite", "full"]), ("sort", ["full"])):
+            # A task-average collection can omit a benchmark with no chosen task.
+            for item_id, benchmarks in (
+                ("add", ["lite", "shared"]),
+                ("sort", ["full", "shared"]),
+                ("sum", ["full", "shared"]),
+            ):
                 patch = {"ids": [item_id], "patch": {"benchmarks": benchmarks}}
                 assert (await client.post("/reef/namespaces/s/data/metadata", headers=AUTH, json=patch)).status == 200
             stored = "/reef/namespaces/s/collections/coding"
             assert (await client.put(stored, headers=AUTH, json={"benchmarks": ["lite", "full"]})).status == 200
             sampled = await _accepted({"num_samples": 1, "collection": "coding"})
-            assert sampled["request"]["task_names"] == ["sort"]
-            assert sampled["request"]["collection"]["benchmarks"] == [{"benchmark": "full", "task_names": ["sort"]}]
+            assert sampled["request"]["task_names"] == ["sum"]
+            assert sampled["request"]["collection"]["benchmarks"] == [{"benchmark": "full", "task_names": ["sum"]}]
+
+            assert (
+                await client.put(stored, headers=AUTH, json={"benchmarks": ["lite", "full"], "average": "benchmark"})
+            ).status == 200
+            covered = await _accepted({"num_samples": 2, "collection": "coding"})
+            assert covered["request"]["task_names"] == ["add", "sum"]
+            assert covered["request"]["collection"]["benchmarks"] == [
+                {"benchmark": "lite", "task_names": ["add"]},
+                {"benchmark": "full", "task_names": ["sum"]},
+            ]
+            seeded_coverage = await _accepted({"num_samples": 2, "sample_seed": 1, "collection": "coding"})
+            assert seeded_coverage["request"]["task_names"] == ["sort", "add"]
+            response = await client.post(
+                "/reef/scenarios/s/evaluations",
+                headers=AUTH,
+                json={**body, "num_samples": 1, "collection": "coding"},
+            )
+            assert response.status == 400, await response.text()
+            assert "num_samples" in await response.text()
+
+            assert (
+                await client.put(stored, headers=AUTH, json={"benchmarks": ["lite", "shared"], "average": "benchmark"})
+            ).status == 200
+            shared = await _accepted({"num_samples": 1, "collection": "coding"})
+            assert shared["request"]["task_names"] == ["add"]
+            assert shared["request"]["collection"]["benchmarks"] == [
+                {"benchmark": "lite", "task_names": ["add"]},
+                {"benchmark": "shared", "task_names": ["add"]},
+            ]
+            filled = await _accepted({"num_samples": 2, "collection": "coding"})
+            assert filled["request"]["task_names"] == ["add", "sum"]
+            assert filled["request"]["collection"]["benchmarks"] == [
+                {"benchmark": "lite", "task_names": ["add"]},
+                {"benchmark": "shared", "task_names": ["add", "sum"]},
+            ]
 
     asyncio.run(run())
 
@@ -1393,13 +1443,18 @@ def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_ro
     asyncio.run(run())
 
 
-def test_a_retry_after_a_task_replace_runs_the_new_files_of_the_task(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pin_task_files", [False, True])
+def test_a_retry_after_a_task_replace_uses_the_configured_task_version(tmp_path: Path, pin_task_files: bool) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
     endpoints = LocalCandidateEndpoints(dispatcher)
 
     async def run() -> None:
-        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        server = TestServer(
+            create_app(
+                dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher, pin_task_files=pin_task_files)
+            )
+        )
         async with TestClient(server) as client:
             artifact_id = await created(client, tmp_path, "add")
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
@@ -1419,11 +1474,85 @@ def test_a_retry_after_a_task_replace_runs_the_new_files_of_the_task(tmp_path: P
             assert put.status == 200, await put.text()
             assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
 
-            # The retried attempt finds the task by name and gets the new files; the old ones stay readable.
             item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
             second = endpoints.task_directory(EvaluationRollout.from_item(item))
-            assert item.attempt_count == 2 and second != first and first.is_dir()
-            assert files_digest(second) == dispatcher.data_store.read("s", "add").digest
+            assert item.attempt_count == 2 and first.is_dir()
+            assert (second == first) is pin_task_files
+
+            new = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert new.status == 202, await new.text()
+            next_item = queue.take(EVALUATIONS_QUEUE, "new", [EVALUATION_ROLLOUT_KIND])
+            assert next_item is not None
+            latest = endpoints.task_directory(EvaluationRollout.from_item(next_item))
+            assert latest != first
+            assert files_digest(latest) == dispatcher.data_store.read("s", "add").digest
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("environment", ["docker", "e2b"])
+def test_a_deferred_evaluation_task_uses_the_files_from_its_keyed_start(tmp_path: Path, environment: str) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    endpoints = LocalCandidateEndpoints(dispatcher)
+    service = ArtifactEvaluations(dispatcher, pin_task_files=True)
+    route = "/reef/scenarios/s/evaluations"
+
+    async def take(kind: str, task_name: str) -> WorkItem:
+        for _ in range(200):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [kind])
+            if item is not None:
+                assert item.payload["task_name"] == task_name
+                return item
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the queue did not hold {kind} for {task_name}")
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=service))) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            original = dispatcher.data_store.read("s", "sort")
+            assert original is not None
+            original_path = dispatcher.data_store.task_path(original)
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "environment": environment,
+                "max_concurrent_rollouts": 1,
+                "start_id": "stable-tasks",
+            }
+            accepted = await client.post(route, headers=AUTH, json=body)
+            assert accepted.status == 202, await accepted.text()
+            evaluation = await accepted.json()
+            assert "task_digests" not in evaluation["request"]
+            detail = await client.get(f"{route}/{evaluation['evaluation_id']}", headers=AUTH)
+            assert detail.status == 200
+            assert "task_digests" not in (await detail.json())["request"]
+            listing = await client.get(route, headers=AUTH)
+            assert listing.status == 200
+            [listed] = (await listing.json())["evaluations"]
+            assert "task_digests" not in listed["request"]
+
+            replacement = write_harbor_task(task_for("sort", "record-2", 9000), tmp_path / "changed")
+            changed = dispatcher.data_store.replace_task("s", "sort", replacement)
+            assert changed.digest != original.digest
+            replay = await client.post(route, headers=AUTH, json=body)
+            assert replay.status == 202 and (await replay.json())["evaluation_id"] == evaluation["evaluation_id"]
+
+            if environment == "e2b":
+                assert dispatcher.data_store.delete("s", "sort")
+                assert dispatcher.data_store.purge("s", "sort")
+                first_template = await take(TASK_TEMPLATE_KIND, "add")
+                queue.finish(EVALUATIONS_QUEUE, first_template.id, "w", {})
+            first = await take(EVALUATION_ROLLOUT_KIND, "add")
+            queue.finish(EVALUATIONS_QUEUE, first.id, "w", {"score": 1.0})
+
+            if environment == "e2b":
+                template = await take(TASK_TEMPLATE_KIND, "sort")
+                assert endpoints.task_directory(EvaluationRollout.from_item(template)) == original_path
+                queue.finish(EVALUATIONS_QUEUE, template.id, "w", {})
+            deferred = await take(EVALUATION_ROLLOUT_KIND, "sort")
+            assert endpoints.task_directory(EvaluationRollout.from_item(deferred)) == original_path
 
     asyncio.run(run())
 

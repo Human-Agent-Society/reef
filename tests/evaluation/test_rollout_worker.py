@@ -623,6 +623,27 @@ def test_a_template_item_builds_for_the_owner_of_the_scenarios_record_and_never_
     assert error in str(item.error)
 
 
+@pytest.mark.unit
+def test_a_template_item_gives_the_builder_its_pinned_task_digest(tmp_path):
+    versions = []
+
+    class VersionBuilder(OwnerBuilder):
+        async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+            versions.append((owner, task_name, task_digest))
+
+    queue = memory_coordination().work_queue
+    owner = "workspace-7"
+    digest = "1" * 64
+    value = replace(e2b_rollout(), owner=owner, task_digest=digest)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = VersionBuilder()
+    worker = TaskTemplateWorker(queue, OwnedEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert versions == [(owner, value.task_name, digest)]
+
+
 def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:
     """Add the template item of ``value``'s task, and end it: finished when ``error`` is None, else failed for good
     with ``error``."""

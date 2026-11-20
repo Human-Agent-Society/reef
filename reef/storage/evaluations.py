@@ -138,7 +138,7 @@ class StoredEvaluation:
         return {
             "evaluation_id": self.evaluation_id,
             "state": self.state,
-            "request": self.request.to_json(),
+            "request": self.request.to_json(include_task_digests=False),
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "policy_evaluation": None if self.result is None else self.result.to_json(),
@@ -236,6 +236,10 @@ class EvaluationStore(ABC):
     @abstractmethod
     def newest(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations, newest ``created_at`` first; ``ValueError`` unless ``limit`` is positive."""
+
+    def newest_for_list(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
+        """At most ``limit`` evaluations for a list. Stores may leave task digests out of these requests."""
+        return self.newest(limit=limit)
 
 
 __all__ = [
