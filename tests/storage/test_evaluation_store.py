@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 from sqlalchemy.schema import DropTable
 
+from reef.core.errors import ScenarioDeletedError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     EvaluationCollection,
@@ -22,7 +23,6 @@ from reef.storage.evaluations import (
     EvaluationStore,
     StoredEvaluation,
 )
-from reef.core.errors import ScenarioDeletedError
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sql_evaluations import SQLEvaluationStore
 from reef.storage.sqlite import SQLiteScenarioStorage

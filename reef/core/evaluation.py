@@ -484,8 +484,8 @@ class ArtifactEvaluationRequest:
     than 1, above which Reef stops the evaluation; None for no limit. ``log_probs`` is a bool: True asks the
     candidate's engine for the sampled tokens' log probabilities and token IDs in every model call of the
     evaluation (``ArtifactEndpoint``), so that the kept calls hold them.
-    Once Reef accepts an evaluation, ``task_digests`` gives the files digest of each of its ``task_names``, in the
-    same order. Each is a lowercase hex SHA-256. Before acceptance and for older stored requests, it is None.
+    For a pinned evaluation, ``task_digests`` holds one lowercase hex SHA-256 per accepted task, in task order.
+    An unpinned request has no digests. A list view can omit them for a pinned request.
     Purpose: the evaluation service makes the request, stores it (``to_json``), and runs it.
     """
 
