@@ -546,7 +546,7 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
 
 
 @pytest.mark.integration
-def test_an_evaluation_on_e2b_adds_a_tasks_rollouts_once_its_template_item_is_final(tmp_path: Path) -> None:
+def test_an_evaluation_on_e2b_adds_the_rollouts_of_each_task_whose_template_item_is_final(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -577,24 +577,36 @@ def test_an_evaluation_on_e2b_adds_a_tasks_rollouts_once_its_template_item_is_fi
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
             evaluation_id = (await response.json())["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
 
             # Each task has a template item first, and no rollout runs while the templates build.
             add_template, sort_template = await open_items(TASK_TEMPLATE_KIND, 2)
             assert [item.payload["task_name"] for item in (add_template, sort_template)] == ["add", "sort"]
             assert queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND) == ()
-            # The rollouts keep their task order: a ready template of a later task starts no rollout.
+            # A ready template of a later task starts its rollouts while the template of an earlier task builds.
             assert queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND]).id == add_template.id
             assert queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND]).id == sort_template.id
             queue.finish(EVALUATIONS_QUEUE, sort_template.id, "w", {})
-            await asyncio.sleep(0.3)
-            assert queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND) == ()
-            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
             first, second = await open_items(EVALUATION_ROLLOUT_KIND, 2)
-            assert [first.payload["task_name"], second.payload["repeat"]] == ["add", 1]
+            assert [(item.payload["task_name"], item.payload["repeat"]) for item in (first, second)] == [
+                ("sort", 0),
+                ("sort", 1),
+            ]
+            listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+            assert [(row["task"], row["repeat"], row["state"]) for row in listed] == [
+                ("add", 0, "waiting"),
+                ("add", 1, "waiting"),
+                ("sort", 0, "queued"),
+                ("sort", 1, "queued"),
+            ]
+            # The rollouts of the earlier task start once its template is ready and the limit lets them.
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
+            await asyncio.sleep(0.3)
+            assert len(await open_items(EVALUATION_ROLLOUT_KIND, 2)) == 2
             for item in (first, second):
-                scored(item, 1.0)
-            for item in await open_items(EVALUATION_ROLLOUT_KIND, 2):
                 scored(item, 0.0)
+            for item in await open_items(EVALUATION_ROLLOUT_KIND, 2):
+                scored(item, 1.0)
 
             answer = await finished(client, evaluation_id)
             assert answer["state"] == "finished", answer
@@ -639,6 +651,35 @@ def test_a_failed_template_item_still_adds_its_tasks_rollouts_and_a_cancel_ends_
             assert (await client.post(f"{route}/resume", headers=AUTH)).status == 202
             assert queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1)).state == "queued"
             assert queue.read(EVALUATIONS_QUEUE, add_template.id).state == "failed"
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_resume_refuses_an_e2b_evaluation_whose_first_template_item_the_queue_deleted(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "environment": "e2b"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            route = f"/reef/scenarios/s/evaluations/{(await response.json())['evaluation_id']}"
+            add_template = queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND])
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
+            for _ in range(200):
+                if queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND):
+                    break
+                await asyncio.sleep(0.05)
+            assert (await client.post(f"{route}/cancel", headers=AUTH)).status == 200
+            # The retention deletes the template item of "add", which ended first; its rollout stays.
+            kept = [item.id for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if item.id != add_template.id]
+            queue.delete_final(finished_before=time.time() + 1, keep={EVALUATIONS_QUEUE: kept})
+            resumed = await client.post(f"{route}/resume", headers=AUTH)
+            assert resumed.status == 409, await resumed.text()
 
     asyncio.run(run())
 
