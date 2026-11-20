@@ -392,3 +392,20 @@ def test_the_evaluation_section_names_a_trial_observer_plugin() -> None:
         ValueError, match=r"evaluation\.trial_observer .* must name a class that inherits TrialObserver"
     ):
         service_config_from_mapping(resolved)
+
+
+def test_the_evaluation_section_names_a_task_template_builder_plugin() -> None:
+    assert (
+        service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).evaluation_task_template_builder
+        is None
+    )
+    builder = "reef.evaluation.task_templates:DockerfileTemplateBuilder"
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"task_template_builder": builder}})
+    assert service_config_from_mapping(resolved).evaluation_task_template_builder == builder
+
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"task_template_builder": "json:loads"}})
+    with pytest.raises(
+        ValueError,
+        match=r"evaluation\.task_template_builder .* must name a class that inherits TaskTemplateBuilder",
+    ):
+        service_config_from_mapping(resolved)

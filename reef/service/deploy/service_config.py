@@ -19,6 +19,7 @@ from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.evaluation.rollout_worker import ON_STOP_CHOICES
+from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
@@ -295,6 +296,12 @@ class ServiceSettings:
         public_path=("evaluation", "trial_observer"),
         help="A TrialObserver plugin reference that reads each evaluation trial before its directory is removed.",
     )
+    #: Unset, or a ``TaskTemplateBuilder`` plugin: ``package.module:ClassName`` or module and config.
+    evaluation_task_template_builder: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("evaluation", "task_template_builder"),
+        help="A TaskTemplateBuilder plugin reference that makes the sandbox templates of each task of an e2b evaluation.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -525,6 +532,10 @@ class ServiceSettings:
             raise ValueError(f"evaluation.on_stop must be one of {', '.join(ON_STOP_CHOICES)}")
         if self.evaluation_trial_observer is not None:
             TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
+        if self.evaluation_task_template_builder is not None:
+            TaskTemplateBuilder.reference(
+                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+            )
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:

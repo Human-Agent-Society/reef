@@ -25,6 +25,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
+from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
@@ -690,6 +691,13 @@ def build_dispatcher(
                 TaskTemplateWorker(
                     dispatcher.queue,
                     LocalCandidateEndpoints(dispatcher),
+                    (
+                        DockerfileTemplateBuilder()
+                        if settings.evaluation_task_template_builder is None
+                        else TaskTemplateBuilder.from_setting(
+                            settings.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+                        )
+                    ),
                     worker_id=instance_id("evaluation-templates"),
                     slots=TEMPLATE_BUILD_SLOTS,
                 )

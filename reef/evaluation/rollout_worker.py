@@ -53,6 +53,7 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
@@ -807,8 +808,8 @@ class TaskTemplateWorker(QueueWorker):
 
     Values: as ``QueueWorker``, on the template items of the evaluations queue (``TASK_TEMPLATE_KIND``), with one
     item in each slot. An item's payload is the payload of the task's first rollout (``EvaluationRollout``).
-    ``endpoints`` gives each task's directory. Every failure of a build is retryable, until the item uses up its
-    attempts. Control adds a task's rollouts once its item is final, also when the build failed: the trial then
+    ``endpoints`` gives each task's directory, and ``builder`` makes the task's templates ready. Every failure of a
+    build is retryable, until the item uses up its attempts. Control adds a task's rollouts once its item is final, also when the build failed: the trial then
     builds the template itself, and its failure is the rollout's failure.
 
     Purpose: the evaluation service starts one beside its ``EvaluationRolloutWorker``. A wait for a template builder
@@ -821,6 +822,7 @@ class TaskTemplateWorker(QueueWorker):
         self,
         queue: WorkQueue,
         endpoints: CandidateEndpoints,
+        builder: TaskTemplateBuilder,
         *,
         worker_id: str,
         poll_seconds: float = 0.5,
@@ -835,6 +837,7 @@ class TaskTemplateWorker(QueueWorker):
             slots=slots,
         )
         self.endpoints = endpoints
+        self.builder = builder
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         rollout = EvaluationRollout.from_item(item)
@@ -846,19 +849,15 @@ class TaskTemplateWorker(QueueWorker):
         return {}
 
     async def build_task_template(self, rollout: EvaluationRollout, task_directory: Path) -> None:
-        """Make the e2b templates of the task of ``rollout``, at ``task_directory``, ready: build them when they are
-        missing, or wait for the builds that another caller started (``build_task_template`` of Reef's e2b sandbox).
-        A build that found no free builder in the task's build time limit (``TimeoutError``) waits again, at most
+        """Make the e2b templates of the task of ``rollout``, at ``task_directory``, ready with ``builder``. A build that
+        found no free builder in the task's build time limit (``TimeoutError``) waits again, at most
         ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the item is retried. Any
         other failure of the build fails the attempt in the same way."""
-        # The e2b extra is optional, and only an evaluation on e2b needs it.
-        from reef.execution.sandbox.e2b import build_task_template
-
         loop = asyncio.get_running_loop()
         deadline = loop.time() + TEMPLATE_WAIT_S
         while True:
             try:
-                await build_task_template(task_directory)
+                await self.builder.build(rollout.scenario, rollout.task_name, task_directory)
                 return
             except TimeoutError as error:
                 if loop.time() >= deadline:
