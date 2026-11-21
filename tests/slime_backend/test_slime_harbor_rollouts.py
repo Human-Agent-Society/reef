@@ -387,13 +387,32 @@ def test_a_remote_environment_builds_once_for_the_tasks_rollouts(tmp_path, sessi
 def test_a_failed_build_removes_the_tasks_samples_after_a_second_try(tmp_path, sessions) -> None:
     source = source_of(tmp_path, environment="e2b")
     lab = AgentLab(build_error="no template")
-    fields = run_one(sessions(source, lab), source)
-    assert fields.remove_sample and "did not start: no template" in fields.error
-    assert lab.builds == ["add", "add"] and lab.runs == 0
+    session = sessions(source, lab)
+    ((name, path),) = source.tasks
+
+    async def scenario() -> None:
+        async def group(index: int) -> list[SampleFields]:
+            return await asyncio.gather(*(session.run(name, Path(path), index) for _ in range(2)))
+
+        failed = await group(0)
+        assert all(fields.remove_sample and "did not start: no template" in fields.error for fields in failed)
+        assert lab.builds == ["add", "add"] and lab.runs == 0
+        lab.build_error = ""
+        assert all(fields.remove_sample for fields in await group(0))
+        assert not any(fields.remove_sample for fields in await group(1))
+        assert not any(fields.remove_sample for fields in await group(2))
+
+    asyncio.run(scenario())
+    assert lab.builds == ["add", "add", "add"] and lab.runs == 4
 
 
 class Args(SimpleNamespace):
-    """Slime's options that a task job reads, with the values that work."""
+    """Build the Slime options that task admission reads.
+
+    The defaults describe a valid task job. ``global_batch_size`` counts trials per optimizer step.
+    A valid size is a positive integer that divides ``rollout_batch_size * n_samples_per_prompt``.
+    ``overrides`` replaces defaults without validation so rejection tests can construct invalid options.
+    """
 
     def __init__(self, **overrides: Any) -> None:
         values = {
@@ -402,6 +421,7 @@ class Args(SimpleNamespace):
             "rewards_normalization": True,
             "n_samples_per_prompt": 2,
             "rollout_batch_size": 4,
+            "global_batch_size": 4,
             "over_sampling_batch_size": 4,
             "group_rm": False,
             "reward_key": None,

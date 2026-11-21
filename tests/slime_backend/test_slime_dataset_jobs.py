@@ -270,3 +270,37 @@ def test_the_data_source_loads_the_recorded_job_and_skips_its_trained_rollouts(t
     assert [group[0].label for group in source.get_samples(1)] == ["0"]
     write_json(root / DATASET_FILE, {"job_id": "job-1", "path": str(prompts), "skip_rollouts": 0, "token": "b"})
     assert [group[0].label for group in source.get_samples(1)] == ["0"]
+
+
+def test_task_source_fills_a_rollout_that_spans_multiple_task_epochs(tmp_path) -> None:
+    pytest.importorskip("slime.data.data_source", reason="requires Slime's optional dataset dependencies")
+    from reef.train.slime_backend.dataset_source import ReefDatasetSource
+    from reef.train.slime_backend.harbor_rollouts import HarborSettings, TaskJobSource
+
+    source_record = TaskJobSource(
+        "job",
+        "token",
+        tuple((name, str(tmp_path / name)) for name in ("a", "b", "c")),
+        HarborSettings(),
+        str(tmp_path),
+        30.0,
+        1,
+    )
+    write_json(tmp_path / DATASET_FILE, source_record.to_record())
+    args = Namespace(
+        save_hf=str(tmp_path / "hf" / "{rollout_id}"),
+        prompt_data=None,
+        rollout_seed=0,
+        rollout_shuffle=False,
+        rollout_batch_size=8,
+        n_samples_per_prompt=2,
+        buffer_filter_path=None,
+    )
+    source = ReefDatasetSource(args)
+
+    groups = source.get_samples(8)
+    assert [[sample.prompt for sample in group] for group in groups] == [
+        [task, task] for task in ("c", "a", "b", "c", "a", "b", "c", "a")
+    ]
+    assert [group[0].group_index for group in groups] == list(range(8))
+    assert [group[0].prompt for group in source.get_samples(2)] == ["b", "c"]

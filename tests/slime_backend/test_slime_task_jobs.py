@@ -243,6 +243,19 @@ def test_slimes_options_that_cannot_work_refuse_a_task_job_at_submit(tmp_path, t
     assert events == []
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("batch_size", [6, 12, 17])
+def test_task_job_refuses_a_batch_size_that_would_drop_trials(tmp_path, task_stack, batch_size) -> None:
+    stack, events, _ = task_stack
+    stack.args.rollout_batch_size = 4
+    stack.args.n_samples_per_prompt = 4
+    stack.args.global_batch_size = batch_size
+
+    with pytest.raises(ValueError, match="--global-batch-size"):
+        stack.component.submit(task_job(stack, tmp_path))
+    assert events == []
+
+
 class ImportanceSamplingObjective(SlimeObjective):
     """A method that a deployment provides, on the importance_sampling family."""
 
