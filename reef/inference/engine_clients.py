@@ -20,7 +20,7 @@ class DeploymentEngineClients(EngineClients):
     ``provider_key`` is the deployment's provider key, or None; ``timeout_seconds`` bounds each call of a proxy
     handler; ``proxies`` holds the proxy handler of each other URL, made on first use.
 
-    Purpose: ``reef.service.components`` gives it to the replica of the inference service.
+    Purpose: service assembly gives it to the replica of the inference service.
     """
 
     def __init__(self, runtime: InferenceRuntime | None, *, provider_key: str | None, timeout_seconds: float) -> None:

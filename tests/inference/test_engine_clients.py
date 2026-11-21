@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from reef.core.served_models import ServedArtifact
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
-from reef.service.engine_clients import DeploymentEngineClients
 
 
 class EndpointsRuntime(InferenceProxyRuntime):
