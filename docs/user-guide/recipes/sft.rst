@@ -46,7 +46,7 @@ How Reef implements it
 ----------------------
 
 SFT has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__):
+(`Write a recipe <../../developer-guide/write-a-recipe.rst>`__):
 
 - ``SFTSamples`` makes each report its own record set and makes one
   ``TrajectorySample`` from it: the report's last call as an ATIF trajectory,
@@ -314,7 +314,7 @@ task jobs with a policy objective. Its ``default_parameters()``
 puts ``"sft"`` in the ``objective``
 parameter of the jobs of that kind (`Train each kind of sample with its own
 method
-<../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
+<../../developer-guide/recipe-training-service.rst#job-parameters>`__).
 The pipeline of that recipe must make samples that the ``sft`` family can
 train.
 

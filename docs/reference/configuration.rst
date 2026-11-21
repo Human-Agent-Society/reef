@@ -970,7 +970,7 @@ A sample that cannot render, or that is longer than a limit of its stage,
 does not train. The job metric ``unrenderable_samples`` counts these samples.
 A chat template that drops the reasoning of earlier turns, as Qwen3's does,
 renders a multi-turn sample as several segments. Each segment trains as one
-sample (see `Processors <../developer-guide/processors.rst>`__).
+sample (see `Rendering <../developer-guide/recipe-training-service.rst#rendering>`__).
 
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1288,7 +1288,7 @@ persistent.
        the files of generated tasks for ``local``, or the local cache of a plugin store
 
    ``storage.job-directory-ttl-s`` : 604800
-       seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__)
+       seconds that the data store keeps a job data directory that no training job used; a job of the same samples uses the directory again (see `The job data directory <../developer-guide/training-backends.rst#the-job-data-directory>`__)
 
    ``storage.agent-record-retention-max-bytes`` : 21474836480
        20 GiB shared across all record items of the data store, including unconsumed records
@@ -1397,7 +1397,7 @@ the runtime under ``recipe.runtime``. Harness settings live in
 It has two values:
 
 - ``auto``: a job starts when the `next job
-  <../developer-guide/processors.rst#the-next-job>`__ holds ``job_samples``
+  <../developer-guide/recipe-control-service.rst#the-next-job>`__ holds ``job_samples``
   samples: the untrained samples that it takes. ``POST /reef/train`` is
   refused.
 - ``manual``: a job starts only for a ``POST /reef/train`` request. The
@@ -2022,8 +2022,8 @@ classes and structural lookalikes.
 The ``pipeline`` section
 ------------------------
 
-A recipe's pipeline has two stages (see `Training pipeline
-<../developer-guide/processors.rst>`__). The recipe names a default class for
+A recipe's pipeline has two stages (see `Write a recipe
+<../developer-guide/write-a-recipe.rst>`__). The recipe names a default class for
 each stage. This section gives each stage its config, and it can name another
 class for a stage. Every stage reads only its own ``config``; the recipe's
 ``recipe.config`` holds no stage settings.
@@ -2063,7 +2063,7 @@ bounded lag, its own ``max_artifact_lag`` (`SAO <../user-guide/recipes/sao.rst>`
 A ``pipeline.record2sample.config.max_staleness`` key is refused at startup:
 remove it. A training framework's own off-policy limit goes in that backend's
 ``training.options``. No built-in backend has one now. See `Staleness
-<../developer-guide/processors.rst#staleness>`__.
+<../developer-guide/recipe-samples-service.rst#staleness>`__.
 
 Reef submits one training job for each job's data. ``job_samples`` is the
 fewest samples that one job trains. A weight recipe requires it: a
@@ -2091,7 +2091,7 @@ samples than the batch size trains more than one optimizer step. A job with fewe
 partial step. The ``remainder`` field of a job's optional ``scheduling``
 parameter decides what happens to a shorter last step; by default, the
 component trains it as a smaller step. See `Job size
-<../developer-guide/processors.rst#job-size>`__.
+<../developer-guide/recipe-control-service.rst#job-size>`__.
 
 Every built-in sample-to-job stage that trains on records reads ``job_samples``
 and ``buffer_size``. A recipe's page lists the other keys of its stage.
@@ -2234,8 +2234,8 @@ The generator's pass-rate band does not filter the store.
 The generator keeps its own state in the same task store, so the state is in
 the deployment's storage with the tasks. A generator's ``config`` therefore
 names no state directory; the built-in generators refuse a ``state_dir`` key.
-See `the task generation contract
-<../developer-guide/processors.rst#task-generation-contract>`__ for the state
+See `Task generators
+<../developer-guide/task-generators.rst#durable-state>`__ for the state
 that a generator gets.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
@@ -2549,8 +2549,8 @@ is refused too.
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
 credentials through environment references in ``config``. The generator
-interface and the round are in `Training pipeline
-<../developer-guide/processors.rst#task-generation-contract>`__.
+interface and the round are in `Task generators
+<../developer-guide/task-generators.rst>`__.
 
 A source session is a report, without a training arm, whose inference
 records all carry ``source_tag``. The generator service accepts at most

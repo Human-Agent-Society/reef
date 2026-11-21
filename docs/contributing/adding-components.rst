@@ -153,8 +153,8 @@ Implementation
   ``InProcessTrainingDeployment``. Expose the class through its
   ``package.module:ClassName`` reference or the ``reef.training_backends``
   entry-point group; see
-  `Training backend deployment
-  <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
+  `Training backends
+  <../developer-guide/training-backends.rst>`__.
 - Implement ``facts(config, model_path, environ)`` on the factory. It returns
   the backend's ``TrainingBackendFacts`` from the same config, without
   building or starting the component, and it imports no training framework or

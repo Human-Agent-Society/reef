@@ -626,7 +626,7 @@ counts as one sample toward ``job_samples`` and ``buffer_size``. Job data takes
 the samples in the order they joined the scenario. A train task trains like a trajectory. In ``sft`` it trains only in
 ``manual`` mode, for a request that gives the job's parameters (see
 `Manual training <#manual-training>`__). For the recipe side, see `Uploaded
-trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
+trajectories <../developer-guide/recipe-control-service.rst#uploaded-trajectories>`__.
 
 After each write that adds items to a scenario or removes them, the data
 service asks control to sync the scenarios that the write touched. It waits up
@@ -2734,7 +2734,7 @@ Artifact of a recorded response
 An inference record holds the provider exchange and ``artifact_id``, the
 artifact that answered: the same ID as ``x-reef-artifact-id``. The samples
 service's staleness check reads it (see `Staleness
-<../developer-guide/processors.rst#staleness>`__). Serving returns no training
+<../developer-guide/recipe-samples-service.rst#staleness>`__). Serving returns no training
 tensors. Reef removes any ``training`` block that an engine handler returns
 from the record, from the client's answer, and from rollout and evaluation
 answers. The training component renders each recorded call and computes the

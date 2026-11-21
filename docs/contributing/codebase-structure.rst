@@ -464,8 +464,8 @@ Where the detailed rules live
 Each package's ``__init__`` docstring states the boundaries it holds and
 how to extend it; there are no READMEs under ``reef/``. Design pages for the
 two packages that need more than a docstring are `Scenario components
-<../developer-guide/components.rst>`__ and `Training pipeline
-<../developer-guide/processors.rst>`__; the extension points every package
+<../developer-guide/components.rst>`__ and `Samples service
+<../developer-guide/recipe-samples-service.rst>`__; the extension points every package
 exposes are in `Python API <../reference/python-api.rst>`__, and the public
 harness wire contract is `HTTP API <../reference/http-api.rst>`__. The
 `top-level README <../../README.md>`__ shows how the cookbook methods sit

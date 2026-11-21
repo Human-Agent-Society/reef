@@ -107,7 +107,7 @@ the training pipeline submits a job when it holds this many samples. Set it
 to the batch size, so that one job is one optimizer step. Job data takes whole
 record sets, so it can hold more; the component then cuts it into optimizer
 steps of the batch size (see `Job size
-<../developer-guide/processors.rst#job-size>`__). A step keeps each rollout of
+<../developer-guide/recipe-control-service.rst#job-size>`__). A step keeps each rollout of
 the objective's ``rollout_unit`` whole: one sample, or one comparison set. A
 job's optional ``scheduling`` parameter sets the epochs, the shuffle, and the
 ``partial``, ``drop`` or ``error`` policy for the last step.
@@ -147,7 +147,7 @@ component, can serve the snapshots.
 
 Each job trains the Tinker loss of the objective that its recipe selected
 (`Train each kind of sample with its own method
-<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
+<../developer-guide/recipe-training-service.rst#job-parameters>`__).
 Tinker preparation needs one advantage per trajectory, so a supervised or
 distillation objective fails before training.
 ``kl-coef`` applies to every job. When it is not zero, a job whose loss has no

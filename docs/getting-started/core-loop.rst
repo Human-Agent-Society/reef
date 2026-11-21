@@ -76,10 +76,10 @@ full elsewhere:
    * - Learning / training in general
      - `Write a recipe <../developer-guide/write-a-recipe.rst>`__
    * - Record eligibility
-     - `Training pipeline <../developer-guide/processors.rst>`__
+     - `Samples service <../developer-guide/recipe-samples-service.rst>`__
    * - Activation
-     - `Activate an artifact
-       <../developer-guide/write-a-recipe.rst#activate-an-artifact>`__
+     - `Activation rule
+       <../developer-guide/recipe-control-service.rst#activation-rule>`__
    * - Snapshot lifecycle
      - `The snapshot chain
        <../advanced_topics/state-model.rst#the-snapshot-chain>`__

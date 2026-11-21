@@ -1520,17 +1520,17 @@ sample2job=...)``):
   ``JudgedSamples``, after an asynchronous ``judge`` derives new feedback. A
   stage with slow work keeps its records and forms the set in
   ``advance(now)`` when the work ends (see `Slow work
-  <../developer-guide/processors.rst#slow-work>`__). The stage's
+  <../developer-guide/recipe-samples-service.rst#slow-work>`__). The stage's
   ``is_stale(samples, served)`` decides whether a group of its stored samples
   may still train against the artifacts that the scenario served
   (``ServedArtifacts``); the samples service marks the stale ones, and the
   automatic jobs leave them out. The default is on-policy (see `the staleness
-  check <../developer-guide/processors.rst#staleness>`__). The default stage,
+  check <../developer-guide/recipe-samples-service.rst#staleness>`__). The default stage,
   ``NoSamples``, makes no sample, so nothing trains.
   ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
   ``ValueError`` to skip the trajectory (see `Uploaded trajectories
-  <../developer-guide/processors.rst#uploaded-trajectories>`__).
+  <../developer-guide/recipe-control-service.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
   Its ``make_job_data(samples, data_id)`` shapes the samples of the next job,
   in use order, into one job's data with the ID ``data_id``. The pipeline assigns the
@@ -1547,7 +1547,7 @@ sample2job=...)``):
   ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose
   stage has no ``job_samples``. ``Sample2JobSettings`` parses the
   ``buffer_size`` and ``job_samples`` keys, and a stage with more keys
-  extends it. See `Job size <../developer-guide/processors.rst#job-size>`__.
+  extends it. See `Job size <../developer-guide/recipe-control-service.rst#job-size>`__.
 
 Reef builds the stages for each scenario, in this order, with the class
 methods below; the sample-to-job stage receives the record-to-sample stage:
@@ -1580,7 +1580,7 @@ request-triggered (``manual``) training. A ``Sample2Job`` declares
 samples that the request names; ``Sample2Job.reads_requests`` says
 whether a request that names no sample runs. Record push, sample storage, acknowledgement, retention
 and background derivation are shared. See
-`Training pipeline <../developer-guide/processors.rst>`__ for the training request queue and job data contract.
+`Control service <../developer-guide/recipe-control-service.rst#sample-to-job-stage>`__ for the training request queue and job data contract.
 
 Every stage gets the scenario's experiment logger as
 ``context.experiment_logger`` (``self.experiment_logger`` on a ``Sample2Job``).
@@ -1658,7 +1658,7 @@ The pipeline stores the samples of a report or a ready group when it is
 ready, and that consumes their records. A group is fixed when it is first
 ready; later reports for its key form a new group. ``make_job_data``
 receives the samples of the `next job
-<../developer-guide/processors.rst#the-next-job>`__ in use order: units in
+<../developer-guide/recipe-control-service.rst#the-next-job>`__ in use order: units in
 the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
 when the recipe omits constant-reward groups from its output. Samples stored
 after the job data was built wait for later job data.
@@ -1731,7 +1731,7 @@ is optional. It receives the results of one earlier ``generate`` call, named by
 restart. A second call for the same generation must have no effect. The
 default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
-See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
+See `Task generators <../developer-guide/task-generators.rst>`__
 for the round and its failure behavior.
 
 ``state`` is a ``GeneratorState`` (``reef.recipe.generated_tasks``): the
@@ -1758,8 +1758,8 @@ task preserves source record IDs in order.
 ``GeneratedTaskResult`` is ``RejectedTask(task, reason)``, ``HeldOutTask(task)``,
 ``RolledOutTask(task, rollout_rewards)`` or ``FailedTask(task, error,
 infrastructure_failure)``. ``rollout_rewards`` is a non-empty tuple of finite
-numbers; ``reason`` and ``error`` are non-empty. See `the task generation
-contract <../developer-guide/processors.rst#task-generation-contract>`__ for
+numbers; ``reason`` and ``error`` are non-empty. See `Task generators
+<../developer-guide/task-generators.rst#results>`__ for
 when the recipe sends each case.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
@@ -1859,7 +1859,7 @@ and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
 ``files`` is a ``TaskFiles(partition, digest)`` that names the directory in the
 task file store, or ``None``. Only a task with ``files`` can go into a training
-job (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__).
+job (see `The job data directory <../developer-guide/training-backends.rst#the-job-data-directory>`__).
 It performs no file I/O or rollout. Algorithms supporting tasks own validation,
 environment execution and conversion to trajectories. The Tinker component,
 and the Slime component with its own rollout engines, roll task samples out in
@@ -2056,7 +2056,7 @@ such as ``scheduling`` or ``save_interval``.
 
 The parameters are part of the job's ID, so ``parameters_by_kind()`` must
 return the same value at every call. See `Write a recipe
-<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__
+<../developer-guide/recipe-training-service.rst#job-parameters>`__
 for a recipe that trains each kind with its own method.
 
 ``TrainingSignal`` carries:

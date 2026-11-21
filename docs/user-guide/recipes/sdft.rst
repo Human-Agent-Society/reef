@@ -58,7 +58,7 @@ How Reef implements it
 ----------------------
 
 SDFT has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__).
+(`Write a recipe <../../developer-guide/write-a-recipe.rst>`__).
 ``SDFTSamples`` makes each report its own record set and turns it into one
 sample. The shared ``DistillJobData`` stage puts the samples into job data in
 arrival order. One job's data holds ``pipeline.sample2job.config.job_samples``

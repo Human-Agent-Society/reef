@@ -54,7 +54,7 @@ How Reef implements it
 ----------------------
 
 SDPO has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__).
+(`Write a recipe <../../developer-guide/write-a-recipe.rst>`__).
 ``SDPOSamples`` groups the reports of one grid and turns each rollout's report
 into one sample. ``SDPOJobData`` makes one job's data of one complete grid.
 

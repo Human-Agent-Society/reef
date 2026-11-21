@@ -92,14 +92,20 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     // Writing your own method against Reef's contracts.
     title: "Developer Guide",
     files: [
+      // The recipe guide: the overview, then one page for each service that runs a plug-in.
       "developer-guide/write-a-recipe.rst",
+      "developer-guide/recipe-samples-service.rst",
+      "developer-guide/task-generators.rst",
+      "developer-guide/recipe-control-service.rst",
+      "developer-guide/recipe-training-service.rst",
+      "developer-guide/loss-families.rst",
       "developer-guide/write-a-harness-method.rst",
+      "developer-guide/components.rst",
+      // Integrations beside a recipe.
+      "developer-guide/training-backends.rst",
       "developer-guide/harness-adapters.rst",
       "developer-guide/sandboxes.rst",
       "developer-guide/executors.rst",
-      "developer-guide/loss-families.rst",
-      "developer-guide/components.rst",
-      "developer-guide/processors.rst",
     ],
   },
   {
