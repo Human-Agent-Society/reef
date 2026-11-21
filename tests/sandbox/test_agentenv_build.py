@@ -35,16 +35,23 @@ case "$FAKE_AENV_MODE" in
   ok) echo "Template ready." ;;
   conflict) echo "Error: HTTP 400: alias 'a' already points to 'x', cannot rebind to 'y'"; exit 1 ;;
   flaky)
-    if [ "$(wc -l < "$FAKE_AENV_LOG.runs")" -eq 1 ]; then echo "Error: HTTP $FAKE_AENV_STATUS: try later"; exit 1; fi
+    if [ "$(wc -l < "$FAKE_AENV_LOG.runs")" -eq 1 ]; then
+      printf '%s\\n' "$FAKE_AENV_ERROR"
+      exit 1
+    fi
     echo "Template ready." ;;
-  *) echo "#5 ERROR: process apt-get did not complete"; exit 1 ;;
+  *)
+    echo '#5 ERROR: process apt-get did not complete'
+    echo '#5 dependency returned HTTP 503'
+    echo 'Error: BuildKit build failed (exit status: 1)'
+    exit 1 ;;
 esac
 """
 
 
 class FakeAgentEnv:
     """A fake AgentENV template API. ``states`` holds the answers to the reads of the alias, in order; the last answer
-    repeats. An answer is None (no template), ``(template_id, status)``, or ``503`` (an overloaded API). A template
+    repeats. An answer is None (no template), ``(template_id, status)``, or an HTTP error status. A template
     that ``deleted`` records, each deletion in order, reads as no template. Each build was made ``build_age`` ago."""
 
     def __init__(self, states: list[tuple[str, str] | int | None], build_age: timedelta = timedelta()) -> None:
@@ -57,9 +64,8 @@ class FakeAgentEnv:
         async def alias(request: web.Request) -> web.Response:
             assert request.headers["X-API-Key"] == "key"
             answer = self.states.pop(0) if len(self.states) > 1 else self.states[0]
-            if answer == 503:
-                return web.json_response({"message": "Service Unavailable"}, status=503)
-            assert not isinstance(answer, int)
+            if isinstance(answer, int):
+                return web.Response(status=answer)
             self.current = None if answer is not None and answer[0] in self.deleted else answer
             if self.current is None:
                 return web.json_response({"message": "template alias not found"}, status=404)
@@ -219,7 +225,7 @@ def test_a_failed_build_raises_with_the_end_of_its_output(
 ) -> None:
     monkeypatch.setenv("FAKE_AENV_MODE", "fail")
     with pytest.raises(AgentEnvBuildError, match="exit code 1: #5 ERROR: process apt-get did not complete"):
-        ensured(FakeAgentEnv([None]), task_build(tmp_path))
+        ensured(FakeAgentEnv([None, ("peer", "ready")]), task_build(tmp_path))
 
 
 @pytest.mark.unit
@@ -252,12 +258,36 @@ def test_a_template_building_long_past_its_deadline_is_an_orphan_that_is_deleted
 
 
 @pytest.mark.unit
-# 429: the AgentENV worker already runs as many builds as it takes ("node concurrent build limit reached").
-@pytest.mark.parametrize("status", ["429", "503"])
+@pytest.mark.parametrize(
+    ("read_status", "build_error"),
+    [
+        pytest.param(503, "Error: HTTP 429: node concurrent build limit reached", id="worker-busy"),
+        pytest.param(500, "Error: HTTP 503: try later", id="alias-read-500"),
+        pytest.param(None, "Error: HTTP 500: <html>\n<center>nginx</center>\n</html>", id="proxy-500"),
+        pytest.param(
+            None,
+            "Error: error sending request for url (https://agentenv.example/v3/templates)\n\n"
+            "Caused by:\n    0: client error (Connect)\n    1: operation timed out",
+            id="connect-timeout",
+        ),
+    ],
+)
 def test_a_build_and_a_read_that_an_overloaded_api_refuses_are_tried_again(
-    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, status: str
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, read_status: int | None, build_error: str
 ) -> None:
     monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
-    monkeypatch.setenv("FAKE_AENV_STATUS", status)
-    ensured(FakeAgentEnv([503, None]), task_build(tmp_path))
+    monkeypatch.setenv("FAKE_AENV_ERROR", build_error)
+    ensured(FakeAgentEnv([read_status, None]), task_build(tmp_path))
     assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run", "run"]
+
+
+@pytest.mark.unit
+def test_a_proxy_failure_waits_for_the_build_already_under_the_alias(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
+    monkeypatch.setenv("FAKE_AENV_ERROR", "Error: HTTP 500: <html>Internal Server Error</html>")
+    fake = FakeAgentEnv([None, ("t1", "waiting"), ("t1", "building"), ("t1", "ready")])
+    ensured(fake, task_build(tmp_path))
+    assert fake.deleted == []
+    assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run"]
