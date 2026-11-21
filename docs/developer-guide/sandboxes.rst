@@ -88,10 +88,12 @@ The class also builds a task's Dockerfile differently in two ways:
   for a build that another trial runs, and deletes a failed template before it
   builds again. A template that stays ``waiting`` for three minutes has no build
   behind it, for example after an ``aenv build`` was killed, so the class also
-  deletes it and builds again. A build or a status read that the AgentENV API
-  refuses with 429, 502, 503 or 504 is tried again until the environment's build
-  timeout. An AgentENV worker answers 429 when it already runs as many builds as
-  it takes at once.
+  deletes it and builds again. Reef retries HTTP 429, 500, 502, 503 and 504
+  responses from the AgentENV API and connection timeouts until the build
+  timeout. A failed ``aenv build`` deletes the ``waiting`` template that it made
+  itself, never the template of another trial, and Reef checks the alias before
+  it starts another build. An AgentENV worker answers 429 when it has no free
+  build slot.
 
 By default, a trial builds a missing template inside its environment start
 limit. A wait for a free AgentENV builder then counts against that limit.
