@@ -1338,6 +1338,10 @@ Reef ships ``HuggingFaceReader`` (``hf``), ``FileReader`` (``file``) and
 ``storage.artifact_sources``. A configured reader replaces the built-in reader
 of a scheme that it reads.
 
+``S3PrefixFiles`` normalizes object keys to relative paths below the requested
+prefix. If two distinct keys map to the same path, the reader raises
+``ValueError`` before it reads any object contents.
+
 ``HuggingFaceRevisionFiles`` has a reference when the URI names a full
 40-digit commit SHA. Reef stores the reference instead of a copy only when the
 component's layout says that its readers resolve one

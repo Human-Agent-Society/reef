@@ -94,8 +94,9 @@ class S3PrefixFiles(SourceFiles):
 
     One listing gives ``paths``. An empty object whose key ends in ``/`` is a folder marker, such as the S3
     console's "Create folder" writes, and is skipped. A key that ends in ``/`` and holds data, a key that is both a
-    file and a folder, a key outside the prefix, and an empty prefix are refused with ``ValueError``. ``version``
-    is the SHA-256 of the paths and ETags, so the same objects read again give the same version. ``sha256``,
+    file and a folder, multiple keys for the same relative file path, and an empty prefix are refused with
+    ``ValueError``. A path outside the prefix raises ``ArtifactSourceError``. ``version`` is the SHA-256 of the paths
+    and ETags, so the same objects read again give the same version. ``sha256``,
     ``read_bytes`` and ``copy_into`` download the objects they read.
     """
 
@@ -118,8 +119,13 @@ class S3PrefixFiles(SourceFiles):
                     relative = PurePosixPath(item["Key"][len(prefix) :])
                     if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                         raise ArtifactSourceError(f"{uri} holds an object outside its prefix: {item['Key']}")
-                    self.keys[relative.as_posix()] = item["Key"]
-                    etags.append((relative.as_posix(), str(item["ETag"])))
+                    path = relative.as_posix()
+                    if path in self.keys and self.keys[path] != item["Key"]:
+                        raise ValueError(
+                            f"{uri} holds multiple objects for file {path}: {self.keys[path]}, {item['Key']}"
+                        )
+                    self.keys[path] = item["Key"]
+                    etags.append((path, str(item["ETag"])))
         except client_errors as exc:
             raise ArtifactSourceError(f"failed to read {uri}: {exc}") from exc
         if not self.keys:

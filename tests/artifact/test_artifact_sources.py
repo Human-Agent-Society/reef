@@ -247,6 +247,28 @@ def test_an_s3_uri_skips_folder_markers(tmp_path: Path, s3) -> None:
 
 
 @pytest.mark.unit
+def test_an_s3_uri_refuses_two_keys_for_the_same_file(tmp_path: Path, s3) -> None:
+    client, _ = s3
+    client.objects = {
+        "models/a/./weights": b"weights",
+        "models/a/config.json": b"{}",
+        "models/a/sub/w.bin": b"shard",
+    }
+    reader = S3Reader.from_config({})
+    files = reader.open("s3://bucket/models/a")
+    target = copied(files, tmp_path / "copy")
+    assert tree(target) == ["config.json", "sub/w.bin", "weights"]
+    assert files.read_bytes("weights") == (target / "weights").read_bytes() == b"weights"
+    assert files.version == reader.open("s3://bucket/models/a/").version
+
+    client.objects["models/a/weights"] = b"other"
+    client.downloads.clear()
+    with pytest.raises(ValueError, match="multiple objects for file weights"):
+        reader.open("s3://bucket/models/a")
+    assert client.downloads == []
+
+
+@pytest.mark.unit
 def test_a_hugging_face_revision_is_a_repo_and_a_full_commit() -> None:
     revision = HuggingFaceRevision("org/model", COMMIT)
     assert revision.uri == f"hf://org/model@{COMMIT}"
