@@ -8,16 +8,20 @@ from unittest.mock import ANY
 
 import pytest
 from aiohttp import ClientPayloadError, web
-from aiohttp.test_utils import TestServer
+from aiohttp.test_utils import TestClient, TestServer
 from tests.support import tokenizers
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
+from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.inference.chat import sse_json_events
-from reef.inference.interfaces import InferenceArtifact, full_weight_name
+from reef.inference.interfaces import FixedEngineClients, InferenceArtifact, full_weight_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
+from reef.service.inference_service import build_inference_app
 from reef.service.streaming import stream_record
+from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class RecordingClient(SGLangGenerateClient):
@@ -834,14 +838,11 @@ def test_pinned_stream_ends_with_its_terminal_event_only_after_a_finish_reason(f
 
 
 @pytest.mark.unit
-def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None:
+@pytest.mark.parametrize("include_usage", [False, True])
+def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path, include_usage) -> None:
     async def run() -> None:
         async def generate(request):
             native = await request.json()
-            assert native["stream"] is True
-            assert native["sampling_params"]["stream_interval"] == 1
-            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
-            await response.prepare(request)
             event = {
                 "text": "answer",
                 "output_ids": [20],
@@ -852,6 +853,11 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
                     "weight_version": "engine:6",
                 },
             }
+            if not native["stream"]:
+                return web.json_response(event)
+            assert native["sampling_params"]["stream_interval"] == 1
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
             return response
@@ -866,17 +872,17 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
                 model_path="model",
                 tokenizer=FakeTokenizer(),
             )
-            stream = await backend.inference_stream(
-                local_artifact(tmp_path),
-                "/v1/chat/completions",
-                {
-                    "messages": [{"role": "user", "content": "hello"}],
-                    "max_completion_tokens": 1,
-                    "logprobs": True,
-                    "return_token_ids": True,
-                    "stream": True,
-                },
-            )
+            artifact = local_artifact(tmp_path)
+            path = "/v1/chat/completions"
+            payload = {
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": 1,
+                "logprobs": True,
+                "return_token_ids": True,
+            }
+            buffered = await backend.inference(artifact, path, payload)
+            options = {"stream_options": {"include_usage": True}} if include_usage else {}
+            stream = await backend.inference_stream(artifact, path, {**payload, **options, "stream": True})
             body = b"".join([chunk async for chunk in stream.chunks])
         finally:
             await server.close()
@@ -884,9 +890,20 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
         assert b'"content": "answer"' in body
         assert b'"logprobs": {"content":' in body
         assert body.endswith(b"data: [DONE]\n\n")
-        last_chunk = [json.loads(frame[6:]) for frame in body.split(b"\n\n") if frame.startswith(b"data: {")][-1]
+        events = [json.loads(frame[6:]) for frame in body.split(b"\n\n") if frame.startswith(b"data: {")]
+        if include_usage:
+            usage_chunk = events.pop()
+            assert usage_chunk["choices"] == []
+            assert usage_chunk["usage"] == buffered["usage"]
+            assert all(event["usage"] is None for event in events)
+        else:
+            assert all("usage" not in event for event in events)
+        last_chunk = events[-1]
         assert (last_chunk["prompt_token_ids"], last_chunk["choices"][0]["token_ids"]) == ([10, 11], [20])
         recorded = stream_record(stream, body, complete=True)
+        assert (
+            recorded["usage"] == buffered["usage"] == {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+        )
         assert recorded["choices"][0]["message"]["content"] == "answer"
         assert [item["logprob"] for item in recorded["choices"][0]["logprobs"]["content"]] == [-0.5]
         assert (recorded["prompt_token_ids"], recorded["choices"][0]["token_ids"]) == ([10, 11], [20])
@@ -1099,7 +1116,13 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
 
 
 @pytest.mark.unit
-def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_path) -> None:
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+@pytest.mark.parametrize(
+    "arguments",
+    ['{"path":"out.txt"}', '{"path": "out', '{"path":   "out', '{"path":"other.txt"}'],
+    ids=["equivalent", "prefix", "spaced-prefix", "divergent"],
+)
+def test_streamed_tool_arguments_agree_with_the_buffered_result(tmp_path, path, arguments) -> None:
     raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
 
     class FakeStreamingToolParser:
@@ -1113,7 +1136,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
             return "", [
                 SimpleNamespace(
                     name="write_file",
-                    parameters='{"path":"out.txt"}',
+                    parameters=arguments,
                     tool_index=0,
                 )
             ]
@@ -1125,8 +1148,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
 
     async def run() -> None:
         async def generate(request):
-            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
-            await response.prepare(request)
+            native = await request.json()
             event = {
                 "text": raw_tool_call,
                 "output_ids": [20],
@@ -1137,6 +1159,10 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                     "weight_version": "wv-tools",
                 },
             }
+            if not native["stream"]:
+                return web.json_response(event)
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
             return response
@@ -1153,44 +1179,81 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                 tool_call_parser="qwen25",
                 client=RecordingClient(FakeStreamingToolParser),
             )
-            stream = await backend.inference_stream(
-                local_artifact(tmp_path),
-                "/v1/messages",
-                {
-                    "model": "served-model",
-                    "messages": [{"role": "user", "content": "write it"}],
-                    "tools": [
-                        {
-                            "name": "write_file",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {"path": {"type": "string"}},
-                            },
-                        }
-                    ],
-                    "max_tokens": 1,
-                    "stream": True,
-                },
-            )
+            artifact = local_artifact(tmp_path)
+            anthropic = path == "/v1/messages"
+            schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+            if anthropic:
+                tool = {"name": "write_file", "input_schema": schema}
+            else:
+                tool = {"type": "function", "function": {"name": "write_file", "parameters": schema}}
+            payload = {
+                "model": "served-model",
+                "messages": [{"role": "user", "content": "write it"}],
+                "tools": [tool],
+                "max_tokens": 1,
+            }
+            if "other.txt" in arguments:
+                scenario = "tools"
+                storage = SQLiteScenarioStorage(tmp_path / "records")
+                coordination = memory_coordination()
+                lease = coordination.control_lease.acquire("control")
+                coordination.served_models.write(
+                    ScenarioModel(scenario, ACTIVE),
+                    ServedArtifact("artifact", str(server.make_url("/")), "served-model"),
+                    control_lease_number=lease.number,
+                )
+                replica = build_inference_app(
+                    coordination.served_models, storage, FixedEngineClients(backend), tokens=None
+                )
+                async with TestClient(TestServer(replica)) as client:
+                    response = await client.post(
+                        path, json={**payload, "stream": True}, headers={"x-reef-scenario": scenario}
+                    )
+                    assert response.status == 200
+                    with pytest.raises(ClientPayloadError):
+                        await response.read()
+                store = storage.open(scenario)
+                try:
+                    (record,) = store.records.replay(scenario)
+                    failed = record.payload["response"]
+                    assert failed["complete"] is False
+                    assert "streamed tool-call arguments" in failed["error"]
+                    assert "[DONE]" not in failed["body"] and "message_stop" not in failed["body"]
+                finally:
+                    store.close()
+                return
+            buffered = await backend.inference(artifact, path, payload)
+            stream = await backend.inference_stream(artifact, path, {**payload, "stream": True})
             body = b"".join([chunk async for chunk in stream.chunks])
         finally:
             await server.close()
 
-        text = body.decode()
-        assert '"type": "tool_use"' in text
-        assert '"type": "input_json_delta", "partial_json": "{\\"path\\":\\"out.txt\\"}"' in text
-        assert "<tool_call>" not in text
+        assert b"<tool_call>" not in body
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
         recorded = stream_record(stream, body, complete=True)
-        assert recorded["stop_reason"] == "tool_use"
-        assert recorded["content"] == [
-            {
-                "type": "tool_use",
-                "id": recorded["content"][0]["id"],
-                "name": "write_file",
-                "input": {"path": "out.txt"},
-            }
-        ]
-        assert "training" not in recorded
+        if anthropic:
+            (start,) = [event for event in events if event["type"] == "content_block_start"]
+            assert start["content_block"]["id"] == recorded["content"][0]["id"]
+            fragments = [event["delta"]["partial_json"] for event in events if event["type"] == "content_block_delta"]
+            assert events[-1]["type"] == "message_stop"
+            assert recorded["stop_reason"] == buffered["stop_reason"] == "tool_use"
+            assert json.loads("".join(fragments)) == recorded["content"][0]["input"] == buffered["content"][0]["input"]
+        else:
+            deltas = [
+                delta
+                for event in events
+                for choice in event["choices"]
+                for delta in choice["delta"].get("tool_calls", [])
+            ]
+            (announced,) = [delta for delta in deltas if "id" in delta]
+            recorded_call = recorded["choices"][0]["message"]["tool_calls"][0]
+            buffered_call = buffered["choices"][0]["message"]["tool_calls"][0]
+            assert announced["id"] == recorded_call["id"]
+            fragments = [delta["function"]["arguments"] for delta in deltas]
+            assert body.endswith(b"data: [DONE]\n\n")
+            assert json.loads("".join(fragments)) == json.loads(recorded_call["function"]["arguments"])
+            assert json.loads("".join(fragments)) == json.loads(buffered_call["function"]["arguments"])
+        assert fragments[0] == arguments
 
     asyncio.run(run())
 

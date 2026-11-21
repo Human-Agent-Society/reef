@@ -182,11 +182,16 @@ class NativeStreamCapture:
     )
 
     def __init__(self) -> None:
-        self.text = ""
+        self._text_fragments: list[str] = []
         self.output_ids: list[int] = []
         self.meta: dict[str, Any] = {}
         self.last_output_logprobs: list[Any] = []
         self.seen = False
+
+    @property
+    def text(self) -> str:
+        """The text received so far."""
+        return "".join(self._text_fragments)
 
     def accept(self, event: Mapping[str, Any]) -> str:
         meta = event.get("meta_info")
@@ -230,7 +235,8 @@ class NativeStreamCapture:
             return ""
         if not isinstance(current_text, str):
             raise ValueError("SGLang stream event text must be a string")
-        self.text += current_text
+        if current_text:
+            self._text_fragments.append(current_text)
         return current_text
 
     def response(self) -> dict[str, Any]:

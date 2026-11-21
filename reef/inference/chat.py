@@ -156,19 +156,22 @@ class _StreamedToolCalls:
     def __init__(self) -> None:
         self.ids: dict[int, str] = {}
         self.names: dict[int, str] = {}
-        self.arguments: dict[int, str] = {}
+        self.arguments: dict[int, list[str]] = {}
 
     def announce(self, index: int, name: Any) -> bool:
-        """Record a call's name on first sight; returns whether this chunk carried the name."""
-        if name:
-            self.ids.setdefault(index, _new_call_id())
-            self.names[index] = str(name)
-        if index not in self.ids:
+        """Record a new call and return whether it needs an announcement."""
+        if index in self.ids:
+            if name and self.names[index] != name:
+                raise ValueError("the streamed tool-call name changed")
+            return False
+        if not name:
             raise ValueError("tool stream emitted arguments before the tool name")
-        return bool(name)
+        self.ids[index] = _new_call_id()
+        self.names[index] = str(name)
+        return True
 
     def add_arguments(self, index: int, arguments: str) -> None:
-        self.arguments[index] = self.arguments.get(index, "") + arguments
+        self.arguments.setdefault(index, []).append(arguments)
 
 
 class _StreamWriter(ABC):
@@ -198,8 +201,11 @@ class _StreamWriter(ABC):
 class _OpenAIChunkWriter(_StreamWriter):
     """``chat.completion.chunk`` events sharing one id, model and timestamp."""
 
-    def __init__(self, common: Mapping[str, Any]) -> None:
+    def __init__(self, common: Mapping[str, Any], *, include_usage: bool) -> None:
         self._common = dict(common)
+        self._include_usage = include_usage
+        if include_usage:
+            self._common["usage"] = None
 
     def _chunk(self, delta: Mapping[str, Any], **choice_fields: Any) -> bytes:
         finish_reason = choice_fields.pop("finish_reason", None)
@@ -233,7 +239,11 @@ class _OpenAIChunkWriter(_StreamWriter):
         if "token_ids" in choice:
             closing["token_ids"] = choice["token_ids"]
         prompt = {"prompt_token_ids": response["prompt_token_ids"]} if "prompt_token_ids" in response else {}
-        return [_sse_data({**self._common, **prompt, "choices": [closing]}), b"data: [DONE]\n\n"]
+        frames = [_sse_data({**self._common, **prompt, "choices": [closing]})]
+        if self._include_usage:
+            frames.append(_sse_data({**self._common, "choices": [], "usage": response["usage"]}))
+        frames.append(b"data: [DONE]\n\n")
+        return frames
 
 
 class _AnthropicEventWriter(_StreamWriter):
@@ -297,7 +307,10 @@ class _AnthropicEventWriter(_StreamWriter):
         return output
 
     def tool_call(self, index: int, call_id: str, name: str, arguments: str, *, announced: bool) -> list[bytes]:
-        output = self._open(("tool", index), {"type": "tool_use", "id": call_id, "name": name, "input": {}})
+        key = ("tool", index)
+        if not announced and self._open_block != key:
+            raise ValueError("streamed tool-call arguments arrived after the content block closed")
+        output = self._open(key, {"type": "tool_use", "id": call_id, "name": name, "input": {}})
         if arguments:
             output.append(self._delta({"type": "input_json_delta", "partial_json": arguments}))
         return output
@@ -328,14 +341,14 @@ class ChatStreamRelay:
         self.writer = writer
         self._parser = stream_tool_parser
         self._tools = _StreamedToolCalls()
-        self._reasoning = ""
-        self._text = ""
+        self._reasoning: list[str] = []
+        self._text: list[str] = []
 
     def piece(self, kind: str, value: str, *, parse_tools: bool = True) -> list[bytes]:
         if not value:
             return []
         if kind == "thinking":
-            self._reasoning += value
+            self._reasoning.append(value)
             return self.writer.thinking(value)
         normal_text, calls = value, []
         if self._parser is not None and parse_tools:
@@ -350,7 +363,7 @@ class ChatStreamRelay:
                 normal_text, calls = parse(value)
         output: list[bytes] = []
         if normal_text:
-            self._text += normal_text
+            self._text.append(normal_text)
             output.extend(self.writer.text(normal_text))
         for fallback_index, call in enumerate(calls):
             index = getattr(call, "tool_index", fallback_index)
@@ -372,37 +385,76 @@ class ChatStreamRelay:
         announced, so the recorded response and the streamed one agree.
         """
         tool_calls = message.get("tool_calls") or []
-        for index, call in enumerate(tool_calls):
-            if not isinstance(call, dict):
-                continue
-            call["id"] = self._tools.ids.setdefault(index, str(call.get("id") or _new_call_id()))
-            function = call.get("function")
-            if isinstance(function, Mapping):
-                self._tools.names.setdefault(index, str(function.get("name", "")))
+        if any(index >= len(tool_calls) for index in self._tools.ids):
+            raise ValueError("a streamed tool call is missing from the completed response")
         output: list[bytes] = []
-        final_reasoning = message.get("reasoning_content")
-        if isinstance(final_reasoning, str) and final_reasoning.startswith(self._reasoning):
-            output.extend(self.piece("thinking", final_reasoning[len(self._reasoning) :], parse_tools=False))
-        final_text = message.get("content")
-        if isinstance(final_text, str) and final_text.startswith(self._text):
-            output.extend(self.piece("text", final_text[len(self._text) :], parse_tools=False))
+        for kind, field, fragments in (
+            ("thinking", "reasoning_content", self._reasoning),
+            ("text", "content", self._text),
+        ):
+            final = message.get(field)
+            emitted = "".join(fragments)
+            if isinstance(final, str) and final.startswith(emitted):
+                output.extend(self.piece(kind, final[len(emitted) :], parse_tools=False))
         for index, call in enumerate(tool_calls):
-            function = call.get("function") if isinstance(call, Mapping) else None
-            if not isinstance(function, Mapping):
-                continue
-            arguments = _argument_text(function.get("arguments", ""))
-            emitted = self._tools.arguments.get(index, "")
-            missing = arguments[len(emitted) :] if arguments.startswith(emitted) else arguments
-            if not missing and index in self._tools.arguments:
-                continue
-            output.extend(
-                self.writer.tool_call(index, self._tools.ids[index], self._tools.names[index], missing, announced=True)
-            )
+            function = call["function"]
+            name = function["name"]
+            announced = index in self._tools.ids
+            if announced:
+                if self._tools.names[index] != name:
+                    raise ValueError("the streamed tool-call name differs from the completed response")
+                call["id"] = self._tools.ids[index]
+            arguments = _argument_text(function["arguments"])
+            emitted = "".join(self._tools.arguments.get(index, ()))
+            missing = remaining_tool_arguments(emitted, arguments)
+            if missing or not announced:
+                output.extend(self.writer.tool_call(index, call["id"], name, missing, announced=not announced))
         return output
 
 
 def _argument_text(arguments: Any) -> str:
     return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+
+def without_json_whitespace(value: str) -> str:
+    """Remove JSON whitespace outside strings, including in a partial object."""
+    inside_string = False
+    escaped = False
+    characters: list[str] = []
+    for character in value:
+        if not inside_string and character in " \t\r\n":
+            continue
+        characters.append(character)
+        if escaped:
+            escaped = False
+        elif inside_string and character == "\\":
+            escaped = True
+        elif character == '"':
+            inside_string = not inside_string
+    return "".join(characters)
+
+
+def remaining_tool_arguments(emitted: str, arguments: str) -> str:
+    """Return the suffix that completes the streamed arguments as the final JSON object."""
+    try:
+        expected = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("completed tool-call arguments are not valid JSON") from exc
+    if not isinstance(expected, dict):
+        raise ValueError("completed tool-call arguments must be a JSON object")
+    if arguments.startswith(emitted):
+        return arguments[len(emitted) :]
+
+    compact = without_json_whitespace(arguments)
+    prefix = without_json_whitespace(emitted)
+    suffix = compact[len(prefix) :] if compact.startswith(prefix) else ""
+    try:
+        actual = json.loads(emitted + suffix)
+    except json.JSONDecodeError as exc:
+        raise ValueError("streamed tool-call arguments cannot be completed") from exc
+    if json.dumps(actual, sort_keys=True) != json.dumps(expected, sort_keys=True):
+        raise ValueError("streamed tool-call arguments differ from the completed response")
+    return suffix
 
 
 @dataclass(frozen=True)
@@ -655,13 +707,15 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 model=str(call.payload.get("model", self._model_path)),
                 input_tokens=len(call.prompt_ids),
             )
+        options = call.request.get("stream_options")
         return _OpenAIChunkWriter(
             {
                 "id": chat_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": str(call.request.get("model", self._model_path)),
-            }
+            },
+            include_usage=isinstance(options, Mapping) and options.get("include_usage") is True,
         )
 
     def _finish_frames(
