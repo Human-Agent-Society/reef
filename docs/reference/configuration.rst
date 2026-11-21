@@ -2510,13 +2510,19 @@ whose ``parameters`` hold ``dataset`` is one job:
     "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
 
 ``dataset.path`` is an absolute path, on the Ray cluster, to a JSONL file in
-Slime's prompt-data format. ``dataset.epochs`` (default 1) is the passes over
-it. The job trains ``len(dataset) // rollout-batch-size`` rollouts per epoch,
-and ``save_interval`` counts rollouts between checkpoints (default: one
-checkpoint at the end). A checkpoint's step is the job's rollouts up to it,
-and its reward is the rollout's mean raw reward. A resumed job continues after
-its last checkpoint and skips the prompts of the rollouts it saved. The
-recipe's ``job_parameters`` can set a default ``dataset``.
+Slime's prompt-data format. ``dataset.epochs`` (default 1) sets the number
+of passes used to calculate the rollout budget. Each epoch budgets one rollout
+per ``rollout-batch-size`` usable prompts. Reef checks this count after Slime
+applies its prompt length limit. If the usable prompts cannot fill whole
+batches, the job fails before generating any rollouts. Slime's oversampling
+and rollout filters can affect which prompts contribute to training.
+
+``save_interval`` counts rollouts between checkpoints. By default, the job
+saves one checkpoint at the end. The checkpoint step counts the completed
+rollouts. The checkpoint reward is the last rollout's mean raw reward.
+A resumed job continues after its last checkpoint and skips the prompts
+of the rollouts it saved. The recipe's ``job_parameters`` can set a default
+``dataset``.
 
 Slime's own options in ``training.options`` configure the rest:
 

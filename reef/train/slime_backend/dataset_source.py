@@ -58,8 +58,14 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
             apply_chat_template_kwargs=args.apply_chat_template_kwargs,
             seed=args.rollout_seed,
         )
-        if not len(dataset):
+        prompt_count = len(dataset)
+        if not prompt_count:
             raise RuntimeError(f"the dataset {path} has no prompt within --rollout-max-prompt-len")
+        if prompt_count % args.rollout_batch_size:
+            raise ValueError(
+                f"the dataset {path} has {prompt_count} usable prompts, which do not fill batches of "
+                f"{args.rollout_batch_size}. Choose a --rollout-batch-size that divides the usable prompt count."
+            )
         return dataset
 
     def refresh(self) -> None:
