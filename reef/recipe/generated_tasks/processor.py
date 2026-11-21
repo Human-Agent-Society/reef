@@ -12,7 +12,8 @@ The stage hands each train task of a complete generation to the pipeline
 tasks then train like any other sample: ``GeneratedTaskJobData`` makes one task job of the next job's
 tasks, and the commit that submits the job counts them trained. The training component rolls the
 tasks out on its own sampler and trains on their rollouts; Reef runs no rollout of them. When the job's end
-commits, the stage saves the result of each task that trained and has none, from the job's metrics; when
+commits, the stage saves the result of each task of that job, and of an earlier job that a new training start
+cancelled, that has none, from the job's metrics; a task of a later job gets its result at that job's end. When
 every train task of a generation has a result, the next job sends the generation's results to the generator.
 
 A train task waits until a committed job trains it, and is unfinished until it has a result. The first round

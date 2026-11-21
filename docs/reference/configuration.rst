@@ -2277,7 +2277,8 @@ Two limits of the training pool:
 
 - When the trainer starts the next job before the stage reads the end of a
   failed task job, the tasks of the next job also get a use with no rewards,
-  and their rewards in that job are not kept.
+  and their rewards in that job are not kept. This also holds with
+  ``pool_capacity`` 0.
 - The tasks of a job that a new training start cancelled return to the pool
   only when a later job ends. When that job held so many tasks that fewer than
   ``job_samples`` wait and the pool is full, no job and no round can start,
