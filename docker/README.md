@@ -114,6 +114,79 @@ contains only Reef:
 reef serve -c recipes/basic/external-provider.yaml
 ```
 
+## Serve with vLLM
+
+The Reef image has no vLLM. A deployment with `inference.backend: vllm` runs
+its serving engines in a second container, from the vLLM inference image:
+
+```bash
+docker build -f docker/Dockerfile.vllm -t reef-vllm .
+```
+
+The image starts from vLLM's release image (0.29.0, pinned by digest in
+`--build-arg VLLM_IMAGE_TAG`) and adds Reef with its `vllm` extra. It runs the
+inference component, `python -m reef.inference.remote --engine vllm`, on port
+8000. The component starts no engine by itself. The Reef container starts the
+engines on it, sends it the inference requests, and uploads the weight files
+of each published snapshot to it. The two containers share no volume for
+weights. [Serve from a remote GPU host](../docs/user-guide/tinker.rst#serve-from-a-remote-gpu-host)
+describes the component and how to protect its tokens.
+
+1. Create the two tokens. They must differ:
+
+   ```bash
+   export REEF_REMOTE_CONTROL_TOKEN="$(openssl rand -hex 16)"    # starts engines and replaces weights
+   export REEF_REMOTE_INFERENCE_TOKEN="$(openssl rand -hex 16)"  # sends inference requests
+   ```
+
+2. Start the component on the serving GPUs. Mount the model at the path that
+   `inference.model-path` names, the same path as in the Reef container:
+
+   ```bash
+   docker run -d --name reef-vllm --gpus '"device=1"' --shm-size 16g \
+     -p 127.0.0.1:8000:8000 \
+     -e REEF_REMOTE_CONTROL_TOKEN -e REEF_REMOTE_INFERENCE_TOKEN \
+     -v ~/models:/root/models:ro \
+     reef-vllm
+   ```
+
+3. In the stack's config, select vLLM and name the component:
+
+   ```yaml
+   inference:
+     backend: vllm
+     model-path: /root/models/Qwen2.5-1.5B-Instruct
+     num-gpus: 1                # GPUs of the component
+     options:                   # vLLM's own option names
+       max-model-len: 4096
+     remote:
+       url: http://127.0.0.1:8000
+   ```
+
+   Set the training backend's node size (`training.options.num-gpus-per-node`
+   for Slime) to the GPUs of the Reef container. The engines use the
+   component's GPUs and none of the Reef container's.
+
+4. Start the Reef container on the training GPUs with the same two variables,
+   and run `reef serve` in it as in [Run](#run):
+
+   ```bash
+   docker run --gpus '"device=0"' --network host --ipc host --shm-size 32g -it \
+     -e REEF_REMOTE_CONTROL_TOKEN -e REEF_REMOTE_INFERENCE_TOKEN \
+     -v ~/models:/root/models \
+     -v ~/reef-run:/var/lib/reef \
+     -v "$PWD":/workspace/Reef \
+     reef bash
+   ```
+
+The component's log (`docker logs reef-vllm`) holds the engines' output. A
+request with `tools` fails in this layout: the Reef container builds vLLM's
+tool-call parser in its own process and has no vLLM.
+
+Reef calls control routes that vLLM serves only in its development mode and
+does not keep stable between releases. Check a training run on GPUs before you
+build with another `VLLM_IMAGE_TAG`.
+
 ## Persistence and cleanup
 
 Agent records and exported checkpoints persist under `reef.state_dir`

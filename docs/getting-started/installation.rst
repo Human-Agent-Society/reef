@@ -48,6 +48,11 @@ supported way to get them is the image:
 how to start the container; `Evolve your model <../user-guide/evolve-your-model.rst>`__
 picks up from there.
 
+The image serves with SGLang. To serve with vLLM instead, build the second
+image, ``docker/Dockerfile.vllm``, which runs the serving engines in a
+container of their own. `Serve with vLLM <../../docker/README.md#serve-with-vllm>`__
+shows the two containers.
+
 Inside the container, to install from source instead of using what the image
 already carries:
 
