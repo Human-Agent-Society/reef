@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from tests.support import records
-from tests.support.trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import TaskSample
@@ -135,6 +135,22 @@ def test_lag_counts_the_artifacts_the_scenario_served() -> None:
     assert {name for name, group in samples.items() if lags_behind(group, served, 0)} == behind | {"one-behind"}
     # A scenario that loads no weights serves no artifact, so nothing lags.
     assert not any(lags_behind(group, ServedArtifacts(), 0) for group in samples.values())
+
+
+def test_every_calls_artifact_counts_for_lag_not_only_the_last() -> None:
+    # The reproduction from #1138: two calls of one conversation, produced by
+    # two different artifacts. The last call is current, the first is not.
+    mixed = recorded_trajectory("mixed", {}, 1.0, trajectory=({"artifact_id": "v1"}, {"artifact_id": "v2"}))
+    fresh = recorded_trajectory("fresh", {}, 1.0, trajectory=({"artifact_id": "v2"},))
+    served = ServedArtifacts(("v0", "v1", "v2"))
+    assert mixed.artifact_id == "v2", "the summary still names the last call"
+    assert not lags_behind((fresh,), served, 0)
+    assert lags_behind((mixed,), served, 0), "the v1 reply is one artifact behind v2"
+    assert not lags_behind((mixed,), served, 1), "one artifact of lag is allowed"
+    # A call of a beside-served artifact is not itself behind.
+    assert not lags_behind((mixed,), ServedArtifacts(("v0", "v1", "v2"), frozenset({"v1"})), 0)
+    # A rollout's override still describes the whole sample.
+    assert not lags_behind((mixed.with_training(artifact_id="v2"),), served, 0)
 
 
 def test_served_artifacts_have_no_equal_neighbors_and_a_non_negative_commit_number() -> None:
