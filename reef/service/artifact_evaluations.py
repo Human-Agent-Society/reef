@@ -253,7 +253,7 @@ def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now
                 "full": full,
                 "part": part,
                 "zero": scored - full - part,
-                "failed": len(ended) - scored + cancelled,
+                "failed": len(ended) - scored,
                 "pending": total - len(ended) - cancelled,
             },
             "total": total,
@@ -1598,7 +1598,7 @@ class ArtifactEvaluations:
                 if index not in selected_tasks or rollout_waits(item):
                     continue
                 if (state == "running" and item.state in ("assigned", "running")) or (
-                    state == "failed" and item.final and rollout_failed(item)
+                    state == "failed" and rollout_ended(item) and not rollout_cancelled(item) and rollout_failed(item)
                 ):
                     matching.setdefault(index, []).append(cast(int, item.payload["repeat"]))
             matching_positions = [(index, repeat) for index in task_indexes for repeat in matching.get(index, ())]

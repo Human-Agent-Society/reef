@@ -1572,7 +1572,8 @@ Use ``score_levels=true`` when reading one evaluation to add ``score_levels``
 to its progress and the progress of each benchmark. It counts rollouts with
 scores of at least one (``full``), between zero and one
 (``part``), and zero or below (``zero``).
-``failed`` counts failures and cancellations. ``pending`` counts the other rollouts.
+``failed`` counts failed rollouts. ``pending`` counts rollouts that have yet to end.
+The separate ``cancelled`` progress count covers cancellations and early stops.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
 shows the progress of an evaluation while it runs. It answers ``{scenario,
@@ -1606,8 +1607,9 @@ score, rewards, error, calls, verifier_calls}``.
 Add ``limit`` to get 1 to 500 rollouts. ``offset`` skips that many rollouts and
 defaults to zero. The response also includes ``offset`` and ``total``, the number
 of rollouts that match the filters. ``state`` defaults to ``all``. It can also
-be ``running`` (assigned or running) or ``failed`` (including rollouts with a
-failed score). ``benchmark`` selects the tasks of one recorded collection benchmark.
+be ``running`` (assigned or running) or ``failed``. The Failed filter includes
+rollouts with a failed score and excludes cancellations and early stops.
+``benchmark`` selects the tasks of one recorded collection benchmark.
 It matches no task if the evaluation has no mapping for that benchmark.
 ``sort=score`` orders tasks by their mean score, with unscored tasks last.
 The default, ``sort=task``, keeps task order. Each task's rollouts keep repeat

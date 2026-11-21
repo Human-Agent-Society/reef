@@ -1769,6 +1769,10 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             queue.start(EVALUATIONS_QUEUE, second.id, "w")
             assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
 
+            page = await (await client.get(f"{route}/rollouts?limit=4&state=failed&calls=false", headers=AUTH)).json()
+            assert page["total"] == 1
+            assert [(row["task"], row["repeat"]) for row in page["rollouts"]] == [("add", 0)]
+
             # A retry runs the failed rollout only: the cancelled rollout stays, and no other rollout starts.
             assert (await (await client.post(f"{route}/retry", headers=AUTH)).json())["state"] == "running"
             item = await taken()
@@ -2439,6 +2443,17 @@ def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_report
             stopped = [row for row in rows if row["error"] == FAILURES_ERROR]
             assert answer["progress"]["cancelled"] == len(stopped)
             assert len(stopped) + [row["state"] for row in rows].count("waiting") == 2
+            page = await (await client.get(f"{route}/rollouts?limit=12&state=failed&calls=false", headers=AUTH)).json()
+            assert page["total"] == 7
+            assert all(row["error"] != FAILURES_ERROR for row in page["rollouts"])
+            progress = (await (await client.get(f"{route}?score_levels=true", headers=AUTH)).json())["progress"]
+            assert progress["score_levels"] == {
+                "full": 1,
+                "part": 1,
+                "zero": 1,
+                "failed": 7,
+                "pending": 2 - len(stopped),
+            }
 
     asyncio.run(run())
 
