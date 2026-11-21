@@ -51,7 +51,7 @@ grid. The recipe waits for the whole grid and trains on it in one step.
    :Loop: the next grid is sampled from the updated weights
 
 SDPO has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__).
+(`Training pipeline <../../developer-guide/write-a-recipe.rst>`__).
 ``SDPOSamples`` groups the reports of one grid and makes one sample from each
 report. ``SDPOJobData`` makes one job's data of one complete grid.
 

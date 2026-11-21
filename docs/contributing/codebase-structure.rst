@@ -355,7 +355,7 @@ Adding a new subpackage under ``reef/`` or a new method under ``recipes/`` requi
 Where the detailed rules live
 -----------------------------
 
-- Design pages: `Scenario components <../developer-guide/components.rst>`__, `Training pipeline <../developer-guide/processors.rst>`__, `Training components <../developer-guide/training-components.rst>`__, `Serving runtimes <../developer-guide/serving-runtimes.rst>`__ and `Executors <../developer-guide/executors.rst>`__.
+- Design pages: `Scenario components <../developer-guide/components.rst>`__, `Training pipeline <../developer-guide/write-a-recipe.rst>`__, `Training components <../developer-guide/training-components.rst>`__, `Serving runtimes <../developer-guide/serving-runtimes.rst>`__ and `Executors <../developer-guide/executors.rst>`__.
 - Extension points: `Python API <../reference/python-api.rst>`__.
 - The public wire contract: `HTTP API <../reference/http-api.rst>`__.
 - How to add each kind of component: `Adding components <adding-components.rst>`__.

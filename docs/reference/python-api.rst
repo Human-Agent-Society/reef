@@ -1536,7 +1536,7 @@ Pipeline stages
 A training pipeline (``reef.train.pipeline.TrainingPipeline``) turns durable
 records into typed job data through two stages. A recipe names a default class
 for each in ``pipeline_spec()`` (``PipelineSpec(record2sample=...,
-sample2job=...)``). `Training pipeline <../developer-guide/processors.rst>`__
+sample2job=...)``). `Training pipeline <../developer-guide/write-a-recipe.rst>`__
 owns the explanation; this section gives the signatures.
 
 Reef owns replay, retention, deduplication, pending job data, and exactly-once
@@ -1567,18 +1567,18 @@ trains.
    * - ``advance(now)``
      - A stage with slow work keeps its records and forms the set here when
        the work ends (see `Slow work
-       <../developer-guide/processors.rst#slow-work>`__).
+       <../developer-guide/recipe-samples-service.rst#slow-work>`__).
    * - ``is_stale(samples, served)``
      - Whether a group of the stage's stored samples may still train against
        the artifacts that the scenario served (``ServedArtifacts``). The
        samples service marks the stale ones, and the automatic jobs leave
        them out. The default is on-policy (see `the staleness check
-       <../developer-guide/processors.rst#staleness>`__).
+       <../developer-guide/recipe-samples-service.rst#staleness>`__).
    * - ``uploaded_sample(trajectory) -> TrajectorySample``
      - Turns an uploaded ATIF trajectory into its training sample. It must
        be pure, and it raises ``ValueError`` to skip the trajectory (see
        `Uploaded trajectories
-       <../developer-guide/processors.rst#uploaded-trajectories>`__).
+       <../developer-guide/recipe-control-service.rst#uploaded-trajectories>`__).
    * - ``job_ended(outcome)``
      - Called once the commit of a job's end is durable (`Training jobs and
        components`_). The default does nothing.
@@ -1598,7 +1598,7 @@ step.
 
 ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
 sets the most samples that one automatic job takes and the fewest samples of
-one job (see `Job size <../developer-guide/processors.rst#job-size>`__):
+one job (see `Job size <../developer-guide/recipe-control-service.rst#job-size>`__):
 
 - A ``job_samples`` of ``None`` is a stage that sets no job size.
   ``Trainer.build`` raises ``PluginConfigError`` for a trainer that trains
@@ -1711,8 +1711,8 @@ group. This collection group differs from ``TrajectorySample.group_id``, the
 comparison group inside one job's data. The job's commit consumes every sample
 that ``make_job_data`` receives, even when the recipe omits some from its
 output. See `Reported feedback
-<../developer-guide/processors.rst#reported-feedback>`__ and `the next job
-<../developer-guide/processors.rst#the-next-job>`__.
+<../developer-guide/write-a-recipe.rst>`__ and `the next job
+<../developer-guide/recipe-control-service.rst#the-next-job>`__.
 
 ``TrajectorySamples(context, *, trajectory_idle_seconds=300.0)`` is the stage
 of a method that needs no report. It forms a ``TrajectorySet`` of a
@@ -1771,7 +1771,7 @@ Task generation
 ``pipeline.record2sample.config.generator``. The built-in generated-task
 recipe, ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls its
 methods. See `the task generation contract
-<../developer-guide/processors.rst#task-generation-contract>`__ for the round
+<../developer-guide/task-generators.rst>`__ for the round
 and its failure behavior.
 
 .. list-table::
@@ -1967,7 +1967,7 @@ and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
 ``files`` is a ``TaskFiles(partition, digest)`` that names the directory in the
 task file store, or ``None``. Only a task with ``files`` can go into a training
-job (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__).
+job (see `The job data directory <../developer-guide/training-backends.rst#the-job-data-directory>`__).
 
 A ``TaskSample`` performs no file I/O or rollout. Algorithms supporting tasks
 own validation, environment execution and conversion to trajectories. The
@@ -1982,7 +1982,7 @@ Serving returns no tokens and no log-probabilities. A training component
 renders each trajectory sample with its model's chat template, and computes
 the log-probabilities that its objective needs with the weights of the job's
 start. `Rendering in the training component
-<../developer-guide/processors.rst#rendering-in-the-training-component>`__
+<../developer-guide/write-a-recipe.rst>`__
 explains segments and the samples that a component leaves out.
 ``reef.core.chat_rendering`` holds the shared rendering:
 
@@ -2129,7 +2129,7 @@ default, the parameters of both kinds are the recipe's
 key, such as ``scheduling`` or ``save_interval``. The parameters are part of
 the job's ID, so ``parameters_by_kind()`` must return the same value at every
 call. See `Write a recipe
-<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__
+<../developer-guide/recipe-training-service.rst#job-parameters>`__
 for a recipe that trains each kind with its own method.
 
 The trainer gives the parameters to its pipeline

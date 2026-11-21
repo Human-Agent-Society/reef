@@ -595,7 +595,7 @@ Training reads the items that a scenario uses from the data store:
   made.
 
 For the recipe side, see `Uploaded trajectories
-<../developer-guide/processors.rst#uploaded-trajectories>`__.
+<../developer-guide/recipe-control-service.rst#uploaded-trajectories>`__.
 
 After each write that adds items to a scenario or removes them, the data
 service asks control to sync the scenarios that the write touched, and waits
@@ -2791,7 +2791,7 @@ Artifact of a recorded response
 An inference record holds the provider exchange and ``artifact_id``, the
 artifact that answered: the same ID as ``x-reef-artifact-id``. The samples
 service's staleness check reads it (see `Staleness
-<../developer-guide/processors.rst#staleness>`__). Serving returns no training
+<../developer-guide/recipe-samples-service.rst#staleness>`__). Serving returns no training
 tensors. Reef removes any ``training`` block that an engine handler returns
 from the record, from the client's answer, and from rollout and evaluation
 answers. The training component renders each recorded call and computes the

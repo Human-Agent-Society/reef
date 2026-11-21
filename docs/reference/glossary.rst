@@ -172,7 +172,7 @@ Training pipeline
 The method's data side. The record-to-sample stage decides which records train
 and in which groups, and turns each record set into samples. The sample-to-job
 stage shapes the samples into one job's data. See `Training pipeline
-<../developer-guide/processors.rst>`__.
+<../developer-guide/write-a-recipe.rst>`__.
 
 Reported and computed feedback
 ------------------------------
@@ -195,7 +195,7 @@ Staleness
 Whether a stored sample may still train, given the artifacts that the scenario
 served after the artifact that produced it. The record-to-sample stage gives
 the rule, and the samples service marks a stale sample in the store. See
-`Staleness <../developer-guide/processors.rst#staleness>`__.
+`Staleness <../developer-guide/recipe-samples-service.rst#staleness>`__.
 
 Job data
 --------

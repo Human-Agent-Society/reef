@@ -112,7 +112,7 @@ Losses
 Tinker computes the loss from one of its built-in loss functions. Each job
 trains the Tinker loss of the objective that its recipe selected (`Train each
 kind of sample with its own method
-<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
+<../developer-guide/recipe-training-service.rst#job-parameters>`__).
 
 .. list-table::
    :header-rows: 1
@@ -179,7 +179,7 @@ Job settings
 
 Job data takes whole record sets, so a job can hold more samples than
 ``job_samples``. The component cuts it into optimizer steps of the batch size
-(`Job size <../developer-guide/processors.rst#job-size>`__). A step keeps each
+(`Job size <../developer-guide/recipe-control-service.rst#job-size>`__). A step keeps each
 rollout of the objective's ``rollout_unit`` whole: one sample, or one
 comparison set. A job's optional ``scheduling`` parameter sets the epochs, the
 shuffle, and the ``partial``, ``drop`` or ``error`` policy for the last step.

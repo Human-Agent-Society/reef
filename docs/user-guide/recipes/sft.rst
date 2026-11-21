@@ -38,7 +38,7 @@ the response that the sample trains:
   answer.
 
 SFT has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__):
+(`Training pipeline <../../developer-guide/write-a-recipe.rst>`__):
 
 - ``SFTSamples`` makes one sample from each report: the recorded request with
   the target as the final assistant turn. Only that turn trains. All samples
@@ -309,5 +309,5 @@ Related guides
 - `Loss families <../../developer-guide/loss-families.rst>`__: how a loss
   family connects to the Slime backend.
 - `Train each kind of sample with its own method
-  <../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__:
+  <../../developer-guide/recipe-training-service.rst#job-parameters>`__:
   let another recipe train some of its jobs with the ``sft`` objective.

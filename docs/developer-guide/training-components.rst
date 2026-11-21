@@ -29,7 +29,7 @@ A ``TrainingJob`` is one bounded job. It has:
 
 - a job ID and the backend name
 - the start, which the component made, such as a saved checkpoint's ``path``
-- the job data directory that it trains (``data_dir``, and its URI ``data_uri``; see `The job data directory <processors.rst#the-job-data-directory>`__)
+- the job data directory that it trains (``data_dir``, and its URI ``data_uri``; see `The job data directory <training-backends.rst#the-job-data-directory>`__)
 - the backend's parameters, which Reef does not read
 - the scenario whose trainer submits it
 

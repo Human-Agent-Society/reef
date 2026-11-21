@@ -55,7 +55,7 @@ model. It reports the demonstration against the request's receipt. With a
    :Loop: the next request is served by the updated weights
 
 SDFT has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__).
+(`Training pipeline <../../developer-guide/write-a-recipe.rst>`__).
 ``SDFTSamples`` makes one sample from each report. The shared
 ``DistillJobData`` stage puts ``job_samples`` samples into one job's data, in
 arrival order.

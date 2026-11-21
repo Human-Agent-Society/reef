@@ -144,7 +144,7 @@ Implementation
   integrations can extend ``InProcessTrainingDeployment``. Expose the class
   through its ``package.module:ClassName`` reference or the
   ``reef.training_backends`` entry-point group (`Training backend deployment
-  <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__).
+  <../developer-guide/training-backends.rst>`__).
 - Declare the component's ``artifact_format``. The ``inference`` section
   builds the serving from it, so the integration builds no serving runtime. A
   backend with its own serving returns its runtime config from
