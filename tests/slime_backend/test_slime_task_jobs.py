@@ -176,6 +176,27 @@ def test_a_rollout_with_no_group_to_train_fails_the_job_before_the_workers_train
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failure", [RuntimeError, SystemExit])
+def test_failed_generation_releases_engines_and_keeps_the_original_error(tmp_path, task_stack, monkeypatch, failure):
+    stack, events, group = task_stack
+
+    def generate(_rollout):
+        raise failure("generation stopped")
+
+    def release():
+        events.append("release")
+        raise RuntimeError("release failed")
+
+    monkeypatch.setattr(group, "generate", generate)
+    monkeypatch.setattr(group, "release", release)
+    job = task_job(stack, tmp_path)
+    with pytest.raises(failure, match="generation stopped"):
+        stack.component.run_slime_loop(job, tmp_path, 0, 1, None)
+    assert events == ["sync", "release"]
+    assert not stack.group.train_calls
+
+
+@pytest.mark.unit
 def test_a_resumed_task_job_skips_the_rollouts_it_saved(tmp_path, task_stack, monkeypatch) -> None:
     stack, _, group = task_stack
     job = task_job(stack, tmp_path, count=4, save_interval=1)

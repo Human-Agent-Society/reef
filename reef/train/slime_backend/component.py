@@ -39,6 +39,7 @@ receive the job's data.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import signal
@@ -437,7 +438,7 @@ class SlimeJobRunner(SlimeJobs):
             if left_out:
                 rollout_metrics["unrenderable_samples"] = len(left_out)
                 if not data.samples:
-                    return rollout_metrics
+                    raise RuntimeError(f"none of the {len(left_out)} trajectories could render with the chat template")
         start_state = start.state_for(parameters.objective)
         prepared = prepare_slime_job(
             data,
@@ -664,8 +665,15 @@ class SlimeJobRunner(SlimeJobs):
             if self.stopping(directory):
                 break
             rollout_id = self.next_rollout_id
-            self.rollout_group.sync(self.group)
-            data = self.rollout_group.generate(rollout_id)
+            try:
+                self.rollout_group.sync(self.group)
+                data = self.rollout_group.generate(rollout_id)
+            except BaseException:
+                try:
+                    self.rollout_group.release()
+                except BaseException:
+                    logging.getLogger(__name__).exception("could not release Slime rollout engines")
+                raise
             self.rollout_group.release()
             if tasks is not None:
                 results = [r for r in read_task_rollout_results(directory) if r.token == tasks.token]
