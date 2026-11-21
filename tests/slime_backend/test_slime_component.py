@@ -60,7 +60,6 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     retention_options,
 )
 from reef.train.slime_backend.schedule import next_steps
-from reef.train.slime_backend.sft import SftAlgorithm
 from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, trajectories
 
@@ -133,10 +132,21 @@ class CriticWarmupObjective(SlimeObjective):
         return TrainingSignal("train", {"steps": next_steps(state)}, {})
 
 
-class ChunkedFamily(SftAlgorithm):
-    """A custom builder that lengthens the prompts of its high-reward rows."""
+class ChunkedFamily(SlimeAlgorithm):
+    """A supervised test family that changes prompt lengths before batch admission.
+
+    ``build_rollout_data`` takes policy samples for one save chunk. It raises
+    ``ValueError`` unless ``external_step_sizes == [3]`` and
+    ``rollout_ids == [0, 1, 2]``. It returns the policy rollout data and
+    prepends token 0 to each row whose reward is greater than 1.
+    """
 
     loss_family = "test-chunked-sft"
+    loss_type = "sft_loss"
+    advantages = "forbidden"
+
+    def validate_specific_args(self, args, source):
+        """Accept the base algorithm's validated arguments."""
 
     def build_rollout_data(self, payload: Mapping[str, Any], samples: Sequence) -> dict:
         if payload["external_step_sizes"] != [3] or payload["rollout_ids"] != [0, 1, 2]:
@@ -149,11 +159,20 @@ class ChunkedFamily(SftAlgorithm):
         return data
 
 
-class ChunkedObjective(CriticWarmupObjective):
-    """An objective over a custom builder that consumes one save chunk."""
+class ChunkedObjective(SlimeObjective):
+    """Train ``ChunkedFamily`` on the job data.
+
+    ``prepare`` returns a training signal with no advantages or metrics.
+    Its next state contains only ``steps``, the prior count plus one.
+    A missing count means zero. A count other than a nonnegative integer
+    raises ``ValueError``, including when the count is a Boolean.
+    """
 
     name = "test-chunked-sft"
-    loss_family = "test-chunked-sft"
+    loss_family = ChunkedFamily.loss_family
+
+    def prepare(self, batch: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        return TrainingSignal("train", {"steps": next_steps(state)}, {})
 
 
 def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
