@@ -80,7 +80,12 @@ def test_leading_whitespace_preserves_reasoning_and_literal_answer_text(reply, e
 @pytest.mark.unit
 def test_an_opening_reasoning_tag_split_after_whitespace_leaks_no_answer_text() -> None:
     splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)
-    assert splitter.feed("\n ") == []
+    for _ in range(32):
+        assert splitter.feed("\n ") == []
+    assert splitter.feed("<thi") == []
+    assert splitter.feed("nk>") == []
+    for _ in range(32):
+        assert splitter.feed("\t") == []
     assert splitter.feed("<thi") == []
     assert splitter.feed("nk>work") == [("thinking", "work")]
     assert splitter.feed("</think>answer") == [("text", "answer")]
