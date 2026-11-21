@@ -436,9 +436,7 @@ def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, op
     attempts from 0. Slime advances its native sample counter only after an update.
     Read that counter to identify successful attempts.
     """
-    samples_before_hook = None
-    if args.reef_learning_rate_schedule_state is not None:
-        samples_before_hook = opt_param_scheduler.num_steps
+    samples_before_hook = opt_param_scheduler.num_steps if args.reef_learning_rate_schedule_state is not None else None
     chained_hook_path = args.reef_chained_before_train_step_hook_path
     if chained_hook_path:
         from slime.utils.misc import load_function
@@ -526,8 +524,9 @@ def record_worker_step(metrics: Mapping[str, Any]) -> None:
         _WORKER_STEP_METRICS.append(numeric)
 
 
-def drain_worker_metrics() -> dict[str, Any]:
-    metrics: dict[str, Any] = dict(_WORKER_METRICS)
+def drain_worker_metrics() -> dict[str, int | float | list[dict[str, float]]]:
+    """Drain numeric metrics and the ordered per-step metric mappings."""
+    metrics: dict[str, int | float | list[dict[str, float]]] = dict(_WORKER_METRICS)
     _WORKER_METRICS.clear()
     if _WORKER_STEP_METRICS:
         metrics[WORKER_STEP_METRICS_KEY] = list(_WORKER_STEP_METRICS)
