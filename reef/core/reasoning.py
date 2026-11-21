@@ -58,9 +58,10 @@ class ReasoningStreamSplitter:
     A value holds the text it has read but not given out (``buffer``) and its position in the reply: whether it reads
     reasoning (``in_reasoning``) and whether it has dropped the first ``<think>`` (``stripped_think_start``). A
     splitter with ``enabled`` false gives every delta out as answer. Otherwise the first ``<think>`` starts reasoning
-    and drops, and with ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning,
-    with the newlines after it dropped, and a ``<tool_call>`` before it ends the reasoning too. A reply that ends in
-    reasoning is all reasoning. ``buffer`` keeps only an end of the text that can be the start of one of these tags.
+    and drops, and with ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning.
+    ``strip_answer_newlines`` drops the newlines after that tag when the answer starts in a later chunk.
+    A ``<tool_call>`` before the closing tag ends the reasoning too. A reply that ends in reasoning is all reasoning.
+    ``buffer`` keeps only an end of the text that can be the start of one of these tags.
     One splitter reads one reply; the streaming chat handlers make it and read its pieces.
     """
 
@@ -68,6 +69,7 @@ class ReasoningStreamSplitter:
         self.enabled = enabled
         self.in_reasoning = enabled and force_reasoning
         self.stripped_think_start = False
+        self.strip_answer_newlines = False
         self.buffer = ""
 
     @staticmethod
@@ -96,7 +98,10 @@ class ReasoningStreamSplitter:
             self.in_reasoning = True
         if not self.in_reasoning:
             value, self.buffer = self.buffer, ""
-            return [("text", value)]
+            if self.strip_answer_newlines:
+                value = value.lstrip("\n")
+                self.strip_answer_newlines = not value
+            return [("text", value)] if value else []
 
         before, separator, after = self.buffer.partition(THINK_END)
         if separator:
@@ -104,6 +109,7 @@ class ReasoningStreamSplitter:
             self.in_reasoning = False
             parts = [("thinking", before)] if before else []
             visible = after.lstrip("\n")
+            self.strip_answer_newlines = not visible
             if visible:
                 parts.append(("text", visible))
             return parts

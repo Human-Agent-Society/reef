@@ -342,16 +342,29 @@ class ChatStreamRelay:
         self._parser = stream_tool_parser
         self._tools = _StreamedToolCalls()
         self._reasoning: list[str] = []
+        self._thinking_whitespace: list[str] = []
         self._text: list[str] = []
 
-    def piece(self, kind: str, value: str, *, parse_tools: bool = True) -> list[bytes]:
+    def piece(self, kind: str, value: str) -> list[bytes]:
         if not value:
             return []
         if kind == "thinking":
-            self._reasoning.append(value)
-            return self.writer.thinking(value)
+            # The complete parse trims reasoning. Keep whitespace until another reasoning fragment follows it.
+            if not self._reasoning:
+                value = value.lstrip()
+            trimmed = value.rstrip()
+            if trimmed:
+                delta = "".join(self._thinking_whitespace) + trimmed
+                self._thinking_whitespace.clear()
+                self._reasoning.append(delta)
+                frames = self.writer.thinking(delta)
+            else:
+                frames = []
+            if len(trimmed) < len(value):
+                self._thinking_whitespace.append(value[len(trimmed) :])
+            return frames
         normal_text, calls = value, []
-        if self._parser is not None and parse_tools:
+        if self._parser is not None:
             parse = getattr(self._parser, "parse_stream_chunk", None)
             if parse is None:
                 # Third-party test/fallback parsers without an incremental
@@ -388,14 +401,16 @@ class ChatStreamRelay:
         if any(index >= len(tool_calls) for index in self._tools.ids):
             raise ValueError("a streamed tool call is missing from the completed response")
         output: list[bytes] = []
-        for kind, field, fragments in (
-            ("thinking", "reasoning_content", self._reasoning),
-            ("text", "content", self._text),
+        for name, field, fragments, write in (
+            ("reasoning", "reasoning_content", self._reasoning, self.writer.thinking),
+            ("text", "content", self._text, self.writer.text),
         ):
-            final = message.get(field)
+            final = message.get(field) or ""
             emitted = "".join(fragments)
-            if isinstance(final, str) and final.startswith(emitted):
-                output.extend(self.piece(kind, final[len(emitted) :], parse_tools=False))
+            if not final.startswith(emitted):
+                raise ValueError(f"streamed {name} differs from the completed response")
+            if len(final) > len(emitted):
+                output.extend(write(final[len(emitted) :]))
         for index, call in enumerate(tool_calls):
             function = call["function"]
             name = function["name"]

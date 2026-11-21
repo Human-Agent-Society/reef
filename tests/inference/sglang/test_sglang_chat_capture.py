@@ -1053,7 +1053,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
             await response.prepare(request)
             events = [
                 {
-                    "text": "work</thi",
+                    "text": "\nwork  </thi",
                     "output_ids": [20],
                     "meta_info": {
                         "finish_reason": None,
@@ -1062,12 +1062,21 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                     },
                 },
                 {
-                    "text": "nk>\nanswer",
+                    "text": "nk>\n",
                     "output_ids": [21],
                     "meta_info": {
-                        "finish_reason": {"type": "stop"},
+                        "finish_reason": None,
                         "completion_tokens": 2,
                         "output_token_logprobs": [[-0.25, 21]],
+                    },
+                },
+                {
+                    "text": "\nanswer",
+                    "output_ids": [22],
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "completion_tokens": 3,
+                        "output_token_logprobs": [[-0.25, 22]],
                     },
                 },
             ]
@@ -1093,7 +1102,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                 {
                     "model": "served-model",
                     "messages": [{"role": "user", "content": "hello"}],
-                    "max_tokens": 2,
+                    "max_tokens": 3,
                     "stream": True,
                 },
             )
@@ -1118,21 +1127,35 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
 @pytest.mark.parametrize(
-    "arguments",
-    ['{"path":"out.txt"}', '{"path": "out', '{"path":   "out', '{"path":"other.txt"}'],
-    ids=["equivalent", "prefix", "spaced-prefix", "divergent"],
+    ("arguments", "failure"),
+    [
+        ('{"path":"out.txt"}', None),
+        ('{"path": "out', None),
+        ('{"path":   "out', None),
+        ('{"path":"other.txt"}', "streamed tool-call arguments"),
+        ('{"path":"out.txt"}', "streamed text"),
+        ('{"path":"out.txt"}', "streamed reasoning"),
+    ],
+    ids=["equivalent", "prefix", "spaced-prefix", "divergent-arguments", "divergent-text", "divergent-reasoning"],
 )
-def test_streamed_tool_arguments_agree_with_the_buffered_result(tmp_path, path, arguments) -> None:
+def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, arguments, failure) -> None:
     raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
+    if failure == "streamed text":
+        chunks = ("Before", raw_tool_call, "After")
+    elif failure == "streamed reasoning":
+        chunks = ("<think>", "<think>work</think>", raw_tool_call)
+    else:
+        chunks = (raw_tool_call,)
 
     class FakeStreamingToolParser:
         @staticmethod
         def has_tool_call(text):
-            return text.startswith("<tool_call>")
+            return "<tool_call>" in text
 
         @staticmethod
         def parse_stream_chunk(text):
-            del text
+            if text != raw_tool_call:
+                return text, []
             return "", [
                 SimpleNamespace(
                     name="write_file",
@@ -1143,27 +1166,34 @@ def test_streamed_tool_arguments_agree_with_the_buffered_result(tmp_path, path, 
 
         @staticmethod
         def parse_non_stream(text):
-            del text
-            return "", [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
+            before, _, _ = text.partition("<tool_call>")
+            return before, [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
 
     async def run() -> None:
         async def generate(request):
             native = await request.json()
-            event = {
-                "text": raw_tool_call,
-                "output_ids": [20],
-                "meta_info": {
-                    "finish_reason": {"type": "stop"},
-                    "completion_tokens": 1,
-                    "output_token_logprobs": [[-0.5, 20]],
-                    "weight_version": "wv-tools",
-                },
-            }
+
+            def event(text, token_ids, total, *, finished):
+                return {
+                    "text": text,
+                    "output_ids": token_ids,
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"} if finished else None,
+                        "completion_tokens": total,
+                        "output_token_logprobs": [[-0.5, token_id] for token_id in token_ids],
+                        "weight_version": "wv-tools",
+                    },
+                }
+
             if not native["stream"]:
-                return web.json_response(event)
+                return web.json_response(
+                    event("".join(chunks), list(range(20, 20 + len(chunks))), len(chunks), finished=True)
+                )
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
-            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            for index, chunk in enumerate(chunks):
+                item = event(chunk, [20 + index], index + 1, finished=index + 1 == len(chunks))
+                await response.write(f"data: {json.dumps(item)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
             return response
 
@@ -1190,9 +1220,9 @@ def test_streamed_tool_arguments_agree_with_the_buffered_result(tmp_path, path, 
                 "model": "served-model",
                 "messages": [{"role": "user", "content": "write it"}],
                 "tools": [tool],
-                "max_tokens": 1,
+                "max_tokens": len(chunks),
             }
-            if "other.txt" in arguments:
+            if failure is not None:
                 scenario = "tools"
                 storage = SQLiteScenarioStorage(tmp_path / "records")
                 coordination = memory_coordination()
@@ -1217,7 +1247,7 @@ def test_streamed_tool_arguments_agree_with_the_buffered_result(tmp_path, path, 
                     (record,) = store.records.replay(scenario)
                     failed = record.payload["response"]
                     assert failed["complete"] is False
-                    assert "streamed tool-call arguments" in failed["error"]
+                    assert failure in failed["error"]
                     assert "[DONE]" not in failed["body"] and "message_stop" not in failed["body"]
                 finally:
                     store.close()
