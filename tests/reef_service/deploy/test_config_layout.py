@@ -435,6 +435,14 @@ def test_the_evaluation_section_names_a_task_template_builder_plugin() -> None:
         service_config_from_mapping(resolved)
 
 
+def test_task_file_pinning_requires_a_boolean_in_service_settings() -> None:
+    default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
+    assert default.evaluation_pin_task_files is False
+    assert dataclasses.replace(default, evaluation_pin_task_files=True).evaluation_pin_task_files is True
+    with pytest.raises(ValueError, match=r"evaluation\.pin_task_files must be true or false"):
+        dataclasses.replace(default, evaluation_pin_task_files="false")
+
+
 def test_the_evaluation_section_requires_prepared_templates_only_when_it_says_so() -> None:
     default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
     assert default.evaluation_require_prepared_templates is False

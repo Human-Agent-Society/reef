@@ -564,6 +564,8 @@ class ServiceSettings:
             )
         if not isinstance(self.evaluation_require_prepared_templates, bool):
             raise ValueError("evaluation.require_prepared_templates must be true or false")
+        if not isinstance(self.evaluation_pin_task_files, bool):
+            raise ValueError("evaluation.pin_task_files must be true or false")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:
