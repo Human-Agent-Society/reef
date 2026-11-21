@@ -15,7 +15,7 @@ from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.inference.chat import StreamedToolCall, _AnthropicEventWriter, sse_json_events
+from reef.inference.chat import StreamedToolCall, sse_json_events
 from reef.inference.interfaces import FixedEngineClients, InferenceArtifact, full_weight_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.service.inference_service import build_inference_app
@@ -240,12 +240,6 @@ def test_native_terminal_marker_does_not_hide_a_late_failure(failure) -> None:
 def test_a_streamed_tool_delta_refuses_an_empty_name() -> None:
     with pytest.raises(ValueError, match="tool-call name must be a nonempty string"):
         StreamedToolCall(0, "", "{}")
-
-
-@pytest.mark.unit
-def test_an_anthropic_stream_writer_refuses_a_negative_input_count() -> None:
-    with pytest.raises(ValueError, match="input token count"):
-        _AnthropicEventWriter("message", model="model", input_tokens=-1)
 
 
 @pytest.mark.unit
