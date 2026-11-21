@@ -1333,20 +1333,25 @@ def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_
     asyncio.run(run())
 
 
+def capture_lifecycle_timers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Timeout]:
+    """Record the lifecycle timers so a test can expire them after readiness starts."""
+    timers: list[asyncio.Timeout] = []
+
+    def kept_timer(delay: float | None) -> asyncio.Timeout:
+        timer = asyncio.timeout(delay)
+        timers.append(timer)
+        return timer
+
+    # Aiohttp and the test's watchdog keep their own timers.
+    monkeypatch.setattr("reef.service.lifecycle.asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": kept_timer}))
+    return timers
+
+
 @pytest.mark.parametrize("phase", ["provider_check", "preview"])
 def test_an_open_whose_deadline_passes_during_readiness_stays_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
-    # Keep each timer that the lifecycle module starts, so the test fires the open's real timer once the phase runs.
-    # Only that module's ``asyncio`` name changes: ``asyncio.wait_for`` and aiohttp keep their own timers.
-    lifecycle_timers: list[asyncio.Timeout] = []
-
-    def kept_timer(delay: float | None) -> asyncio.Timeout:
-        timer = asyncio.timeout(delay)
-        lifecycle_timers.append(timer)
-        return timer
-
-    monkeypatch.setattr("reef.service.lifecycle.asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": kept_timer}))
+    lifecycle_timers = capture_lifecycle_timers(monkeypatch)
 
     async def run() -> None:
         # The provider check or the preview waits for this event.
@@ -1529,8 +1534,10 @@ def test_a_candidate_check_needs_the_control_token_and_a_json_object(tmp_path: P
 
 @pytest.mark.parametrize("interruption", ["stop", "publication", "deadline"])
 def test_a_candidate_check_never_holds_a_command_and_fails_once_it_is_overtaken(
-    tmp_path: Path, interruption: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str
 ) -> None:
+    lifecycle_timers = capture_lifecycle_timers(monkeypatch)
+
     async def run() -> None:
         # The first provider holds the check's model-list request until the test releases it.
         hold = asyncio.Event()
@@ -1538,7 +1545,7 @@ def test_a_candidate_check_never_holds_a_command_and_fails_once_it_is_overtaken(
             tmp_path, delay_seconds=0, timeout_s=2, environ=SPARE_CREDENTIAL, hold=hold
         ) as child:
             path, version = candidate_manifest(child, tmp_path, "spare_credential")
-            deadline = time.monotonic() + (0.3 if interruption == "deadline" else 30)
+            deadline = time.monotonic() + 30
             body = check_body(child, path, version, check_deadline_monotonic=deadline)
             checking = asyncio.create_task(post_check(child, body))
 
@@ -1561,13 +1568,17 @@ def test_a_candidate_check_never_holds_a_command_and_fails_once_it_is_overtaken(
                 }
                 activating = asyncio.to_thread(client.request, "activate", publication=publication)
                 assert (await asyncio.wait_for(activating, 10)).snapshot_version == published_version
-            if interruption != "deadline":
+            if interruption == "deadline":
+                [readiness_timer] = lifecycle_timers
+                readiness_timer.reschedule(asyncio.get_running_loop().time())
+            else:
                 # The command finished while a provider still held the check: the check took no command lock.
                 assert not checking.done()
                 hold.set()
             answer_status, text = await asyncio.wait_for(checking, 10)
             if interruption == "deadline":
                 assert (answer_status, text) == (503, "routing candidate check deadline passed")
+                assert readiness_timer.expired()
             else:
                 assert answer_status == 409, text
 
