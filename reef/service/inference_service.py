@@ -51,7 +51,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +63,7 @@ from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusErr
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
+from reef.inference.http import _inference_connector
 from reef.inference.interfaces import (
     EngineClients,
     EngineState,
@@ -853,6 +854,26 @@ class InferenceReplica:
 
 def add_inference_routes(app: web.Application, replica: InferenceReplica) -> None:
     """Add the model routes of ``replica`` (see the module rules) to ``app``."""
+
+    connector_key = web.AppKey("inference_provider_connector", aiohttp.TCPConnector)
+
+    async def provider_connections(app: web.Application) -> AsyncIterator[None]:
+        async with aiohttp.TCPConnector(limit=100, keepalive_timeout=15) as connector:
+            app[connector_key] = connector
+            yield
+
+    @web.middleware
+    async def use_provider_connections(
+        request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
+    ) -> web.StreamResponse:
+        token = _inference_connector.set((asyncio.get_running_loop(), app[connector_key]))
+        try:
+            return await handler(request)
+        finally:
+            _inference_connector.reset(token)
+
+    app.cleanup_ctx.append(provider_connections)
+    app.middlewares.append(use_provider_connections)
 
     def checked(route: str) -> str:
         path = "/v1/" + route
