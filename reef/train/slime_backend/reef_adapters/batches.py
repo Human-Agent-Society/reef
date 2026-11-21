@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -100,37 +99,61 @@ class TrainingBatchProcessor:
         self.rollout_data_keys = tuple(dict.fromkeys((*self.rollout_data_keys, *keys)))
         self.tensor_dtypes.update(dtypes)
 
-    def check_external_steps(self, rollout_ids: Sequence[int], step_sizes: Sequence[int], first_step: int) -> None:
-        """Refuse an unstarted optimizer step that cannot supply the required microbatches.
+    def check_external_steps(self, data: Mapping[str, Any], first_step: int) -> None:
+        """Refuse unstarted steps whose rows cannot form the workers' aligned microbatches.
 
-        rollout_ids has one entry per row in training order. step_sizes gives
-        the count of distinct rollouts per step. first_step is the first
-        unstarted step's zero-based index. Raise ValueError with the required
-        row count if a step is too small for the workers' layout.
+        Data holds one rollout ID and token list per row in the converted rollout.
+        First step is the zero-based index of the first unstarted step.
         """
         layout = self.train_parallel_config
         dp_size = layout["dp_size"]
         microbatch_group = layout["microbatch_group_size_per_vp_stage"] if layout.get("vpp_size", 1) > 1 else 1
-        microbatches = dp_size * microbatch_group
-        if self.args.use_dynamic_batch_size:
-            minimum_rows = microbatches
-        else:
-            # Slime allows fewer rows in the last fixed-size microbatch.
-            minimum_rows = (microbatches - 1) * self.args.micro_batch_size + 1
+        alignment = dp_size * microbatch_group
+        dynamic = self.args.use_dynamic_batch_size
+        minimum_rows = alignment if dynamic else (alignment - 1) * self.args.micro_batch_size + 1
 
-        rows_by_rollout = Counter(rollout_ids)
-        row_counts = list(rows_by_rollout.values())
+        rollout_ids = data["rollout_ids"]
+        rows_by_rollout: dict[int, list[int]] = {}
+        for index, rollout_id in enumerate(rollout_ids):
+            rows_by_rollout.setdefault(rollout_id, []).append(index)
+        rollout_rows = list(rows_by_rollout.values())
         cursor = 0
-        for step, size in enumerate(step_sizes):
+        for step, size in enumerate(data["external_step_sizes"]):
             end = cursor + size
-            row_count = sum(row_counts[cursor:end])
-            if step >= first_step and row_count < minimum_rows:
+            indices = [index for rows in rollout_rows[cursor:end] for index in rows]
+            cursor = end
+            if step < first_step:
+                continue
+            row_count = len(indices)
+            if row_count < minimum_rows:
                 raise ValueError(
                     f"Slime optimizer step {step + 1} has {row_count} rows. "
                     f"The worker layout with {dp_size} data-parallel ranks needs at least {minimum_rows} rows per step. "
                     "Change the batch size, remainder policy, or data-parallel size."
                 )
-            cursor = end
+            if not dynamic:
+                micro_batch_size = self.args.micro_batch_size
+                microbatches = (row_count + micro_batch_size - 1) // micro_batch_size
+                if microbatches % alignment:
+                    raise ValueError(
+                        f"Slime optimizer step {step + 1} has {row_count} rows in {microbatches} microbatches. "
+                        f"The worker layout needs a multiple of {alignment} microbatches."
+                    )
+            elif row_count % alignment:
+                # The packer may need more bins than there are rows when it rounds up to the alignment.
+                from slime.utils.dp_schedule import build_dp_schedule
+
+                indices.sort()
+                try:
+                    build_dp_schedule(
+                        self.args,
+                        layout,
+                        [len(data["tokens"][index]) for index in indices],
+                        global_batch_size=size,
+                        rollout_indices=[rollout_ids[index] for index in indices],
+                    )
+                except AssertionError as error:
+                    raise ValueError(f"Slime optimizer step {step + 1} has {row_count} rows: {error}") from error
 
     def prepare_external_train_data(self, data):
         return self._split_train_data_by_dp(dict(data))

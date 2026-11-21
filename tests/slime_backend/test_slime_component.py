@@ -388,8 +388,30 @@ def test_the_fixed_batch_minimum_includes_virtual_pipeline_alignment() -> None:
     )
 
     with pytest.raises(ValueError, match="needs at least 7 rows"):
-        processor.check_external_steps(list(range(6)), [6], 0)
-    processor.check_external_steps(list(range(7)), [7], 0)
+        processor.check_external_steps({"rollout_ids": list(range(6)), "external_step_sizes": [6]}, 0)
+    processor.check_external_steps({"rollout_ids": list(range(7)), "external_step_sizes": [7]}, 0)
+    with pytest.raises(ValueError, match="9 rows in 5 microbatches"):
+        processor.check_external_steps({"rollout_ids": list(range(9)), "external_step_sizes": [9]}, 0)
+
+
+@pytest.mark.unit
+def test_dynamic_admission_detects_alignment_after_native_packing() -> None:
+    pytest.importorskip("slime.utils.dp_schedule")
+    processor = TrainingBatchProcessor(
+        SlimeArguments(
+            max_tokens_per_gpu=4,
+            balance_by_flops=False,
+            balance_data=False,
+            reef_rollout_tensor_dtypes={},
+        ),
+        {"dp_size": 2, "cp_size": 1, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1},
+    )
+    data = {"rollout_ids": list(range(7)), "external_step_sizes": [4, 3], "tokens": [[0] * 4 for _ in range(7)]}
+    with pytest.raises(ValueError, match="optimizer step 2 has 3 rows"):
+        processor.check_external_steps(data, 0)
+    # Three rows still fit when the packer can put two in one microbatch.
+    data["tokens"][-2:] = [[0] * 2] * 2
+    processor.check_external_steps(data, 0)
 
 
 @pytest.mark.unit
