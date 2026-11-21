@@ -352,8 +352,9 @@ class CandidateEndpoints(ABC):
     def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
         """The resolved task directory and its stored digest, or None if unavailable for unpinned work.
 
-        An endpoint that resolves pinned work overrides this method. The returned digest must be the
-        digest of the directory it resolved.
+        Template preparation and scoring both use this lookup. A lookup without a pin may select the
+        current version on each attempt. A returned digest must identify the directory it resolved.
+        An endpoint that resolves pinned work overrides this method.
         """
         if rollout.task_digest is not None:
             raise ItemFailedError("the task resolver does not support pinned task files")
@@ -850,12 +851,9 @@ class EvaluationRolloutWorker(QueueWorker):
                 raise ItemFailedError(f"{unprepared}: the queue no longer holds its template item")
             if template.state != "finished":
                 raise ItemFailedError(f"{unprepared}: {template.error or f'its template item is {template.state}'}")
-        if rollout.task_digest is None:
-            task_directory = self.endpoints.task_directory(rollout)
-        else:
-            task_directory, task_digest = self.endpoints.task_version(rollout)
-            if task_digest != rollout.task_digest:
-                raise ItemFailedError("the task resolver returned different files from the pinned version")
+        task_directory, task_digest = self.endpoints.task_version(rollout)
+        if rollout.task_digest is not None and task_digest != rollout.task_digest:
+            raise ItemFailedError("the task resolver returned different files from the pinned version")
         if rollout.tree is not None:
             # A retry runs the same task with the same tree, so a task that asks for what the tree's agent cannot
             # give fails for good, before its candidate is served.

@@ -1579,7 +1579,7 @@ def test_a_retry_after_a_task_replace_uses_the_configured_task_version(tmp_path:
             accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
             item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
-            first = endpoints.task_directory(EvaluationRollout.from_item(item))
+            first, first_digest = endpoints.task_version(EvaluationRollout.from_item(item))
             queue.fail(
                 EVALUATIONS_QUEUE, item.id, "w", "the task's compose file reads an unset variable", retryable=False
             )
@@ -1593,17 +1593,18 @@ def test_a_retry_after_a_task_replace_uses_the_configured_task_version(tmp_path:
             assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
 
             item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
-            second = endpoints.task_directory(EvaluationRollout.from_item(item))
+            second, second_digest = endpoints.task_version(EvaluationRollout.from_item(item))
             assert item.attempt_count == 2 and first.is_dir()
             assert (second == first) is pin_task_files
+            assert (second_digest == first_digest) is pin_task_files
 
             new = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert new.status == 202, await new.text()
             next_item = queue.take(EVALUATIONS_QUEUE, "new", [EVALUATION_ROLLOUT_KIND])
             assert next_item is not None
-            latest = endpoints.task_directory(EvaluationRollout.from_item(next_item))
+            latest, latest_digest = endpoints.task_version(EvaluationRollout.from_item(next_item))
             assert latest != first
-            assert files_digest(latest) == dispatcher.data_store.read("s", "add").digest
+            assert latest_digest == files_digest(latest) == dispatcher.data_store.read("s", "add").digest
 
     asyncio.run(run())
 

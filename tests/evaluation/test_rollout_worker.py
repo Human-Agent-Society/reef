@@ -737,40 +737,54 @@ def test_a_pinned_rollout_refuses_name_only_or_mismatched_resolution(tmp_path, r
     "resolver", ["base", "legacy", "inherited_legacy", "version", "explicit", "legacy_after_version"]
 )
 def test_template_and_trial_resolve_the_same_local_task(tmp_path, pinned, resolver):
-    current, custom, admitted = (tmp_path / name for name in ("current", "custom", "admitted"))
-    for directory in (current, custom, admitted):
+    current, custom, explicit, admitted = (tmp_path / name for name in ("current", "custom", "explicit", "admitted"))
+    for directory in (current, custom, explicit, admitted):
         directory.mkdir()
         (directory / "task.toml").write_text("")
 
     class Endpoints(LocalCandidateEndpoints):
+        """Local endpoints whose trial opens without an inference server."""
+
         open = OpenEndpoints.open
 
     class NameBasedEndpoints(Endpoints):
+        """Endpoints whose legacy resolver always selects the custom directory."""
+
         def task_directory(self, rollout):
             return custom
 
     class InheritedNameBasedEndpoints(NameBasedEndpoints):
-        pass
+        """Endpoints that inherit the custom legacy resolver."""
 
     class VersionEndpoints(NameBasedEndpoints):
+        """Endpoints that delegate explicit version resolution to the built-in resolver."""
+
         def task_version(self, rollout):
             return super().task_version(rollout)
 
     class ExplicitVersionEndpoints(NameBasedEndpoints):
+        """Endpoints that resolve unpinned versions to their own directory and known digest."""
+
         def task_version(self, rollout):
             if rollout.task_digest is None:
-                return custom, custom_digest
+                return explicit, custom_digest
             return super().task_version(rollout)
 
     class NewNameBasedEndpoints(VersionEndpoints):
+        """Endpoints that replace the legacy hook below an inherited version resolver."""
+
         def task_directory(self, rollout):
             return custom
 
     class Builder(RecordedBuilder):
+        """A builder that records the directory and digest passed to preparation."""
+
         async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
             prepared.append((task_directory, task_digest))
 
     class Lab(NoSandboxLab):
+        """A lab that checks the trial uses the prepared directory, then simulates no sandbox."""
+
         async def run(self, task_path, agent, *, key, tags, overrides):
             [expected] = prepared
             assert Path(task_path) == expected[0]
@@ -813,7 +827,7 @@ def test_template_and_trial_resolve_the_same_local_task(tmp_path, pinned, resolv
     elif resolver == "base":
         assert prepared == [(current, current_digest)]
     elif resolver == "explicit":
-        assert prepared == [(custom, custom_digest)]
+        assert prepared == [(explicit, custom_digest)]
     else:
         assert prepared == [(custom, None)]
     with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
