@@ -1134,8 +1134,8 @@ stops the stack and reports the service, the failure reason, and the local
 log directory. An exited service's message includes its exit code. CLI
 startup failures exit with status 1; invalid configuration exits with status
 2. Child output is retained in the logs and forwarded to the terminal.
-Interrupting startup with SIGINT or SIGTERM also stops the services already
-launched, including when they are still loading a model.
+Interrupting startup with SIGINT, SIGTERM or, on POSIX, SIGHUP also stops the
+services already launched, including when they are still loading a model.
 
 The basic and SAO example ``run.sh`` launchers wait for the HTTP health
 endpoint and stop waiting if Reef exits. Startup deadlines are configured

@@ -22,6 +22,11 @@ Once the stack is running, Ctrl-C requests graceful shutdown. Pressing it
 again during shutdown skips the remaining 30-second grace period and proceeds
 to forced cleanup of the managed service processes.
 
+On Linux and macOS, closing the terminal or the SSH session (SIGHUP) also
+requests graceful shutdown. A second hangup does not skip the grace period. To
+keep the stack running after you log out, start it with ``nohup reef serve``.
+A deployment with managed routing uses SIGHUP to reload its policy instead.
+
 .. container:: config
 
    ``-c, --config``
