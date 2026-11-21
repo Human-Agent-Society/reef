@@ -399,6 +399,8 @@ class LocalCandidateEndpoints(CandidateEndpoints):
 
     def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
         if rollout.task_digest is None:
+            if type(self).task_directory is not LocalCandidateEndpoints.task_directory:
+                return self.task_directory(rollout), None
             return self.artifacts.candidate_task_version(rollout.scenario, rollout.task_name)
         for base in type(self).__mro__:
             if "task_version" in base.__dict__:

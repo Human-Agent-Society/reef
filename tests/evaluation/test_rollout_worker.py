@@ -732,34 +732,92 @@ def test_a_pinned_rollout_refuses_name_only_or_mismatched_resolution(tmp_path, r
 
 
 @pytest.mark.unit
-def test_a_local_endpoint_with_a_custom_task_directory_must_declare_its_pinned_lookup(tmp_path):
-    current, pinned = tmp_path / "current", tmp_path / "pinned"
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize(
+    "resolver", ["base", "legacy", "inherited_legacy", "version", "explicit", "legacy_after_version"]
+)
+def test_template_and_trial_resolve_the_same_local_task(tmp_path, pinned, resolver):
+    current, custom, admitted = (tmp_path / name for name in ("current", "custom", "admitted"))
+    for directory in (current, custom, admitted):
+        directory.mkdir()
+        (directory / "task.toml").write_text("")
 
-    class NameBasedEndpoints(LocalCandidateEndpoints):
+    class Endpoints(LocalCandidateEndpoints):
+        open = OpenEndpoints.open
+
+    class NameBasedEndpoints(Endpoints):
         def task_directory(self, rollout):
-            return current
+            return custom
+
+    class InheritedNameBasedEndpoints(NameBasedEndpoints):
+        pass
 
     class VersionEndpoints(NameBasedEndpoints):
         def task_version(self, rollout):
             return super().task_version(rollout)
 
+    class ExplicitVersionEndpoints(NameBasedEndpoints):
+        def task_version(self, rollout):
+            if rollout.task_digest is None:
+                return custom, custom_digest
+            return super().task_version(rollout)
+
     class NewNameBasedEndpoints(VersionEndpoints):
         def task_directory(self, rollout):
-            return current
+            return custom
+
+    class Builder(RecordedBuilder):
+        async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+            prepared.append((task_directory, task_digest))
+
+    class Lab(NoSandboxLab):
+        async def run(self, task_path, agent, *, key, tags, overrides):
+            [expected] = prepared
+            assert Path(task_path) == expected[0]
+            return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
 
     artifacts = Mock(spec=CandidateArtifacts)
-    artifacts.candidate_task_for_digest.return_value = pinned
-    digest = "1" * 64
-    value = replace(rollout(), task_digest=digest)
-    endpoints = NameBasedEndpoints(artifacts)
-    assert endpoints.task_directory(rollout()) == current
-    for custom_endpoint in (endpoints, NewNameBasedEndpoints(artifacts)):
-        with pytest.raises(ItemFailedError, match="must override task_version"):
-            custom_endpoint.task_version(value)
-    artifacts.candidate_task_for_digest.assert_not_called()
+    artifacts.task_owner.return_value = None
+    artifacts.candidate_task.return_value = current
+    current_digest, admitted_digest, custom_digest = "0" * 64, "1" * 64, "2" * 64
+    artifacts.candidate_task_version.return_value = (current, current_digest)
+    artifacts.candidate_task_for_digest.return_value = admitted
+    endpoint_type = {
+        "base": Endpoints,
+        "legacy": NameBasedEndpoints,
+        "inherited_legacy": InheritedNameBasedEndpoints,
+        "version": VersionEndpoints,
+        "explicit": ExplicitVersionEndpoints,
+        "legacy_after_version": NewNameBasedEndpoints,
+    }[resolver]
+    endpoints = endpoint_type(artifacts)
+    value = replace(e2b_rollout(), task_digest=admitted_digest if pinned else None)
+    queue = memory_coordination().work_queue
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    prepared = []
+    assert TaskTemplateWorker(queue, endpoints, Builder(), worker_id="template").run_once()
+    template = queue.read(EVALUATIONS_QUEUE, item_id)
+    worker = ServedWorker(queue, endpoints, worker_id="rollout", lab=Lab(tmp_path / "trials"))
 
-    assert VersionEndpoints(artifacts).task_version(value) == (pinned, digest)
-    artifacts.candidate_task_for_digest.assert_called_once_with(value.scenario, value.task_name, digest)
+    if pinned and resolver not in ("base", "version", "explicit"):
+        assert template.state == "failed" and "must override task_version" in template.error
+        assert not prepared
+        with pytest.raises(ItemFailedError, match="must override task_version"):
+            worker.score(value, threading.Event(), 1)
+        return
+
+    assert template.state == "finished"
+    if pinned:
+        assert prepared == [(admitted, admitted_digest)]
+    elif resolver == "base":
+        assert prepared == [(current, current_digest)]
+    elif resolver == "explicit":
+        assert prepared == [(custom, custom_digest)]
+    else:
+        assert prepared == [(custom, None)]
+    with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
+        worker.score(replace(value, requires_prepared_templates=True), threading.Event(), 1)
 
 
 def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:
