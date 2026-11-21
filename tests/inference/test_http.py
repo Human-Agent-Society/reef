@@ -145,3 +145,10 @@ def test_a_json_object_is_returned_and_a_provider_client_error_keeps_its_status(
             assert "max_tokens too large" in str(error.value)
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timeout_s", [0.0, -1.0, float("nan")])
+def test_an_http_handler_refuses_a_timeout_that_is_not_positive(timeout_s: float) -> None:
+    with pytest.raises(ValueError, match="timeout_s must be positive"):
+        HttpInferenceHandler("https://provider.example", timeout_s=timeout_s)
