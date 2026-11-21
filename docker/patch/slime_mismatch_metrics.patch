@@ -1,0 +1,62 @@
+--- a/slime/backends/megatron_utils/loss.py
++++ b/slime/backends/megatron_utils/loss.py
+@@ -1262,10 +1262,10 @@
+         ois = (-ppo_kl).exp()
+         tis_kwargs = {
+             "args": args,
+-            "pg_loss": pg_loss,
++            "pg_loss": pg_loss if args.use_tis else pg_loss.detach().clone(),
+             "train_log_probs": train_log_probs_for_tis,
+             "rollout_log_probs": batch["rollout_log_probs"],
+-            "loss_masks": batch["loss_masks"],
++            "loss_masks": batch["loss_masks"] if args.use_tis else [mask.clone() for mask in batch["loss_masks"]],
+             "total_lengths": total_lengths,
+             "response_lengths": response_lengths,
+         }
+@@ -1274,21 +1274,23 @@
+             tis_func = load_function(args.custom_tis_function_path)
+         else:
+             tis_func = vanilla_tis_function
+-        pg_loss, modified_response_masks, tis_metrics = tis_func(**tis_kwargs)
++        corrected_pg_loss, modified_response_masks, tis_metrics = tis_func(**tis_kwargs)
+
+-        # [decouple IS and rejection] Rebuild sum_of_sample_mean with
+-        # modified_response_masks for numerator correction (rejected tokens
+-        # zeroed in pg_loss). Denominators stay the precomputed per-rollout
+-        # totals from ``rollout_mask_sums`` (based on original loss_masks) —
+-        # same normalizer as the outer reducer, so pg_loss and the rest of the
+-        # reported metrics live in the same per-rollout-mean space.
+-        sum_of_sample_mean = get_sum_of_sample_mean(
+-            total_lengths,
+-            response_lengths,
+-            modified_response_masks,
+-            batch["rollout_mask_sums"],
+-            args.calculate_per_token_loss,
+-        )
++        if args.use_tis:
++            pg_loss = corrected_pg_loss
++            # [decouple IS and rejection] Rebuild sum_of_sample_mean with
++            # modified_response_masks for numerator correction (rejected tokens
++            # zeroed in pg_loss). Denominators stay the precomputed per-rollout
++            # totals from ``rollout_mask_sums`` (based on original loss_masks) —
++            # same normalizer as the outer reducer, so pg_loss and the rest of the
++            # reported metrics live in the same per-rollout-mean space.
++            sum_of_sample_mean = get_sum_of_sample_mean(
++                total_lengths,
++                response_lengths,
++                modified_response_masks,
++                batch["rollout_mask_sums"],
++                args.calculate_per_token_loss,
++            )
+
+     sc_terms = {}
+     if use_score_centering:
+@@ -1304,7 +1306,7 @@
+     if getattr(args, "custom_pg_loss_reducer_function_path", None) is not None:
+         custom_pg_loss_reducer_func = load_function(args.custom_pg_loss_reducer_function_path)
+         # Determine which loss_masks to use for pg_loss reducer
+-        pg_loss_masks = modified_response_masks if (args.get_mismatch_metrics or args.use_tis) else batch["loss_masks"]
++        pg_loss_masks = modified_response_masks if args.use_tis else batch["loss_masks"]
+         pg_loss_reducer = custom_pg_loss_reducer_func(
+             total_lengths, response_lengths, pg_loss_masks, args.calculate_per_token_loss
+         )

@@ -105,6 +105,10 @@ RUN python -c "from sglang.srt.server_args import ServerArgs; import transformer
 # storage modules without a GPU. A missing core dependency fails the build here.
 RUN reef serve --help > /dev/null
 
+# Run mismatch callbacks without correcting the loss unless TIS is enabled.
+RUN SLIME_SITE=$(python -c "from importlib.metadata import distribution; print(distribution('slime').locate_file(''))") && \
+    git -C "$SLIME_SITE" apply "$PWD/docker/patch/slime_mismatch_metrics.patch"
+
 # Qwen3.5's fused Q/K norm + RoPE + gate kernel must rotate image tokens with
 # all three M-RoPE rows, as SGLang does from sgl-project/sglang#34446
 # (e635577431) on; before it, the kernel read only the temporal row. The base
