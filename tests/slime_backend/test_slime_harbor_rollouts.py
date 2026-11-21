@@ -23,7 +23,7 @@ from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.durable_files import write_json
 from reef.train.slime_backend import harbor_rollouts
 from reef.train.slime_backend.dataset import DATASET_FILE
-from reef.train.slime_backend.engine_chat import EngineChat
+from reef.train.slime_backend.engine_chat import EngineChat, TrialEngineChat
 from reef.train.slime_backend.harbor_rollouts import (
     GENERATE_FUNCTION_PATH,
     HarborRolloutSession,
@@ -562,7 +562,15 @@ def test_the_generate_function_runs_the_recorded_jobs_session_and_refuses_an_old
     requests = []
     concurrent = threading.Barrier(2)
 
-    class OptionLab(AgentLab):
+    class OptionLab(TaskLab):
+        """Call the trial endpoint once with agent options and return reward 0.25.
+
+        Wait for both trials. A successful local build returns an empty error.
+        """
+
+        async def build_environment(self, task_path, *, overrides) -> str:
+            return ""
+
         async def run(self, task_path, agent, *, key, tags, overrides):
             concurrent.wait(timeout=5)
             options = {"chat_template_kwargs": {"enable_thinking": True}} if task_path == override_task else {}
@@ -637,6 +645,13 @@ def test_the_generate_function_runs_the_recorded_jobs_session_and_refuses_an_old
     assert len(made) == 1
     for session in harbor_rollouts.SESSIONS.values():
         session.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("limit", ["4", 0, -1, True])
+def test_a_trial_rejects_an_invalid_response_token_limit(limit) -> None:
+    with pytest.raises(ValueError, match="max_new_tokens must be a positive integer or None"):
+        TrialEngineChat(Chat((200, GENERATED)), {"max_new_tokens": limit})
 
 
 @pytest.mark.unit

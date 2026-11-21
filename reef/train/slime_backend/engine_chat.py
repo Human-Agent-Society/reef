@@ -48,8 +48,9 @@ class TrialEngineChat(RolloutChat):
     """Bind one trial's Slime sampler options to a shared engine chat.
 
     chat owns the tokenizer and engine connection. sampling_params maps SGLang
-    option names to their JSON values. answer delegates one path and request
-    body and returns the shared chat's status and body using those options.
+    option names to their JSON values. max_new_tokens is absent, None, or
+    a positive integer. answer returns the shared chat's status and body
+    for the supplied path and request body.
     """
 
     chat: EngineChat
@@ -58,6 +59,9 @@ class TrialEngineChat(RolloutChat):
     def __post_init__(self) -> None:
         if not isinstance(self.chat, EngineChat) or not isinstance(self.sampling_params, Mapping):
             raise TypeError("A trial chat needs an engine chat and a mapping of sampler options.")
+        limit = self.sampling_params.get("max_new_tokens")
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("Trial max_new_tokens must be a positive integer or None.")
 
     def answer(self, path: str, payload: Any) -> tuple[int, Mapping[str, Any]]:
         return self.chat.answer(path, payload, sampling_params=self.sampling_params)
