@@ -87,7 +87,8 @@ TEMPLATE_WAIT_S = 6 * 3600.0
 #: The seconds between two checks of a running trial's lease.
 LEASE_CHECK_S = 1.0
 #: What a stopping evaluation worker does with the rollouts that it runs: ``requeue`` cancels each one and gives it
-#: back to the queue, where another worker starts it again; ``finish`` takes no new rollout and finishes each one.
+#: back to the queue, where another worker starts it again; ``finish`` takes no new rollout and finishes each one,
+#: and requeues those that still run at the end of the worker's ``finish_timeout_s``.
 ON_STOP_CHOICES = ("requeue", "finish")
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
@@ -614,6 +615,25 @@ class RolloutCalls(CaptureObserver):
         self.writer.shutdown(wait=True)
 
 
+def check_finish_timeout(on_stop: str, finish_timeout_s: object, *, prefix: str = "") -> None:
+    """Raise ``ValueError`` unless ``finish_timeout_s`` is None, or ``on_stop`` is ``finish`` and ``finish_timeout_s``
+    is an int or float, not a bool, above 0 and at most ``threading.TIMEOUT_MAX``: the longest wait of the timer that
+    ends it. ``prefix`` starts the name of each setting in the message, such as ``evaluation.``."""
+    if finish_timeout_s is None:
+        return
+    if on_stop != "finish":
+        raise ValueError(f"{prefix}finish_timeout_s needs {prefix}on_stop: finish")
+    if (
+        isinstance(finish_timeout_s, bool)
+        or not isinstance(finish_timeout_s, (int, float))
+        # A comparison, not math.isfinite: it refuses NaN and infinity, and does not overflow on a large int.
+        or not 0 < finish_timeout_s <= threading.TIMEOUT_MAX
+    ):
+        raise ValueError(
+            f"{prefix}finish_timeout_s is a number of seconds above 0 and at most {threading.TIMEOUT_MAX:.0f}"
+        )
+
+
 Result = TypeVar("Result")
 
 
@@ -621,14 +641,17 @@ async def run_while_held(work: Awaitable[Result], lease_lost: threading.Event, s
     """Run ``work`` of a rollout and return its result. When ``lease_lost`` or ``stopped`` is set first, cancel
     ``work``, so that Harbor stops a trial and its sandbox, or a template build stops. Then raise
     ``WorkLeaseLostError`` for ``lease_lost``: a client cancelled the rollout, or another worker took it. Raise
-    ``WorkerStoppedError`` for ``stopped`` alone: the worker stops, and the rollout goes back to the queue. A process
-    that ends with a trial still running leaves the trial's sandbox running, so a stopping worker does not wait for
-    the trial."""
+    ``WorkerStoppedError`` for ``stopped`` alone: the worker stops, and the rollout goes back to the queue. Work that
+    had already ended when ``stopped`` alone is seen keeps its result. A process that ends with a trial still running
+    leaves the trial's sandbox running, so a stopping worker does not wait for the trial."""
     run = asyncio.ensure_future(work)
     while not lease_lost.is_set() and not stopped.is_set():
         done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
         if done:
             return run.result()
+    if run.done() and not run.cancelled() and not lease_lost.is_set():
+        # The work ended before the stop could cancel it; the queue still fences the result to the lease holder.
+        return run.result()
     run.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await run
@@ -643,15 +666,19 @@ class EvaluationRolloutWorker(QueueWorker):
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
-    address at which a task's container reaches this host. ``on_stop`` is one of ``ON_STOP_CHOICES``: what ``stop``
-    does with the rollouts that run. With ``requeue``, ``stop`` cancels each one and gives it back to the queue; with
-    ``finish``, it takes no new rollout and returns when each running one has finished, so a process that a scale-down
-    or a deploy stops loses no work in its grace period. A failed rollout is retried: a trial fails for reasons
-    outside its input, such as a sandbox that did not start. A rollout of a harness tree whose task needs what the
-    tree's agent does not give it (``task_agent_tools``) fails for good, and so does a rollout that requires prepared
-    templates when its task's template item did not finish.
+    address at which a task's container reaches this host. ``on_stop`` is one of ``ON_STOP_CHOICES``: what the worker
+    does with the rollouts that run when it begins to stop (``begin_stop``). With ``requeue``, it cancels each one and
+    gives it back to the queue. With ``finish``, it takes no new rollout, and ``stop`` returns when each running one
+    has finished, so a process that a scale-down or a deploy stops loses no work in its grace period.
+    ``finish_timeout_s`` is None, or, with ``finish`` only, a positive number of seconds: the time from the first
+    ``begin_stop`` to the cancellation of the rollouts that still run (``cancel_rollouts``). Each of those goes back
+    to the queue, as with ``requeue``; a rollout whose trial has ended keeps its result. A failed rollout is retried: a
+    trial fails for reasons outside its input, such as a sandbox that did not start. A rollout of a harness tree whose
+    task needs what the tree's agent does not give it (``task_agent_tools``) fails for good, and so does a rollout
+    that requires prepared templates when its task's template item did not finish.
 
-    Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
+    Purpose: the evaluation service starts one (``start``), lets it begin to stop as soon as the process begins to
+    stop (``begin_stop``), and stops it (``stop``).
     """
 
     permanent_errors = ()
@@ -668,9 +695,11 @@ class EvaluationRolloutWorker(QueueWorker):
         poll_seconds: float = 0.5,
         slots: int = 1,
         on_stop: str = "requeue",
+        finish_timeout_s: float | None = None,
     ) -> None:
         if on_stop not in ON_STOP_CHOICES:
             raise ValueError(f"on_stop must be one of {', '.join(ON_STOP_CHOICES)}, not {on_stop!r}")
+        check_finish_timeout(on_stop, finish_timeout_s)
         super().__init__(
             queue,
             EVALUATIONS_QUEUE,
@@ -684,8 +713,62 @@ class EvaluationRolloutWorker(QueueWorker):
         self.trial_observer = trial_observer
         self.agent_host = agent_host
         self.on_stop = on_stop
-        #: The event that cancels the running rollouts: the worker's stop with ``requeue``, never with ``finish``.
+        self.finish_timeout_s = finish_timeout_s
+        #: The event that cancels the running rollouts: the worker's stop with ``requeue``; with ``finish``, the end of
+        #: ``finish_timeout_s``, and never without it.
         self.rollouts_cancelled = self.stopped if on_stop == "requeue" else threading.Event()
+        #: The timer that ends ``finish_timeout_s``, from the first ``begin_stop`` until ``stop`` returns; else None.
+        self.cancel_timer: threading.Timer | None = None
+        #: Makes ``begin_stop`` one step, so that two calls start one timer.
+        self.stop_lock = threading.Lock()
+
+    def start(self) -> None:
+        if self.thread is None:
+            # A worker that starts again after a stop runs its rollouts to the end again.
+            self.rollouts_cancelled.clear()
+        super().start()
+
+    def begin_stop(self) -> None:
+        """Take no new rollout. With ``requeue``, cancel the running rollouts now. With ``finish_timeout_s``, start a
+        timer that cancels the rollouts that still run that many seconds after the first call (``cancel_rollouts``).
+        A later call does not move that time."""
+        with self.stop_lock:
+            if self.stopped.is_set():
+                return
+            self.stopped.set()
+            if self.finish_timeout_s is None:
+                return
+            timer = threading.Timer(self.finish_timeout_s, self.cancel_rollouts)
+            timer.daemon = True
+            timer.start()
+            # Only a started timer is kept, so that ``stop`` joins a thread that runs.
+            self.cancel_timer = timer
+        logger.info(
+            "evaluation worker %s takes no new rollout; it cancels the rollouts that still run in %.0f s",
+            self.worker_id,
+            self.finish_timeout_s,
+        )
+
+    def cancel_rollouts(self) -> None:
+        """Cancel the rollouts that still run at the end of ``finish_timeout_s``. Each one stops its trial and goes
+        back to the queue (``run_while_held``), and another worker starts it again."""
+        logger.warning(
+            "evaluation worker %s cancels the rollouts that still run %.0f s after its stop began",
+            self.worker_id,
+            self.finish_timeout_s,
+        )
+        self.rollouts_cancelled.set()
+
+    def stop(self) -> None:
+        """Begin to stop (``begin_stop``), wait until each running rollout has finished or gone back to the queue, and
+        end the timer of ``finish_timeout_s``."""
+        self.begin_stop()
+        super().stop()
+        with self.stop_lock:
+            timer, self.cancel_timer = self.cancel_timer, None
+        if timer is not None:
+            timer.cancel()
+            timer.join()
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         score, rewards, error = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
@@ -884,6 +967,10 @@ class TaskTemplateWorker(QueueWorker):
         self.endpoints = endpoints
         self.builder = builder
 
+    def begin_stop(self) -> None:
+        """Take no new template item, and cancel the running builds now: each one goes back to the queue."""
+        self.stopped.set()
+
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         rollout = EvaluationRollout.from_item(item)
         owner = self.endpoints.task_owner(rollout)
@@ -941,6 +1028,7 @@ __all__ = [
     "TaskTemplateWorker",
     "TreeHarness",
     "agent_harness",
+    "check_finish_timeout",
     "evaluation_call",
     "harbor_agent",
     "reply_summary",

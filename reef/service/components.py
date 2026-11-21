@@ -316,9 +316,15 @@ class QueueServiceApp(ComponentApp):
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
         app = service_application(settings.tokens)
 
-        async def close_dispatcher(app: web.Application) -> None:
-            dispatcher.close()
+        async def stop_taking_work(app: web.Application) -> None:
+            # Shutdown hooks run right after the signal and before the HTTP drain, so a stop deadline starts here.
+            dispatcher.workers.begin_stop()
 
+        async def close_dispatcher(app: web.Application) -> None:
+            # The workers can take long to stop, so the event loop does not wait on them.
+            await asyncio.to_thread(dispatcher.close)
+
+        app.on_shutdown.append(stop_taking_work)
         app.on_cleanup.append(close_dispatcher)
         return app
 

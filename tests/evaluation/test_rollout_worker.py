@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 import urllib.request
 from collections.abc import Iterator, Mapping
@@ -15,6 +16,7 @@ from typing import cast
 
 import pytest
 from reef_client.serve import CapturedTurn
+from tests.support.polling import wait_until
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
@@ -30,6 +32,7 @@ from reef.evaluation.rollout_worker import (
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
+    check_finish_timeout,
     evaluation_call,
     reply_summary,
     rollout_item_id,
@@ -40,7 +43,7 @@ from reef.evaluation.rollout_worker import (
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
-from reef.execution.workers import WorkerStoppedError
+from reef.execution.workers import ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork, WorkLeaseLostError, WorkQueue
@@ -484,6 +487,26 @@ def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops
     assert cancelled.is_set()
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("lease_lost", [False, True])
+def test_work_that_ended_before_the_stop_keeps_its_result_unless_the_lease_is_lost(lease_lost):
+    lost, stopped = threading.Event(), threading.Event()
+    stopped.set()
+    if lease_lost:
+        lost.set()
+
+    async def held() -> str:
+        ended = asyncio.get_running_loop().create_future()
+        ended.set_result("scored")
+        return await run_while_held(ended, lost, stopped)
+
+    if lease_lost:
+        with pytest.raises(WorkLeaseLostError):
+            asyncio.run(held())
+    else:
+        assert asyncio.run(held()) == "scored"
+
+
 def e2b_rollout() -> EvaluationRollout:
     return replace(rollout(), environment="e2b")
 
@@ -707,48 +730,269 @@ def test_only_a_rollout_on_e2b_requires_prepared_templates():
 
 
 class HeldLab(CalledThenFailedLab):
-    """A ``TaskLab`` whose trial makes one model call, as ``CalledThenFailedLab``, then runs until ``released`` is
-    set, and ends with the reward 1. ``started`` is set once the call has an answer."""
+    """A ``TaskLab`` whose trial of each task in ``tasks`` makes one model call, as ``CalledThenFailedLab``, then runs
+    until ``released[task]`` is set, and ends with the reward 1.
 
-    def __init__(self) -> None:
-        self.started = threading.Event()
-        self.released = threading.Event()
+    ``started[task]`` is set once the call has an answer. A cancelled trial sets ``cleaned_up[task]`` as it stops, as
+    Harbor stops the sandbox of a cancelled trial. Each of the three maps holds one event for each task.
+    """
+
+    def __init__(self, *tasks: str) -> None:
+        self.started = {task: threading.Event() for task in tasks}
+        self.released = {task: threading.Event() for task in tasks}
+        self.cleaned_up = {task: threading.Event() for task in tasks}
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        task = Path(task_path).name
         await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
-        self.started.set()
-        while not self.released.is_set():
-            await asyncio.sleep(0.01)
+        self.started[task].set()
+        try:
+            while not self.released[task].is_set():
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            self.cleaned_up[task].set()
+            raise
         return RolloutRow(rewards={"reward": 1.0}, error=None, trial_uri=None)
+
+
+def held_rollout(task_index: int, task_name: str) -> EvaluationRollout:
+    """The rollout of task ``task_name`` at ``task_index``, whose agent calls the model through the rollout's
+    endpoint, as ``HeldLab`` needs."""
+    return replace(
+        rollout(),
+        task_index=task_index,
+        task_name=task_name,
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+    )
+
+
+def add_rollout(queue: WorkQueue, value: EvaluationRollout) -> None:
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("on_stop", "state", "error"), [("requeue", "queued", "the worker stopped"), ("finish", "finished", None)]
+    ("on_stop", "finish_timeout_s", "state", "error"),
+    [
+        ("requeue", None, "queued", "the worker stopped"),
+        ("finish", None, "finished", None),
+        # A rollout that finishes before the timeout ends the stop, and the stop ends the timer.
+        ("finish", 3600.0, "finished", None),
+    ],
 )
 def test_a_stopping_worker_requeues_or_finishes_the_rollouts_that_it_runs(
-    tmp_path, monkeypatch, on_stop, state, error
+    tmp_path, monkeypatch, on_stop, finish_timeout_s, state, error
 ):
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     queue = memory_coordination().work_queue
-    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
-    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    lab = HeldLab()
+    value = held_rollout(2, "add")
+    add_rollout(queue, value)
+    lab = HeldLab("add")
     worker = ServedWorker(
-        queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab, slots=2, on_stop=on_stop
+        queue,
+        AnsweringEndpoints(tmp_path / "tasks"),
+        worker_id="w",
+        lab=lab,
+        slots=2,
+        on_stop=on_stop,
+        finish_timeout_s=finish_timeout_s,
     )
     assert worker.run_once() is True
-    assert lab.started.wait(10)
+    assert lab.started["add"].wait(10)
+    worker.begin_stop()
+    timer = worker.cancel_timer
+    assert (timer is None) == (finish_timeout_s is None)
     # The rollout ends only when the lab lets it, so a worker that cancels it stops first.
-    threading.Timer(0.3, lab.released.set).start()
+    threading.Timer(0.3, lab.released["add"].set).start()
     worker.stop()
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert (item.state, item.error) == (state, error)
+    assert lab.cleaned_up["add"].is_set() == (on_stop == "requeue")
     if on_stop == "finish":
         assert item.result == {"score": 1.0, "rewards": {"reward": 1.0}, "error": None}
+        assert not worker.rollouts_cancelled.is_set()
+    assert worker.cancel_timer is None and (timer is None or not timer.is_alive())
+
+
+class GatedCutoffWorker(ServedWorker):
+    """A ``ServedWorker`` whose cutoff waits, once the timer of ``finish_timeout_s`` calls it, until the test sets
+    ``cutoff_allowed``. So the test decides what ends before the cutoff, with no race against the clock.
+
+    ``cutoff_reached`` is set when the timer calls the cutoff, and ``cutoff_count`` counts the calls.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.cutoff_reached = threading.Event()
+        self.cutoff_allowed = threading.Event()
+        self.cutoff_count = 0
+
+    def cancel_rollouts(self) -> None:
+        self.cutoff_count += 1
+        self.cutoff_reached.set()
+        self.cutoff_allowed.wait(10)
+        super().cancel_rollouts()
 
 
 @pytest.mark.unit
-def test_a_worker_refuses_an_unknown_stop():
-    with pytest.raises(ValueError, match="on_stop must be one of requeue, finish, not 'drain'"):
-        ServedWorker(memory_coordination().work_queue, UnreachableEndpoints(), worker_id="w", on_stop="drain")
+def test_a_stopping_worker_keeps_the_rollout_that_finishes_in_time_and_gives_back_the_one_that_runs_at_the_cutoff(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    # Each rollout has one attempt: a stop that counted as an attempt would leave it none.
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 1})
+    in_time, at_cutoff, fresh = held_rollout(0, "in-time"), held_rollout(1, "at-cutoff"), held_rollout(2, "fresh")
+    add_rollout(queue, in_time)
+    add_rollout(queue, at_cutoff)
+    lab = HeldLab("in-time", "at-cutoff", "fresh")
+    endpoints = AnsweringEndpoints(tmp_path / "tasks")
+    # Three slots: the worker has a free slot while it stops, and still takes no new rollout.
+    worker = GatedCutoffWorker(
+        queue, endpoints, worker_id="w", lab=lab, poll_seconds=0.01, slots=3, on_stop="finish", finish_timeout_s=0.05
+    )
+    workers = ServiceWorkers()
+    workers.add(worker)
+    workers.start()
+    assert lab.started["in-time"].wait(10) and lab.started["at-cutoff"].wait(10)
+
+    workers.begin_stop()
+    timer = worker.cancel_timer
+    # Another stop request keeps the cutoff of the first.
+    workers.begin_stop()
+    assert timer is not None and worker.cancel_timer is timer
+    add_rollout(queue, fresh)
+    assert worker.cutoff_reached.wait(10)
+    lab.released["in-time"].set()
+    wait_until(lambda: queue.read(EVALUATIONS_QUEUE, in_time.item_id()).state == "finished")
+    worker.cutoff_allowed.set()
+    workers.stop()
+
+    finished = queue.read(EVALUATIONS_QUEUE, in_time.item_id())
+    assert (finished.state, finished.attempt_count, finished.stopped_attempt_count) == ("finished", 1, 0)
+    assert finished.result == {"score": 1.0, "rewards": {"reward": 1.0}, "error": None}
+    given_back = queue.read(EVALUATIONS_QUEUE, at_cutoff.item_id())
+    assert (given_back.state, given_back.error) == ("queued", "the worker stopped")
+    assert (given_back.attempt_count, given_back.stopped_attempt_count) == (1, 1)
+    assert queue.has_attempts_left(given_back)
+    assert lab.cleaned_up["at-cutoff"].is_set() and not lab.cleaned_up["in-time"].is_set()
+    assert queue.read(EVALUATIONS_QUEUE, fresh.item_id()).attempt_count == 0
+    assert worker.cutoff_count == 1 and worker.cancel_timer is None and not timer.is_alive()
+    # Another worker starts the rollout that was given back from its start, and finishes it.
+    lab.released["at-cutoff"].set()
+    assert ServedWorker(queue, endpoints, worker_id="w2", lab=lab).run_once() is True
+    restarted = queue.read(EVALUATIONS_QUEUE, at_cutoff.item_id())
+    assert (restarted.state, restarted.attempt_count, restarted.stopped_attempt_count) == ("finished", 2, 1)
+
+
+@pytest.mark.unit
+def test_a_rollout_that_the_worker_takes_as_its_stop_begins_goes_back_with_no_trial(tmp_path, monkeypatch):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 1})
+    value = held_rollout(2, "add")
+    add_rollout(queue, value)
+    # No candidate is served and the lab runs no trial, which would write under ``trials``.
+    lab = NoSandboxLab(tmp_path / "trials")
+    worker = ServingRefusedWorker(
+        queue, UnreachableEndpoints(), worker_id="w", lab=lab, on_stop="finish", finish_timeout_s=60.0
+    )
+    take = queue.take
+
+    def take_as_the_stop_begins(*args, **kwargs):
+        item = take(*args, **kwargs)
+        worker.begin_stop()
+        return item
+
+    monkeypatch.setattr(queue, "take", take_as_the_stop_begins)
+    assert worker.run_once() is False
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == ("queued", "the worker stopped")
+    assert (item.attempt_count, item.stopped_attempt_count) == (1, 1) and queue.has_attempts_left(item)
+    assert not (tmp_path / "trials").exists()
+    # A stopping worker takes no rollout at all.
+    assert worker.run_once() is False
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).attempt_count == 1
+    worker.stop()
+    assert worker.cancel_timer is None
+
+
+class SlowCancelBuilder(TaskTemplateBuilder):
+    """A builder whose build runs until it is cancelled, and whose cancellation ends only when ``ended`` is set, as a
+    build that waits for its builder to answer. ``started`` is set when the build starts; ``saw_end`` is whether
+    ``ended`` was set within 10 s of the cancellation."""
+
+    def __init__(self, ended: threading.Event) -> None:
+        self.ended = ended
+        self.started = threading.Event()
+        self.saw_end = False
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.saw_end = await asyncio.to_thread(self.ended.wait, 10)
+            raise
+
+
+@pytest.mark.unit
+def test_the_cutoff_of_the_rollouts_does_not_wait_for_the_stop_of_the_template_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    queue = memory_coordination().work_queue
+    value = held_rollout(2, "add")
+    add_rollout(queue, value)
+    template = e2b_rollout()
+    template_id = template_item_id(template.evaluation_id, template.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, template_id, "s", TASK_TEMPLATE_KIND, template.to_payload()))
+    lab = HeldLab("add")
+    endpoints = AnsweringEndpoints(tmp_path / "tasks")
+    rollouts = ServedWorker(
+        queue, endpoints, worker_id="w", lab=lab, poll_seconds=0.01, on_stop="finish", finish_timeout_s=0.05
+    )
+    # The template worker's stop waits until the rollout worker has cancelled its rollouts.
+    builder = SlowCancelBuilder(rollouts.rollouts_cancelled)
+    # As in a process of the evaluation service: the template worker is added last, so it stops first.
+    workers = ServiceWorkers()
+    workers.add(rollouts)
+    workers.add(TaskTemplateWorker(queue, endpoints, builder, worker_id="t", poll_seconds=0.01))
+    workers.start()
+    assert lab.started["add"].wait(10) and builder.started.wait(10)
+
+    workers.stop()
+
+    assert builder.saw_end
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.stopped_attempt_count) == ("queued", 1) and lab.cleaned_up["add"].is_set()
+    template_item = queue.read(EVALUATIONS_QUEUE, template_id)
+    assert (template_item.state, template_item.stopped_attempt_count) == ("queued", 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("on_stop", "finish_timeout_s", "message"),
+    [
+        ("drain", None, "on_stop must be one of requeue, finish, not 'drain'"),
+        ("requeue", 60.0, "finish_timeout_s needs on_stop: finish"),
+        ("finish", 0.0, "finish_timeout_s is a number of seconds above 0"),
+        ("finish", math.inf, "finish_timeout_s is a number of seconds above 0"),
+        # Longer than a timer can wait, and an int too large for a float.
+        ("finish", math.nextafter(threading.TIMEOUT_MAX, math.inf), "at most"),
+        ("finish", 10**400, "at most"),
+    ],
+)
+def test_a_worker_refuses_an_unknown_stop_and_a_timeout_that_it_cannot_keep(on_stop, finish_timeout_s, message):
+    with pytest.raises(ValueError, match=message):
+        ServedWorker(
+            memory_coordination().work_queue,
+            UnreachableEndpoints(),
+            worker_id="w",
+            on_stop=on_stop,
+            finish_timeout_s=finish_timeout_s,
+        )
+
+
+@pytest.mark.unit
+def test_the_longest_finish_timeout_is_a_wait_that_the_timer_can_keep():
+    # ``threading.Timer`` waits on a timed lock, which takes ``TIMEOUT_MAX`` and refuses a much longer timeout.
+    assert threading.Lock().acquire(timeout=threading.TIMEOUT_MAX)
+    with pytest.raises(OverflowError):
+        threading.Lock().acquire(timeout=2 * threading.TIMEOUT_MAX)
+    check_finish_timeout("finish", threading.TIMEOUT_MAX)
