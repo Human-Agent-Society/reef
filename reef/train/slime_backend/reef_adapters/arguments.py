@@ -9,12 +9,17 @@ from argparse import Namespace
 
 
 class SlimeArguments(Namespace):
-    """Slime's namespace with explicit Reef adapter inputs and derived hooks."""
+    """Slime's namespace with explicit Reef adapter inputs and derived hooks.
+
+    use_dynamic_batch_size is a bool. A partial namespace defaults it to
+    True. Fixed batching requires micro_batch_size to be a positive int.
+    Dynamic batching does not use micro_batch_size for step admission.
+    """
 
     num_rollout: int
     global_batch_size: int
     micro_batch_size: int
-    use_dynamic_batch_size: bool
+    use_dynamic_batch_size: bool = True
     save_hf: str
     save: str
     compute_advantages_and_returns: bool
@@ -100,3 +105,12 @@ class SlimeArguments(Namespace):
     reef_chained_megatron_init_path: str | None = None
     reef_chained_critic_args_hook_path: str | None = None
     reef_chained_model_provider_path: str | None = None
+
+    def __init__(self, **values: object) -> None:
+        super().__init__(**values)
+        if type(self.use_dynamic_batch_size) is not bool:
+            raise ValueError("use_dynamic_batch_size must be a bool.")
+        if not self.use_dynamic_batch_size:
+            size = values.get("micro_batch_size")
+            if type(size) is not int or size < 1:
+                raise ValueError("Fixed batching needs a positive micro_batch_size.")

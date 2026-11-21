@@ -365,6 +365,35 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("layout", "message"),
+    [
+        ({"dp_size": 1, "vpp_size": 0}, "positive vpp_size"),
+        ({"dp_size": 1, "vpp_size": 2}, "positive microbatch_group_size_per_vp_stage"),
+        (
+            {"dp_size": 1, "vpp_size": 2, "microbatch_group_size_per_vp_stage": 0},
+            "positive microbatch_group_size_per_vp_stage",
+        ),
+    ],
+)
+def test_the_batch_processor_rejects_an_invalid_pipeline_layout(layout, message):
+    with pytest.raises(ValueError, match=message):
+        TrainingBatchProcessor(SlimeArguments(), layout)
+
+
+@pytest.mark.unit
+def test_the_fixed_batch_minimum_includes_virtual_pipeline_alignment() -> None:
+    processor = TrainingBatchProcessor(
+        SlimeArguments(use_dynamic_batch_size=False, micro_batch_size=2, reef_rollout_tensor_dtypes={}),
+        {"dp_size": 2, "vpp_size": 2, "microbatch_group_size_per_vp_stage": 2},
+    )
+
+    with pytest.raises(ValueError, match="needs at least 7 rows"):
+        processor.check_external_steps(list(range(6)), [6], 0)
+    processor.check_external_steps(list(range(7)), [7], 0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("dp_size", "remainder", "step_sizes"), [(8, "partial", []), (1, "partial", [16, 1]), (8, "drop", [16])]
 )
 def test_a_partial_step_must_fit_the_worker_layout(tmp_path, stacks, dp_size, remainder, step_sizes) -> None:

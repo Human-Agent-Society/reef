@@ -61,7 +61,9 @@ class TrainingBatchProcessor:
 
     ``args`` are the workers' startup arguments, from which the processor
     reads Slime's batch options. ``train_parallel_config`` is the workers'
-    parallel layout, whose ``dp_size`` is a positive int. ``rollout_data_keys``
+    parallel layout. Its dp_size and vpp_size are positive integers. Omitted
+    vpp_size means 1. If vpp_size exceeds 1, the layout must give a positive
+    microbatch_group_size_per_vp_stage. ``rollout_data_keys``
     are the per-sample keys beyond Slime's own that a rank's data carries, and
     ``tensor_dtypes`` maps a key to the dtype name it is tensorized as. Both
     start from ``args`` and grow only through ``register_keys``. The training
@@ -73,6 +75,13 @@ class TrainingBatchProcessor:
         dp_size = train_parallel_config.get("dp_size")
         if isinstance(dp_size, bool) or not isinstance(dp_size, int) or dp_size < 1:
             raise ValueError(f"the training parallel layout needs a positive dp_size, got {dp_size!r}")
+        vpp_size = train_parallel_config.get("vpp_size", 1)
+        if type(vpp_size) is not int or vpp_size < 1:
+            raise ValueError("The training parallel layout needs a positive vpp_size.")
+        if vpp_size > 1:
+            group_size = train_parallel_config.get("microbatch_group_size_per_vp_stage")
+            if type(group_size) is not int or group_size < 1:
+                raise ValueError("Virtual pipeline parallelism needs a positive microbatch_group_size_per_vp_stage.")
         self.args = args
         self.train_parallel_config = dict(train_parallel_config)
         self.rollout_data_keys: tuple[str, ...] = tuple(args.custom_rollout_data_keys or ())
@@ -101,9 +110,8 @@ class TrainingBatchProcessor:
         """
         layout = self.train_parallel_config
         dp_size = layout["dp_size"]
-        microbatches = dp_size
-        if layout["vpp_size"] > 1:
-            microbatches *= layout["microbatch_group_size_per_vp_stage"]
+        microbatch_group = layout["microbatch_group_size_per_vp_stage"] if layout.get("vpp_size", 1) > 1 else 1
+        microbatches = dp_size * microbatch_group
         if self.args.use_dynamic_batch_size:
             minimum_rows = microbatches
         else:
