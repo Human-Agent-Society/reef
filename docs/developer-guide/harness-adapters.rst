@@ -5,6 +5,11 @@ Harness adapters
 :Before you start: the harness tree and the loop from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
 :You will have: an adapter that Reef can render, run in runs and Harbor tasks, and install on a person's machine
 
+For a Python program or an existing Harbor agent class, start with
+`Connect your own agent <../user-guide/custom-agents.rst>`__. Those entry
+points can reuse an existing adapter. This page defines the adapter contract
+for an agent with its own configuration or plugin format.
+
 An adapter connects a harness tree to one agent. It is one file,
 ``reef/harness/adapters/<name>/adapter.yaml``, and an optional ``render.py``
 for what the file cannot state. For an agent that runs on a person's machine,
