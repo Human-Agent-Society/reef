@@ -286,11 +286,14 @@ def test_a_build_and_a_read_that_an_overloaded_api_refuses_are_tried_again(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "error", ["Error: HTTP 500: <html>Internal Server Error</html>", "Error: HTTP 503: try later"]
+)
 def test_a_proxy_failure_waits_for_the_build_already_under_the_alias(
-    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, error: str
 ) -> None:
     monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
-    monkeypatch.setenv("FAKE_AENV_ERROR", "Error: HTTP 500: <html>Internal Server Error</html>")
+    monkeypatch.setenv("FAKE_AENV_ERROR", error)
     fake = FakeAgentEnv([None, ("t1", "waiting"), ("t1", "building"), ("t1", "ready")])
     ensured(fake, task_build(tmp_path))
     assert fake.deleted == []
