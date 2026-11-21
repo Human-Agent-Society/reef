@@ -180,7 +180,8 @@ def test_a_rollout_with_no_group_to_train_fails_the_job_before_the_workers_train
 def test_failed_generation_releases_engines_and_keeps_the_original_error(tmp_path, task_stack, monkeypatch, failure):
     stack, events, group = task_stack
 
-    def generate(_rollout):
+    def generate(rollout_id):
+        assert rollout_id == stack.component.next_rollout_id
         raise failure("generation stopped")
 
     def release():

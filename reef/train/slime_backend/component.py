@@ -302,7 +302,9 @@ class SlimeJobRunner(SlimeJobs):
     earlier checkpoint records the state of the job's start, since the
     objective computes its state for the whole data. A job whose objective
     skips its data saves no checkpoint, so the next job continues the start's
-    weights and objective state, as on every training component.
+    weights and objective state, as on every training component. If the chat
+    template rejects every trajectory, ``run`` raises ``RuntimeError`` before
+    training or saving a checkpoint.
 
     The workers load Slime's latest checkpoint, so a job's start must name
     it: the latest saved rollout's start, or, before the first rollout, the
@@ -311,7 +313,9 @@ class SlimeJobRunner(SlimeJobs):
 
     A dataset job and a task job need ``rollout_group`` and run Slime's own
     loop (``run_slime_loop``). A task job reports each task's rewards of the
-    rollouts that ran (``rollout_rewards``, by task name).
+    rollouts that ran (``rollout_rewards``, by task name). If engine sync or
+    generation raises, the loop attempts release and propagates the original
+    failure.
 
     ``args`` are the arguments the workers started with; ``storage`` bounds
     the paired checkpoints on disk, and has a critic root exactly when a
@@ -655,6 +659,9 @@ class SlimeJobRunner(SlimeJobs):
         their memory, and the workers train it. Every ``save_interval`` rollouts (None: only the last) and the last
         save a checkpoint, whose step counts the job's rollouts. With ``tasks``, a rollout whose prompt groups cannot
         train fails the job (``check_rollout_can_train``).
+
+        If sync or generation raises, attempt engine release before re-raising that failure. Log any release
+        failure in this case. After successful generation, a release failure stops the rollout before training.
         """
         if self.rollout_group is None:
             raise RuntimeError("Slime's own loop rolls out on the serving session, which this runner lacks")
