@@ -39,13 +39,7 @@ from reef.train.slime_backend.dataset import DATASET_FILE, save_root
 from reef.train.slime_backend.engine_chat import EngineChat, TrialEngineChat
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SLIME_DEFAULT_SOURCE_PATH
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.task_rollouts import (
-    ROLLOUT_SCENARIO,
-    ChatEndpoint,
-    HarborSettings,
-    rollout_assembly,
-    rollout_sample,
-)
+from reef.train.task_rollouts import ROLLOUT_SCENARIO, ChatEndpoint, HarborSettings, rollout_assembly, rollout_sample
 
 logger = logging.getLogger(__name__)
 
