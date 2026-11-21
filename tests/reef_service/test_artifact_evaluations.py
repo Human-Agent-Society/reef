@@ -752,18 +752,30 @@ def test_filtered_rollout_pages_keep_numeric_repeat_order(tmp_path: Path) -> Non
                 current.store.evaluations.create(
                     evaluation_id=evaluation_id, owner="test", request=request, created_at=time.time()
                 )
+            calls = dispatcher.data_store
+            assert calls is not None
+            for repeat in (99_998, 99_999):
+                summary = EvaluationCallSummary(
+                    0, repeat, 1, 0, "/v1/chat/completions", 200, 10.0, 0.5, 3, 2, "stop", 0
+                )
+                calls.create(
+                    "s", [evaluation_call_item("s", artifact_id, evaluation_id, EvaluationCall(summary, None, None))]
+                )
             route = f"/reef/scenarios/s/evaluations/{evaluation_id}/rollouts"
             unfiltered = await client.get(f"{route}?offset=99999&limit=2&calls=false", headers=AUTH)
             assert unfiltered.status == 200, await unfiltered.text()
             assert [row["repeat"] for row in (await unfiltered.json())["rollouts"]] == [99_999, 100_000]
             for state in ("running", "failed"):
                 for offset, repeat in enumerate((99_999, 100_000)):
-                    response = await client.get(
-                        f"{route}?offset={offset}&limit=1&state={state}&calls=false", headers=AUTH
-                    )
+                    response = await client.get(f"{route}?offset={offset}&limit=1&state={state}", headers=AUTH)
                     assert response.status == 200, await response.text()
                     page = await response.json()
-                    assert (page["total"], [row["repeat"] for row in page["rollouts"]]) == (2, [repeat])
+                    [row] = page["rollouts"]
+                    assert (page["total"], row["repeat"]) == (2, repeat)
+                    if repeat == 99_999:
+                        assert row["calls"] == {"count": 1, "failed": 0, "prompt_tokens": 3, "completion_tokens": 2}
+                    else:
+                        assert row["calls"] is None
                 if state == "running":
                     for item in taken:
                         assert item is not None

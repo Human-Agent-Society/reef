@@ -1232,10 +1232,66 @@ def test_the_calls_of_one_rollout_leave_out_the_other_rollouts_of_the_evaluation
         )
         return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
 
-    store.create("acme", [call_item(1, 1), call_item(1, 10), call_item(11, 1), call_item(1, 1, "verifier")])
+    store.create(
+        "acme",
+        [
+            call_item(1, 1, "verifier"),
+            call_item(1, 10),
+            call_item(11, 1),
+            call_item(1, 1),
+            trajectory("coding/e1:1:1:not-a-call"),
+            evaluation_call_item("other", "a1", "e1", evaluation_call(1, 1, 8)[0]),
+        ],
+    )
+    store.create("another-owner", [call_item(1, 1)])
     kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 1))
-    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:0", "coding/e1:1:1:1:verifier:0"]
+    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:verifier:0", "coding/e1:1:1:1:0"]
+    assert not list(evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 0)))
     assert len(list(evaluation_call_items(store, "acme", "coding", "e1", content=False))) == 4
+
+
+def test_sparse_rollout_reads_do_not_scan_the_other_calls_on_fresh_sqlite(tmp_path):
+    def call_item(task_index: int, index: int = 0) -> NewItem:
+        summary = EvaluationCallSummary(
+            task_index, 0, 1, index, "/v1/chat/completions", 200, 10.0, 0.5, None, None, None, 0
+        )
+        return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
+
+    with closing(SQLiteDataStore(None, LocalTaskFileStore(tmp_path))) as store:
+        with store.transaction(read_only=True) as connection:
+            sqlite = connection.connection.driver_connection
+        store.create("acme", [call_item(0), call_item(95)])
+
+        def read_sparse_rollouts() -> int:
+            progress = 0
+
+            def count() -> int:
+                nonlocal progress
+                progress += 1
+                return 0
+
+            sqlite.set_progress_handler(count, 100)
+            try:
+                found = [
+                    item.item_id
+                    for index in range(96)
+                    for item in evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(index, 0))
+                ]
+                assert found == ["coding/e1:0:0:1:0", "coding/e1:95:0:1:0"]
+                return progress
+            finally:
+                sqlite.set_progress_handler(None, 0)
+
+        sparse = read_sparse_rollouts()
+        store.create("acme", [call_item(index) for index in range(96, 2_096)])
+        crowded = read_sparse_rollouts()
+        assert crowded <= 2 * sparse + 10
+
+        # One rollout can span several storage pages. The cursor follows insertion order, not ID sort order.
+        new_calls = [call_item(0, index) for index in range(data_module.MAX_QUERY_LIMIT + 1, 0, -1)]
+        store.create("acme", new_calls)
+        kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(0, 0))
+        assert [item.item_id for item in kept] == ["coding/e1:0:0:1:0", *(call.item_id for call in new_calls)]
 
 
 def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):

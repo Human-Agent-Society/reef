@@ -35,7 +35,15 @@ from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, Evaluati
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, NewItem, StoredItem, record_source
+from reef.storage.data import (
+    MAX_QUERY_LIMIT,
+    DataStore,
+    ItemConflictError,
+    NewItem,
+    StoredItem,
+    group_value,
+    record_source,
+)
 from reef.storage.item_kinds import (
     copied_record,
     evaluation_call_id,
@@ -176,22 +184,30 @@ def evaluation_call_items(
     content: bool,
     rollout: tuple[int, int] | None = None,
 ) -> Iterator[StoredItem]:
-    """The evaluation calls of evaluation ``evaluation_id`` of ``scenario``, in sequence order, a page at a time: one
-    query of the record items of ``scenario`` with that ``evaluation_id`` for each page. With ``rollout``, a pair
-    ``(task_index, repeat)``, only the calls of that rollout: the query keeps only the IDs that start with the
-    rollout's (``evaluation_rollout_id_prefix``), so the store does not return the other calls of the evaluation."""
+    """Read the calls of this evaluation in sequence order, one page at a time.
+
+    A rollout, given by task index and repeat, limits the IDs to its prefix.
+    """
     id_prefix = None if rollout is None else f"{scenario}/{evaluation_rollout_id_prefix(evaluation_id, *rollout)}"
     after = 0
     while page := data.query(
         owner,
-        kind="record",
-        origin=scenario,
-        group=("evaluation_id", evaluation_id),
+        # For a single rollout, only use the ID range. The kind and group could select a much larger index range.
+        kind="record" if id_prefix is None else None,
+        origin=scenario if id_prefix is None else None,
+        group=("evaluation_id", evaluation_id) if id_prefix is None else None,
         after=after,
         content=content,
         id_prefix=id_prefix,
     ):
-        yield from (item for item in page if record_source(item.metadata) == "evaluation")
+        yield from (
+            item
+            for item in page
+            if item.kind == "record"
+            and group_value(item.metadata, "evaluation_id") == evaluation_id
+            and record_source(item.metadata) == "evaluation"
+            and origin_of(item) == scenario
+        )
         after = page[-1].sequence
 
 
