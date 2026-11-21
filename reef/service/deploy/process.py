@@ -22,12 +22,13 @@ import yaml
 
 from reef.service.deploy.config_utils import interpolate_config
 
-_DEFAULT_GRACE_TIMEOUT = 30
+DEFAULT_GRACE_TIMEOUT_SECONDS = 30
 _PROCESS_REAP_TIMEOUT = 5
 
 
-def _log(msg: str) -> None:
-    print(f"[reef] {msg}", file=sys.stderr)
+def log_status(message: str) -> None:
+    """Print one status line of the deployment to stderr."""
+    print(f"[reef] {message}", file=sys.stderr)
 
 
 def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> list[str]:
@@ -109,11 +110,11 @@ class ProcessWorker:
     def _start_service(self, svc: Mapping[str, Any]) -> None:
         name = svc["name"]
         if self._is_alive(name):
-            _log(f"{name}: already running (pid {self._procs[name].pid})")
+            log_status(f"{name}: already running (pid {self._procs[name].pid})")
             return
         command = _command_argv(self.config, svc["command"])
         env = self._service_env(svc)
-        _log(f"starting {name}: {shlex.join(command)}")
+        log_status(f"starting {name}: {shlex.join(command)}")
         # The handle outlives this scope (closed in stop()); a context manager
         # would close it under the running service.
         log_fp = open(self._log_file(name), "a")  # noqa: SIM115
@@ -155,7 +156,7 @@ class ProcessWorker:
     def start(self) -> None:
         for svc in self.services:
             self._start_service(svc)
-        _log(f"stack up. logs: {self.run_dir}/*.log")
+        log_status(f"stack up. logs: {self.run_dir}/*.log")
 
     def _safe_process_group(self, name: str, proc: subprocess.Popen[bytes]) -> int | None:
         """Return the spawn-time PGID only when it is safe to signal."""
@@ -209,14 +210,14 @@ class ProcessWorker:
             except ProcessLookupError:
                 pass
             except PermissionError:
-                _log(f"could not signal {name} process group {pgid}; falling back to leader {proc.pid}")
+                log_status(f"could not signal {name} process group {pgid}; falling back to leader {proc.pid}")
         if proc.poll() is None:
             if signum == signal.SIGTERM:
                 proc.terminate()
             else:
                 proc.kill()
 
-    def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
+    def shutdown(self, grace: float = DEFAULT_GRACE_TIMEOUT_SECONDS) -> None:
         """Kill service process groups in reverse order: SIGTERM → wait → SIGKILL."""
         deadline = time.monotonic() + max(0, grace)
         targets = []
@@ -226,7 +227,7 @@ class ProcessWorker:
                 continue
             pgid = self._safe_process_group(name, proc)
             identity = f"process group {pgid}" if pgid is not None else f"pid {proc.pid}"
-            _log(f"stopping {name} ({identity})")
+            log_status(f"stopping {name} ({identity})")
             self._signal_process_tree(name, proc, signal.SIGTERM)
             targets.append((name, proc))
 
@@ -242,7 +243,7 @@ class ProcessWorker:
         pending = [(name, proc) for name, proc in pending if self._process_tree_alive(name, proc)]
         kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
         for name, proc in pending:
-            _log(f"{name}: process tree did not exit in {grace}s, SIGKILL")
+            log_status(f"{name}: process tree did not exit in {grace}s, SIGKILL")
             self._signal_process_tree(name, proc, kill_signal)
 
         reap_deadline = time.monotonic() + _PROCESS_REAP_TIMEOUT
@@ -254,7 +255,7 @@ class ProcessWorker:
                 try:
                     proc.wait(timeout=max(0, reap_deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
-                    _log(f"{name}: leader pid {proc.pid} could not be reaped after SIGKILL")
+                    log_status(f"{name}: leader pid {proc.pid} could not be reaped after SIGKILL")
             self._pid_file(name).unlink(missing_ok=True)
         for descriptor in self.routing_owner_descriptors:
             os.close(descriptor)
@@ -377,7 +378,7 @@ class RayProcessWorker(ProcessWorker):
         self._leases.append(write_fd)
         return proc
 
-    def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
+    def shutdown(self, grace: float = DEFAULT_GRACE_TIMEOUT_SECONDS) -> None:
         try:
             super().shutdown(grace=grace)
         finally:
