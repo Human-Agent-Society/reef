@@ -2408,7 +2408,8 @@ the method. Slime's rollout manager serves each task as a prompt, and
 group. Each rollout runs the agent in the task's Harbor environment, and the
 agent's model calls reach the engines. The rollout becomes one Slime sample,
 with the verifier's reward. Slime then computes the advantages with
-``advantage-estimator`` and trains ``policy_loss``. Each Slime rollout runs
+``advantage-estimator`` and trains ``policy_loss``. Reef refuses critic training, including the
+``ppo`` estimator, for task and dataset jobs. Each Slime rollout runs
 Slime's own sequence: the engines take the workers' weights, generate the
 rollout and free their memory, and the workers train it.
 

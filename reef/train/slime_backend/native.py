@@ -48,6 +48,11 @@ class SlimeNativeAlgorithm(SlimeAlgorithm):
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         if not args.compute_advantages_and_returns:
             raise RuntimeError(f"{source} needs Slime's advantages: remove --disable-compute-advantages-and-returns")
+        if args.advantage_estimator == "ppo" or args.use_critic:
+            raise RuntimeError(
+                f"{source} cannot train a critic in Slime's dataset or task loop. "
+                "Use an estimator that needs no critic, such as --advantage-estimator grpo."
+            )
 
 
 __all__ = ["DATASET_SOURCE_PATH", "SlimeNativeAlgorithm"]
