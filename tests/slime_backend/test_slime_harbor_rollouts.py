@@ -407,7 +407,12 @@ def test_a_failed_build_removes_the_tasks_samples_after_a_second_try(tmp_path, s
 
 
 class Args(SimpleNamespace):
-    """Slime's options that a task job reads, with the values that work."""
+    """Build the Slime options that task admission reads.
+
+    The defaults describe a valid task job. ``global_batch_size`` counts trials per optimizer step.
+    A valid size is a positive integer that divides ``rollout_batch_size * n_samples_per_prompt``.
+    ``overrides`` replaces defaults without validation so rejection tests can construct invalid options.
+    """
 
     def __init__(self, **overrides: Any) -> None:
         values = {
