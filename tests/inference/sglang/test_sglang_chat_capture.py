@@ -15,7 +15,7 @@ from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.inference.chat import sse_json_events
+from reef.inference.chat import StreamedToolCall, sse_json_events
 from reef.inference.interfaces import FixedEngineClients, InferenceArtifact, full_weight_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.service.inference_service import build_inference_app
@@ -234,6 +234,12 @@ def test_native_terminal_marker_does_not_hide_a_late_failure(failure) -> None:
             [event async for event in sse_json_events(chunks())]
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_streamed_tool_delta_refuses_an_empty_name() -> None:
+    with pytest.raises(ValueError, match="tool-call name must be a nonempty string"):
+        StreamedToolCall(0, "", "{}")
 
 
 @pytest.mark.unit
@@ -1175,7 +1181,7 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, argu
 
         @staticmethod
         def parse_non_stream(text):
-            before, _, _ = text.partition("<tool_call>")
+            before = text.partition("<tool_call>")[0]
             return before, [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
 
     async def run() -> None:

@@ -155,12 +155,16 @@ class StreamedToolCall:
     """One tool argument delta supplied by a native parser adapter to the chat relay.
 
     ``index`` is the parser's integer call position. ``name`` is a nonempty tool name or None when omitted.
-    ``arguments`` is the argument fragment, which may be empty. The relay checks the position and name.
+    ``arguments`` is the argument fragment, which may be empty. The relay checks the position and name across deltas.
     """
 
     index: int
     name: str | None
     arguments: str
+
+    def __post_init__(self) -> None:
+        if self.name is not None and (not isinstance(self.name, str) or not self.name):
+            raise ValueError("a streamed tool-call name must be a nonempty string or None")
 
 
 class StreamingToolParser(ABC):
