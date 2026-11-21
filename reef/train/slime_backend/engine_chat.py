@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from reef.train.task_rollouts import CHAT_COMPLETIONS_PATH, RolloutChat
@@ -42,6 +43,26 @@ REQUEST_OPTIONS = frozenset(
 DEFAULT_MAX_TOKENS = 1024
 
 
+@dataclass(frozen=True)
+class TrialEngineChat(RolloutChat):
+    """Bind one trial's Slime sampler options to a shared engine chat.
+
+    chat owns the tokenizer and engine connection. sampling_params maps SGLang
+    option names to their JSON values. answer delegates one path and request
+    body and returns the shared chat's status and body using those options.
+    """
+
+    chat: EngineChat
+    sampling_params: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.chat, EngineChat) or not isinstance(self.sampling_params, Mapping):
+            raise TypeError("A trial chat needs an engine chat and a mapping of sampler options.")
+
+    def answer(self, path: str, payload: Any) -> tuple[int, Mapping[str, Any]]:
+        return self.chat.answer(path, payload, sampling_params=self.sampling_params)
+
+
 class EngineChat(RolloutChat):
     """Answer a task job's OpenAI text chat calls on the rollout group's engines, with the training capture.
 
@@ -56,6 +77,10 @@ class EngineChat(RolloutChat):
     and with ``topk_logprobs`` the heads ``topk_indices`` and ``topk_log_probs``, one list of ``topk_logprobs`` per
     response token. Another path gets 404, a request outside text system, user and assistant messages (or with ``n``
     other than 1) 400, an engine error status its own status, and an unusable engine answer 502.
+
+    template_kwargs supplies the job's renderer defaults. A request may override
+    individual template keys. Trial sampling options override request sampling.
+    The request token limit remains bounded by the job and trial limits.
     """
 
     def __init__(
@@ -68,6 +93,7 @@ class EngineChat(RolloutChat):
         distribution: Mapping[str, float | int],
         max_response_tokens: int | None = None,
         topk_logprobs: int = 0,
+        template_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         if not router_url or not model_path or not runtime_load_id:
             raise ValueError("EngineChat needs a router URL, a model path and a runtime load ID")
@@ -86,6 +112,7 @@ class EngineChat(RolloutChat):
         self.runtime_load_id = runtime_load_id
         self.distribution = dict(distribution)
         self.max_response_tokens = max_response_tokens
+        self.template_kwargs = dict(template_kwargs or {})
         # The model's Hugging Face tokenizer, loaded at the first call.
         self.tokenizer: Any = None
 
@@ -121,7 +148,9 @@ class EngineChat(RolloutChat):
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode(errors="replace")[:400]
 
-    def answer(self, path: str, payload: Any) -> tuple[int, Mapping[str, Any]]:
+    def answer(
+        self, path: str, payload: Any, *, sampling_params: Mapping[str, Any] | None = None
+    ) -> tuple[int, Mapping[str, Any]]:
         if path != CHAT_COMPLETIONS_PATH:
             return 404, {"error": {"message": f"no route {path}"}}
         try:
@@ -129,13 +158,19 @@ class EngineChat(RolloutChat):
         except ValueError as exc:
             return 400, {"error": {"message": str(exc)}}
         sampling.update(self.distribution)
-        if self.max_response_tokens is not None:
-            sampling["max_new_tokens"] = min(sampling["max_new_tokens"], self.max_response_tokens)
+        trial = dict(sampling_params or {})
+        trial_limit = trial.pop("max_new_tokens", None)
+        sampling.update(
+            {name: value for name, value in trial.items() if value is not None and (name != "stop" or value)}
+        )
+        for limit in (self.max_response_tokens, trial_limit):
+            if limit is not None:
+                sampling["max_new_tokens"] = min(sampling["max_new_tokens"], limit)
         request: dict[str, Any] = {"sampling_params": sampling, "return_logprob": True}
         if self.topk_logprobs:
             request["top_logprobs_num"] = self.topk_logprobs
         try:
-            prompt = self.render(messages, template_kwargs)
+            prompt = self.render(messages, {**self.template_kwargs, **template_kwargs})
         except (ValueError, TypeError) as exc:
             return 400, {"error": {"message": f"the chat template cannot render the request: {exc}"}}
         try:
