@@ -1356,21 +1356,16 @@ downgrade without restoring a compatible backup.
        the task sandboxes that one process of the evaluation service holds at once, across all evaluations. Each
        running rollout holds one. Set it to the quota of the sandbox provider, divided by the evaluation processes.
    ``evaluation.on_stop`` : requeue
-       what an evaluation process does with the rollouts that it runs when it stops, for example on SIGTERM:
+       how an evaluation worker handles running rollouts when shutdown begins (for example, on SIGTERM).
 
-       - ``requeue``: it cancels each rollout and its sandbox, and gives the rollout back to the queue. Another
-         process starts the rollout again from its start. The stop does not count as an attempt.
-       - ``finish``: it takes no new rollout and stops when each running rollout has finished. Use it where processes
-         stop while they work, such as a scale-down or a deploy. A process that is killed first leaves its rollouts
-         to expire, and each one counts as an attempt. Set ``evaluation.finish_timeout_s`` when the stop deadline
-         can be shorter than a rollout.
+       - ``requeue`` cancels running rollouts and stops their sandboxes. Another worker can restart them from the
+         beginning. The interruption does not count toward the retry limit.
+       - ``finish`` stops taking new rollouts and lets running ones finish.
    ``evaluation.finish_timeout_s`` : unset
-       with ``on_stop: finish``, the seconds that a stopping process lets its running rollouts finish. The time starts
-       when the process begins to stop, for example on SIGTERM. A rollout that finishes in this time keeps its
-       result. Then the process cancels each rollout that still runs and gives it back to the queue, as ``requeue``
-       does. Unset, the process waits for every rollout. Set it shorter than the time from SIGTERM to a forced kill,
-       and keep a margin for the cancelled sandboxes to stop. For example, Kubernetes counts a ``preStop`` hook in
-       ``terminationGracePeriodSeconds``.
+       how many seconds a worker using ``finish`` waits after shutdown begins. If unset, it waits indefinitely.
+       Completed rollouts keep their results. When time runs out, the worker requeues only unfinished rollouts.
+       Allow time for sandbox cleanup. If the worker is killed before it can requeue a rollout, that attempt can
+       expire and count toward the retry limit.
    ``evaluation.trial_observer`` : unset
        a ``TrialObserver`` plugin (``reef.evaluation.trials``), as ``package.module:ClassName`` or ``module`` and
        ``config``. The evaluation worker gives it each trial: the rollout, the attempt, the trial directory and the
