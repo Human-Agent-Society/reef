@@ -350,8 +350,14 @@ class CandidateEndpoints(ABC):
         """The Harbor task directory of ``rollout``'s task, on this process's file system."""
 
     def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
-        """The task directory and its stored files digest, or None when the digest is unavailable."""
-        return self.task_directory(rollout), rollout.task_digest
+        """The resolved task directory and its stored digest, or None if unavailable for unpinned work.
+
+        An endpoint that resolves pinned work overrides this method. The returned digest must be the
+        digest of the directory it resolved.
+        """
+        if rollout.task_digest is not None:
+            raise ItemFailedError("the task resolver does not support pinned task files")
+        return self.task_directory(rollout), None
 
     def task_owner(self, rollout: EvaluationRollout) -> str | None:
         """The owner that the record of ``rollout``'s scenario stores now, whose data holds the task's item; None when
@@ -394,7 +400,7 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
         if rollout.task_digest is None:
             return self.artifacts.candidate_task_version(rollout.scenario, rollout.task_name)
-        return super().task_version(rollout)
+        return self.task_directory(rollout), rollout.task_digest
 
     def task_owner(self, rollout: EvaluationRollout) -> str | None:
         return self.artifacts.task_owner(rollout.scenario)
@@ -832,7 +838,12 @@ class EvaluationRolloutWorker(QueueWorker):
                 raise ItemFailedError(f"{unprepared}: the queue no longer holds its template item")
             if template.state != "finished":
                 raise ItemFailedError(f"{unprepared}: {template.error or f'its template item is {template.state}'}")
-        task_directory = self.endpoints.task_directory(rollout)
+        if rollout.task_digest is None:
+            task_directory = self.endpoints.task_directory(rollout)
+        else:
+            task_directory, task_digest = self.endpoints.task_version(rollout)
+            if task_digest != rollout.task_digest:
+                raise ItemFailedError("the task resolver returned different files from the pinned version")
         if rollout.tree is not None:
             # A retry runs the same task with the same tree, so a task that asks for what the tree's agent cannot
             # give fails for good, before its candidate is served.
@@ -1001,7 +1012,11 @@ class TaskTemplateWorker(QueueWorker):
                 f"scenario {rollout.scenario!r} has {found} now, not {rollout.owner!r}, the owner of the evaluation's "
                 f"tasks: the templates of task {rollout.task_name!r} are not built for another owner"
             )
+        if rollout.task_digest is not None and not self.builder.supports_pinned_versions():
+            raise ItemFailedError("the template builder does not support pinned task files")
         task_directory, task_digest = self.endpoints.task_version(rollout)
+        if rollout.task_digest is not None and task_digest != rollout.task_digest:
+            raise ItemFailedError("the task resolver returned different files from the pinned version")
         asyncio.run(
             run_while_held(
                 self.build_task_template(owner, rollout, task_directory, task_digest),

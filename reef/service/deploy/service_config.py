@@ -558,14 +558,16 @@ class ServiceSettings:
         check_finish_timeout(self.evaluation_on_stop, self.evaluation_finish_timeout_s, prefix="evaluation.")
         if self.evaluation_trial_observer is not None:
             TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
-        if self.evaluation_task_template_builder is not None:
-            TaskTemplateBuilder.reference(
-                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
-            )
         if not isinstance(self.evaluation_require_prepared_templates, bool):
             raise ValueError("evaluation.require_prepared_templates must be true or false")
         if not isinstance(self.evaluation_pin_task_files, bool):
             raise ValueError("evaluation.pin_task_files must be true or false")
+        if self.evaluation_task_template_builder is not None:
+            builder = TaskTemplateBuilder.reference(
+                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+            )
+            if self.evaluation_pin_task_files and not builder.plugin_class.supports_pinned_versions():
+                raise ValueError("evaluation.pin_task_files needs a template builder that overrides build_for_version")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:

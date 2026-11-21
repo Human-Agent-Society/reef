@@ -34,10 +34,16 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
     ``build_for_owner``; it must raise for an owner that it cannot use, None too, and never choose another owner.
 
     ``build_for_version`` also receives the stored files digest of the evaluation's task, or None if unavailable.
-    Its default calls ``build_for_owner``. A builder that selects a template by the stored digest overrides it.
+    Its default calls ``build_for_owner`` for unpinned work. A builder supports pinned work when it overrides
+    ``build_for_version``. The override uses the admitted digest or builds from the supplied pinned directory.
 
     Purpose: the evaluation service's ``TaskTemplateWorker`` calls ``build_for_version`` for each template item.
     """
+
+    @classmethod
+    def supports_pinned_versions(cls) -> bool:
+        """Return whether this builder declares how it builds the admitted task version."""
+        return cls.build_for_version is not TaskTemplateBuilder.build_for_version
 
     @abstractmethod
     async def build(self, scenario: str, task_name: str, task_directory: Path) -> None: ...
@@ -67,6 +73,18 @@ class DockerfileTemplateBuilder(TaskTemplateBuilder):
         from reef.execution.sandbox.e2b import build_task_template
 
         await build_task_template(task_directory)
+
+    async def build_for_version(
+        self,
+        owner: str | None,
+        scenario: str,
+        task_name: str,
+        task_directory: Path,
+        *,
+        task_digest: str | None,
+    ) -> None:
+        # The directory already points to the admitted version.
+        await self.build_for_owner(owner, scenario, task_name, task_directory)
 
 
 __all__ = ["DockerfileTemplateBuilder", "TaskTemplateBuilder"]
