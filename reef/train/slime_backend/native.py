@@ -27,7 +27,19 @@ SLIME_DEFAULT_SOURCE_PATH = "slime.data.data_source.RolloutDataSourceWithBuffer"
 
 @register_loss_family
 class SlimeNativeAlgorithm(SlimeAlgorithm):
-    """Slime's ``policy_loss`` on the advantages that Slime computes from its own rollouts' rewards."""
+    """The Slime loss family for dataset and task jobs.
+
+    Slime computes advantages from rollout rewards and trains with ``policy_loss``.
+    The worker options include ``loss_type``, ``compute_advantages_and_returns``,
+    ``advantage_estimator``, and ``use_critic``. The first two must be
+    ``"policy_loss"`` and ``True``. The estimator must differ from ``"ppo"``,
+    and ``use_critic`` must be false. Validation returns None for valid options
+    and raises RuntimeError when an option violates these requirements.
+
+    Backend configuration replaces an unset or default ``data_source_path`` with
+    Reef's native data source. It accepts that same path and raises ValueError
+    for another source.
+    """
 
     loss_family = "slime"
     loss_type = "policy_loss"
