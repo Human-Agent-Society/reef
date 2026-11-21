@@ -466,9 +466,24 @@ class SlimeJobRunner(SlimeJobs):
         step_count = len(payload["external_step_sizes"])
         interval = parameters.save_interval or step_count
         done = saved[-1].step if saved else 0
-        if done < step_count:
-            self.batch_processor.check_external_steps(to_slime_rollout_data(payload), done)
         runs = [(first, min(first + interval, step_count)) for first in range(done, step_count, interval)]
+        if runs:
+            spec = resolve_loss_family(payload["loss"])
+            if type(spec).build_rollout_data is SlimeAlgorithm.build_rollout_data:
+                # The policy builder preserves the rows and their token lengths.
+                projection = {
+                    "rollout_ids": payload["rollout_ids"],
+                    "external_step_sizes": payload["external_step_sizes"],
+                }
+                if self.batch_processor.args.use_dynamic_batch_size:
+                    projection["tokens"] = [row[1] for row in payload["samples"]]
+                self.batch_processor.check_external_steps(projection, done)
+            else:
+                # A custom builder can change the projected rows. Use the same payload slices as training.
+                for first, last in runs:
+                    self.batch_processor.check_external_steps(
+                        to_slime_rollout_data(slime_payload_steps(payload, first, last)), 0, step_offset=first
+                    )
         metrics: dict[str, Any] = {**prepared.metrics, **rollout_metrics}
         for first, last in runs:
             if self.stopping(directory):

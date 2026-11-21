@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import types
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -60,6 +60,7 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     retention_options,
 )
 from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.sft import SftAlgorithm
 from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, trajectories
 
@@ -130,6 +131,29 @@ class CriticWarmupObjective(SlimeObjective):
 
     def prepare(self, batch: JobData, state: Mapping[str, Any]) -> TrainingSignal:
         return TrainingSignal("train", {"steps": next_steps(state)}, {})
+
+
+class ChunkedFamily(SftAlgorithm):
+    """A custom builder that lengthens the prompts of its high-reward rows."""
+
+    loss_family = "test-chunked-sft"
+
+    def build_rollout_data(self, payload: Mapping[str, Any], samples: Sequence) -> dict:
+        if payload["external_step_sizes"] != [3] or payload["rollout_ids"] != [0, 1, 2]:
+            raise ValueError("expected one rebased training chunk")
+        data = super().build_rollout_data(payload, samples)
+        data["tokens"] = [
+            [0, *tokens] if reward > 1 else tokens
+            for tokens, reward in zip(data["tokens"], data["rewards"], strict=True)
+        ]
+        return data
+
+
+class ChunkedObjective(CriticWarmupObjective):
+    """An objective over a custom builder that consumes one save chunk."""
+
+    name = "test-chunked-sft"
+    loss_family = "test-chunked-sft"
 
 
 def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
@@ -412,6 +436,42 @@ def test_dynamic_admission_detects_alignment_after_native_packing() -> None:
     # Three rows still fit when the packer can put two in one microbatch.
     data["tokens"][-2:] = [[0] * 2] * 2
     processor.check_external_steps(data, 0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("last_reward", [1.0, 2.0])
+def test_admission_checks_the_custom_family_projection_of_each_save_chunk(tmp_path, stacks, last_reward) -> None:
+    pytest.importorskip("slime.utils.dp_schedule")
+    family = ChunkedFamily()
+    register_loss_family(family)
+    try:
+        stack = stacks(tmp_path, loss_family=family.loss_family, global_batch_size=3)
+        stack.processor.args.max_tokens_per_gpu = 6
+        stack.processor.args.balance_by_flops = False
+        stack.processor.args.balance_data = False
+        stack.processor.train_parallel_config.update(dp_size=2, cp_size=1, microbatch_group_size_per_vp_stage=1)
+        data = batch_for(0, rewards=(1.0, 1.0, 1.0, last_reward, last_reward, last_reward))
+        stack.component.submit(
+            TrainingJob(
+                "job-0",
+                "slime",
+                stack.component.base_start,
+                job_data_ref(data),
+                {**parameters("tests.slime_backend.test_slime_component:ChunkedObjective"), "save_interval": 1},
+                scenario="s",
+            )
+        )
+        status = finished(stack.component, "job-0")
+        if last_reward == 1.0:
+            assert status.state == "finished", status.error
+            assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]
+        else:
+            assert status.state == "failed"
+            assert "optimizer step 2 has 3 rows" in status.error
+            assert not stack.group.train_calls
+            assert not status.checkpoints
+    finally:
+        unregister_loss_family(family.loss_family)
 
 
 @pytest.mark.unit
