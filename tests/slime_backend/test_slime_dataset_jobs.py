@@ -71,10 +71,17 @@ def dataset_stack(tmp_path: Path, *, rollouts_per_epoch: int = 4) -> tuple[Stack
     return stack, events, group
 
 
-def dataset_job(stack: Stack, job_id: str, *, epochs: int = 1, save_interval: int | None = 2) -> TrainingJob:
+def dataset_job(
+    stack: Stack,
+    job_id: str,
+    *,
+    path: str = "/data/prompts.jsonl",
+    epochs: int = 1,
+    save_interval: int | None = 2,
+) -> TrainingJob:
     parameters: dict[str, Any] = {
         "objective": OBJECTIVE,
-        "dataset": {"path": "/data/prompts.jsonl", "epochs": epochs},
+        "dataset": {"path": path, "epochs": epochs},
     }
     if save_interval is not None:
         parameters["save_interval"] = save_interval
@@ -232,36 +239,12 @@ def test_the_dataset_stage_has_the_job_size_a_weight_trainer_requires() -> None:
 
 
 @pytest.mark.unit
-def test_the_data_source_loads_the_recorded_job_and_skips_its_trained_rollouts(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("slime.data.data_source", reason="requires Slime's optional dataset dependencies")
-    from reef.train.slime_backend import dataset_source
-
-    monkeypatch.setattr(dataset_source, "load_tokenizer", lambda *args, **kwargs: None)
-    monkeypatch.setattr(dataset_source, "load_processor", lambda *args, **kwargs: None)
+def test_the_data_source_loads_the_recorded_job_and_skips_its_trained_rollouts(tmp_path, make_dataset_source) -> None:
     root = tmp_path / "save"
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text("".join(json.dumps({"input": f"q{index}", "label": str(index)}) + "\n" for index in range(6)))
-    args = Namespace(
-        save_hf=str(root / "hf" / "{rollout_id}"),
-        prompt_data=None,
-        hf_checkpoint="/models/m",
-        rollout_max_prompt_len=None,
-        input_key="input",
-        multimodal_keys=None,
-        label_key="label",
-        metadata_key="metadata",
-        tool_key=None,
-        apply_chat_template=False,
-        apply_chat_template_kwargs=None,
-        rollout_seed=0,
-        rollout_shuffle=False,
-        rollout_batch_size=2,
-        n_samples_per_prompt=2,
-        buffer_filter_path=None,
-        dump_details=None,
-    )
     write_json(root / DATASET_FILE, {"job_id": "job-0", "path": str(prompts), "skip_rollouts": 2, "token": "a"})
-    source = dataset_source.ReefDatasetSource(args)
+    source = make_dataset_source(root, rollout_batch_size=2)
     assert len(source) == 6
     # Two rollouts of two prompts were trained: the next prompts are q4 and q5, each in a group of two.
     groups = source.get_samples(2)
@@ -270,3 +253,26 @@ def test_the_data_source_loads_the_recorded_job_and_skips_its_trained_rollouts(t
     assert [group[0].label for group in source.get_samples(1)] == ["0"]
     write_json(root / DATASET_FILE, {"job_id": "job-1", "path": str(prompts), "skip_rollouts": 0, "token": "b"})
     assert [group[0].label for group in source.get_samples(1)] == ["0"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("epochs", [1, 2])
+def test_a_dataset_job_rejects_an_incomplete_rollout_batch(
+    tmp_path, dataset_args, make_dataset_source, monkeypatch, epochs
+) -> None:
+    stack, events, group = dataset_stack(tmp_path)
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text("".join(json.dumps({"input": f"q{index}", "label": str(index)}) + "\n" for index in range(5)))
+    source = make_dataset_source(group.root, rollout_batch_size=4)
+    monkeypatch.setattr(group, "rollouts_per_epoch", lambda: len(source) // 4)
+    job = dataset_job(stack, "job-0", path=str(prompts), epochs=epochs)
+    try:
+        stack.component.submit(job)
+        status = finished(stack.component, job.job_id)
+        assert status.state == "failed", status
+        assert status.error is not None
+        assert "has 5 usable prompts, which do not fill batches of 4" in status.error
+        assert not events
+        assert not stack.group.train_calls
+    finally:
+        stack.component.close()

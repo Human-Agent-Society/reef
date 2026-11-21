@@ -28,7 +28,20 @@ from reef.train.slime_backend.harbor_rollouts import GENERATE_FUNCTION_PATH, Tas
 
 
 class ReefDatasetSource(RolloutDataSourceWithBuffer):
-    """Serve the prompts of the job in the save root's ``DATASET_FILE``, as Slime's own data source does."""
+    """Serve the current job's prompts to Slime's rollout manager.
+
+    Slime creates one source per serving session with its parsed arguments.
+    The arguments include a checkpoint path template and a positive rollout batch size.
+    ``record_path`` is ``DATASET_FILE`` in the absolute save root derived from the template.
+    ``token`` is None until the first successful refresh, then it is the loaded driver's token.
+    The tokenizer and processor start as None. Slime loads them from the configured checkpoint for file datasets.
+
+    After refresh, ``dataset`` holds the ordered prompts of the loaded job.
+    For a file dataset, Slime keeps prompt rows that pass the length limit, including duplicate rows.
+    Their count is a positive multiple of ``rollout_batch_size``.
+    A task job has one prompt per recorded task and can have a partially filled last batch.
+    The inherited cursor and buffer track Slime's position and pending sample groups for the loaded job.
+    """
 
     def __init__(self, args: Any) -> None:
         super().__init__(args)
@@ -39,7 +52,15 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
         self.processor: Any = None
 
     def load_dataset(self, path: str) -> Dataset:
-        """The prompts of a dataset job's JSONL file ``path``, as Slime's own data source reads them."""
+        """Read the JSONL file at ``path`` with Slime's prompt format and length limit.
+
+        Returns:
+            The Slime dataset of usable prompts in file order.
+
+        Raises:
+            RuntimeError: The dataset has no usable prompts.
+            ValueError: The positive usable prompt count is not a multiple of the rollout batch size.
+        """
         args = self.args
         if self.tokenizer is None:
             self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
@@ -58,12 +79,23 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
             apply_chat_template_kwargs=args.apply_chat_template_kwargs,
             seed=args.rollout_seed,
         )
-        if not len(dataset):
+        prompt_count = len(dataset)
+        if not prompt_count:
             raise RuntimeError(f"the dataset {path} has no prompt within --rollout-max-prompt-len")
+        if prompt_count % args.rollout_batch_size:
+            raise ValueError(
+                f"the dataset {path} has {prompt_count} usable prompts, which do not fill batches of "
+                f"{args.rollout_batch_size}. Choose a --rollout-batch-size that divides the usable prompt count."
+            )
         return dataset
 
     def refresh(self) -> None:
-        """Load the recorded job's prompts when a new driver recorded it."""
+        """Load the job's prompts when its recorded driver token changes.
+
+        Reset Slime's buffer and position the cursor after ``skip_rollouts * rollout_batch_size`` prompts.
+        Shuffle for that cursor's epoch if Slime enables shuffling.
+        Raise RuntimeError for a missing record and propagate errors from loading the recorded job.
+        """
         record = read_json(self.record_path)
         if record is None:
             raise RuntimeError(f"no dataset job is recorded in {self.record_path}")
@@ -94,10 +126,19 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
         self.token = record["token"]
 
     def get_samples(self, num_samples: int) -> list[list[Any]]:
+        """Refresh the job and ask Slime for up to ``num_samples`` sample groups.
+
+        Slime selects buffered groups first and fills the request from the prompt cursor.
+        Propagate refresh errors, including ValueError for an incompatible file dataset.
+        """
         self.refresh()
         return super().get_samples(num_samples)
 
     def __len__(self) -> int:
+        """Refresh the job and return its prompt count, independent of the cursor and buffer.
+
+        Propagate refresh errors, including ValueError for an incompatible file dataset.
+        """
         self.refresh()
         return len(self.dataset)
 
