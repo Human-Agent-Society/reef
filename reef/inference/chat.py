@@ -217,7 +217,12 @@ class _StreamedToolCalls:
 
 
 class _StreamWriter(ABC):
-    """Encode one protocol's streamed events; the relay decides what to send and when."""
+    """Encode one protocol's streamed events; the relay decides what to send and when.
+
+    ``accepts_raw_arguments`` is false for protocols that require the final tool arguments to be a JSON object.
+    """
+
+    accepts_raw_arguments: bool = False
 
     @abstractmethod
     def start(self) -> list[bytes]: ...
@@ -252,6 +257,8 @@ class _OpenAIChunkWriter(_StreamWriter):
     corresponding choice fields. ``tool_call`` emits the argument fragment at its index. Its first fragment also
     names the call and includes its ID. ``finish`` emits the final choice, optional usage chunk, and ``[DONE]``.
     """
+
+    accepts_raw_arguments = True
 
     def __init__(self, response_id: str, *, model: str, created: int, include_usage: bool) -> None:
         if not isinstance(response_id, str) or not isinstance(model, str):
@@ -495,7 +502,7 @@ class ChatStreamRelay:
                 call["id"] = self._tools.ids[index]
             arguments = argument_text(function["arguments"])
             emitted = "".join(self._tools.arguments.get(index, ()))
-            missing = remaining_tool_arguments(emitted, arguments)
+            missing = remaining_tool_arguments(emitted, arguments, allow_raw_prefix=self.writer.accepts_raw_arguments)
             if missing or not announced:
                 output.extend(self.writer.tool_call(index, call["id"], name, missing, announced=not announced))
         return output
@@ -523,15 +530,22 @@ def without_json_whitespace(value: str) -> str:
     return "".join(characters)
 
 
-def remaining_tool_arguments(emitted: str, arguments: str) -> str:
-    """Return the suffix that completes the streamed arguments as the final JSON object."""
+def remaining_tool_arguments(emitted: str, arguments: str, *, allow_raw_prefix: bool = False) -> str:
+    """Return the suffix that completes emitted arguments, or raise ValueError on a mismatch.
+
+    When allow_raw_prefix is true, a literal prefix match suffices even for invalid JSON.
+    Other matches must complete a JSON object equal to the final object.
+    """
+    has_prefix = arguments.startswith(emitted)
+    if allow_raw_prefix and has_prefix:
+        return arguments[len(emitted) :]
     try:
         expected = json.loads(arguments)
     except json.JSONDecodeError as exc:
         raise ValueError("completed tool-call arguments are not valid JSON") from exc
     if not isinstance(expected, dict):
         raise ValueError("completed tool-call arguments must be a JSON object")
-    if arguments.startswith(emitted):
+    if has_prefix:
         return arguments[len(emitted) :]
 
     compact = without_json_whitespace(arguments)

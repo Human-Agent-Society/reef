@@ -1125,30 +1125,46 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
 @pytest.mark.parametrize(
-    ("arguments", "failure", "repeated_think_tags"),
+    ("path", "arguments", "failure", "repeated_think_tags", "completed_arguments"),
     [
-        ('{"path":"out.txt"}', None, False),
-        ('{"path": "out', None, False),
-        ('{"path":   "out', None, False),
-        ('{"path":"other.txt"}', "streamed tool-call arguments", False),
-        ('{"path":"out.txt"}', "streamed text", False),
-        ('{"path":"out.txt"}', None, True),
-        ('{"path":"out.txt"}', "streamed tool-call index", False),
-    ],
-    ids=[
-        "equivalent",
-        "prefix",
-        "spaced-prefix",
-        "divergent-arguments",
-        "divergent-text",
-        "repeated-think-tags",
-        "negative-index",
+        *(
+            pytest.param(path, arguments, failure, repeated, None, id=f"{name}-{path}")
+            for path in ("/v1/chat/completions", "/v1/messages")
+            for name, arguments, failure, repeated in (
+                ("equivalent", '{"path":"out.txt"}', None, False),
+                ("prefix", '{"path": "out', None, False),
+                ("spaced-prefix", '{"path":   "out', None, False),
+                ("divergent-arguments", '{"path":"other.txt"}', "streamed tool-call arguments", False),
+                ("divergent-text", '{"path":"out.txt"}', "streamed text", False),
+                ("repeated-think-tags", '{"path":"out.txt"}', None, True),
+                ("negative-index", '{"path":"out.txt"}', "streamed tool-call index", False),
+            )
+        ),
+        pytest.param("/v1/chat/completions", '{"path":"README', None, False, '{"path":"README', id="raw-match"),
+        pytest.param("/v1/chat/completions", '{"path":"RE', None, False, '{"path":"README', id="raw-prefix"),
+        pytest.param("/v1/chat/completions", None, None, False, '{"path":"README', id="raw-buffered-only"),
+        pytest.param(
+            "/v1/chat/completions",
+            '{"path":"else',
+            "completed tool-call arguments",
+            False,
+            '{"path":"README',
+            id="raw-divergence",
+        ),
+        pytest.param(
+            "/v1/messages",
+            '{"path":"README',
+            "completed tool-call arguments are not valid JSON",
+            False,
+            '{"path":"README',
+            id="anthropic-invalid-json",
+        ),
+        pytest.param("/v1/messages", "[]", "must be a JSON object", False, "[]", id="anthropic-non-object"),
     ],
 )
 def test_streamed_tool_turns_agree_with_the_buffered_result(
-    tmp_path, path, arguments, failure, repeated_think_tags
+    tmp_path, path, arguments, failure, repeated_think_tags, completed_arguments
 ) -> None:
     raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
     if failure == "streamed text":
@@ -1177,6 +1193,8 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(
         def parse_stream_chunk(text):
             if text != raw_tool_call:
                 return text, []
+            if arguments is None:
+                return "", []
             return "", [
                 SimpleNamespace(
                     name="write_file",
@@ -1188,7 +1206,8 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(
         @staticmethod
         def parse_non_stream(text):
             before = text.partition("<tool_call>")[0]
-            return before, [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
+            final = {"path": "out.txt"} if completed_arguments is None else completed_arguments
+            return before, [SimpleNamespace(name="write_file", parameters=final)]
 
     async def run() -> None:
         async def generate(request):
@@ -1327,9 +1346,15 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(
             assert announced["id"] == recorded_call["id"]
             fragments = [delta["function"]["arguments"] for delta in deltas]
             assert body.endswith(b"data: [DONE]\n\n")
-            assert json.loads("".join(fragments)) == json.loads(recorded_call["function"]["arguments"])
-            assert json.loads("".join(fragments)) == json.loads(buffered_call["function"]["arguments"])
-        assert fragments[0] == arguments
+            emitted = "".join(fragments)
+            if completed_arguments is None:
+                assert json.loads(emitted) == json.loads(recorded_call["function"]["arguments"])
+                assert json.loads(emitted) == json.loads(buffered_call["function"]["arguments"])
+            else:
+                assert emitted == recorded_call["function"]["arguments"] == buffered_call["function"]["arguments"]
+                assert emitted == completed_arguments
+        if arguments is not None:
+            assert fragments[0] == arguments
 
     asyncio.run(run())
 
