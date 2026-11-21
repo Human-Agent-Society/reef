@@ -243,8 +243,9 @@ class _StreamWriter(ABC):
 class _OpenAIChunkWriter(_StreamWriter):
     """Encode one OpenAI Chat Completions stream for ``ChatStreamRelay``.
 
-    The common fields are a response ID, model, creation timestamp, and the object value
-    ``chat.completion.chunk``. The boolean ``include_usage`` adds null usage to each choice chunk. It also adds
+    The response ID and model are strings. The creation timestamp is a nonnegative integer in seconds.
+    The writer sets the object value to ``chat.completion.chunk``. The boolean ``include_usage`` adds null
+    usage to each choice chunk. It also adds
     the response totals in one empty-choice chunk after the final choice.
 
     ``start`` emits the assistant role. ``thinking``, ``text``, and ``logprobs`` put their inputs in the
@@ -252,8 +253,18 @@ class _OpenAIChunkWriter(_StreamWriter):
     names the call and includes its ID. ``finish`` emits the final choice, optional usage chunk, and ``[DONE]``.
     """
 
-    def __init__(self, common: Mapping[str, Any], *, include_usage: bool) -> None:
-        self._common = dict(common)
+    def __init__(self, response_id: str, *, model: str, created: int, include_usage: bool) -> None:
+        if not isinstance(response_id, str) or not isinstance(model, str):
+            raise ValueError("The response ID and model must be strings.")
+        require_integer(created, "the creation timestamp")
+        if not isinstance(include_usage, bool):
+            raise ValueError("The include_usage flag must be a boolean.")
+        self._common: dict[str, JsonValue] = {
+            "id": response_id,
+            "model": model,
+            "created": created,
+            "object": "chat.completion.chunk",
+        }
         self.include_usage = include_usage
         if include_usage:
             self._common["usage"] = None
@@ -787,12 +798,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             )
         options = call.request.get("stream_options")
         return _OpenAIChunkWriter(
-            {
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": str(call.request.get("model", self._model_path)),
-            },
+            chat_id,
+            model=str(call.request.get("model", self._model_path)),
+            created=created,
             include_usage=isinstance(options, Mapping) and options.get("include_usage") is True,
         )
 
