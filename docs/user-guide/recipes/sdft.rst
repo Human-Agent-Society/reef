@@ -101,12 +101,12 @@ KL is the default and the reverse KL and the generalized JSD are switches. A
 top-K representation of the teacher is another switch. Each sample
 contributes the mean over its trained response tokens. That mean is weighted
 by the truncated importance-sampling ratio between the policy and the
-recorded sampler log-probs. If the data has no sampler log-probs, the actor
-uses the log-probs at the start of the job.
+recorded sampler log-probs when every row in the batch has them. If any row
+lacks sampler log-probs, the actor uses the job-start log-probs for every row.
 
 The sampled reverse-KL mode also accepts score centering for training/inference
 mismatch. Score centering needs the sampler's recorded top-K. With importance
-sampling, it also needs the sampled tokens' recorded log-probs. See `Score centering
+sampling, it also needs the sampled tokens' recorded log-probs for every row. See `Score centering
 <../../developer-guide/loss-families.rst#score-centering>`__. The default
 full-vocabulary forward KL does not support it.
 

@@ -241,6 +241,22 @@ def test_the_wire_row_is_the_policy_row_plus_the_teacher_sequence(toy_family) ->
 
 
 @pytest.mark.unit
+def test_a_mixed_distillation_batch_uses_the_trainer_fallback(toy_family) -> None:
+    payload = _payload(TEACHER_TOKENS)
+    (recorded_row,) = payload["samples"]
+    missing_row = [*recorded_row]
+    missing_row[3] = []
+    payload["samples"] = [recorded_row, missing_row]
+    payload["rollout_ids"] = [0, 1]
+    payload["external_step_sizes"] = [2]
+
+    data = to_slime_rollout_data(payload)
+
+    assert data["tokens"] == [STUDENT_TOKENS, STUDENT_TOKENS]
+    assert "rollout_log_probs" not in data
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("sample_weight", [-1.0, "1", None, float("nan"), True])
 def test_the_payload_rejects_an_invalid_sample_weight(toy_family, sample_weight: Any) -> None:
     with pytest.raises(ValueError, match="sample_weight"):

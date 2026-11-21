@@ -159,10 +159,12 @@ refuses a mismatch.
 
 Every family except ``slime`` refuses ``--use-rollout-logprobs``. Serving returns no
 log-probabilities, so the actor computes the old-policy log-probabilities of
-each row with the weights of the job's start. Objectives that need old-policy
-log-probabilities, such as TTTD and the distillation importance-sampling
-correction, read these values. They are exact for an on-policy stage and
-an approximation for a stage that accepts a lag. ``importance_sampling`` reads recorded rollout log-probabilities
+each row with the weights of the job's start. TTTD reads these values. They
+are exact for an on-policy stage and an approximation for a stage that accepts
+a lag. Slime distillation prefers recorded sampler log-probabilities when each
+row has them. Otherwise it uses the job-start log-probabilities for the whole
+batch. Combining distillation importance sampling and score centering requires
+recorded sampler log-probabilities. ``importance_sampling`` reads recorded rollout log-probabilities
 (``rollout_log_probs``) as ``q`` instead, without the flag, and refuses a row
 without them. No built-in job data records them on Slime, so a method that selects
 this family must provide such samples.
