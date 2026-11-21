@@ -293,8 +293,8 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
     template ``building`` for more than ``build.timeout_seconds`` plus ``ORPHAN_BUILDING_GRACE_S``. Reef builds an alias
     with the deadline of its task, so the other trial's build has the same deadline. When the
     alias names no template, ``build`` runs; when another trial starts a build under the alias first, this waits for
-    that build. A failure of this trial's own build deletes the ``waiting`` template that it left. A build or a read
-    that the API refuses for a while (``is_transient``, ``TransientBuildError``) is tried again until the deadline; any
+    that build. A failed build does not identify the owner of a waiting alias.
+    A build or read that the API refuses for a while (``is_transient``, ``TransientBuildError``) is tried again until the deadline; any
     other failure of this trial's own build raises its ``AgentEnvBuildError``.
     """
     loop = asyncio.get_running_loop()
@@ -324,7 +324,6 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
             except AliasConflictError:
                 logger.info("another trial builds the template %s; waiting for it", build.alias)
             except AgentEnvBuildError as error:
-                await delete_orphan(templates, build.alias)
                 if not isinstance(error, TransientBuildError):
                     raise
                 logger.warning("the AgentENV API refused the build of %s; building it again: %s", build.alias, error)
@@ -351,17 +350,6 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
                     raise
                 logger.warning("could not delete the template %s; trying again: %s", build.alias, error)
         await asyncio.sleep(poll_interval())
-
-
-async def delete_orphan(templates: AgentEnvTemplates, alias: str) -> None:
-    """Delete the template that ``alias`` names when it is ``waiting``: a failed ``aenv build`` leaves it so. A read or a
-    delete that fails is logged, and the orphan check of a later wait deletes the template."""
-    try:
-        state = await templates.state(alias)
-        if state is not None and state.status == "waiting":
-            await templates.delete(state.template_id)
-    except (TimeoutError, aiohttp.ClientError) as error:
-        logger.warning("could not delete the template %s that a failed build left: %s", alias, error)
 
 
 __all__ = [

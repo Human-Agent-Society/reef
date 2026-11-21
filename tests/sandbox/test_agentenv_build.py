@@ -214,6 +214,20 @@ def test_a_build_that_another_trial_started_first_is_waited_for(
 
 
 @pytest.mark.unit
+def test_a_transient_registration_failure_does_not_delete_a_shared_waiting_template(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
+    monkeypatch.setenv("FAKE_AENV_STATUS", "503")
+    fake = FakeAgentEnv([None, ("peer", "waiting"), ("peer", "building"), ("peer", "ready")])
+
+    ensured(fake, task_build(tmp_path))
+
+    assert fake.deleted == []
+    assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run"]
+
+
+@pytest.mark.unit
 def test_a_failed_build_raises_with_the_end_of_its_output(
     tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
