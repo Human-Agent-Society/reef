@@ -1127,15 +1127,15 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
 @pytest.mark.parametrize(
-    ("arguments", "failure"),
+    ("arguments", "failure", "repeated_think_tags"),
     [
-        ('{"path":"out.txt"}', None),
-        ('{"path": "out', None),
-        ('{"path":   "out', None),
-        ('{"path":"other.txt"}', "streamed tool-call arguments"),
-        ('{"path":"out.txt"}', "streamed text"),
-        ('{"path":"out.txt"}', "streamed reasoning"),
-        ('{"path":"out.txt"}', "streamed tool-call index"),
+        ('{"path":"out.txt"}', None, False),
+        ('{"path": "out', None, False),
+        ('{"path":   "out', None, False),
+        ('{"path":"other.txt"}', "streamed tool-call arguments", False),
+        ('{"path":"out.txt"}', "streamed text", False),
+        ('{"path":"out.txt"}', None, True),
+        ('{"path":"out.txt"}', "streamed tool-call index", False),
     ],
     ids=[
         "equivalent",
@@ -1143,16 +1143,18 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
         "spaced-prefix",
         "divergent-arguments",
         "divergent-text",
-        "divergent-reasoning",
+        "repeated-think-tags",
         "negative-index",
     ],
 )
-def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, arguments, failure) -> None:
+def test_streamed_tool_turns_agree_with_the_buffered_result(
+    tmp_path, path, arguments, failure, repeated_think_tags
+) -> None:
     raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
     if failure == "streamed text":
         chunks = ("Before", raw_tool_call, "After")
-    elif failure == "streamed reasoning":
-        chunks = ("<think>", "<think>work</think>", raw_tool_call)
+    elif repeated_think_tags:
+        chunks = ("<think>", "<thi", "nk>work</think>", raw_tool_call)
     else:
         chunks = (raw_tool_call,)
 
@@ -1281,12 +1283,29 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, argu
         events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
         recorded = stream_record(stream, body, complete=True)
         if anthropic:
-            (start,) = [event for event in events if event["type"] == "content_block_start"]
-            assert start["content_block"]["id"] == recorded["content"][0]["id"]
-            fragments = [event["delta"]["partial_json"] for event in events if event["type"] == "content_block_delta"]
+            (start,) = [
+                event
+                for event in events
+                if event["type"] == "content_block_start" and event["content_block"]["type"] == "tool_use"
+            ]
+            assert start["content_block"]["id"] == recorded["content"][-1]["id"]
+            fragments = [
+                event["delta"]["partial_json"]
+                for event in events
+                if event["type"] == "content_block_delta" and event["delta"]["type"] == "input_json_delta"
+            ]
+            if repeated_think_tags:
+                (thinking,) = [
+                    event["delta"]["thinking"]
+                    for event in events
+                    if event["type"] == "content_block_delta" and event["delta"]["type"] == "thinking_delta"
+                ]
+                assert thinking == recorded["content"][0]["thinking"] == buffered["content"][0]["thinking"] == "work"
             assert events[-1]["type"] == "message_stop"
             assert recorded["stop_reason"] == buffered["stop_reason"] == "tool_use"
-            assert json.loads("".join(fragments)) == recorded["content"][0]["input"] == buffered["content"][0]["input"]
+            assert (
+                json.loads("".join(fragments)) == recorded["content"][-1]["input"] == buffered["content"][-1]["input"]
+            )
         else:
             deltas = [
                 delta
@@ -1297,6 +1316,14 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, argu
             (announced,) = [delta for delta in deltas if "id" in delta]
             recorded_call = recorded["choices"][0]["message"]["tool_calls"][0]
             buffered_call = buffered["choices"][0]["message"]["tool_calls"][0]
+            if repeated_think_tags:
+                (thinking,) = [
+                    choice["delta"]["reasoning_content"]
+                    for event in events
+                    for choice in event["choices"]
+                    if "reasoning_content" in choice["delta"]
+                ]
+                assert thinking == recorded["choices"][0]["message"]["reasoning_content"] == "work"
             assert announced["id"] == recorded_call["id"]
             fragments = [delta["function"]["arguments"] for delta in deltas]
             assert body.endswith(b"data: [DONE]\n\n")

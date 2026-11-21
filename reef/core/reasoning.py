@@ -56,9 +56,9 @@ class ReasoningStreamSplitter:
     """The split of one streamed reply into reasoning and answer pieces, without waiting for the whole reply.
 
     A value holds the text it has read but not given out (``buffer``) and its position in the reply: whether it reads
-    reasoning (``in_reasoning``) and whether it has dropped the first ``<think>`` (``stripped_think_start``). A
-    splitter with ``enabled`` false gives every delta out as answer. Otherwise the first ``<think>`` starts reasoning
-    and drops, and with ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning.
+    reasoning (``in_reasoning``) and whether only leading tags have appeared (``at_start``). A splitter with
+    ``enabled`` false gives every delta out as answer. Otherwise leading ``<think>`` tags start reasoning and drop.
+    With ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning.
     ``strip_answer_newlines`` drops the newlines after that tag when the answer starts in a later chunk.
     A ``<tool_call>`` before the closing tag ends the reasoning too. A reply that ends in reasoning is all reasoning.
     ``buffer`` keeps only an end of the text that can be the start of one of these tags.
@@ -68,7 +68,7 @@ class ReasoningStreamSplitter:
     def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
         self.enabled = enabled
         self.in_reasoning = enabled and force_reasoning
-        self.stripped_think_start = False
+        self.at_start = True
         self.strip_answer_newlines = False
         self.buffer = ""
 
@@ -88,14 +88,18 @@ class ReasoningStreamSplitter:
         if not self.enabled:
             return [("text", delta)]
         self.buffer += delta
-        if any(
-            tag.startswith(self.buffer) and tag != self.buffer for tag in (THINK_START, THINK_END, TOOL_CALL_START)
-        ):
+        if self.at_start:
+            start = 0
+            while self.buffer.startswith(THINK_START, start):
+                start += len(THINK_START)
+            if start:
+                self.buffer = self.buffer[start:]
+                self.in_reasoning = True
+            if THINK_START.startswith(self.buffer):
+                return []
+            self.at_start = False
+        if any(tag.startswith(self.buffer) and tag != self.buffer for tag in (THINK_END, TOOL_CALL_START)):
             return []
-        if not self.stripped_think_start and THINK_START in self.buffer:
-            self.buffer = self.buffer.replace(THINK_START, "", 1)
-            self.stripped_think_start = True
-            self.in_reasoning = True
         if not self.in_reasoning:
             value, self.buffer = self.buffer, ""
             if self.strip_answer_newlines:
@@ -119,10 +123,7 @@ class ReasoningStreamSplitter:
             self.buffer = ""
             self.in_reasoning = False
             return [("thinking", before), ("text", after)] if before else [("text", after)]
-        held_tags = (
-            [THINK_END, TOOL_CALL_START] if self.stripped_think_start else [THINK_START, THINK_END, TOOL_CALL_START]
-        )
-        held = max(self.held_suffix_length(self.buffer, tag) for tag in held_tags)
+        held = max(self.held_suffix_length(self.buffer, tag) for tag in (THINK_END, TOOL_CALL_START))
         if held:
             value = self.buffer[:-held]
             self.buffer = self.buffer[-held:]
@@ -135,10 +136,7 @@ class ReasoningStreamSplitter:
         if not self.buffer:
             return []
         value, self.buffer = self.buffer, ""
-        if self.in_reasoning:
-            value = value.removeprefix(THINK_START)
-            return [("thinking", value)] if value else []
-        return [("text", value)]
+        return [("thinking" if self.in_reasoning else "text", value)]
 
 
 __all__ = [

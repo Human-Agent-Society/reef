@@ -36,6 +36,8 @@ def test_a_prompt_that_ends_with_an_open_think_tag_pre_opens_the_reasoning() -> 
     [
         (["<thi", "nk>a", "</th", "ink>\n\nb"], False, [("thinking", "a"), ("text", "b")]),
         (["<think>a</think>b"], True, [("thinking", "a"), ("text", "b")]),
+        (["<think><think>a</think>b"], False, [("thinking", "a"), ("text", "b")]),
+        (["<think><thi", "nk>a", "</think>b"], True, [("thinking", "a"), ("text", "b")]),
         (["a", "<tool_", "call>x"], True, [("thinking", "a"), ("text", "<tool_call>x")]),
         (["still thin", "king"], True, [("thinking", "still thin"), ("thinking", "king")]),
         (["plain ", "text"], False, [("text", "plain "), ("text", "text")]),
