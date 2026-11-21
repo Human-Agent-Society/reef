@@ -858,7 +858,8 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
     connector_key = web.AppKey("inference_provider_connector", aiohttp.TCPConnector)
 
     async def provider_connections(app: web.Application) -> AsyncIterator[None]:
-        async with aiohttp.TCPConnector(limit=100, keepalive_timeout=15) as connector:
+        connector = aiohttp.TCPConnector(limit=100, keepalive_timeout=15)
+        async with connector:
             app[connector_key] = connector
             yield
 
