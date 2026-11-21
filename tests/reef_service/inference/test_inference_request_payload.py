@@ -35,7 +35,11 @@ CHUNKS = (
 
 
 class EchoHandler(InferenceHandler):
-    """An engine that answers every request and keeps each body that it receives."""
+    """Record each request payload in arrival order in ``received``.
+
+    ``completion`` is the JSON object returned by buffered inference. It defaults to ``COMPLETION``.
+    Streaming emits the fixed ``CHUNKS`` as server-sent events followed by ``[DONE]``.
+    """
 
     def __init__(self, completion: dict[str, Any] = COMPLETION) -> None:
         self.completion = completion
