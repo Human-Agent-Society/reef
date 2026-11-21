@@ -469,6 +469,17 @@ def test_adaptive_entropic_advantages_match_pinned_reference(rewards, expected) 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("rewards", [[1.0, 0.0], [0.51, 0.5], [0.0, 1.0], [1e308, -1e308], [5e-324, 0.0]])
+def test_two_rollout_groups_give_bounded_advantages_in_reward_order(rewards) -> None:
+    advantages, beta = adaptive_entropic_advantages(rewards)
+
+    winner = rewards.index(max(rewards))
+    assert 0.0 < advantages[winner] <= 3.0
+    assert -0.75 <= advantages[1 - winner] < 0.0
+    assert 0.0 < beta <= 1e6
+
+
+@pytest.mark.unit
 def test_importance_sampling_surrogate_is_unclipped() -> None:
     torch = pytest.importorskip("torch")
     from recipes.tttd.slime.objective import importance_sampling_surrogate

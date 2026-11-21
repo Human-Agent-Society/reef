@@ -21,7 +21,8 @@ def adaptive_entropic_advantages(rewards: list[float]) -> tuple[tuple[float, ...
     ``adv_estimator == "entropic_adaptive_beta"``. Beta is selected so
     ``KL(softmax(beta * rewards) || uniform) == log(2)`` using the same
     expansion bound, 60 bisection iterations, stable reward shift, and
-    leave-one-out normalizer.
+    leave-one-out normalizer. With two rollouts, the reference KL target is
+    reached only at an infinite logit gap. Cap the odds at four to one.
     """
     if not rewards:
         raise ValueError("an adaptive-entropic group cannot be empty")
@@ -33,6 +34,21 @@ def adaptive_entropic_advantages(rewards: list[float]) -> tuple[tuple[float, ...
 
     group_size = len(rewards)
     max_reward = max(rewards)
+
+    if group_size == 2:
+        low_reward = min(rewards)
+        if low_reward == max_reward:
+            return (0.0, 0.0), 0.0
+        gap = max_reward - low_reward
+        max_log_odds = math.log(4)
+        if math.isinf(gap):
+            # The finite rewards can have a difference above the float range.
+            beta = (max_log_odds / 2) / (max_reward / 2 - low_reward / 2)
+            log_odds = max_log_odds
+        else:
+            beta = min(beta_max, max_log_odds / gap)
+            log_odds = min(max_log_odds, beta * gap)
+        return tuple(math.expm1(log_odds if reward == max_reward else -log_odds) for reward in rewards), beta
 
     beta: float | None
     if group_size < 2:
