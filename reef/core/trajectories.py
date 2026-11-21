@@ -92,28 +92,28 @@ def recorded_payload(item: TrajectorySample) -> Mapping[str, Any]:
     return {**_project_exchange(item.trajectory), **last}
 
 
-def _string_fields(value: Mapping[str, Any], *, nested: str | None = None) -> bool:
+def string_fields(value: Mapping[str, Any], *, nested: str | None = None) -> bool:
     """Whether a plain dictionary has only string keys and string or null fields, except for one named field."""
     return type(value) is dict and all(
         type(key) is str and (key == nested or type(field) is str or field is None) for key, field in value.items()
     )
 
 
-def _simple_history_message(message: Mapping[str, Any]) -> bool:
+def simple_history_message(message: Mapping[str, Any]) -> bool:
     """Recognize flat text messages and Chat Completions tool calls with JSON arguments in a string."""
-    if not _string_fields(message, nested="tool_calls"):
+    if not string_fields(message, nested="tool_calls"):
         return False
     calls = message.get("tool_calls")
     if calls is None:
         return True
     return type(calls) is list and all(
-        _string_fields(call, nested="function") and _string_fields(call.get("function")) for call in calls
+        string_fields(call, nested="function") and string_fields(call.get("function")) for call in calls
     )
 
 
-def _same_history_message(previous: Mapping[str, Any], current: Mapping[str, Any], provider: str) -> bool:
+def same_history_message(previous: Mapping[str, Any], current: Mapping[str, Any], provider: str) -> bool:
     # Python treats several numeric types as equal. Only use direct equality for the string/null wire shape.
-    if _simple_history_message(previous) and _simple_history_message(current) and previous == current:
+    if simple_history_message(previous) and simple_history_message(current) and previous == current:
         return True
     return canonical_json(atif_form(previous, provider)) == canonical_json(atif_form(current, provider))
 
@@ -150,7 +150,7 @@ class TrajectoryBuilder:
         request, responses = exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(self.history, request, strict=False):
-            if not _same_history_message(previous, current, provider):
+            if not same_history_message(previous, current, provider):
                 break
             shared += 1
         self.entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])

@@ -430,7 +430,7 @@ def test_trajectory_history_matches_the_canonical_provider_comparison(monkeypatc
     def canonical_match(previous, current, provider):
         return canonical_json(atif_form(previous, provider)) == canonical_json(atif_form(current, provider))
 
-    monkeypatch.setattr(trajectories, "_same_history_message", canonical_match)
+    monkeypatch.setattr(trajectories, "same_history_message", canonical_match)
     reference = make_trajectory(records)
     assert canonical_json(actual.trajectory) == canonical_json(reference.trajectory)
     assert actual.source_agent_record_ids == reference.source_agent_record_ids == ("first", "second")
