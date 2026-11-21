@@ -1135,8 +1135,17 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
         ('{"path":"other.txt"}', "streamed tool-call arguments"),
         ('{"path":"out.txt"}', "streamed text"),
         ('{"path":"out.txt"}', "streamed reasoning"),
+        ('{"path":"out.txt"}', "streamed tool-call index"),
     ],
-    ids=["equivalent", "prefix", "spaced-prefix", "divergent-arguments", "divergent-text", "divergent-reasoning"],
+    ids=[
+        "equivalent",
+        "prefix",
+        "spaced-prefix",
+        "divergent-arguments",
+        "divergent-text",
+        "divergent-reasoning",
+        "negative-index",
+    ],
 )
 def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, arguments, failure) -> None:
     raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
@@ -1160,7 +1169,7 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(tmp_path, path, argu
                 SimpleNamespace(
                     name="write_file",
                     parameters=arguments,
-                    tool_index=0,
+                    tool_index=-1 if failure == "streamed tool-call index" else 0,
                 )
             ]
 

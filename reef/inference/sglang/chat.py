@@ -160,7 +160,8 @@ def normalize_native_response(response: dict[str, Any]) -> dict[str, Any]:
 class NativeStreamCapture:
     """Accumulate the disjoint incremental events of one SGLang stream into its complete native response.
 
-    Values: ``text`` joins the events' text deltas in order, and ``output_ids`` joins their output token IDs.
+    Values: ``text_fragments`` holds the nonempty text deltas of accepted events in order. ``text`` joins those
+    fragments. ``output_ids`` joins the events' output token IDs.
     ``meta`` holds each list field of ``_LIST_META_KEYS`` joined over the events in order, and the newest value of
     every other ``meta_info`` field. ``last_output_logprobs`` holds the newest event's own
     ``output_token_logprobs``. ``seen`` is whether an event arrived.
@@ -182,7 +183,7 @@ class NativeStreamCapture:
     )
 
     def __init__(self) -> None:
-        self._text_fragments: list[str] = []
+        self.text_fragments: list[str] = []
         self.output_ids: list[int] = []
         self.meta: dict[str, Any] = {}
         self.last_output_logprobs: list[Any] = []
@@ -191,7 +192,7 @@ class NativeStreamCapture:
     @property
     def text(self) -> str:
         """The text received so far."""
-        return "".join(self._text_fragments)
+        return "".join(self.text_fragments)
 
     def accept(self, event: Mapping[str, Any]) -> str:
         meta = event.get("meta_info")
@@ -236,7 +237,7 @@ class NativeStreamCapture:
         if not isinstance(current_text, str):
             raise ValueError("SGLang stream event text must be a string")
         if current_text:
-            self._text_fragments.append(current_text)
+            self.text_fragments.append(current_text)
         return current_text
 
     def response(self) -> dict[str, Any]:

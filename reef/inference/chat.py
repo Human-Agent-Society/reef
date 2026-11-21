@@ -151,15 +151,27 @@ def _new_call_id() -> str:
 
 
 class _StreamedToolCalls:
-    """Tool calls seen so far in one stream: their ids, names and the argument text already sent."""
+    """Keep the tool calls that ``ChatStreamRelay`` announced in one stream.
+
+    ``ids`` and ``names`` have the same nonnegative integer indices. Each index is a tool's position in the
+    completed reply. Its ID and name are nonempty strings and remain fixed after announcement. Each key of
+    ``arguments`` has an announced call. Its value is a nonempty list of strings in send order, including empty
+    fragments. An absent key means no fragments have been sent for that call.
+    """
 
     def __init__(self) -> None:
         self.ids: dict[int, str] = {}
         self.names: dict[int, str] = {}
         self.arguments: dict[int, list[str]] = {}
 
-    def announce(self, index: int, name: Any) -> bool:
-        """Record a new call and return whether it needs an announcement."""
+    def announce(self, index: int, name: str | None) -> bool:
+        """Return true and assign an ID when a named call first appears.
+
+        Return false when an existing call has the same name or the fragment omits its name. Raise
+        ``ValueError`` for a negative index, a changed name, or a new call without a name.
+        """
+        if index < 0:
+            raise ValueError("a streamed tool-call index must be nonnegative")
         if index in self.ids:
             if name and self.names[index] != name:
                 raise ValueError("the streamed tool-call name changed")
@@ -167,10 +179,11 @@ class _StreamedToolCalls:
         if not name:
             raise ValueError("tool stream emitted arguments before the tool name")
         self.ids[index] = _new_call_id()
-        self.names[index] = str(name)
+        self.names[index] = name
         return True
 
     def add_arguments(self, index: int, arguments: str) -> None:
+        """Append the argument fragment for already announced ``index``."""
         self.arguments.setdefault(index, []).append(arguments)
 
 
@@ -199,11 +212,20 @@ class _StreamWriter(ABC):
 
 
 class _OpenAIChunkWriter(_StreamWriter):
-    """``chat.completion.chunk`` events sharing one id, model and timestamp."""
+    """Encode one OpenAI Chat Completions stream for ``ChatStreamRelay``.
+
+    The common fields are a response ID, model, creation timestamp, and the object value
+    ``chat.completion.chunk``. The boolean ``include_usage`` adds null usage to each choice chunk. It also adds
+    the response totals in one empty-choice chunk after the final choice.
+
+    ``start`` emits the assistant role. ``thinking``, ``text``, and ``logprobs`` put their inputs in the
+    corresponding choice fields. ``tool_call`` emits the argument fragment at its index. Its first fragment also
+    names the call and includes its ID. ``finish`` emits the final choice, optional usage chunk, and ``[DONE]``.
+    """
 
     def __init__(self, common: Mapping[str, Any], *, include_usage: bool) -> None:
         self._common = dict(common)
-        self._include_usage = include_usage
+        self.include_usage = include_usage
         if include_usage:
             self._common["usage"] = None
 
@@ -232,22 +254,34 @@ class _OpenAIChunkWriter(_StreamWriter):
         return [self._chunk({}, logprobs={"content": content})]
 
     def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
-        """The last chunk carries the finish reason and ``meta_info``, and the token IDs of a response that has
-        them: ``token_ids`` in its choice and ``prompt_token_ids`` beside ``choices``."""
+        """Use the completed first choice's finish reason and metadata in the final choice chunk.
+
+        If the response has token IDs, put the output IDs in the choice and the prompt IDs beside ``choices``.
+        """
         choice = response["choices"][0]
         closing = {"index": 0, "delta": {}, "finish_reason": choice["finish_reason"], "meta_info": choice["meta_info"]}
         if "token_ids" in choice:
             closing["token_ids"] = choice["token_ids"]
         prompt = {"prompt_token_ids": response["prompt_token_ids"]} if "prompt_token_ids" in response else {}
         frames = [_sse_data({**self._common, **prompt, "choices": [closing]})]
-        if self._include_usage:
+        if self.include_usage:
             frames.append(_sse_data({**self._common, "choices": [], "usage": response["usage"]}))
         frames.append(b"data: [DONE]\n\n")
         return frames
 
 
 class _AnthropicEventWriter(_StreamWriter):
-    """Anthropic Messages events; content blocks open and close as the sampled text changes kind."""
+    """Encode one Anthropic Messages stream for ``ChatStreamRelay``.
+
+    The message ID and model are strings. Input tokens are a nonnegative count. The block index counts closed
+    blocks, starting at zero. The open block is absent, or a pair of a block kind and a call index. The kind is
+    ``text``, ``thinking``, or ``tool``. Only a tool has a call index, its nonnegative position among the reply's calls.
+
+    ``start`` emits the header. ``thinking`` and ``text`` use the current block when its kind matches. Otherwise
+    they close it and open a block for the new kind. ``tool_call`` opens a block for a new call. An argument
+    fragment for an announced call requires its block to remain open. ``finish`` closes the block and emits the
+    stop reason, stop sequence, and output token count before ``message_stop``.
+    """
 
     def __init__(self, message_id: str, *, model: str, input_tokens: int) -> None:
         self._message_id = message_id
@@ -330,38 +364,45 @@ class _AnthropicEventWriter(_StreamWriter):
 
 
 class ChatStreamRelay:
-    """Turn one request's sampled deltas into client frames and remember what was sent.
+    """Translate one model reply into protocol frames and check the completed parse.
 
-    Tool markers are parsed out of the visible text as it streams; at the end
-    :meth:`reconcile` compares the canonical parse of the full sample with
-    what already went out and sends only the difference.
+    The writer encodes one protocol. The parser is absent or a provider tool parser. The tool calls hold the
+    indices, names, IDs, and argument fragments already sent. Text and reasoning fragments are nonempty strings
+    in send order. Pending reasoning whitespace holds only whitespace after the last emitted reasoning character.
+
+    ``piece`` takes one text or thinking delta. It emits no frame for empty input and holds trailing thinking
+    whitespace until more reasoning arrives. For text with a parser, it emits the text and tool calls that the parser returns. A parser without an incremental method defers text and tool output to ``reconcile``.
+
+    ``reconcile`` takes the completed assistant message. It emits missing suffixes and assigns the streamed IDs
+    to matching completed calls. It raises ``ValueError`` if any emitted field and its completed value disagree
+    or the protocol cannot append to an earlier block. The caller sends a terminal event only on success.
     """
 
     def __init__(self, writer: _StreamWriter, stream_tool_parser: Any) -> None:
         self.writer = writer
         self._parser = stream_tool_parser
         self._tools = _StreamedToolCalls()
-        self._reasoning: list[str] = []
-        self._thinking_whitespace: list[str] = []
-        self._text: list[str] = []
+        self.reasoning_fragments: list[str] = []
+        self.reasoning_whitespace: list[str] = []
+        self.text_fragments: list[str] = []
 
     def piece(self, kind: str, value: str) -> list[bytes]:
         if not value:
             return []
         if kind == "thinking":
             # The complete parse trims reasoning. Keep whitespace until another reasoning fragment follows it.
-            if not self._reasoning:
+            if not self.reasoning_fragments:
                 value = value.lstrip()
             trimmed = value.rstrip()
             if trimmed:
-                delta = "".join(self._thinking_whitespace) + trimmed
-                self._thinking_whitespace.clear()
-                self._reasoning.append(delta)
+                delta = "".join(self.reasoning_whitespace) + trimmed
+                self.reasoning_whitespace.clear()
+                self.reasoning_fragments.append(delta)
                 frames = self.writer.thinking(delta)
             else:
                 frames = []
             if len(trimmed) < len(value):
-                self._thinking_whitespace.append(value[len(trimmed) :])
+                self.reasoning_whitespace.append(value[len(trimmed) :])
             return frames
         normal_text, calls = value, []
         if self._parser is not None:
@@ -376,12 +417,13 @@ class ChatStreamRelay:
                 normal_text, calls = parse(value)
         output: list[bytes] = []
         if normal_text:
-            self._text.append(normal_text)
+            self.text_fragments.append(normal_text)
             output.extend(self.writer.text(normal_text))
         for fallback_index, call in enumerate(calls):
             index = getattr(call, "tool_index", fallback_index)
             index = fallback_index if index is None else int(index)
-            announced = self._tools.announce(index, getattr(call, "name", None))
+            name = getattr(call, "name", None)
+            announced = self._tools.announce(index, str(name) if name else None)
             arguments = _argument_text(getattr(call, "parameters", ""))
             self._tools.add_arguments(index, arguments)
             output.extend(
@@ -402,8 +444,8 @@ class ChatStreamRelay:
             raise ValueError("a streamed tool call is missing from the completed response")
         output: list[bytes] = []
         for name, field, fragments, write in (
-            ("reasoning", "reasoning_content", self._reasoning, self.writer.thinking),
-            ("text", "content", self._text, self.writer.text),
+            ("reasoning", "reasoning_content", self.reasoning_fragments, self.writer.thinking),
+            ("text", "content", self.text_fragments, self.writer.text),
         ):
             final = message.get(field) or ""
             emitted = "".join(fragments)
