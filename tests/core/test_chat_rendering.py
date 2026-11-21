@@ -32,6 +32,28 @@ def test_every_agent_turn_trains_and_the_turns_between_are_masked() -> None:
     assert rendered.loss_mask == [1, 1, 0, 0, 0, 1]
 
 
+@pytest.mark.parametrize(
+    ("blocks", "text"),
+    [
+        ([{"type": "text", "text": "ab"}, {"type": "text", "text": "cd"}], "abcd"),
+        (
+            [
+                {"type": "text", "text": "ab"},
+                {"type": "image_url", "image_url": {"url": "example.png"}},
+                {"type": "text", "text": "c"},
+                {"type": "text", "text": "d"},
+            ],
+            "ab cd",
+        ),
+    ],
+)
+def test_sft_preserves_adjacent_text_blocks(blocks, text) -> None:
+    prompt = step("user", "q")
+    plain = render_trajectory(CharTemplate(), trajectory(prompt, step("agent", text)))
+    typed = render_trajectory(CharTemplate(), trajectory(prompt, {"source": "agent", "message": blocks}))
+    assert typed == plain
+
+
 def test_copied_context_trains_nothing_and_the_steps_after_the_last_trained_turn_are_left_out() -> None:
     (rendered,) = render_trajectory(
         CharTemplate(),
