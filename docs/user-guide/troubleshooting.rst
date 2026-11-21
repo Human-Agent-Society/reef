@@ -26,7 +26,7 @@ Requests
 An inference request reaches Reef on ``/v1/chat/completions``, ``/v1/responses``
 or ``/v1/messages``; all three take the provider's own request body. Reef
 answers it from the scenario's row in ``served_models``, as `Run the services in
-separate processes <operate.rst#run-the-services-in-separate-processes>`__
+separate processes <split-services.rst>`__
 describes.
 
 **401 invalid service token.** The ``Authorization: Bearer`` value (or ``x-api-key``, when no Authorization header is sent) is not one of ``reef.token`` / ``reef.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.

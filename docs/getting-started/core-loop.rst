@@ -1,5 +1,9 @@
 The core loop: a closer look
-================================
+============================
+
+This page shows one pass of the loop that `Quickstart <quickstart.rst>`__
+introduces: Reef serves and records a request, trains on the feedback,
+evaluates the candidate, and publishes it.
 
 The core loop
 -------------
@@ -52,14 +56,13 @@ Each saved checkpoint is a candidate. Serving loads only a snapshot that Reef
 published, and the next job starts from the newest saved checkpoint. A
 harness recipe uses its own backend in place of the training component: the
 backend prepares a candidate tree for each step. See `Training components
-<../developer-guide/executors.rst#training-components>`__ and `Serving saved
-weights <../developer-guide/executors.rst#serving-saved-weights>`__.
+<../developer-guide/training-components.rst>`__ and `Serving saved
+weights <../developer-guide/serving-runtimes.rst#serving-saved-weights>`__.
 
 Learn more
 ----------
 
-This page stays at the level of the loop. Each step it shows is specified in
-full elsewhere:
+Each step is specified in full on its own page:
 
 .. list-table::
    :header-rows: 1

@@ -2,7 +2,7 @@ Development
 ===========
 
 :For: contributors
-:Before you start: a Reef checkout
+:Before you start: a Reef checkout, ``uv``, Git LFS, and Python 3.12 or newer
 :You will have: a development environment with the checks that run in CI
 
 Setup
@@ -11,30 +11,31 @@ Setup
 .. code:: bash
 
    git submodule update --init --recursive
-   python -m venv .venv
+   uv venv --python 3.12
    source .venv/bin/activate
-   pip install -e ".[dev]" -e ./third_party/reef-client
-   pip install --no-deps --group runtime
+   uv pip install -e ".[dev]" -e ./third_party/reef-client
    pre-commit install
 
-The ``runtime`` dependency group installs the reviewed training-runtime commit.
-Keep ``--no-deps`` in this command because GPU development uses the
-CUDA-compatible dependencies already installed in the container.
+Training-related work also needs the training runtime:
 
-Package responsibilities
-------------------------
+.. code:: bash
 
-- The ``slime`` extra installs the Python-side dependencies used by
-  ``reef/train/slime_backend/``; the ``runtime`` dependency group pins the
-  training runtime itself.
-- ``reef-client`` is a separate distribution maintained at
-  `Human-Agent-Society/reef-client <https://github.com/Human-Agent-Society/reef-client>`__.
-  It implements Reef's wire protocol using only the standard library, does not
-  import ``reef``, and does not ship in the ``reef`` wheel. The harness in
-  ``recipes/basic/`` talks to Reef through it.
+   uv pip install -e ".[slime]"
+   uv pip install --no-deps --group runtime
 
-Package ownership and repository-level homes are in `Codebase structure
-<codebase-structure.rst>`__.
+The ``slime`` extra installs the Python-side dependencies of
+``reef/train/slime_backend/``. The ``runtime`` dependency group pins the
+reviewed training-runtime commit. Keep ``--no-deps``: GPU development uses the
+CUDA-compatible dependencies that the container already holds. `Installation
+<../getting-started/installation.rst#gpu-image-for-weight-training>`__
+describes the container.
+
+``reef-client`` is a separate distribution, maintained at
+`Human-Agent-Society/reef-client <https://github.com/Human-Agent-Society/reef-client>`__.
+It implements Reef's wire protocol with the standard library only, does not
+import ``reef``, and does not ship in the ``reef`` wheel. The harness in
+``recipes/basic/`` talks to Reef through it. `Codebase structure
+<codebase-structure.rst>`__ maps the other packages.
 
 Run entry points as modules or scripts:
 
@@ -49,11 +50,10 @@ Checks
 .. code:: bash
 
    pre-commit run --all-files
-   PYTHONPATH=.:third_party/reef-client uv run \
-     --with pytest \
-     --with aiohttp \
-     --with huggingface_hub \
-     pytest tests/reef_service -q
+   .venv/bin/python -m mypy
+   .venv/bin/python -m pytest tests/reef_service -q
 
-Keep provider request bodies unchanged and preserve scenario isolation. A change
-to a public interface also needs a contract test.
+Start with the smallest suite that exercises your change; `Testing
+<testing.rst>`__ describes the full suite and the opt-in suites. Keep provider
+request bodies unchanged and preserve scenario isolation. A change to a public
+interface also needs a contract test.

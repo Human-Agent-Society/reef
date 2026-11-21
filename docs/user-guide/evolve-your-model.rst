@@ -1,6 +1,12 @@
 Train model weights from agent feedback
 =======================================
 
+This page sets up a GPU deployment that trains model weights with the default
+Slime backend. Use it when the model itself has to change. To evolve a harness
+or another text artifact, see `Evolve your harness <evolve-your-harness.rst>`__.
+For hosted LoRA training from a CPU machine, see `Train with Tinker
+<tinker.rst>`__.
+
 With Slime, weight training runs on one Ray cluster. Reef submits each job's
 ready data to its training component as one training job, and the component
 runs the job in a Slime driver process of its own. Each checkpoint that a job
@@ -28,25 +34,16 @@ engines load its weights from files.
 | (service ``inference``)  | serving the published weights                 |
 +--------------------------+-----------------------------------------------+
 
-For hosted LoRA training from a CPU machine, see `Train with Tinker <tinker.rst>`__.
-The GPU deployment below uses the default Slime backend.
-
-When it fits
-------------
-
-Use this lane when the model itself has to change. If your recipe evolves a
-harness or another text artifact, see `Evolve your harness
-<evolve-your-harness.rst>`__.
-
 Before you start
 ----------------
 
 The Slime backend needs the supported GPU environment: Ray, Slime, and
 CUDA-specific builds of torch, SGLang, and Megatron. ``pip install -e .`` from
-the quickstart brings none of them; build the image as described in
-`Installation <../getting-started/installation.rst#gpu-image-for-weight-training>`__, then get
-inside it, mounting the model directory ``inference.model-path`` points at and the
-directory Reef keeps its state in:
+the quickstart brings none of them. Build the image as `Installation
+<../getting-started/installation.rst#gpu-image-for-weight-training>`__
+describes. Then start a container. Mount the model directory that
+``inference.model-path`` points at and the directory where Reef keeps its
+state:
 
 .. code:: bash
 
@@ -57,30 +54,26 @@ directory Reef keeps its state in:
      reef bash
 
 ``--network host`` lets the HTTP service, the inference component, and Ray
-reach each other on localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
-shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs the same
-invocation non-interactively.
+reach each other on localhost. ``--ipc host --shm-size 32g`` gives the training
+stack its shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs
+the same invocation non-interactively.
 
-The cookbook ``recipes/sao/examples/imo_answerbench/serve.yaml`` requests one actor GPU
-and one serving GPU. Reef manages the shared Ray runtime and reserves the
-training GPUs and the engine GPUs separately there. Its ``run.sh`` defaults the local
-Ray pool to two visible devices; an external cluster controls its own pool.
 The model at ``inference.model-path`` must be present or downloadable.
 
 Start from a config
 -------------------
 
-Each weight-training example ships a complete ``serve.yaml``. ``reef serve``
-manages the shared Ray runtime and starts the inference component before the
-HTTP service. The component listens on a free loopback port; an
-``inference.remote`` section names a component elsewhere instead. The HTTP
-service starts Slime's training workers and the serving engines before it
-answers, and ``reef serve`` stops the stack on exit. Method-specific dependencies
-are implemented by the Recipe. Copy the closest example and edit it.
+Each weight-training example ships a complete ``serve.yaml``. Copy the closest
+one and edit it. ``reef serve`` manages the shared Ray runtime and starts the
+inference component before the HTTP service. The component listens on a free
+loopback port; an ``inference.remote`` section names a component elsewhere
+instead. The HTTP service starts Slime's training workers and the serving
+engines before it answers, and ``reef serve`` stops the stack on exit.
 
 - `SAO rollout training <recipes/sao.rst>`__ uses
   ``recipes/sao/examples/imo_answerbench/serve.yaml``, the smallest: two GPUs, one actor
-  that shares its GPU with the critic, and one serving engine.
+  that shares its GPU with the critic, and one serving engine. Its ``run.sh``
+  defaults the local Ray pool to two visible devices.
 - `TTT-Discover test-time training <recipes/tttd.rst>`__ uses
   ``recipes/tttd/examples/tttd/serve.yaml``, four GPUs with LoRA training: two
   for the actor and two for the serving engines.
@@ -156,8 +149,8 @@ Run the example
    reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
      --inference.model-path ~/models/Qwen2.5-1.5B-Instruct
 
-Any config value can be overridden on the command line. Startup takes several
-minutes; wait for the inference component and the HTTP service to report ready.
+You can override any config value on the command line. Startup takes several
+minutes. Wait for the inference component and the HTTP service to report ready.
 
 .. code:: bash
 
@@ -185,8 +178,8 @@ publishes it, loads it into the engines, and records a new version.
      http://127.0.0.1:8900/reef/scenarios/$SCENARIO/artifacts
    # {"scenario": "...", "artifacts": [{"operation": "training", "active": true, ...}, ...]}
 
-You are training when a new ``training`` entry appears, which happens once
-``global_batch_size`` eligible samples have arrived. Later requests use the current
+A new ``training`` entry shows that training ran. It appears once
+``job_samples`` eligible samples have arrived. Later requests use the current
 version without a restart. Slime saves one checkpoint per job, whatever
 ``save-interval`` says, so each published version is a durable checkpoint.
 Megatron requires ``save-interval`` whenever ``save`` is set, so the examples
@@ -245,9 +238,9 @@ What a published adapter contains
 ---------------------------------
 
 Every published LoRA artifact holds the adapter alone in its ``adapter/``
-directory, never a merged or full-model checkpoint. This is what makes saving every update
-affordable: a rank-32 adapter is a few megabytes where the base model is
-gigabytes. Thus the snapshot chain can keep every revision.
+directory, never a merged or full-model checkpoint. A rank-32 adapter is a few
+megabytes where the base model is gigabytes, so the snapshot chain can keep
+every revision.
 
 .. code:: text
 
@@ -267,8 +260,7 @@ revision loads outside Reef with nothing but ``transformers`` and ``peft``:
    base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
    model = PeftModel.from_pretrained(base, "/path/to/snapshot/adapter")
 
-``reef-adapter.json`` is what lets you check a revision, not just load it. It
-records:
+``reef-adapter.json`` lets you check a revision. It records:
 
 - the base model, plus a checksum of its tokenizer and chat-template files;
 - the PEFT settings the export wrote;
@@ -276,15 +268,14 @@ records:
 - the rollout that produced it;
 - a SHA-256 for each of the two PEFT files.
 
-PEFT loaders ignore files they do not recognize, so this one does not affect
+PEFT loaders ignore files they do not recognize, so this file does not affect
 loading the adapter elsewhere.
 
-Reef checks this file whenever it is present. A checksum that no longer matches
-its file, a setting that contradicts ``adapter_config.json``, or a listed file
-that is missing all cause Reef to refuse the adapter instead of serving weights
-it cannot account for. Adapters from elsewhere have no such file and are
-accepted without one; a deployment that should serve only its own exports can
-require it.
+Reef checks this file whenever it is present. Reef refuses the adapter when a
+checksum does not match its file, a setting contradicts
+``adapter_config.json``, or a listed file is missing. Adapters from elsewhere
+have no such file and are accepted without one; a deployment that should serve
+only its own exports can require it.
 
 Connect your agent
 ------------------
@@ -297,6 +288,8 @@ choosing a training config, see `Choose a recipe for agent learning
 Run Harbor tasks and report
 ---------------------------
 
+To train from Harbor tasks, run them through Reef. This needs Docker.
+
 .. code-block:: bash
 
    python -m reef.harness.harbor.rollouts \
@@ -304,15 +297,20 @@ Run Harbor tasks and report
      --manifest tasks/manifest.json --tasks-root tasks --side train
 
 Each task directory runs one rollout with a Harbor agent (``terminus-2`` unless
-``--agent-json`` names another) whose model calls go through Reef, so every
-inference is a record. When the verifier scores the rollout, one report reaches
-``/reef/report``: the reward as the score, the receipts as the references, and
-the task's name, path and digest under ``metadata.task``. The recipe's reported
-processor turns those records into training samples like any other report.
-``--instructions FILE`` appends a file to every task's instruction and
-``--label name=value`` tags the calls and the report, so two arms of one task
-stay apart. The proxy the agent talks to listens on this host's loopback; an
-agent that runs inside the task container (``claude-code``, ``codex`` and the
-other installed agents) needs ``--agent-host host.docker.internal`` (on Linux,
-give the container that name with Docker's ``host-gateway``), and the proxy then
-listens on every interface. Needs Docker.
+``--agent-json`` names another). The agent's model calls go through Reef, so
+every inference is a record. When the verifier scores the rollout, the command
+sends one report to ``/reef/report``: the reward as the score, the receipts as
+the references, and the task's name, path and digest under ``metadata.task``.
+The recipe's reported processor turns those records into training samples like
+any other report.
+
+Options:
+
+- ``--instructions FILE`` appends a file to every task's instruction.
+- ``--label name=value`` tags the calls and the report, so two arms of one task
+  stay apart.
+- ``--agent-host host.docker.internal`` is for an agent that runs inside the
+  task container (``claude-code``, ``codex`` and the other installed agents).
+  By default the proxy that the agent talks to listens on this host's
+  loopback; with this option it listens on every interface. On Linux, give
+  the container that name with Docker's ``host-gateway``.
