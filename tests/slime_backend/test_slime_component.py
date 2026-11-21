@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import types
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -127,6 +127,49 @@ class CriticWarmupObjective(SlimeObjective):
 
     name = "test-critic-warmup"
     loss_family = "test-critic-warmup"
+
+    def prepare(self, batch: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        return TrainingSignal("train", {"steps": next_steps(state)}, {})
+
+
+class ChunkedFamily(SlimeAlgorithm):
+    """A supervised test family that changes prompt lengths before batch admission.
+
+    ``build_rollout_data`` takes policy samples for one save chunk. It raises
+    ``ValueError`` unless ``external_step_sizes == [3]`` and
+    ``rollout_ids == [0, 1, 2]``. It returns the policy rollout data and
+    prepends token 0 to each row whose reward is greater than 1.
+    """
+
+    loss_family = "test-chunked-sft"
+    loss_type = "sft_loss"
+    advantages = "forbidden"
+
+    def validate_specific_args(self, args, source):
+        """Accept the base algorithm's validated arguments."""
+
+    def build_rollout_data(self, payload: Mapping[str, Any], samples: Sequence) -> dict:
+        if payload["external_step_sizes"] != [3] or payload["rollout_ids"] != [0, 1, 2]:
+            raise ValueError("expected one rebased training chunk")
+        data = super().build_rollout_data(payload, samples)
+        data["tokens"] = [
+            [0, *tokens] if reward > 1 else tokens
+            for tokens, reward in zip(data["tokens"], data["rewards"], strict=True)
+        ]
+        return data
+
+
+class ChunkedObjective(SlimeObjective):
+    """Train ``ChunkedFamily`` on the job data.
+
+    ``prepare`` returns a training signal with no advantages or metrics.
+    Its next state contains only ``steps``, the prior count plus one.
+    A missing count means zero. A count other than a nonnegative integer
+    raises ``ValueError``, including when the count is a Boolean.
+    """
+
+    name = "test-chunked-sft"
+    loss_family = ChunkedFamily.loss_family
 
     def prepare(self, batch: JobData, state: Mapping[str, Any]) -> TrainingSignal:
         return TrainingSignal("train", {"steps": next_steps(state)}, {})
@@ -361,6 +404,124 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
     assert SlimeStart.read(starts / "rollout_0") == SlimeStart(0, None, {}, None)
     assert SlimeStart.read(starts / "rollout_1") == SlimeStart(1, "sft", {"steps": 1}, None)
     assert stack.component.loaded_rollout_id == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("layout", "message"),
+    [
+        ({"dp_size": 1, "vpp_size": 0}, "positive vpp_size"),
+        ({"dp_size": 1, "vpp_size": 2}, "positive microbatch_group_size_per_vp_stage"),
+        (
+            {"dp_size": 1, "vpp_size": 2, "microbatch_group_size_per_vp_stage": 0},
+            "positive microbatch_group_size_per_vp_stage",
+        ),
+    ],
+)
+def test_the_batch_processor_rejects_an_invalid_pipeline_layout(layout, message):
+    with pytest.raises(ValueError, match=message):
+        TrainingBatchProcessor(SlimeArguments(), layout)
+
+
+@pytest.mark.unit
+def test_the_fixed_batch_minimum_includes_virtual_pipeline_alignment() -> None:
+    processor = TrainingBatchProcessor(
+        SlimeArguments(use_dynamic_batch_size=False, micro_batch_size=2, reef_rollout_tensor_dtypes={}),
+        {"dp_size": 2, "vpp_size": 2, "microbatch_group_size_per_vp_stage": 2},
+    )
+
+    with pytest.raises(ValueError, match="needs at least 7 rows"):
+        processor.check_external_steps({"rollout_ids": list(range(6)), "external_step_sizes": [6]}, 0)
+    processor.check_external_steps({"rollout_ids": list(range(7)), "external_step_sizes": [7]}, 0)
+    with pytest.raises(ValueError, match="9 rows in 5 microbatches"):
+        processor.check_external_steps({"rollout_ids": list(range(9)), "external_step_sizes": [9]}, 0)
+
+
+@pytest.mark.unit
+def test_dynamic_admission_detects_alignment_after_native_packing() -> None:
+    pytest.importorskip("slime.utils.dp_schedule")
+    processor = TrainingBatchProcessor(
+        SlimeArguments(
+            max_tokens_per_gpu=4,
+            balance_by_flops=False,
+            balance_data=False,
+            reef_rollout_tensor_dtypes={},
+        ),
+        {"dp_size": 2, "cp_size": 1, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1},
+    )
+    data = {"rollout_ids": list(range(7)), "external_step_sizes": [4, 3], "tokens": [[0] * 4 for _ in range(7)]}
+    with pytest.raises(ValueError, match="optimizer step 2 has 3 rows"):
+        processor.check_external_steps(data, 0)
+    # Three rows still fit when the packer can put two in one microbatch.
+    data["tokens"][-2:] = [[0] * 2] * 2
+    processor.check_external_steps(data, 0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("last_reward", [1.0, 2.0])
+def test_admission_checks_the_custom_family_projection_of_each_save_chunk(tmp_path, stacks, last_reward) -> None:
+    pytest.importorskip("slime.utils.dp_schedule")
+    family = ChunkedFamily()
+    register_loss_family(family)
+    try:
+        stack = stacks(tmp_path, loss_family=family.loss_family, global_batch_size=3)
+        stack.processor.args.max_tokens_per_gpu = 6
+        stack.processor.args.balance_by_flops = False
+        stack.processor.args.balance_data = False
+        stack.processor.train_parallel_config.update(dp_size=2, cp_size=1, microbatch_group_size_per_vp_stage=1)
+        data = batch_for(0, rewards=(1.0, 1.0, 1.0, last_reward, last_reward, last_reward))
+        stack.component.submit(
+            TrainingJob(
+                "job-0",
+                "slime",
+                stack.component.base_start,
+                job_data_ref(data),
+                {**parameters("tests.slime_backend.test_slime_component:ChunkedObjective"), "save_interval": 1},
+                scenario="s",
+            )
+        )
+        status = finished(stack.component, "job-0")
+        if last_reward == 1.0:
+            assert status.state == "finished", status.error
+            assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]
+        else:
+            assert status.state == "failed"
+            assert "optimizer step 2 has 3 rows" in status.error
+            assert not stack.group.train_calls
+            assert not status.checkpoints
+    finally:
+        unregister_loss_family(family.loss_family)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dp_size", "remainder", "step_sizes"), [(8, "partial", []), (1, "partial", [16, 1]), (8, "drop", [16])]
+)
+def test_a_partial_step_must_fit_the_worker_layout(tmp_path, stacks, dp_size, remainder, step_sizes) -> None:
+    stack = stacks(tmp_path, global_batch_size=16)
+    stack.processor.train_parallel_config["dp_size"] = dp_size
+    data = batch_for(0, rewards=(1.0,) * 17)
+    stack.component.submit(
+        TrainingJob(
+            "job-0",
+            "slime",
+            stack.component.base_start,
+            job_data_ref(data),
+            {**parameters("sft"), "save_interval": 1, "scheduling": {"remainder": remainder}},
+            scenario="s",
+        )
+    )
+    status = finished(stack.component, "job-0")
+    if step_sizes:
+        assert status.state == "finished", status.error
+        assert [call["external_step_sizes"] for call in stack.processor.calls] == [[size] for size in step_sizes]
+        assert len(status.checkpoints) == len(step_sizes)
+    else:
+        assert status.state == "failed"
+        assert "optimizer step 2 has 1 rows" in status.error
+        assert "8 data-parallel ranks needs at least 8 rows" in status.error
+        assert not stack.group.train_calls
+        assert not status.checkpoints
 
 
 @pytest.mark.unit

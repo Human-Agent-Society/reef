@@ -83,7 +83,10 @@ class RecordingBatchProcessor(TrainingBatchProcessor):
     """Keeps each job's rollout data instead of splitting it across data-parallel ranks."""
 
     def __init__(self) -> None:
-        super().__init__(SlimeArguments(custom_rollout_data_keys=(), reef_rollout_tensor_dtypes={}), {"dp_size": 1})
+        super().__init__(
+            SlimeArguments(custom_rollout_data_keys=(), reef_rollout_tensor_dtypes={}, use_dynamic_batch_size=True),
+            {"dp_size": 1, "vpp_size": 1},
+        )
         self.calls: list[dict[str, Any]] = []
 
     def prepare_external_train_data(self, data):
