@@ -14,7 +14,11 @@ method matching GEPA's published numbers, so a runtime dependency on the
 package under comparison would defeat it. The original is
 ``gepa.adapters.default_adapter.ContainsAnswerEvaluator`` at the v0.1.2 tag
 (commit 92dadfff), MIT licensed, copyright Lakshya A Agrawal and the GEPA
-contributors. The minibatch order is the method's (``recipes/gepa/archive.py``),
+contributors. The containment rule is upstream's; the one departure is that
+two integer answers are compared by value, because the pinned split stores
+answers zero-padded (``033``) while a solver writes ``33`` -- and ``### 033``
+is a prefix of ``### 0335``. The minibatch order is the method's
+(``recipes/gepa/archive.py``),
 drawn from the same generator as its parent choice, as upstream draws it.
 """
 
@@ -23,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
@@ -181,7 +186,7 @@ def _answer_for(answers: Mapping[str, str], task: str) -> str:
 
 
 def evaluate(task: str, result: TaskResult) -> float:
-    """The quickstart's containment score over one Pi run.
+    """The quickstart's containment score over one Pi run, integer answers by value.
 
     A dirty run - a non-zero exit or a file the adapter did not declare -
     scores zero rather than being read for an answer, so a broken harness can
@@ -190,11 +195,48 @@ def evaluate(task: str, result: TaskResult) -> float:
     return _evaluate(ANSWERS, task, result)
 
 
+#: The answer a response names: the token after the skill seed's ``###`` marker.
+_ANSWER_LINE = re.compile(r"###\s*(\S+)")
+
+
+def _answer_value(text: str) -> int | None:
+    """*text* as the integer it names, or ``None`` when it is not an integer.
+
+    AIME answers are integers in 0-999. The pinned train split stores them
+    zero-padded (``"033"``) while a solving model writes the value (``"33"``),
+    so the strings differ for the same answer; and a gold that is a prefix of
+    the model's number (``033`` inside ``0335``) is a different answer.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _answers_match(expected: str, response: str) -> bool:
+    """Does *response* carry the answer *expected* asks for?
+
+    The last ``### <value>`` in the response is its answer: the skill seed asks
+    for the final value on the last answer line, and a model that restates an
+    intermediate result earlier has not changed what it answered. Two integer
+    answers are compared by value, which accepts ``72`` for gold ``072`` and
+    rejects ``0335`` for gold ``033``. Anything else keeps the upstream
+    containment rule, where the expected string has to appear verbatim.
+    """
+    found = _ANSWER_LINE.findall(response)
+    expected_value = _answer_value(expected.removeprefix("### ").strip())
+    if found and expected_value is not None:
+        answer_value = _answer_value(found[-1])
+        if answer_value is not None:
+            return answer_value == expected_value
+    return expected in response
+
+
 def _evaluate(answers: Mapping[str, str], task: str, result: TaskResult) -> float:
     if result.exit_code != 0 or result.residue:
         return 0.0
     response = final_assistant_text(result.trajectory) or result.stdout
-    return 1.0 if _answer_for(answers, task) in response else 0.0
+    return 1.0 if _answers_match(_answer_for(answers, task), response) else 0.0
 
 
 def feedback(task: str, output: str, score: float) -> str:
