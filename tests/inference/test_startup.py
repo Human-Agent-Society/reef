@@ -44,10 +44,16 @@ from reef.recipe.composite import CompositeRecipe
 from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
-from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
+from reef.storage.served_models import (
+    INFERENCE_OWNER_QUEUE,
+    REDEPLOY,
+    SERVE_ARTIFACT_KIND,
+    SERVING_KIND,
+    SERVING_QUEUE,
+)
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import WorkLeaseLostError
+from reef.storage.work_queue import NewWork, WorkLeaseLostError
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
@@ -129,6 +135,51 @@ def startup(tmp_path):
         runtime.release.set()
         worker.stop()
         control.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lost_queue", [SERVING_QUEUE, INFERENCE_OWNER_QUEUE])
+def test_candidate_startup_observes_loss_of_either_lease(startup, monkeypatch, lost_queue):
+    control, worker, runtime = startup[:3]
+    queue = control.coordination.work_queue
+    queue.lease_seconds = 0.3
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+    selected = control.coordination.served_models.current_request("math")
+    candidate = queue.append(
+        NewWork(
+            SERVING_QUEUE,
+            "candidate",
+            "math",
+            SERVE_ARTIFACT_KIND,
+            {"selection": selected.payload["selection"], "component": "weights"},
+        )
+    )
+    entered = threading.Event()
+    observed_stop = threading.Event()
+    release = threading.Event()
+
+    def start(artifact, *, scenario):
+        entered.set()
+        while not release.wait(0.01):
+            if stopping():
+                observed_stop.set()
+                raise StartupStoppedError
+
+    monkeypatch.setattr(runtime, "serve_artifact", start)
+    monkeypatch.setattr(serving, "REPLACED_CHECK_SECONDS", 0.01)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        running = executor.submit(worker.run_once)
+        try:
+            assert entered.wait(5)
+            lost_id = candidate.id if lost_queue == SERVING_QUEUE else worker.owner.item.id
+            queue.cancel(lost_queue, lost_id, "the claim ended")
+            assert observed_stop.wait(2)
+        finally:
+            release.set()
+        assert running.result(timeout=5)
+    assert queue.read(SERVING_QUEUE, candidate.id).state != "finished"
 
 
 @pytest.mark.unit

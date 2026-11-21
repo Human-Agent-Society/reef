@@ -322,39 +322,46 @@ class ServingWorker(QueueWorker):
                     self.activated.pop(scenario, None)
                 logger.info("stopped serving artifact %s at %s", served.artifact_id, served.url)
             return {}
-        if item.kind == SERVE_ARTIFACT_KIND:
-            return self.serve_artifact(item, runtime)
-        selected = self.routes.current_request(item.scenario)
-        if selected is None or selected.id != item.id or not item.payload:
-            return {}
+        candidate = item.kind == SERVE_ARTIFACT_KIND
+        if not candidate:
+            selected = self.routes.current_request(item.scenario)
+            if selected is None or selected.id != item.id or not item.payload:
+                return {}
         stop, done = threading.Event(), threading.Event()
         watcher = threading.Thread(
-            target=self.watch_replaced,
+            target=self.watch_startup,
             args=(item, lease_lost, stop, done),
-            name=f"reef-replaced-{item.id}",
+            name=f"reef-startup-{item.id}",
             daemon=True,
         )
         watcher.start()
         try:
-            with serving_work(stop, redeploy=REDEPLOY in item.payload):
+            with serving_work(stop, redeploy=not candidate and REDEPLOY in item.payload):
+                if candidate:
+                    return self.serve_artifact(item, runtime)
                 return self.start_request(item, runtime, lambda: self.check_stop(stop, lease_lost))
         except StartupStoppedError as error:
             self.check_stop(stop, lease_lost)
+            if candidate:
+                raise
             raise ItemFailedError(REPLACED) from error
         except StartupFailedError as error:
+            if candidate:
+                raise
             raise ItemFailedError(f"{STARTUP_FAILED_PREFIX}{error}") from error
         finally:
             done.set()
 
-    def watch_replaced(
+    def watch_startup(
         self, item: WorkItem, lease_lost: threading.Event, stop: threading.Event, done: threading.Event
     ) -> None:
-        """Set ``stop`` when a newer request replaces ``item`` or the worker loses it, until ``done`` (RFC #1299). A
-        failed read leaves ``stop`` as it is."""
+        """Stop startup if a lease ends or a route request is replaced (RFC #1299)."""
         while not done.wait(REPLACED_CHECK_SECONDS):
-            if lease_lost.is_set():
+            if lease_lost.is_set() or self.owner is None or self.owner.lease_lost.is_set():
                 stop.set()
                 return
+            if item.kind == SERVE_ARTIFACT_KIND:
+                continue
             try:
                 current = self.routes.current_request(item.scenario)
             except Exception:
