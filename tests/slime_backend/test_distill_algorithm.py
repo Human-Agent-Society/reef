@@ -278,3 +278,13 @@ def test_the_base_registers_no_family_and_imports_no_adapters() -> None:
                 assert all("reef_adapters" not in alias.name for alias in node.names), path
     with pytest.raises(Exception, match="available families"):
         resolve_loss_family("distill")
+
+
+@pytest.mark.unit
+def test_distillation_rejects_per_token_loss_with_skipped_response_tokens() -> None:
+    algorithm = ToyAlgorithm()
+    args = SimpleNamespace(num_steps_per_rollout=1, calculate_per_token_loss=True)
+    algorithm.apply_driver_options(args, ToySettings(skip_response_tokens=2))
+
+    with pytest.raises(RuntimeError, match="cannot combine per-token loss with skipped response tokens"):
+        algorithm.validate_specific_args(args, "distillation")

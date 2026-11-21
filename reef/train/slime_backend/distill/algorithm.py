@@ -296,6 +296,11 @@ class DistillAlgorithm(SlimeAlgorithm):
         # so dropout would let the loss compare the teacher against ids the
         # trained student never ranked highest.
         settings = settings_from_args(args)
+        if settings.skip_response_tokens and args.calculate_per_token_loss:
+            raise RuntimeError(
+                f"{source} cannot combine per-token loss with skipped response tokens. "
+                "Set the skip count to zero or disable --calculate-per-token-loss."
+            )
         if settings.teacher_url:
             if args.rollout_temperature != 1.0:
                 raise ValueError(

@@ -100,7 +100,8 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         "loss_masks": masks,
         "distill_sample_weights": sample_weights,
         # The old-policy log-probabilities that the actor computes with the job's start weights.
-        "log_probs": list(sampler_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
+        "log_probs": list(probabilities.log().gather(-1, sampled[:, None])[:, 0].split(lengths)),
+        "rollout_log_probs": list(sampler_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
         "distill_teacher_topk_ids": list(teacher_head_ids.split(lengths)),
         "distill_teacher_topk_log_probs": list(teacher_log_probs.gather(-1, teacher_head_ids).split(lengths)),
         "distill_teacher_sampled_log_probs": list(teacher_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
@@ -148,10 +149,20 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         [mask * weight / mask.sum().clamp_min(1) for mask, weight in zip(effective_masks, sample_weights, strict=True)]
     )
     torch.testing.assert_close(logits.grad, expected * reduction_weights[:, None], atol=2e-6, rtol=2e-5)
+    if cap > 0:
+        metric_weights = torch.cat([mask / mask.sum().clamp_min(1) for mask in effective_masks])
+        torch.testing.assert_close(metrics["distill_is_weight"], (weights[rows, sampled] * metric_weights).sum())
+        disagreement = (probabilities.log() - sampler_log_probs).abs()[rows, sampled]
+        torch.testing.assert_close(metrics["distill_log_prob_abs_diff"], (disagreement * metric_weights).sum())
     assert teacher_log_probs.grad is None
     assert torch.equal(batch["loss_masks"][0], torch.tensor([1.0, 0.0, 1.0]))
     assert "advantages" not in batch
     torch.testing.assert_close(metrics["loss"], loss.detach())
+
+    if cap > 0:
+        without_sampler = {key: value for key, value in batch.items() if key != "rollout_log_probs"}
+        with pytest.raises(ValueError, match="requires sampler log-probs"):
+            distill_loss(args, without_sampler, logits, reduce)
 
     args.score_centering = False
     plain_loss, plain_metrics = distill_loss(args, batch, logits, reduce)
