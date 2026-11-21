@@ -31,7 +31,7 @@ to forced cleanup of the managed service processes.
        the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
 
    ``--component NAME``
-       run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation`` or ``data``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
+       run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` or ``harness``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
 
    ``--print-config``
        print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
@@ -100,7 +100,8 @@ store:
 
 A service that only takes work from a queue (``samples``, ``training`` and
 ``evaluation``) answers ``/healthz`` and nothing else. The ``data`` service
-answers the data routes and the scenario reads.
+answers the data routes and the scenario reads. The ``harness`` service
+answers the routes that a harness client calls.
 
 Where it writes
 ---------------

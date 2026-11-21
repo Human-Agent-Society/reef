@@ -501,8 +501,8 @@ service.
 
 Every service except inference must also reach the same data store
 (``storage.data-store``, which follows the record backend by default; see
-`Choose the data store`_). Control, inference, training, evaluation and data must reach
-the same artifact backend.
+`Choose the data store`_). Control, inference, training, evaluation, data and harness
+must reach the same artifact backend.
 
 **Data requests.** Send the data routes (``/reef/namespaces/{owner}/data...``),
 ``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` and
