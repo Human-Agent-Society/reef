@@ -101,6 +101,7 @@ from reef.train.slime_backend.reef_adapters.train_groups import (
     merge_rank_metrics,
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, critic_checkpoint_due
+from reef.train.slime_backend.reef_adapters.worker_hooks import OPTIMIZER_UPDATES_METRIC
 from reef.train.slime_backend.resources import SlimeDeploymentResources, retire_lease
 from reef.train.slime_backend.rollout_group import (
     SERVING_FILE,
@@ -481,20 +482,49 @@ class SlimeJobRunner(SlimeJobs):
             training = (algorithm, slime_payload_steps(payload, first, last))
             rollout = SlimeRound(self.next_rollout_id, last, schedule_state, next_schedule, objective, state)
             started = read_json(directory / ROLLOUT_FILE)
-            if started is not None and started["step"] == last and started["rollout_id"] < self.next_rollout_id:
+            if started is not None and started["step"] == last and started["rollout_id"] == self.loaded_rollout_id:
                 # A restart stopped the job after Megatron saved this rollout, which the workers loaded again.
                 # The job records that checkpoint instead of training the same data a second time.
                 rollout = replace(rollout, rollout_id=started["rollout_id"])
+                owned = self.storage.check_rollout_owner(job.job_id, rollout.rollout_id)
+                schedule_state = self.recovered_schedule(rollout, owned)
                 rewards = to_slime_rollout_data(dict(training[1]))["rewards"]
                 self.storage.complete(job.job_id, rollout.rollout_id, reward=math.fsum(rewards) / len(rewards))
-                self.record_rollout(directory, rollout, next_schedule, {})
+                self.record_rollout(directory, rollout, schedule_state, {})
                 metrics.update(rollout_id=rollout.rollout_id, resumed=1)
-                schedule_state = next_schedule
             else:
                 write_json(directory / ROLLOUT_FILE, {"rollout_id": rollout.rollout_id, "step": last})
                 schedule_state = self.train_and_save(job, directory, rollout, training)
                 metrics["rollout_id"] = rollout.rollout_id
         return metrics
+
+    def recovered_schedule(self, rollout: SlimeRound, owned: bool) -> LearningRateScheduleState | None:
+        """Read a confirmed start for this rollout, or use the planned count if no start was written."""
+        start_dir = self.starts_root / f"rollout_{rollout.rollout_id}"
+        path = start_dir / START_STATE
+        if self.starts_root.is_symlink() or start_dir.is_symlink() or path.is_symlink():
+            raise RuntimeError(f"checkpoint start is unsafe: {path}")
+        if not path.exists():
+            return rollout.next_schedule
+        if not owned or not path.is_file():
+            raise RuntimeError(f"checkpoint start has no matching storage record: {path}")
+        start = SlimeStart.read(start_dir)
+        if (start.rollout_id, start.objective) != (rollout.rollout_id, rollout.objective):
+            raise RuntimeError(f"checkpoint start has the wrong rollout or objective: {path}")
+        recovered = start.schedule_state
+        if rollout.schedule_state is None:
+            if recovered is None:
+                return None
+        elif (
+            rollout.next_schedule is not None
+            and recovered is not None
+            and recovered.schedule == rollout.schedule_state.schedule
+            and rollout.schedule_state.completed_steps
+            <= recovered.completed_steps
+            <= rollout.next_schedule.completed_steps
+        ):
+            return recovered
+        raise RuntimeError(f"checkpoint start has invalid schedule progress: {path}")
 
     def train_and_save(
         self,
@@ -509,8 +539,7 @@ class SlimeJobRunner(SlimeJobs):
         optimizer steps. Storage
         admission bounds the checkpoints on disk, and retention never deletes
         the rollout that the workers hold. Return the schedule progress that
-        the checkpoint records: ``rollout.next_schedule`` when the actor
-        trained, else ``rollout.schedule_state``.
+        the checkpoint records after the actor's successful updates.
         """
         algorithm, payload = training
         rollout_data = to_slime_rollout_data(dict(payload))
@@ -542,21 +571,37 @@ class SlimeJobRunner(SlimeJobs):
             metrics = next(
                 (dict(value) for value in result.worker_results if isinstance(value, Mapping) and value), {}
             )
-            metrics.update(merge_rank_metrics(self.resolve(self.group.async_pop_metrics())))
+            per_rank = self.resolve(self.group.async_pop_metrics())
+            rank_metrics = merge_rank_metrics(per_rank)
+            rank_metrics.pop(OPTIMIZER_UPDATES_METRIC, None)
+            metrics.update(rank_metrics)
             metrics.update(algorithm_metrics)
             metrics.update(result.durable_metrics)
             metrics.update(algorithm.rollout_metrics(rollout_data))
             if result.actor_trained:
                 # The actor fetched the rollout's data, and with it any worker switch.
                 self.worker_settings = worker_settings
-                if rollout.schedule_state is not None and rollout.next_schedule is not None:
-                    saved_schedule = rollout.next_schedule
-                    optimizer_steps = len(rollout_data["external_step_sizes"])
-                    metrics.update(
-                        learning_rate_metrics(
-                            rollout.schedule_state.learning_rates(optimizer_steps), rollout.next_schedule
+                if rollout.schedule_state is not None:
+                    planned_steps = len(rollout_data["external_step_sizes"])
+                    updates = [rank.get(OPTIMIZER_UPDATES_METRIC) if rank is not None else None for rank in per_rank]
+                    if (
+                        not updates
+                        or len(updates) != self.group.world_size
+                        or any(
+                            not isinstance(count, int | float)
+                            or isinstance(count, bool)
+                            or not 0 <= count <= planned_steps
+                            or int(count) != count
+                            or count != updates[0]
+                            for count in updates
                         )
-                    )
+                    ):
+                        raise RuntimeError("Actor ranks did not agree on a valid optimizer update count.")
+                    completed_steps = int(updates[0])
+                    saved_schedule = rollout.schedule_state.advanced(completed_steps)
+                    if completed_steps:
+                        rates = rollout.schedule_state.learning_rates(completed_steps)
+                        metrics.update(learning_rate_metrics(rates, saved_schedule))
             rewards = rollout_data["rewards"]
             self.save_rollout(job, directory, rollout, saved_schedule, metrics, math.fsum(rewards) / len(rewards))
         return saved_schedule
