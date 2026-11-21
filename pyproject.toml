@@ -90,6 +90,8 @@ slime = [
 # Local dev toolchain: `pip install -e .[dev]`. Versions of the lint
 # tools stay in sync with .pre-commit-config.yaml revs.
 dev = [
+    # Property tests of parsers that read model replies and stored state.
+    "hypothesis",
     "mypy",
     "pre-commit",
     "pytest",

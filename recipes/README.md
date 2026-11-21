@@ -107,6 +107,7 @@ recipe reads it out of the traffic it already serves.
 | OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
 | ACE | harness rules: a playbook of lessons | [`recipes/ace/`](ace/) | [ACE](ace/README.md) | [online deployment](ace/examples/serve.yaml) |
 | ReasoningBank | harness skills: memory items | [`recipes/reasoning_bank/`](reasoning_bank/) | [ReasoningBank](reasoning_bank/README.md) | [online deployment](reasoning_bank/examples/serve.yaml) |
+| Skill library | harness skills: procedures checked by replay | [`recipes/skill_library/`](skill_library/) | [Skill library](skill_library/README.md) | [deployment with replays](skill_library/examples/serve.yaml) |
 
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
 personal-agent experiment as a reef-eval task stream: a simulated student brings
@@ -120,7 +121,11 @@ contains only the harness side.
 traffic without ground truth and run no evaluation rollout (`policy: none`).
 ACE grows a playbook of lessons in `rules.md` from a reflector and a curator
 model; ReasoningBank distills strategies and lessons from judged runs into one
-Agent Skill per memory item, which the harness's skill list retrieves.
+Agent Skill per memory item, which the harness's skill list retrieves. The
+[skill library](skill_library/README.md) also writes skills from runs, but it
+needs scores and keeps a skill from a failed run only when a replay of that
+run's task scores higher with the skill, so it needs a scorer and evaluation
+tasks.
 
 ## Basic
 

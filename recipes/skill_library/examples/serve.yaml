@@ -1,0 +1,55 @@
+# SkillLibrary on pi, learning from scored reports and checking each new skill by a replay.
+#
+# Each scored report is one step (the default pipeline stages, job_samples 1). The extractor writes at most one
+# skill from the run. When a failed run's prompt is one of evolution.evaluation.tasks, the step runs that task with
+# and without the skill and keeps the skill only when it scores higher. A successful run adds its skill unverified,
+# and a failed run on any other prompt adds nothing. policy: compare then runs every task on the new library
+# against the head before the release. The tasks and the scorer are the tutorial's. Start it from the repository root:
+#
+#   reef serve -c recipes/skill_library/examples/serve.yaml
+
+reef:
+  host: 127.0.0.1
+  port: 8900
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
+  run-dir: .reef/skill-library/run
+
+recipe:
+  implementation: reef.recipe.harness:HarnessEvolutionRecipe
+  config:
+    evolution:
+      adapter: pi
+      method:
+        module: recipes.skill_library:SkillLibrary
+        config:
+          # The served model writes the skills. To use another model, declare it under evolution.models
+          # (url, model, api_key_env) and give its name here.
+          extract_model: served
+          success_score: 1.0
+          # A replay runs each tree this many times. 0 takes evaluation.repeats.
+          repeats: 0
+          max_ablations_per_step: 2
+          max_losses: 2
+          max_skills: 30
+      state_dir: .reef/skill-library/harness
+      evaluation:
+        scorer: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
+        policy: compare
+        repeats: 2
+        tasks:
+          - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a
+            plain integer alone on the last line.'
+          - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the
+            value as a plain integer alone on the last line.'
+
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+
+storage:
+  agent-record-dir: .reef/skill-library/agent-record
+  artifact-repository: .reef/skill-library/artifacts.git
+  artifact-work-dir: .reef/skill-library/artifact-work
+  artifact-cache-dir: .reef/skill-library/artifact-cache
