@@ -781,20 +781,24 @@ class EvaluationRolloutWorker(QueueWorker):
         item_id = f"{SERVE_ARTIFACT_KIND}:{uuid.uuid4().hex}"
         payload: dict[str, JsonValue] = {"selection": dict(rollout.selection), "component": rollout.component}
         self.queue.append(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
-        deadline = time.monotonic() + SERVE_WAIT_S
-        while time.monotonic() < deadline:
-            if self.rollouts_cancelled.is_set():
-                raise WorkerStoppedError
-            if lease_lost.is_set():
-                raise WorkLeaseLostError("the evaluation worker lost its lease")
-            item = self.queue.read(SERVING_QUEUE, item_id)
-            if item is not None and item.final:
-                if item.state != "finished":
-                    raise ReefError(f"inference could not serve artifact {rollout.artifact_id}: {item.error}")
-                served = cast(Mapping[str, Any], item.result)["served"]
-                return None if served is None else ServedArtifact.from_json(served)
-            time.sleep(SERVE_POLL_S)
-        raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
+        try:
+            deadline = time.monotonic() + SERVE_WAIT_S
+            while time.monotonic() < deadline:
+                if self.rollouts_cancelled.is_set():
+                    raise WorkerStoppedError
+                if lease_lost.is_set():
+                    raise WorkLeaseLostError("the evaluation worker lost its lease")
+                item = self.queue.read(SERVING_QUEUE, item_id)
+                if item is not None and item.final:
+                    if item.state != "finished":
+                        raise ReefError(f"inference could not serve artifact {rollout.artifact_id}: {item.error}")
+                    served = cast(Mapping[str, Any], item.result)["served"]
+                    return None if served is None else ServedArtifact.from_json(served)
+                time.sleep(SERVE_POLL_S)
+            raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
+        except (WorkerStoppedError, WorkLeaseLostError, ReefError):
+            self.queue.cancel(SERVING_QUEUE, item_id, "the rollout stopped waiting for its candidate")
+            raise
 
     def score(
         self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int

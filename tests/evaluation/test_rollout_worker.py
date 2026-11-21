@@ -8,6 +8,7 @@ import math
 import threading
 import urllib.request
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +46,7 @@ from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
+from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork, WorkLeaseLostError, WorkQueue
 
@@ -254,6 +256,24 @@ def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp
         "rewards": None,
         "error": "VerifierTimeoutError: the verifier ran past 600 s",
     }
+
+
+@pytest.mark.unit
+def test_a_cancelled_rollout_leaves_no_claimable_serving_work(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.SERVE_POLL_S", 0.01)
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), lease_seconds=0.09)
+    value = rollout()
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = EvaluationRolloutWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="evaluation")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(worker.run_once)
+        try:
+            wait_until(lambda: bool(queue.read_changes(SERVING_QUEUE, 0)))
+        finally:
+            queue.cancel(EVALUATIONS_QUEUE, value.item_id(), "evaluation cancelled")
+        assert result.result(timeout=5)
+
+    assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
 
 
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
