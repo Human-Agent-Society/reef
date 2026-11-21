@@ -12,6 +12,8 @@ imports ``reef.inference``.
 
 from __future__ import annotations
 
+import re
+
 #: The tokens at the end of a rendered prompt that hold an open ``<think>``: the tag and the newline after it can be
 #: several tokens.
 PROMPT_TAIL_TOKEN_COUNT = 8
@@ -29,20 +31,29 @@ def is_reasoning_pre_opened(prompt_tail: str) -> bool:
     return prompt_tail.rstrip().endswith(THINK_START)
 
 
+LEADING_THINK_TAG = re.compile(rf"\s*{re.escape(THINK_START)}")
+
+
+def leading_think_tags_end(text: str) -> int:
+    """Return the end of the leading opening tags and any whitespace before them."""
+    end = 0
+    while match := LEADING_THINK_TAG.match(text, end):
+        end = match.end()
+    return end
+
+
 def split_reasoning(text: str, *, pre_opened: bool) -> tuple[str, str]:
     """The reasoning and the answer of the sampled reply ``text``; the reasoning is "" when the reply has none.
 
     ``pre_opened`` holds when the prompt ended with an open ``<think>``. Without it, a reply with no ``<think>`` and
-    no ``</think>`` is all answer. Otherwise the leading ``<think>`` tags drop, and the first ``</think>`` ends the
-    reasoning, with the newlines after it dropped. Without a ``</think>``, a ``<tool_call>`` ends the reasoning, and a
-    reply with neither is all reasoning: its generation stopped while it thought. The reasoning has no leading or
+    no ``</think>`` is all answer. Leading ``<think>`` tags and whitespace before them drop. The first
+    ``</think>`` ends the reasoning and drops the newlines after it. Without a closing tag, a ``<tool_call>`` ends
+    reasoning. With no closing tag or tool call, a reply that starts in reasoning remains in reasoning. The reasoning has no leading or
     trailing whitespace.
     """
     if not (pre_opened or THINK_START in text or THINK_END in text):
         return "", text
-    body = text
-    while body.startswith(THINK_START):
-        body = body[len(THINK_START) :]
+    body = text[leading_think_tags_end(text) :]
     reasoning, separator, answer = body.partition(THINK_END)
     if separator:
         return reasoning.strip(), answer.lstrip("\n")
@@ -56,18 +67,23 @@ class ReasoningStreamSplitter:
     """The split of one streamed reply into reasoning and answer pieces, without waiting for the whole reply.
 
     A value holds the text it has read but not given out (``buffer``) and its position in the reply: whether it reads
-    reasoning (``in_reasoning``) and whether it has dropped the first ``<think>`` (``stripped_think_start``). A
-    splitter with ``enabled`` false gives every delta out as answer. Otherwise the first ``<think>`` starts reasoning
-    and drops, and with ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning,
-    with the newlines after it dropped, and a ``<tool_call>`` before it ends the reasoning too. A reply that ends in
-    reasoning is all reasoning. ``buffer`` keeps only an end of the text that can be the start of one of these tags.
+    reasoning (``in_reasoning``) and whether only leading tags have appeared (``at_start``). A splitter with
+    ``enabled`` false gives every delta out as answer. Otherwise leading ``<think>`` tags start reasoning and drop.
+    With ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning.
+    ``strip_answer_newlines`` drops the newlines after that tag when the answer starts in a later chunk.
+    A ``<tool_call>`` before the closing tag ends the reasoning too. A reply that ends in reasoning is all reasoning.
+    While ``at_start`` is true, ``leading_whitespace`` holds nonempty whitespace fragments in their input order.
+    ``buffer`` can hold a partial opening tag after those fragments. A complete opening tag discards them.
+    Other text or the end of the reply releases them in order. After ``at_start``, ``buffer`` holds only a tag suffix.
     One splitter reads one reply; the streaming chat handlers make it and read its pieces.
     """
 
     def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
         self.enabled = enabled
         self.in_reasoning = enabled and force_reasoning
-        self.stripped_think_start = False
+        self.at_start = True
+        self.strip_answer_newlines = False
+        self.leading_whitespace: list[str] = []
         self.buffer = ""
 
     @staticmethod
@@ -78,6 +94,13 @@ class ReasoningStreamSplitter:
                 return size
         return 0
 
+    def restore_leading_whitespace(self) -> None:
+        """Put pending whitespace back in the buffer before it is emitted."""
+        if self.leading_whitespace:
+            self.leading_whitespace.append(self.buffer)
+            self.buffer = "".join(self.leading_whitespace)
+            self.leading_whitespace.clear()
+
     def feed(self, delta: str) -> list[tuple[str, str]]:
         """The pieces that ``delta`` completes, in reply order, as ``("thinking", text)`` for reasoning and
         ``("text", text)`` for the answer; a part of a tag that is still open stays in ``buffer``."""
@@ -86,17 +109,29 @@ class ReasoningStreamSplitter:
         if not self.enabled:
             return [("text", delta)]
         self.buffer += delta
-        if any(
-            tag.startswith(self.buffer) and tag != self.buffer for tag in (THINK_START, THINK_END, TOOL_CALL_START)
-        ):
+        if self.at_start:
+            start = leading_think_tags_end(self.buffer)
+            if start:
+                self.buffer = self.buffer[start:]
+                self.in_reasoning = True
+                self.leading_whitespace.clear()
+            possible_tag = self.buffer.lstrip()
+            if THINK_START.startswith(possible_tag):
+                whitespace = len(self.buffer) - len(possible_tag)
+                if whitespace:
+                    self.leading_whitespace.append(self.buffer[:whitespace])
+                self.buffer = possible_tag
+                return []
+            self.at_start = False
+            self.restore_leading_whitespace()
+        if any(tag.startswith(self.buffer) and tag != self.buffer for tag in (THINK_END, TOOL_CALL_START)):
             return []
-        if not self.stripped_think_start and THINK_START in self.buffer:
-            self.buffer = self.buffer.replace(THINK_START, "", 1)
-            self.stripped_think_start = True
-            self.in_reasoning = True
         if not self.in_reasoning:
             value, self.buffer = self.buffer, ""
-            return [("text", value)]
+            if self.strip_answer_newlines:
+                value = value.lstrip("\n")
+                self.strip_answer_newlines = not value
+            return [("text", value)] if value else []
 
         before, separator, after = self.buffer.partition(THINK_END)
         if separator:
@@ -104,6 +139,7 @@ class ReasoningStreamSplitter:
             self.in_reasoning = False
             parts = [("thinking", before)] if before else []
             visible = after.lstrip("\n")
+            self.strip_answer_newlines = not visible
             if visible:
                 parts.append(("text", visible))
             return parts
@@ -113,10 +149,7 @@ class ReasoningStreamSplitter:
             self.buffer = ""
             self.in_reasoning = False
             return [("thinking", before), ("text", after)] if before else [("text", after)]
-        held_tags = (
-            [THINK_END, TOOL_CALL_START] if self.stripped_think_start else [THINK_START, THINK_END, TOOL_CALL_START]
-        )
-        held = max(self.held_suffix_length(self.buffer, tag) for tag in held_tags)
+        held = max(self.held_suffix_length(self.buffer, tag) for tag in (THINK_END, TOOL_CALL_START))
         if held:
             value = self.buffer[:-held]
             self.buffer = self.buffer[-held:]
@@ -125,14 +158,12 @@ class ReasoningStreamSplitter:
         return [("thinking", value)] if value else []
 
     def finish(self) -> list[tuple[str, str]]:
-        """The piece that ``buffer`` holds when the reply ends, as reasoning when the reply ends in reasoning."""
+        """Emit any pending whitespace and text in the reply's last channel."""
+        self.restore_leading_whitespace()
         if not self.buffer:
             return []
         value, self.buffer = self.buffer, ""
-        if self.in_reasoning:
-            value = value.removeprefix(THINK_START)
-            return [("thinking", value)] if value else []
-        return [("text", value)]
+        return [("thinking" if self.in_reasoning else "text", value)]
 
 
 __all__ = [
