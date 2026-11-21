@@ -90,14 +90,22 @@ class DirectorySource(DirectoryFiles, SourceFiles):
 
 
 class S3PrefixFiles(SourceFiles):
-    """The objects under ``prefix`` in ``bucket``, at their keys below the prefix.
+    """An import's files from one S3 bucket and prefix, indexed by normalized relative path.
 
-    One listing gives ``paths``. An empty object whose key ends in ``/`` is a folder marker, such as the S3
-    console's "Create folder" writes, and is skipped. A key that ends in ``/`` and holds data, a key that is both a
-    file and a folder, multiple keys for the same relative file path, and an empty prefix are refused with
-    ``ValueError``. A path outside the prefix raises ``ArtifactSourceError``. ``version`` is the SHA-256 of the paths
-    and ETags, so the same objects read again give the same version. ``sha256``,
-    ``read_bytes`` and ``copy_into`` download the objects they read.
+    Skip zero-byte folder markers whose raw keys end in ``/``. Raise ``ValueError`` when a marker holds data.
+    For each remaining key, remove the prefix and parse the suffix with ``PurePosixPath``. It must be relative
+    and have at least one component and no ``..`` component. Otherwise, raise ``ArtifactSourceError``.
+    Each ``as_posix()`` path maps to one raw key. The suffixes ``./weights`` and ``weights`` both become
+    ``weights``.
+    Raise ``ValueError`` if two distinct keys map to one path, a path is both a file and a folder,
+    or the prefix has no files.
+
+    ``paths()`` lists normalized paths in component order. ``key(path)`` returns the mapped raw key.
+    ``read_bytes(path)`` reads that object's bytes. Both raise ``FileNotFoundError`` for paths absent from
+    ``paths()``.
+    If the only key below ``model/`` is ``model/./weights``, callers use ``weights`` to read that raw key.
+    ``version`` is the SHA-256 of sorted path and ETag pairs. ``sha256(path)`` hashes ``read_bytes(path)``.
+    ``copy_into(directory)`` downloads each mapped key to its normalized path under the directory.
     """
 
     def __init__(self, uri: str, client: Any, client_errors: tuple[type[Exception], ...]) -> None:
