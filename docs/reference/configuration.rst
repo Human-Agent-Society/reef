@@ -2089,8 +2089,10 @@ the rest of each group that those samples touch, so it can hold more than
 ``job_samples``: a group of rollouts trains in one job, and a job with more
 samples than the batch size trains more than one optimizer step. A job with fewer samples than the batch size trains one
 partial step. The ``remainder`` field of a job's optional ``scheduling``
-parameter decides what happens to a shorter last step; by default, the
-component trains it as a smaller step. See `Job size
+parameter decides what happens to a shorter last step. By default, Slime
+trains that step if it can supply the required data-parallel microbatches.
+Slime checks this for every step before training.
+An error reports the step's row count and the required minimum. See `Job size
 <../developer-guide/processors.rst#job-size>`__.
 
 Every built-in sample-to-job stage that trains on records reads ``job_samples``

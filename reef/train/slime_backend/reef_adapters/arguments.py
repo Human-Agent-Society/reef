@@ -13,6 +13,8 @@ class SlimeArguments(Namespace):
 
     num_rollout: int
     global_batch_size: int
+    micro_batch_size: int
+    use_dynamic_batch_size: bool
     save_hf: str
     save: str
     compute_advantages_and_returns: bool

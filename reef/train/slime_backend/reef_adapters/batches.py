@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -89,6 +90,39 @@ class TrainingBatchProcessor:
             raise ValueError(f"rollout key {key!r} is declared as {dtype}, and as {self.tensor_dtypes[key]} before")
         self.rollout_data_keys = tuple(dict.fromkeys((*self.rollout_data_keys, *keys)))
         self.tensor_dtypes.update(dtypes)
+
+    def check_external_steps(self, rollout_ids: Sequence[int], step_sizes: Sequence[int], first_step: int) -> None:
+        """Refuse an unstarted optimizer step that cannot supply the required microbatches.
+
+        rollout_ids has one entry per row in training order. step_sizes gives
+        the count of distinct rollouts per step. first_step is the first
+        unstarted step's zero-based index. Raise ValueError with the required
+        row count if a step is too small for the workers' layout.
+        """
+        layout = self.train_parallel_config
+        dp_size = layout["dp_size"]
+        microbatches = dp_size
+        if layout["vpp_size"] > 1:
+            microbatches *= layout["microbatch_group_size_per_vp_stage"]
+        if self.args.use_dynamic_batch_size:
+            minimum_rows = microbatches
+        else:
+            # Slime allows fewer rows in the last fixed-size microbatch.
+            minimum_rows = (microbatches - 1) * self.args.micro_batch_size + 1
+
+        rows_by_rollout = Counter(rollout_ids)
+        row_counts = list(rows_by_rollout.values())
+        cursor = 0
+        for step, size in enumerate(step_sizes):
+            end = cursor + size
+            row_count = sum(row_counts[cursor:end])
+            if step >= first_step and row_count < minimum_rows:
+                raise ValueError(
+                    f"Slime optimizer step {step + 1} has {row_count} rows. "
+                    f"The worker layout with {dp_size} data-parallel ranks needs at least {minimum_rows} rows per step. "
+                    "Change the batch size, remainder policy, or data-parallel size."
+                )
+            cursor = end
 
     def prepare_external_train_data(self, data):
         return self._split_train_data_by_dp(dict(data))

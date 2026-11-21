@@ -364,6 +364,37 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dp_size", "remainder", "step_sizes"), [(8, "partial", []), (1, "partial", [16, 1]), (8, "drop", [16])]
+)
+def test_a_partial_step_must_fit_the_worker_layout(tmp_path, stacks, dp_size, remainder, step_sizes) -> None:
+    stack = stacks(tmp_path, global_batch_size=16)
+    stack.processor.train_parallel_config["dp_size"] = dp_size
+    data = batch_for(0, rewards=(1.0,) * 17)
+    stack.component.submit(
+        TrainingJob(
+            "job-0",
+            "slime",
+            stack.component.base_start,
+            job_data_ref(data),
+            {**parameters("sft"), "save_interval": 1, "scheduling": {"remainder": remainder}},
+            scenario="s",
+        )
+    )
+    status = finished(stack.component, "job-0")
+    if step_sizes:
+        assert status.state == "finished", status.error
+        assert [call["external_step_sizes"] for call in stack.processor.calls] == [[size] for size in step_sizes]
+        assert len(status.checkpoints) == len(step_sizes)
+    else:
+        assert status.state == "failed"
+        assert "optimizer step 2 has 1 rows" in status.error
+        assert "8 data-parallel ranks needs at least 8 rows" in status.error
+        assert not stack.group.train_calls
+        assert not status.checkpoints
+
+
+@pytest.mark.unit
 def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     stack.component.submit(

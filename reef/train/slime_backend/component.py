@@ -466,6 +466,7 @@ class SlimeJobRunner(SlimeJobs):
         step_count = len(payload["external_step_sizes"])
         interval = parameters.save_interval or step_count
         done = saved[-1].step if saved else 0
+        self.batch_processor.check_external_steps(payload["rollout_ids"], payload["external_step_sizes"], done)
         runs = [(first, min(first + interval, step_count)) for first in range(done, step_count, interval)]
         metrics: dict[str, Any] = {**prepared.metrics, **rollout_metrics}
         for first, last in runs:
