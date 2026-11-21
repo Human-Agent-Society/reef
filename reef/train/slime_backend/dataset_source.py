@@ -28,7 +28,10 @@ from reef.train.slime_backend.harbor_rollouts import GENERATE_FUNCTION_PATH, Tas
 
 
 class ReefDatasetSource(RolloutDataSourceWithBuffer):
-    """Serve the prompts of the job in the save root's ``DATASET_FILE``, as Slime's own data source does."""
+    """Serve the prompts of the job in the save root's ``DATASET_FILE``.
+
+    ``get_samples`` fills task batches across epochs and delegates dataset-job batches to Slime's data source.
+    """
 
     def __init__(self, args: Any) -> None:
         super().__init__(args)
@@ -94,6 +97,13 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
         self.token = record["token"]
 
     def get_samples(self, num_samples: int) -> list[list[Any]]:
+        """Read up to ``num_samples`` prompt groups (a nonnegative count) from the current job.
+
+        For tasks, return exactly that many groups in Slime's source order. Each group has
+        ``n_samples_per_prompt`` samples. Continue from the current cursor across as many epochs as needed.
+        Slime updates its epoch and cursor at each wrap and applies the configured shuffle.
+        For dataset jobs, return the groups from one call to Slime's data source.
+        """
         self.refresh()
         if not isinstance(self.dataset, TaskPrompts):
             return super().get_samples(num_samples)
