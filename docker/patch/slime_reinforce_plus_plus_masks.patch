@@ -1,0 +1,28 @@
+--- a/slime/backends/megatron_utils/loss.py
++++ b/slime/backends/megatron_utils/loss.py
+@@ -894,5 +894,7 @@
+             process_group=dp_cp_group,
+             shift_mean=True,
+         )
++        if args.advantage_estimator == "reinforce_plus_plus" and args.custom_advantage_function_path is None:
++            whitened_advs_flat = whitened_advs_flat.masked_fill(all_masks == 0, 0)
+         chunk_lengths = [chunk.size(0) for chunk in advantages]
+         advantages = list(torch.split(whitened_advs_flat, chunk_lengths))
+--- a/slime/utils/ppo_utils.py
++++ b/slime/utils/ppo_utils.py
+@@ -585,8 +585,10 @@
+         # Step 3: Compute returns on full response kl tensor.
+         full_mask = loss_masks[i]
+-        assert full_mask.sum().item() > 0, f"Sequence at index {i} is fully masked."
+-        masked_kl = full_kl_response * full_mask
+-        rewards_for_seq = -kl_coef * masked_kl
+-        last_idx = full_mask.nonzero(as_tuple=True)[0][-1]
+-        rewards_for_seq[last_idx] += rewards[i]
++        active_tokens = full_mask.nonzero(as_tuple=True)[0]
++        if active_tokens.numel() == 0:
++            rewards_for_seq = torch.zeros_like(full_kl_response)
++        else:
++            masked_kl = full_kl_response * full_mask
++            rewards_for_seq = -kl_coef * masked_kl
++            rewards_for_seq[active_tokens[-1]] += rewards[i]
+         token_level_rewards.append(rewards_for_seq)

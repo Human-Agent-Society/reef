@@ -50,6 +50,7 @@ from abc import abstractmethod
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from statistics import fmean
 from typing import Any
 
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
@@ -632,8 +633,15 @@ class SlimeJobRunner(SlimeJobs):
         if started is not None and started["rollout_id"] == self.loaded_rollout_id and started["step"] > recorded:
             # A restart stopped the job after Megatron saved this rollout, which the workers loaded again.
             rollout = SlimeRound(started["rollout_id"], started["step"], None, None, None, {})
-            self.storage.complete(job.job_id, rollout.rollout_id, reward=0.0)
-            self.record_rollout(directory, rollout, None, {"resumed": 1})
+            metrics: dict[str, Any] = {"resumed": 1}
+            if job.kind == "task":
+                reward = started.get("reward")
+                if reward is not None:
+                    metrics["rollout/raw_reward"] = reward
+            else:
+                reward = 0.0
+            self.storage.complete(job.job_id, rollout.rollout_id, reward=reward)
+            self.record_rollout(directory, rollout, None, metrics)
             return started["step"]
         held = SlimeStart.read(Path(saved[-1].path if saved else job.start))
         self.check_held_weights(held.rollout_id, job.start)
@@ -659,6 +667,10 @@ class SlimeJobRunner(SlimeJobs):
             raise RuntimeError("Slime's own loop rolls out on the serving session, which this runner lacks")
         interval = save_interval or total
         metrics: dict[str, Any] = {}
+        if tasks is not None and done:
+            previous_metrics = self.saved(directory)[-1].metrics
+            if "rollout/raw_reward" in previous_metrics:
+                metrics["rollout/raw_reward"] = previous_metrics["rollout/raw_reward"]
         results_read = 0
         for index in range(done, total):
             if self.stopping(directory):
@@ -669,10 +681,16 @@ class SlimeJobRunner(SlimeJobs):
             self.rollout_group.release()
             if tasks is not None:
                 results = [r for r in read_task_rollout_results(directory) if r.token == tasks.token]
-                check_rollout_can_train(results[results_read:], group_size=2 if has_group_baseline(self.args) else 1)
+                new_results = results[results_read:]
+                check_rollout_can_train(new_results, group_size=2 if has_group_baseline(self.args) else 1)
                 results_read = len(results)
+                task_reward = fmean(result.reward for result in new_results if result.reward is not None)
+            else:
+                task_reward = None
             self.resolve(self.group.async_train(rollout_id, data))
             rollout_metrics = merge_rank_metrics(self.resolve(self.group.async_pop_metrics()))
+            if task_reward is not None:
+                rollout_metrics["rollout/raw_reward"] = task_reward
             metrics.update(rollout_metrics)
             step = index + 1
             if step % interval and step != total:
@@ -684,8 +702,11 @@ class SlimeJobRunner(SlimeJobs):
             with self.storage.admit(rollout_id=rollout_id, active_rollouts=protected) as storage_plan:
                 if storage_plan["blocked"]:
                     raise RuntimeError(f"checkpoint storage is full: {'; '.join(storage_plan['reasons'])}")
-                write_json(directory / ROLLOUT_FILE, {"rollout_id": rollout_id, "step": step})
-                self.save_rollout(job, directory, rollout, None, dict(rollout_metrics), float(reward))
+                started: dict[str, int | float] = {"rollout_id": rollout_id, "step": step}
+                if task_reward is not None:
+                    started["reward"] = task_reward
+                write_json(directory / ROLLOUT_FILE, started)
+                self.save_rollout(job, directory, rollout, None, rollout_metrics, float(reward))
             metrics["rollout_id"] = rollout_id
         return metrics
 

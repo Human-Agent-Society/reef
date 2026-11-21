@@ -2457,9 +2457,10 @@ into one sample, trains nothing. Its sample has no trained token, and Slime leav
 its reward out of its group's mean and deviation, so the group's other rollouts
 train against each other. A group with one sample left has advantage 0. When
 no group of a Slime rollout can train, the job fails before the workers train it,
-with the first rollout's error. Slime's metrics such as ``rollout/raw_reward``
-count a removed sample with reward 0. The job's metrics are the task job
-metrics above: ``rollout_rewards``, ``rollout_samples`` and ``removed_rollouts``.
+with the first rollout's error. Reef reports ``rollout/raw_reward`` as the mean of
+the verifier scores in the Slime rollout. The ``best_reward`` checkpoint policy
+uses this mean. Only verifier scores count, including zero. The job also reports
+``rollout_rewards``, ``rollout_samples``, and ``removed_rollouts`` as described above.
 
 The driver refuses a task job, when it is submitted, in these cases:
 
