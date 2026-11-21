@@ -617,8 +617,27 @@ def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(
     assert lab.calls == [] and lab.builds == []
 
 
-def test_the_reef_eval_lab_builds_with_an_install_only_trial_of_the_nop_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("install_only", "verifier_options", "expected_import"),
+    [
+        (True, {}, None),
+        (False, {}, "reef.harness.harbor.verifier:RetryingVerifier"),
+        (
+            False,
+            {"override_timeout_sec": 17.0, "env": {"JUDGE_API_KEY": "test-secret"}},
+            "reef.harness.harbor.verifier:RetryingVerifier",
+        ),
+        (False, {"import_path": "custom:Verifier"}, "custom:Verifier"),
+        (False, {"kwargs": {"custom_argument": 1}}, None),
+        (False, {"disable": True}, None),
+    ],
+)
+def test_the_reef_eval_lab_preserves_trial_settings_and_retries_only_the_default_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_only: bool,
+    verifier_options: dict[str, object],
+    expected_import: str | None,
 ) -> None:
     # The source suite installs no reef-eval; the installed-wheel suite has it.
     pytest.importorskip("reef_eval")
@@ -643,10 +662,19 @@ def test_the_reef_eval_lab_builds_with_an_install_only_trial_of_the_nop_agent(
     monkeypatch.setattr(reef_eval.lab, "HarborExecutor", TrialConfigExecutor)
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = ReefEvalLab(tmp_path / "lab")
-    error = asyncio.run(lab.build_environment(task_path, overrides={"environment": {"type": "docker"}}))
-    assert error == "build was cancelled"
+    options = {"environment": {"type": "docker"}, "verifier": verifier_options}
+    if install_only:
+        error = asyncio.run(lab.build_environment(task_path, overrides=options))
+        assert error == "build was cancelled"
+    else:
+        row = asyncio.run(lab.run(task_path, {"name": "nop"}, key="rollout", tags={}, overrides=options))
+        assert row.error == "build was cancelled"
     (trial,) = trials
-    assert trial.install_only and trial.verifier.disable, "Harbor starts the environment and runs no agent or verifier"
+    assert trial.install_only is install_only
+    assert trial.verifier.disable is (install_only or verifier_options.get("disable", False))
+    assert trial.verifier.import_path == expected_import
+    assert trial.verifier.override_timeout_sec == verifier_options.get("override_timeout_sec")
+    assert trial.verifier.env == verifier_options.get("env", {})
     assert trial.agent.name == "nop" and trial.environment.type == "docker"
 
 

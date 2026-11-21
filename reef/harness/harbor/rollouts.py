@@ -96,6 +96,7 @@ class ReefEvalLab(TaskLab):
 
     ``build_environment`` runs Harbor's ``install_only`` trial of its nop agent: Harbor starts the task's
     environment, sets up the agent, which does nothing, and stops the environment.
+    Normal trials use ``RetryingVerifier`` unless the caller disables verification or supplies a custom verifier.
     """
 
     def __init__(self, work_dir: Path) -> None:
@@ -111,14 +112,25 @@ class ReefEvalLab(TaskLab):
         overrides: Mapping[str, object],
     ) -> RolloutRow:
         try:
+            from harbor.models.trial.config import VerifierConfig
             from reef_eval import Lab
         except ImportError as exc:
             raise TaskRolloutError(
                 "running rollouts needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
             ) from exc
         # A Lab binds its asyncio primitives to the loop of its first use, so every rollout gets its own Lab.
-        # reef-eval types each override by name; the caller's mapping passes through as it is.
+        # Keep explicit verifiers; the built-in verifier retries without replaying the agent.
         options: dict[str, Any] = dict(overrides)
+        verifier = VerifierConfig.model_validate(options.get("verifier", {}))
+        if (
+            not options.get("install_only")
+            and not verifier.disable
+            and verifier.import_path is None
+            and not verifier.kwargs
+        ):
+            options["verifier"] = verifier.model_copy(
+                update={"import_path": "reef.harness.harbor.verifier:RetryingVerifier"}
+            )
         row = await Lab(self.work_dir).run(str(task_path), dict(agent), tags=dict(tags), key=key, **options)
         row_tags = dict(row.tags)
         rewards = {str(name): float(value) for name, value in dict(row.rewards).items()}

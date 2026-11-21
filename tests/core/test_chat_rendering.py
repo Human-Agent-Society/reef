@@ -149,3 +149,104 @@ def test_a_sample_renders_with_the_template_arguments_of_its_recorded_request() 
     template = CharTemplate()
     _, left_out = rendered_job_data(JobData("d", (make_trajectory((record,), 1.0),)), template)
     assert left_out == () and template.arguments == {"enable_thinking": False}
+
+
+@pytest.mark.parametrize("split_contexts", [False, True])
+def test_context_window_rendering_is_opt_in(split_contexts: bool) -> None:
+    records = tuple(
+        AgentRecord.create(
+            agent_record_id=f"call-{index}",
+            scenario="s",
+            request_type=RequestType.INFERENCE,
+            payload={
+                "messages": [{"role": "user", "content": prompt}],
+                "response": {"choices": [{"message": {"role": "assistant", "content": reply}}]},
+            },
+        )
+        for index, (prompt, reply) in enumerate((("q", "a"), ("summary", "b")))
+    )
+    original = make_trajectory(records, 1.0).with_metadata(
+        records=[{"agent_record_id": record.agent_record_id, "payload": dict(record.payload)} for record in records]
+    )
+    data = JobData("d", (original,))
+
+    rendered, left_out = rendered_job_data(data, CharTemplate(), split_contexts=split_contexts)
+
+    assert left_out == ()
+    if split_contexts:
+        expected = [render_trajectory(CharTemplate(), make_trajectory((record,)).trajectory)[0] for record in records]
+        assert [sample.training["tokens"] for sample in rendered.samples] == [item.tokens for item in expected]
+        assert [sample.training["loss_mask"] for sample in rendered.samples] == [[1], [1]]
+    else:
+        assert len(rendered.samples) == 1
+    assert data.samples == (original,) and not original.training
+
+
+def test_context_windows_apply_the_length_limit_independently_and_report_the_original_position_once() -> None:
+    records = tuple(
+        AgentRecord.create(
+            agent_record_id=f"call-{index}",
+            scenario="s",
+            request_type=RequestType.INFERENCE,
+            payload={
+                "messages": [{"role": "user", "content": prompt}],
+                "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
+            },
+        )
+        for index, prompt in enumerate(("long original context", "still too long", "q"))
+    )
+    sample = make_trajectory(records).with_metadata(
+        max_tokens=4,
+        records=[{"agent_record_id": record.agent_record_id, "payload": dict(record.payload)} for record in records],
+    )
+    invalid = sample.with_metadata(records=[sample.metadata["records"][0], {}])
+
+    rendered, left_out = rendered_job_data(JobData("d", (sample, invalid)), CharTemplate(), split_contexts=True)
+
+    assert left_out == (0, 1)
+    assert len(rendered.samples) == 1
+    assert rendered.samples[0].training["tokens"] == [2, 213, 9, 197]
+
+
+@pytest.mark.parametrize("teacher", [False, True])
+def test_captured_windows_preserve_template_segments_and_refuse_a_teacher_for_several_windows(teacher: bool) -> None:
+    records = []
+    for index, (prompt, answer) in enumerate((("q", "a"), ("r", "b"), ("summary", "c"), ("s", "d"))):
+        messages = [{"role": "user", "content": prompt}]
+        if index % 2:
+            previous = records[-1].payload
+            messages = [*previous["messages"], previous["response"]["choices"][0]["message"], *messages]
+        records.append(
+            AgentRecord.create(
+                agent_record_id=f"call-{index}",
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={
+                    "messages": messages,
+                    "response": {"choices": [{"message": {"role": "assistant", "content": answer}}]},
+                },
+            )
+        )
+    sample = make_trajectory(records).with_metadata(
+        records=[{"agent_record_id": record.agent_record_id, "payload": dict(record.payload)} for record in records]
+    )
+    if teacher:
+        sample = sample.with_metadata(teacher=TeacherRequest().as_json())
+
+    rendered, left_out = rendered_job_data(
+        JobData("d", (sample,)), CharTemplate(drop_history=True), split_contexts=True
+    )
+
+    if teacher:
+        assert left_out == (0,) and rendered.samples == ()
+    else:
+        expected = [
+            render_trajectory(CharTemplate(drop_history=True), make_trajectory((record,)).trajectory)[0]
+            for record in records
+        ]
+        assert left_out == ()
+        assert [part.training["tokens"] for part in rendered.samples] == [part.tokens for part in expected]
+        assert [part.training["segment"] for part in rendered.samples] == [
+            {"index": 0, "count": 2},
+            {"index": 1, "count": 2},
+        ] * 2

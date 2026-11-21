@@ -19,6 +19,7 @@ from typing import Any
 
 from reef.core.job_data import JobData, Sample, TrajectorySample
 from reef.core.trajectories import atif_messages
+from reef.core.trajectory_windows import captured_context_windows
 
 
 def flatten_content(content: Any) -> str:
@@ -313,9 +314,17 @@ def needs_rendering(data: JobData) -> bool:
     return any(isinstance(sample, TrajectorySample) and not sample.training.get("tokens") for sample in data.samples)
 
 
-def rendered_job_data(data: JobData, template: ChatTemplate) -> tuple[JobData, tuple[int, ...]]:
+def rendered_job_data(
+    data: JobData, template: ChatTemplate, *, split_contexts: bool = False
+) -> tuple[JobData, tuple[int, ...]]:
     """``data`` with each trajectory sample that has no ``tokens`` rendered with ``template`` (``render_trajectory``),
-    and the positions in ``data.samples`` of the trajectories that cannot render, which the result leaves out.
+    and the positions in ``data.samples`` of the trajectories with rejected training input.
+
+    With ``split_contexts``, captured trajectories are first divided into verified context windows for SFT.
+    Each window renders independently; an invalid capture rejects its original sample. The returned positions
+    name each original sample at most once if it or any of its windows cannot render. Other windows still train.
+    Call summaries have no complete requests and remain unchanged. Template segmentation still applies to each
+    trajectory or context window. A teacher sample that needs several context windows is left out.
 
     A rendered sample gets ``tokens`` and ``loss_mask`` in its ``extra.reef.training`` and no log-probabilities: the
     training component computes them with its own weights. A trajectory that renders as ``n > 1`` segments becomes
@@ -333,16 +342,33 @@ def rendered_job_data(data: JobData, template: ChatTemplate) -> tuple[JobData, t
     """
     samples: list[Sample] = []
     left_out: list[int] = []
-    for index, sample in enumerate(data.samples):
-        if not isinstance(sample, TrajectorySample) or sample.training.get("tokens"):
-            samples.append(sample)
-            continue
-        rendered = rendered_samples(sample, template)
-        if rendered is None:
+    for index, original in enumerate(data.samples):
+        try:
+            windows = (
+                captured_context_windows(original)
+                if split_contexts and isinstance(original, TrajectorySample)
+                else (original,)
+            )
+        except ValueError:
             left_out.append(index)
-        else:
-            samples.extend(rendered)
-    return JobData(data.data_id, tuple(samples), request=data.request), tuple(left_out)
+            continue
+        if (
+            len(windows) > 1
+            and isinstance(original, TrajectorySample)
+            and (TeacherRequest.of_sample(original) is not None or teacher_candidates(original))
+        ):
+            left_out.append(index)
+            continue
+        for sample in windows:
+            if not isinstance(sample, TrajectorySample) or sample.training.get("tokens"):
+                samples.append(sample)
+                continue
+            rendered = rendered_samples(sample, template)
+            if rendered is None:
+                left_out.append(index)
+            else:
+                samples.extend(rendered)
+    return JobData(data.data_id, tuple(samples), request=data.request), tuple(dict.fromkeys(left_out))
 
 
 def rendered_samples(sample: TrajectorySample, template: ChatTemplate) -> list[TrajectorySample] | None:

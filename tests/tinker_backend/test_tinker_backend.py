@@ -25,8 +25,10 @@ from reef.cli import main
 from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
+from reef.core.trajectories import make_trajectory
 from reef.inference.tinker import TINKER_URL, TinkerInferenceRuntime
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
@@ -1225,3 +1227,44 @@ def test_a_recorded_trajectory_renders_with_the_models_chat_template(component, 
     ((row,),) = client.calls[0][1]
     # user q | assistant ab in CharTemplate; the client computes the log probabilities from the start's weights.
     assert (row.tokens, row.mask, row.logprobs) == ((2, 213, 9, 197, 198), (1, 1), ())
+
+
+@pytest.mark.parametrize("supervised", [True, False])
+def test_the_job_objective_selects_context_splitting_and_keeps_token_samples(
+    component, client, objective, supervised: bool
+) -> None:
+    calls = tuple(
+        AgentRecord.create(
+            scenario="s",
+            request_type=RequestType.INFERENCE,
+            agent_record_id=f"call-{index}",
+            payload={
+                "messages": [{"role": "user", "content": question}],
+                "response": {"choices": [{"message": {"role": "assistant", "content": answer}}]},
+            },
+        )
+        for index, (question, answer) in enumerate((("q", "a"), ("s", "b")))
+    )
+    captured = make_trajectory(calls, 1.0)
+    captured = captured.with_metadata(
+        records=[
+            {**summary, "payload": dict(record.payload)}
+            for summary, record in zip(captured.metadata["records"], calls, strict=True)
+        ]
+    )
+    data = JobData("rewritten-context", (item(), captured))
+    objective_name = "sft" if supervised else objective.name
+
+    status = train(component, data, objective_name)
+
+    assert status.state == "finished", status.error
+    (training_call,) = client.calls
+    rows = [row for step in training_call[1] for row in step]
+    assert (rows[0].tokens, rows[0].mask) == ((10, 11, 20, 21), (1, 0))
+    if supervised:
+        assert [row.tokens for row in rows[1:]] == [(2, 213, 9, 197), (2, 215, 9, 198)]
+        assert [row.mask for row in rows[1:]] == [(1,), (1,)]
+    else:
+        assert [row.tokens for row in rows[1:]] == [(2, 213, 9, 197, 2, 215, 9, 198)]
+        assert [row.mask for row in rows[1:]] == [(1, 0, 0, 0, 1)]
+        assert rows[0].logprobs == (-0.2, -0.4)
