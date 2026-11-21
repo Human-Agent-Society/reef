@@ -101,12 +101,12 @@ KL is the default and the reverse KL and the generalized JSD are switches. A
 top-K representation of the teacher is another switch. Each sample
 contributes the mean over its trained response tokens. That mean is weighted
 by the truncated importance-sampling ratio between the policy and the
-old-policy log-probs. The actor computes those with the weights of the job's
-start. The stage is on-policy, so the ratio is exact.
+recorded sampler log-probs when every row in the batch has them. If any row
+lacks sampler log-probs, the actor uses the job-start log-probs for every row.
 
 The sampled reverse-KL mode also accepts score centering for training/inference
-mismatch. Score centering needs the sampler's recorded top-K, which samples
-that serving recorded do not carry. See `Score centering
+mismatch. Score centering needs the sampler's recorded top-K. With importance
+sampling, it also needs the sampled tokens' recorded log-probs for every row. See `Score centering
 <../../developer-guide/loss-families.rst#score-centering>`__. The default
 full-vocabulary forward KL does not support it.
 
@@ -194,6 +194,7 @@ adds its own flags:
 
    ``--sdft-skip-response-tokens`` : 0
        response tokens at the start of every sample left out of the loss. The paper's runs used 3.
+       Set this to zero when using ``--calculate-per-token-loss``.
 
 The teacher pass keeps one float16 block per sample on the host between the
 pass and the step. The block has one row per response token and one column
