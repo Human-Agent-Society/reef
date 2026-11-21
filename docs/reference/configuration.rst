@@ -2473,6 +2473,8 @@ The driver refuses a task job, when it is submitted, in these cases:
   ``over-sampling-batch-size`` other than ``rollout-batch-size``,
   ``dynamic-sampling-filter-path``, a ``rollout-top-p`` other than 1 or
   ``use-rollout-routing-replay``.
+- ``global-batch-size`` does not divide ``rollout-batch-size * n-samples-per-prompt``.
+  Slime would drop the remaining trials.
 - ``n-samples-per-prompt`` is 1 with a group baseline: ``advantage-estimator``
   ``grpo``, ``gspo``, ``cispo`` or ``reinforce_plus_plus_baseline`` with reward
   normalization, which would center each reward to 0.

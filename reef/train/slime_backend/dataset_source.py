@@ -95,7 +95,15 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
 
     def get_samples(self, num_samples: int) -> list[list[Any]]:
         self.refresh()
-        return super().get_samples(num_samples)
+        if not isinstance(self.dataset, TaskPrompts):
+            return super().get_samples(num_samples)
+        # Slime reads at most one new epoch per call.
+        groups = []
+        while num_samples > 0:
+            size = min(num_samples, len(self.dataset))
+            groups.extend(super().get_samples(size))
+            num_samples -= size
+        return groups
 
     def __len__(self) -> int:
         self.refresh()
