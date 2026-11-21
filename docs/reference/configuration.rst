@@ -1361,8 +1361,16 @@ downgrade without restoring a compatible backup.
        - ``requeue``: it cancels each rollout and its sandbox, and gives the rollout back to the queue. Another
          process starts the rollout again from its start. The stop does not count as an attempt.
        - ``finish``: it takes no new rollout and stops when each running rollout has finished. Use it where processes
-         stop while they work, such as a scale-down or a deploy. Give the process a stop deadline longer than a
-         rollout: a process that is killed first leaves its rollouts to expire, and each one counts as an attempt.
+         stop while they work, such as a scale-down or a deploy. A process that is killed first leaves its rollouts
+         to expire, and each one counts as an attempt. Set ``evaluation.finish_timeout_s`` when the stop deadline
+         can be shorter than a rollout.
+   ``evaluation.finish_timeout_s`` : unset
+       with ``on_stop: finish``, the seconds that a stopping process lets its running rollouts finish. The time starts
+       when the process begins to stop, for example on SIGTERM. A rollout that finishes in this time keeps its
+       result. Then the process cancels each rollout that still runs and gives it back to the queue, as ``requeue``
+       does. Unset, the process waits for every rollout. Set it shorter than the time from SIGTERM to a forced kill,
+       and keep a margin for the cancelled sandboxes to stop. For example, Kubernetes counts a ``preStop`` hook in
+       ``terminationGracePeriodSeconds``.
    ``evaluation.trial_observer`` : unset
        a ``TrialObserver`` plugin (``reef.evaluation.trials``), as ``package.module:ClassName`` or ``module`` and
        ``config``. The evaluation worker gives it each trial: the rollout, the attempt, the trial directory and the

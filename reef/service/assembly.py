@@ -683,6 +683,7 @@ def build_dispatcher(
                     agent_host=settings.evaluation_agent_host,
                     slots=settings.evaluation_max_sandboxes,
                     on_stop=settings.evaluation_on_stop,
+                    finish_timeout_s=settings.evaluation_finish_timeout_s,
                 )
             )
             # The template builds of evaluations on e2b have their own slots, so a wait for a template builder holds
