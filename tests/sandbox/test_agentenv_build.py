@@ -26,21 +26,25 @@ from reef.execution.sandbox.agentenv_build import (
 )
 
 #: A fake ``aenv``: it records its arguments, the credentials that it reads and each run, then acts as FAKE_AENV_MODE
-#: says. ``flaky`` fails its first run on an overloaded API and passes the next.
+#: says. ``flaky`` fails its first run on an overloaded API and passes the next. A run of ``flaky`` or of a failing
+#: build first reports the template FAKE_AENV_CREATED as made, when the variable is set.
 FAKE_AENV = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_AENV_LOG.args"
 cp "$XDG_CONFIG_HOME/aenv/credentials" "$FAKE_AENV_LOG.credentials"
 echo run >> "$FAKE_AENV_LOG.runs"
+created() { if [ -n "$FAKE_AENV_CREATED" ]; then echo "Created template $FAKE_AENV_CREATED (build $FAKE_AENV_CREATED)"; fi; }
 case "$FAKE_AENV_MODE" in
   ok) echo "Template ready." ;;
   conflict) echo "Error: HTTP 400: alias 'a' already points to 'x', cannot rebind to 'y'"; exit 1 ;;
   flaky)
     if [ "$(wc -l < "$FAKE_AENV_LOG.runs")" -eq 1 ]; then
+      created
       printf '%s\\n' "$FAKE_AENV_ERROR"
       exit 1
     fi
     echo "Template ready." ;;
   *)
+    created
     echo '#5 ERROR: process apt-get did not complete'
     echo '#5 dependency returned HTTP 503'
     echo 'Error: BuildKit build failed (exit status: 1)'
@@ -291,3 +295,50 @@ def test_a_proxy_failure_waits_for_the_build_already_under_the_alias(
     ensured(fake, task_build(tmp_path))
     assert fake.deleted == []
     assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run"]
+
+
+@pytest.mark.unit
+def test_a_refused_build_deletes_the_waiting_template_that_it_made_and_builds_again_at_once(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AgentENV answers 429 to the request for a builder, after aenv made the template: the template stays waiting.
+    monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
+    monkeypatch.setenv("FAKE_AENV_CREATED", "t1")
+    monkeypatch.setenv("FAKE_AENV_ERROR", "Error: HTTP 429: node concurrent build limit reached; retry later")
+    # The second build must not wait until the template counts as an orphan.
+    monkeypatch.setattr(agentenv_build, "ORPHAN_WAITING_S", 3600.0)
+    fake = FakeAgentEnv([None, ("t1", "waiting")])
+    ensured(fake, task_build(tmp_path))
+    assert fake.deleted == ["t1"]
+    assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run", "run"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["flaky", "fail"])
+def test_a_failed_build_does_not_delete_the_waiting_template_of_another_trial(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    # The alias names another trial's template by the time this trial's build has failed.
+    monkeypatch.setenv("FAKE_AENV_MODE", mode)
+    monkeypatch.setenv("FAKE_AENV_CREATED", "t1")
+    monkeypatch.setenv("FAKE_AENV_ERROR", "Error: HTTP 503: try later")
+    fake = FakeAgentEnv([None, ("peer", "waiting"), ("peer", "building"), ("peer", "ready")])
+    if mode == "flaky":
+        ensured(fake, task_build(tmp_path))
+    else:
+        with pytest.raises(AgentEnvBuildError, match="BuildKit build failed"):
+            ensured(fake, task_build(tmp_path))
+    assert fake.deleted == []
+    assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run"]
+
+
+@pytest.mark.unit
+def test_a_failed_build_deletes_the_waiting_template_that_it_made(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_AENV_MODE", "fail")
+    monkeypatch.setenv("FAKE_AENV_CREATED", "t1")
+    fake = FakeAgentEnv([None, ("t1", "waiting")])
+    with pytest.raises(AgentEnvBuildError, match="BuildKit build failed"):
+        ensured(fake, task_build(tmp_path))
+    assert fake.deleted == ["t1"]
