@@ -394,6 +394,12 @@ class HarborRolloutSession:
     ``removed_fields``, and cancelling ``run`` cancels the rollout and waits for its cleanup. At most
     ``harbor.concurrency`` rollouts and environment builds run at a time. ``close`` closes the chat endpoint and lets
     the threads end when their work ends.
+
+    ``builds`` maps each remote task path to the current build attempt on Slime's event loop. Each entry holds
+    the nonnegative index of the prompt group that started the attempt and its future. The future returns an empty
+    string on success or a nonempty error string on failure. ``built`` starts an attempt for a new path and shares
+    every pending attempt. It keeps successful attempts for the session. After failure, only a group with a larger
+    index can replace the attempt. Cancelling a waiter leaves the shared attempt running.
     """
 
     def __init__(
@@ -406,7 +412,6 @@ class HarborRolloutSession:
         self.results_path = Path(source.job_directory) / TASK_ROLLOUTS_FILE
         self.results_lock = threading.Lock()
         self.threads = ThreadPoolExecutor(max_workers=settings.concurrency, thread_name_prefix="task-rollout")
-        # Keep each build with the group that started it. Access it only on Slime's loop.
         self.builds: dict[Path, tuple[int, asyncio.Future[str]]] = {}
         self.endpoint = ChatEndpoint(chat)
         self.endpoint.__enter__()
