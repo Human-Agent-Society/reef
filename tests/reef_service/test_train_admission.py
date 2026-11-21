@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import harness_recipe
 from tests.support.harness_service import harness_dispatcher
@@ -113,7 +114,11 @@ def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(tmp_path: Path) -> None:
+def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Exercise the queue and commit path without waiting for the deployment's polling interval.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     method, entered, release = blocking_method()
     dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method, job_samples=3))
 
