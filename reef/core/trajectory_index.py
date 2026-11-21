@@ -6,7 +6,7 @@ same trajectory whose request is the longest prefix of its own; the links form a
 a call is the trajectory that the call ends. A record store keeps this tree in SQL; ``TrajectoryIndex`` keeps it in
 memory for a record-to-sample stage. Both use ``call_key`` and ``best_parent``, so they link the same calls.
 
-Let ``P`` be a payload with a message list (``payload_provider``), and ``canonical(v)`` the JSON of ``v`` with sorted
+Let ``P`` be a payload with a message list (``call_shape``), and ``canonical(v)`` the JSON of ``v`` with sorted
 keys and compact separators. The request values of ``P`` are its ``system`` or ``instructions`` value, when it has
 one, and then each message of its message list, each in its ATIF form (``atif_form``, RFC #1300), so that a
 provider's spelling of one message, such as ``cache_control``, cannot split a conversation. ``trajectory_sha256(P)`` is the SHA-256 of ``"trajectory:" +
@@ -25,11 +25,9 @@ from typing import Any
 
 from reef.core.atif_payloads import (
     ELEMENTS,
-    OPENAI_CHAT,
-    OPENAI_RESPONSES,
     atif_message,
+    call_shape,
     canonical_json,
-    payload_provider,
     plain_message,
     reply_messages,
     step,
@@ -116,21 +114,21 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
 
     Raise ``TypeError`` when the payload holds a value that is not JSON.
     """
-    provider = payload_provider(payload)
-    if provider is None:
+    shape = call_shape(payload)
+    if shape is None:
         return None
-    message_field = "input" if provider == OPENAI_RESPONSES else "messages"
-    system_field = next(
-        (name for name in ("system", "instructions") if name in payload and provider != OPENAI_CHAT), None
-    )
-    request = [atif_form(message, provider) for message in payload[message_field]]
-    if system_field is not None:
-        request.insert(0, atif_form(payload[system_field], provider, system=True))
-    shape: dict[str, Any] = {"provider": provider, "message_field": message_field, "system_field": system_field}
-    if "tools" in payload:
-        shape["tools"] = payload["tools"]
+    request = [atif_form(message, shape.provider) for message in payload[shape.message_field]]
+    if shape.system_field is not None:
+        request.insert(0, atif_form(payload[shape.system_field], shape.provider, system=True))
+    shape_fields: dict[str, Any] = {
+        "provider": shape.provider,
+        "message_field": shape.message_field,
+        "system_field": shape.system_field,
+    }
+    if shape.has_tools:
+        shape_fields["tools"] = payload["tools"]
     try:
-        trajectory = sha256_text("trajectory:" + canonical_json(shape))
+        trajectory = sha256_text("trajectory:" + canonical_json(shape_fields))
         prefixes: list[str] = []
         previous = trajectory
         for value in request:
@@ -138,7 +136,7 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
             prefixes.append(previous)
     except (TypeError, ValueError) as exc:
         raise TypeError("a record must contain JSON-serializable values") from exc
-    replies = [atif_form(message, provider) for message in reply_messages(payload.get("response")) or []]
+    replies = [atif_form(message, shape.provider) for message in reply_messages(payload.get("response")) or []]
     return CallKey(
         trajectory, tuple(request), tuple(prefixes), len(replies), reply_sha256(replies) if replies else None
     )
