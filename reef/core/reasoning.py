@@ -12,6 +12,8 @@ imports ``reef.inference``.
 
 from __future__ import annotations
 
+import re
+
 #: The tokens at the end of a rendered prompt that hold an open ``<think>``: the tag and the newline after it can be
 #: several tokens.
 PROMPT_TAIL_TOKEN_COUNT = 8
@@ -29,20 +31,29 @@ def is_reasoning_pre_opened(prompt_tail: str) -> bool:
     return prompt_tail.rstrip().endswith(THINK_START)
 
 
+LEADING_THINK_TAG = re.compile(rf"\s*{re.escape(THINK_START)}")
+
+
+def leading_think_tags_end(text: str) -> int:
+    """Return the end of the leading opening tags and any whitespace before them."""
+    end = 0
+    while match := LEADING_THINK_TAG.match(text, end):
+        end = match.end()
+    return end
+
+
 def split_reasoning(text: str, *, pre_opened: bool) -> tuple[str, str]:
     """The reasoning and the answer of the sampled reply ``text``; the reasoning is "" when the reply has none.
 
     ``pre_opened`` holds when the prompt ended with an open ``<think>``. Without it, a reply with no ``<think>`` and
-    no ``</think>`` is all answer. Otherwise the leading ``<think>`` tags drop, and the first ``</think>`` ends the
-    reasoning, with the newlines after it dropped. Without a ``</think>``, a ``<tool_call>`` ends the reasoning, and a
-    reply with neither is all reasoning: its generation stopped while it thought. The reasoning has no leading or
+    no ``</think>`` is all answer. Leading ``<think>`` tags and whitespace before them drop. The first
+    ``</think>`` ends the reasoning and drops the newlines after it. Without a closing tag, a ``<tool_call>`` ends
+    reasoning. With no closing tag or tool call, a reply that starts in reasoning remains in reasoning. The reasoning has no leading or
     trailing whitespace.
     """
     if not (pre_opened or THINK_START in text or THINK_END in text):
         return "", text
-    body = text
-    while body.startswith(THINK_START):
-        body = body[len(THINK_START) :]
+    body = text[leading_think_tags_end(text) :]
     reasoning, separator, answer = body.partition(THINK_END)
     if separator:
         return reasoning.strip(), answer.lstrip("\n")
@@ -61,7 +72,8 @@ class ReasoningStreamSplitter:
     With ``force_reasoning`` the reply starts in reasoning. The first ``</think>`` ends the reasoning.
     ``strip_answer_newlines`` drops the newlines after that tag when the answer starts in a later chunk.
     A ``<tool_call>`` before the closing tag ends the reasoning too. A reply that ends in reasoning is all reasoning.
-    ``buffer`` keeps only an end of the text that can be the start of one of these tags.
+    Before the first tag, ``buffer`` can hold whitespace and a partial opening tag. Otherwise it keeps only
+    the end of the text that can start a tag.
     One splitter reads one reply; the streaming chat handlers make it and read its pieces.
     """
 
@@ -89,13 +101,11 @@ class ReasoningStreamSplitter:
             return [("text", delta)]
         self.buffer += delta
         if self.at_start:
-            start = 0
-            while self.buffer.startswith(THINK_START, start):
-                start += len(THINK_START)
+            start = leading_think_tags_end(self.buffer)
             if start:
                 self.buffer = self.buffer[start:]
                 self.in_reasoning = True
-            if THINK_START.startswith(self.buffer):
+            if THINK_START.startswith(self.buffer.lstrip()):
                 return []
             self.at_start = False
         if any(tag.startswith(self.buffer) and tag != self.buffer for tag in (THINK_END, TOOL_CALL_START)):

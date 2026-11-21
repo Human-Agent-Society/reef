@@ -1154,7 +1154,7 @@ def test_streamed_tool_turns_agree_with_the_buffered_result(
     if failure == "streamed text":
         chunks = ("Before", raw_tool_call, "After")
     elif repeated_think_tags:
-        chunks = ("<think>", "<thi", "nk>work</think>", raw_tool_call)
+        chunks = ("\n ", "<think>", "\t<thi", "nk>work</think>", raw_tool_call)
     else:
         chunks = (raw_tool_call,)
 
