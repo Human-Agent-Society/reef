@@ -85,6 +85,8 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "user-guide/recipes/openclawrl.rst",
       "user-guide/recipes/gepa.rst",
       "user-guide/operate.rst",
+      "user-guide/split-services.rst",
+      "user-guide/storage.rst",
       "user-guide/troubleshooting.rst",
     ],
   },
