@@ -22,19 +22,13 @@ and the model is updated while the agent stays in service.
 | Example     | ``recipes/openclawrl/examples/openclawrl/``                |
 +-------------+------------------------------------------------------------+
 
-What it does
+How it works
 ------------
 
-The learning signal comes from the conversation itself: when the user
-accepts a reply and moves on, the turn counts as positive, and when the user complains, it counts as
-negative. Reef reads this from the traffic it already records, so the agent
-does not send training reports. For reliable correlation, the harness should
-send a stable ``x-reef-tag-session`` value, unique to the conversation within
-its scenario, on every inference in that conversation. Reef stores this opaque
-tag with each record and the judging stage uses it to bind turns in arrival order,
-so one tag must not be shared by concurrent or distinct conversations. Without
-the tag, the judging stage falls back to matching the transcripts that clients
-resend on later requests.
+The learning signal comes from the conversation itself. When the user accepts
+a reply and moves on, the turn counts as positive. When the user complains,
+it counts as negative. Reef reads this from the traffic it already records,
+so the agent sends no training reports.
 
 .. container:: flow
 
@@ -52,67 +46,71 @@ resend on later requests.
 
    :Loop: the next session is served by the updated weights
 
-How Reef implements it
-----------------------
+Correlate sessions
+~~~~~~~~~~~~~~~~~~
 
-The judging stage rebuilds sessions from the recorded traffic. It prefers the
-``x-reef-tag-session`` value supplied by the harness, which also supports
-agents that keep or rewrite their history locally. If the tag is absent, a
-chat agent must resend an extending transcript so each request can be matched
-to its session by trace. Identical histories can be ambiguous, while history
-changes that no longer preserve a prefix, such as compaction or sliding
-windows, break the chain and leave the pre-rewrite turn unmatched. The
-included Hermes example uses a small header shim because Hermes cannot set the
-tag itself.
+The judging stage rebuilds sessions from the recorded traffic. Send a stable
+``x-reef-tag-session`` header on every inference of a conversation. The value
+must be unique to the conversation within its scenario: Reef binds the turns
+of one tag in arrival order, so concurrent or distinct conversations must not
+share a tag. The tag also supports agents that keep or rewrite their history
+locally. Hermes cannot set the tag itself, so the included example uses a
+small header shim.
 
-A turn that never correlates is never judged and never trains, so a run on the
-fallback can produce an empty training set with nothing else to show for it.
-The recipe therefore says so: it warns once when it sees untagged traffic,
-warns again when sessions keep expiring without ever binding a turn, and counts
-both under ``correlation`` in the ``prm_record_file`` line. ``max_open_sessions``
-caps the table those unmatched requests fill, evicting the least recently active
-sessions above it.
+Without the tag, the stage falls back to trace matching: the client must
+resend an extending transcript on each request. The fallback has limits:
 
-When a session's next state arrives, the finished turn is judged
-through an independently deployed PRM. The PRM votes on
-whether the message shows acceptance, and on acceptance it also proposes a
-hindsight hint, a short instruction that would have produced this reply if
-the user had given it up front. Judged turns go into job data for training
-directly.
+- Identical histories can be ambiguous.
+- A history change that does not preserve a prefix, such as compaction or a
+  sliding window, breaks the chain and leaves the earlier turn unmatched.
+- A turn that never correlates is never judged and never trains, so a run on
+  the fallback can produce an empty training set.
 
-OpenClaw-RL trains with two signals, reinforcement learning and on-policy
-distillation (OPD). The RL term is a PPO clipped surrogate on the sampled
-tokens, with the turn's raw reward as its advantage. The OPD term pulls the
-policy toward a teacher on the student's top-K token candidates. The actor
-computes them, and their old-policy log-probabilities, with the weights of
-the step's start, as upstream does; ``--openclawrl-topk`` sets K (default 4).
-The teacher is the frozen base model conditioned on one of the accepted
-hindsight hints, and the objective selects which hint by how well the
-teacher's top-K overlaps the policy's. The weights of the two terms are
-``--openclawrl-w-rl`` and ``--openclawrl-w-opd`` in ``training.options``,
-both 1.0 by default.
+The recipe warns once when it sees untagged traffic, and again when sessions
+keep expiring without a bound turn. It counts both under ``correlation`` in
+the ``prm_record_file`` line. ``max_open_sessions`` caps the session table
+and evicts the least recently active sessions above it.
 
-Each sample is the judged turn's call as an ATIF trajectory, with one
-hint-enhanced teacher request for each candidate hint. The training
-component renders the turn and each candidate with the model's chat
-template: a candidate's teacher sequence is its hint-enhanced prompt
-followed by the turn's reply tokens. Give the component the serving engine's
-chat template arguments (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__). A turn that
-cannot render, or whose candidates all fail to render, does not train, and
-the job metric ``unrenderable_samples`` counts it.
+Judge and train
+~~~~~~~~~~~~~~~
+
+When a session's next state arrives, an independently deployed PRM judges the
+finished turn. The PRM votes on whether the next message shows acceptance. On
+acceptance, it also proposes a hindsight hint: a short instruction that would
+have produced this reply if the user had given it first. Judged turns go
+directly into job data.
+
+OpenClaw-RL trains with two signals:
+
+- **RL.** A PPO clipped surrogate on the sampled tokens, with the turn's raw
+  reward as its advantage. ``--openclawrl-w-rl`` sets its weight (default
+  1.0).
+- **On-policy distillation (OPD).** The policy is pulled toward a teacher on
+  the student's top-K token candidates. The teacher is the frozen base model
+  conditioned on one accepted hindsight hint; the objective selects the hint
+  whose teacher top-K best overlaps the policy's. ``--openclawrl-topk`` sets K
+  (default 4) and ``--openclawrl-w-opd`` sets the weight (default 1.0).
+
+Set these flags in ``training.options``. The actor computes the top-K
+candidates and their old-policy log-probabilities with the weights of the
+step's start.
+
+The training component renders the judged turn, and one hint-enhanced teacher
+request for each candidate hint, with the model's chat template. Give the
+component the serving engine's chat template arguments (`Chat template
+arguments <../../reference/configuration.rst#chat-template-arguments>`__). A
+turn that cannot render, or whose candidates all fail to render, does not
+train, and the job metric ``unrenderable_samples`` counts it.
 
 Configuration
 -------------
 
-The deployment's ``pipeline`` section configures the recipe's two stages.
-The recipe's own classes are the defaults, so the section needs no
-``module``. The record-to-sample stage, ``OpenClawRLSamples``, correlates
-sessions, runs the PRM judge, and makes one sample of each judged turn. The
-sample-to-job stage sets the job size and writes the PRM record file.
-``job_samples`` is the judged turns of one job. Slime's ``--global-batch-size``,
-``training.config.global_batch_size`` in the example, is the judged turns of
-one optimizer step.
+The deployment's ``pipeline`` section configures the recipe's two stages. The
+recipe's own classes are the defaults, so the section needs no ``module``.
+
+- ``record2sample`` (``OpenClawRLSamples``) correlates sessions, runs the PRM
+  judge, and makes one sample of each judged turn.
+- ``sample2job`` sets the job size and writes the PRM record file.
 
 .. code:: yaml
 
@@ -176,19 +174,18 @@ invalid value stops the deployment at startup. A stage key in
 ``recipe.config``, such as ``prm_url``, also stops it, and the error names the
 key's ``pipeline`` path.
 
-The values above are the defaults. The example's ``serve.yaml`` overrides
-several of them. It points ``prm_url`` and ``prm_tokenizer_path`` at the
-example's independently deployed PRM engine. It raises ``prm_timeout_s`` to
-3600 because a thinking model can spend minutes on a single vote. It sets
-``prm_record_file``, so each job writes one line with its ``data_id``, the
-reward split, and the judge counters.
+The example's ``serve.yaml`` overrides several defaults:
 
-Reef coordinates inference and training only. OpenClawRL's example Compose
-file owns PRM and student-model startup, health checks and GPU allocation.
-The judging stage consumes ``pipeline.record2sample.config.prm_url`` and
-requires the matching ``prm_tokenizer_path``; it owns judge request handling.
-Reef does not register, schedule or stop the PRM process. The student-model
-endpoint is used by the simulation harness, outside Reef.
+- ``prm_url`` and ``prm_tokenizer_path`` point at the example's PRM engine.
+- ``prm_timeout_s`` is 3600, because a thinking model can spend minutes on a
+  single vote.
+- ``prm_record_file`` is set, so each job writes one line with its
+  ``data_id``, the reward split, and the judge counters.
+
+Reef does not register, schedule or stop the PRM process. The example's
+Compose file owns PRM and student-model startup, health checks and GPU
+allocation. The simulation harness uses the student-model endpoint, outside
+Reef.
 
 Run the example
 ---------------
@@ -223,18 +220,16 @@ The example's README records one run over the first 36 sessions of the stream.
 A session passes when the agent's first solution reply already matches the
 student's preferences, with the work shown and the correct answer. The
 student wants homework that does not look AI-written, so a reply that uses
-bold text or a bullet or numbered list draws a complaint. The bold rate and
-the list rate measure this habit over the run, as the fraction of the last
-ten sessions whose first reply still contains bold text or a list. From the curves we see both fall as
-training goes on, and the run reaches the paper's adaptation criterion
-(three passed sessions in a row) at session 14.
+bold text or a list draws a complaint. The bold rate and the list rate are
+the fractions of the last ten sessions whose first reply still contains bold
+text or a list. Both fall as training goes on. The run reaches the paper's
+adaptation criterion, three passed sessions in a row, at session 14.
 
 .. image:: ../../assets/openclawrl/demo.gif
    :alt: A failing and a passing session replayed from the run, with the student's ask, the agent's reply, and the student's reaction
 
-The demo above replays two sessions from the same run. In session 1 the
-student rejects a formatted reply, reef keeps the training going, and by
-session 16 the first reply passes directly.
+The demo replays two sessions from the same run. In session 1 the student
+rejects a formatted reply. By session 16 the first reply passes directly.
 
 Related guides
 --------------

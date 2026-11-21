@@ -21,17 +21,17 @@ than supervised fine-tuning on the same demonstrations.
 +-------------+------------------------------------------------------------+
 | Pipeline    | reported feedback, singleton                               |
 +-------------+------------------------------------------------------------+
-| Needs       | GPUs, and a backend that captures tokens and log-probs     |
+| Needs       | GPUs and the Slime training backend                        |
 +-------------+------------------------------------------------------------+
 | Example     | `SDFT on a skill stream                                    |
 |             | <../../../recipes/sdft/examples/skill_stream/README.md>`__ |
 +-------------+------------------------------------------------------------+
 
-What it does
+How it works
 ------------
 
 The harness sends a request through Reef. It gets a demonstration of the
-response from somewhere else such as a reference solution or a stronger
+response from somewhere else, such as a reference solution or a stronger
 model. It reports the demonstration against the request's receipt. With a
 ``job_samples`` and a batch size of 1, each report is one training step.
 
@@ -54,61 +54,40 @@ model. It reports the demonstration against the request's receipt. With a
 
    :Loop: the next request is served by the updated weights
 
-How Reef implements it
-----------------------
-
 SDFT has two pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
-``SDFTSamples`` makes each report its own record set and turns it into one
-sample. The shared ``DistillJobData`` stage puts the samples into job data in
-arrival order. One job's data holds ``pipeline.sample2job.config.job_samples``
-samples.
+``SDFTSamples`` makes one sample from each report. The shared
+``DistillJobData`` stage puts ``job_samples`` samples into one job's data, in
+arrival order.
 
-``SDFTSamples`` extends the shared ``DistillSamples``. ``DistillSamples`` turns every
-``TeacherContextReport`` into one ``TrajectorySample``: the student's call as
-an ATIF trajectory, with the teacher's request in ``extra.reef.teacher``. The
-training component renders both with the model's chat template. The teacher
-sequence is the teacher's request rendered with the generation prompt and
-followed by the student's response tokens. A teacher sequence longer than
-``max_teacher_tokens`` does not train: the component leaves the sample out
-and counts it in the job metric ``unrenderable_samples``.
-
-``SDFTSamples`` adds the demonstration block to the request's final user
-message. It adds the block as a new user message when the request ends in a
-tool result. ``context_template`` sets the block's text and its default is
-the reference implementation's wording. A harness that needs another layout
-subclasses ``SDFTSamples`` and overrides ``teacher_request``. The deployment
-names the subclass in ``pipeline.record2sample.module``.
-
-The ``sdft`` loss family is a thin family on the Slime backend's
-distillation base in ``reef/train/slime_backend/distill/``
-(`Loss families <../../developer-guide/loss-families.rst>`__). It sets the
-reference's defaults and runs as a ``custom_loss``. Before each step the base
-runs one forward pass over every sample's teacher sequence and keeps the
-teacher's next-token distribution at each response position. The loss
-compares the student's distribution at the same positions with it.
-
-The teacher is the model itself (``--sdft-teacher self``) and
-``--sdft-teacher-update-rate`` sets how its weights move. The default is
-0.01. The teacher starts as a copy of the initial weights and moves 1% toward
-the policy after every step. A rate of 1 makes
-the current policy the teacher and a rate of 0 freezes the initial weights.
-In the skill stream example a teacher that follows the policy drifted with
-it and training collapsed. The example freezes the teacher with a rate of 0.
-
-The loss is the per-token divergence over the full vocabulary. The forward
-KL is the default and the reverse KL and the generalized JSD are switches. A
-top-K representation of the teacher is another switch. Each sample
-contributes the mean over its trained response tokens. That mean is weighted
-by the truncated importance-sampling ratio between the policy and the
-old-policy log-probs. The actor computes those with the weights of the job's
-start. The stage is on-policy, so the ratio is exact.
-
-The sampled reverse-KL mode also accepts score centering for training/inference
-mismatch. Score centering needs the sampler's recorded top-K, which samples
-that serving recorded do not carry. See `Score centering
-<../../developer-guide/loss-families.rst#score-centering>`__. The default
-full-vocabulary forward KL does not support it.
+- **Teacher request.** ``SDFTSamples`` adds the demonstration block to the
+  request's final user message, or as a new user message when the request
+  ends in a tool result. ``context_template`` sets the block's text; its
+  default is the reference implementation's wording. For another layout,
+  subclass ``SDFTSamples``, override ``teacher_request``, and name the
+  subclass in ``pipeline.record2sample.module``.
+- **Rendering.** The training component renders the student's call and the
+  teacher's request with the model's chat template. The teacher sequence is
+  the teacher's request followed by the student's response tokens. The
+  component leaves out a sample whose teacher sequence is longer than
+  ``max_teacher_tokens`` and counts it in the job metric
+  ``unrenderable_samples``.
+- **Teacher weights.** The teacher is the model itself
+  (``--sdft-teacher self``). It starts as a copy of the initial weights and,
+  by default, moves 1% toward the policy after every step
+  (``--sdft-teacher-update-rate``). In the skill stream example, a teacher
+  that followed the policy drifted with it and training collapsed, so the
+  example freezes the teacher with a rate of 0.
+- **Loss.** The ``sdft`` loss family builds on the Slime backend's
+  distillation base (`Loss families <../../developer-guide/loss-families.rst>`__)
+  and runs as a ``custom_loss``. Before each step, one forward pass over
+  every teacher sequence gives the teacher's next-token distribution at each
+  response position. The loss is the per-token divergence from the student's
+  distribution over the full vocabulary, forward KL by default. Each sample
+  contributes the mean over its trained response tokens, weighted by the
+  truncated importance-sampling ratio between the policy and the old-policy
+  log-probs. The actor computes those with the weights of the job's start.
+  The stage is on-policy, so the ratio is exact.
 
 The report contract
 -------------------
@@ -145,11 +124,6 @@ stage reads only its own ``config``.
      config:
        global_batch_size: 32
 
-Reef checks each stage's config when it loads the recipe. A bad
-``context_template`` or an unknown key fails the deployment. A
-stage key under ``recipe.config`` also fails it, and the error names the
-key's place in ``pipeline``.
-
 .. container:: config
 
    ``pipeline.record2sample.config.max_teacher_tokens`` : 0
@@ -166,7 +140,10 @@ key's place in ``pipeline``.
 
 ``SDFTSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
-``scaffold_tolerance``).
+``scaffold_tolerance``). Reef checks each stage's config when it loads the
+recipe. A bad ``context_template`` or an unknown key fails the deployment. A
+stage key under ``recipe.config`` also fails it, and the error names the
+key's place in ``pipeline``.
 
 Slime takes ``--loss-type custom_loss`` and
 ``--disable-compute-advantages-and-returns``, and refuses
@@ -195,12 +172,16 @@ adds its own flags:
    ``--sdft-skip-response-tokens`` : 0
        response tokens at the start of every sample left out of the loss. The paper's runs used 3.
 
+The default full-vocabulary forward KL does not support `score centering
+<../../developer-guide/loss-families.rst#score-centering>`__; only the
+sampled reverse-KL mode does.
+
 The teacher pass keeps one float16 block per sample on the host between the
-pass and the step. The block has one row per response token and one column
-per vocabulary entry on the rank. That is about 2 GB for a 16k-token
-response of a 248k-vocabulary model at tensor parallel 4. Size
-``max_teacher_tokens`` with that in mind for long contexts. A moving teacher
-copy also costs the actor's weights once more on the host per rank.
+pass and the step, with one row per response token and one column per
+vocabulary entry on the rank. That is about 2 GB for a 16k-token response of
+a 248k-vocabulary model at tensor parallel 4. Size ``max_teacher_tokens``
+accordingly for long contexts. A moving teacher also keeps one more copy of
+the actor's weights on the host per rank.
 
 Run the example
 ---------------
