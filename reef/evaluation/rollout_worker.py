@@ -796,8 +796,11 @@ class EvaluationRolloutWorker(QueueWorker):
                     return None if served is None else ServedArtifact.from_json(served)
                 time.sleep(SERVE_POLL_S)
             raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
-        except (WorkerStoppedError, WorkLeaseLostError, ReefError):
-            self.queue.cancel(SERVING_QUEUE, item_id, "the rollout stopped waiting for its candidate")
+        except Exception:
+            try:
+                self.queue.cancel(SERVING_QUEUE, item_id, "the rollout stopped waiting for its candidate")
+            except Exception:
+                logger.exception("could not cancel abandoned candidate serving item %s", item_id)
             raise
 
     def score(

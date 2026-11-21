@@ -276,6 +276,21 @@ def test_a_cancelled_rollout_leaves_no_claimable_serving_work(tmp_path, monkeypa
     assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
 
 
+@pytest.mark.unit
+def test_a_failed_candidate_queue_read_leaves_no_claimable_serving_work(tmp_path, monkeypatch):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None))
+    worker = EvaluationRolloutWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="evaluation")
+
+    def unavailable(queue_name, item_id):
+        raise OSError("temporary queue read failure")
+
+    monkeypatch.setattr(queue, "read", unavailable)
+    with pytest.raises(OSError, match="temporary queue read failure"):
+        worker.served_candidate(rollout(), threading.Event())
+
+    assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
+
+
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
     return CapturedTurn("", path, status, {"messages": []}, response, None, False, 2.0, at=100.0)
 
