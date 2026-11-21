@@ -2450,7 +2450,10 @@ stopped driver did not train run again.
 The engines answer OpenAI text chat: system, user and assistant text messages,
 no tools. Each call samples Slime's ``rollout-temperature``, ``rollout-top-p``
 and ``rollout-top-k``, whatever the agent asks, since the trainer reads that
-distribution. ``rollout-max-response-len`` bounds each call's response.
+distribution. ``rollout-max-response-len`` bounds each call's response. Slime sends each trial's sampling options to the engine.
+These include configured stop strings, stop token IDs, and a deterministic seed when enabled.
+Trial options take precedence over matching agent options. A lower agent token limit still applies.
+``apply-chat-template-kwargs`` sets template defaults. An agent can override individual template keys.
 
 A rollout that fails in the infrastructure, or whose model calls do not assemble
 into one sample, trains nothing. Its sample has no trained token, and Slime leaves

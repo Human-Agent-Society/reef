@@ -11,6 +11,7 @@ import json
 import threading
 import time
 import urllib.request
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.durable_files import write_json
 from reef.train.slime_backend import harbor_rollouts
 from reef.train.slime_backend.dataset import DATASET_FILE
-from reef.train.slime_backend.engine_chat import EngineChat
+from reef.train.slime_backend.engine_chat import EngineChat, TrialEngineChat
 from reef.train.slime_backend.harbor_rollouts import (
     GENERATE_FUNCTION_PATH,
     HarborRolloutSession,
@@ -80,10 +81,10 @@ LIMITED = {**GENERATED, "meta_info": {**GENERATED["meta_info"], "finish_reason":
 CHAT = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "temperature": 0.7, "seed": 3}
 
 
-def post(agent: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, Any]:
+def post(agent: dict[str, Any], messages: list[dict[str, str]], **options: Any) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{agent['kwargs']['api_base']}/chat/completions",
-        data=json.dumps({"model": "m", "messages": messages, "temperature": 0.7}).encode(),
+        data=json.dumps({"model": "m", "messages": messages, "temperature": 0.7, **options}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -551,14 +552,44 @@ def test_task_prompts_shuffle_by_seed_and_epoch_only() -> None:
 def test_the_generate_function_runs_the_recorded_jobs_session_and_refuses_an_older_driver(
     tmp_path, monkeypatch
 ) -> None:
-    source = source_of(tmp_path)
+    source = source_of(tmp_path, concurrency=2)
+    override_task = tmp_path / "tasks" / "override"
+    override_task.mkdir()
+    (override_task / "task.toml").write_text('version = "1.0"\n')
+    source = replace(source, tasks=(*source.tasks, ("override", str(override_task))))
     write_json(tmp_path / "save" / DATASET_FILE, source.to_record())
-    made: list[Any] = []
+    made = []
+    requests = []
+    concurrent = threading.Barrier(2)
+
+    class OptionLab(TaskLab):
+        """Call the trial endpoint once with agent options and return reward 0.25.
+
+        Wait for both trials. A successful local build returns an empty error.
+        """
+
+        async def build_environment(self, task_path, *, overrides) -> str:
+            return ""
+
+        async def run(self, task_path, agent, *, key, tags, overrides):
+            concurrent.wait(timeout=5)
+            options = {"chat_template_kwargs": {"enable_thinking": True}} if task_path == override_task else {}
+            post(agent, [{"role": "user", "content": "hi"}], stop=["agent"], seed=99, max_tokens=8, **options)
+            return RolloutRow(rewards={"reward": 0.25})
 
     class Session(HarborRolloutSession):
-        def __init__(self, source, *, chat, model, top_k) -> None:
+        def __init__(self, source, *, chat, model, top_k):
             made.append(chat)
-            super().__init__(source, chat=Chat((200, GENERATED)), model=model, top_k=top_k, lab=AgentLab(reward=0.25))
+            chat.tokenizer = SimpleNamespace(
+                apply_chat_template=lambda messages, *, enable_thinking=True, **options: [1, 2, int(enable_thinking)]
+            )
+
+            def record(body):
+                requests.append(body)
+                return 200, GENERATED
+
+            monkeypatch.setattr(chat, "generate", record)
+            super().__init__(source, chat=chat, model=model, top_k=top_k, lab=OptionLab())
 
     monkeypatch.setattr(harbor_rollouts, "HarborRolloutSession", Session)
     monkeypatch.setattr(harbor_rollouts, "SESSIONS", {})
@@ -571,17 +602,42 @@ def test_the_generate_function_runs_the_recorded_jobs_session_and_refuses_an_old
         rollout_top_p=1.0,
         rollout_top_k=-1,
         rollout_max_response_len=64,
+        apply_chat_template_kwargs={"enable_thinking": False},
         use_score_centering=False,
         score_centering_top_k=2,
     )
-    ((name, path),) = source.tasks
-    sample = FakeSample(metadata={"task": name, "path": path, "token": "token"})
-    assert asyncio.run(generate_task_rollout(args, sample, {})) is sample
-    assert sample.reward == 0.25 and sample.status == FakeSample.Status.COMPLETED
-    # The session answers on Slime's router, with Slime's rollout distribution and response limit.
+
+    async def generate():
+        trials = [
+            generate_task_rollout(
+                args,
+                FakeSample(index=index, metadata={"task": name, "path": path, "token": "token"}),
+                {"sampling_seed": index, "stop": [name], "stop_token_ids": [index], "max_new_tokens": 4},
+            )
+            for index, (name, path) in enumerate(source.tasks)
+        ]
+        return await asyncio.gather(*trials)
+
+    samples = asyncio.run(generate())
+    assert all(sample.reward == 0.25 and sample.status == FakeSample.Status.COMPLETED for sample in samples)
     assert made[0].router_url == "http://10.0.0.1:3000"
-    assert made[0].distribution == {"temperature": 0.9, "top_p": 1.0, "top_k": -1}
-    assert made[0].max_response_tokens == 64
+    assert sorted(requests, key=lambda request: request["sampling_params"]["sampling_seed"]) == [
+        {
+            "input_ids": [1, 2, index],
+            "return_logprob": True,
+            "sampling_params": {
+                "temperature": 0.9,
+                "top_p": 1.0,
+                "top_k": -1,
+                "sampling_seed": index,
+                "stop": [name],
+                "stop_token_ids": [index],
+                "max_new_tokens": 4,
+            },
+        }
+        for index, (name, _) in enumerate(source.tasks)
+    ]
+    name, path = source.tasks[0]
 
     stale = FakeSample(metadata={"task": name, "path": path, "token": "older-driver"})
     asyncio.run(generate_task_rollout(args, stale, {}))
@@ -589,6 +645,13 @@ def test_the_generate_function_runs_the_recorded_jobs_session_and_refuses_an_old
     assert len(made) == 1
     for session in harbor_rollouts.SESSIONS.values():
         session.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("limit", ["4", 0, -1, True])
+def test_a_trial_rejects_an_invalid_response_token_limit(limit) -> None:
+    with pytest.raises(ValueError, match="max_new_tokens must be a positive integer or None"):
+        TrialEngineChat(Chat((200, GENERATED)), {"max_new_tokens": limit})
 
 
 @pytest.mark.unit

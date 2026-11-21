@@ -36,17 +36,10 @@ from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
-from reef.train.slime_backend.engine_chat import EngineChat
+from reef.train.slime_backend.engine_chat import EngineChat, TrialEngineChat
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SLIME_DEFAULT_SOURCE_PATH
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.task_rollouts import (
-    ROLLOUT_SCENARIO,
-    ChatEndpoint,
-    HarborSettings,
-    RolloutChat,
-    rollout_assembly,
-    rollout_sample,
-)
+from reef.train.task_rollouts import ROLLOUT_SCENARIO, ChatEndpoint, HarborSettings, rollout_assembly, rollout_sample
 
 logger = logging.getLogger(__name__)
 
@@ -392,10 +385,11 @@ class HarborRolloutSession:
     """
 
     def __init__(
-        self, source: TaskJobSource, *, chat: RolloutChat, model: str, top_k: int, lab: TaskLab | None = None
+        self, source: TaskJobSource, *, chat: EngineChat, model: str, top_k: int, lab: TaskLab | None = None
     ) -> None:
         settings = source.harbor
         self.source = source
+        self.chat = chat
         self.top_k = top_k
         self.assembly = rollout_assembly(settings)
         self.results_path = Path(source.job_directory) / TASK_ROLLOUTS_FILE
@@ -424,7 +418,9 @@ class HarborRolloutSession:
         self.endpoint.__exit__()
         self.threads.shutdown(wait=False)
 
-    async def run(self, task: str, task_path: Path, group_index: int) -> SampleFields:
+    async def run(
+        self, task: str, task_path: Path, group_index: int, sampling_params: Mapping[str, Any] | None = None
+    ) -> SampleFields:
         """One rollout of ``task``, called on Slime's event loop."""
         build_error = await self.built(task_path)
         if build_error:
@@ -434,7 +430,7 @@ class HarborRolloutSession:
                 removed_fields(f"the environment of {task} did not start: {build_error}", self.top_k),
                 None,
             )
-        return await self.on_own_loop(self.rollout(task, task_path, group_index))
+        return await self.on_own_loop(self.rollout(task, task_path, group_index, sampling_params))
 
     async def built(self, task_path: Path) -> str:
         """Wait for the one build of the task's remote environment: "", or the error that stopped it.
@@ -455,10 +451,16 @@ class HarborRolloutSession:
         except Exception as exc:
             return str(exc) or type(exc).__name__
 
-    async def rollout(self, task: str, task_path: Path, group_index: int) -> SampleFields:
+    async def rollout(
+        self, task: str, task_path: Path, group_index: int, sampling_params: Mapping[str, Any] | None
+    ) -> SampleFields:
         """Run and assemble one rollout on this thread's own loop."""
         try:
-            rollout = await self.runner.run_async(task_path)
+            if sampling_params is None:
+                rollout = await self.runner.run_async(task_path)
+            else:
+                with ChatEndpoint(TrialEngineChat(self.chat, dict(sampling_params))) as endpoint:
+                    rollout = await self.runner.run_async(task_path, inference_url=endpoint.url)
         # Harbor and the agent raise their own types, and one rollout must not stop the Slime rollout's other samples.
         except Exception as exc:
             logger.warning("a rollout of task %s failed", task, exc_info=True)
@@ -549,6 +551,7 @@ def task_session(args: SlimeArguments, token: str) -> HarborRolloutSession | Non
         },
         max_response_tokens=args.rollout_max_response_len,
         topk_logprobs=top_k,
+        template_kwargs=args.apply_chat_template_kwargs,
     )
     SESSIONS[token] = HarborRolloutSession(source, chat=chat, model=args.hf_checkpoint, top_k=top_k)
     return SESSIONS[token]
@@ -557,14 +560,16 @@ def task_session(args: SlimeArguments, token: str) -> HarborRolloutSession | Non
 async def generate_task_rollout(args: SlimeArguments, sample: Any, sampling_params: dict[str, Any]) -> Any:
     """Slime's generate function of a task job's prompt: run one Harbor rollout of its task, and fill ``sample``.
 
-    ``sampling_params`` are not read: ``EngineChat`` sends Slime's rollout distribution with each model call. The
-    result is one ``Sample``, one rollout. Its reward is set, so Slime calls no reward model.
+    Use sampling_params for this trial's model calls. Set the sample's
+    reward so Slime calls no reward model.
     """
     session = task_session(args, sample.metadata["token"])
     if session is None:
         fields = removed_fields("a newer driver of the job replaced this rollout's driver", head_count(args))
     else:
-        fields = await session.run(sample.metadata["task"], Path(sample.metadata["path"]), sample.group_index)
+        fields = await session.run(
+            sample.metadata["task"], Path(sample.metadata["path"]), sample.group_index, sampling_params
+        )
     apply_fields(sample, fields)
     return sample
 
