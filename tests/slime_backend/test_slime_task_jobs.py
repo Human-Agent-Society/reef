@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,20 +33,33 @@ HARBOR = {"environment": "modal", "concurrency": 4}
 
 
 class TaskRolloutGroup(SlimeRolloutGroup):
-    """The serving session's engines: each rollout writes the results that the rollout manager would write.
+    """Stand in for the serving engines and write the rollout manager's result records.
 
-    ``outcomes`` holds one ``(group_index, reward)`` list per rollout; the default is a group of two samples.
+    ``events`` receives the engine calls in order. ``root`` locates the task source.
+    ``records`` collects the task source read on each generate call.
+    ``outcomes`` is an initially empty queue of rollouts in the order to generate them.
+    Each rollout is an ordered sequence of trial pairs and may be empty.
+    Repeated pairs are allowed. A pair holds a nonnegative integer group index and a reward.
+    A finite float reward, including zero, produces an assembled result.
+    A reward of None reports a trial that did not produce a score or an assembled result.
     """
 
-    def __init__(
-        self, events: list[str], root: Path, outcomes: list[list[tuple[int, float | None]]] | None = None
-    ) -> None:
+    def __init__(self, events: list[str], root: Path) -> None:
         super().__init__(SimpleNamespace(manager=None), colocated=True, router_url="http://router:3000")
         self.events = events
         self.root = root
-        self.outcomes = outcomes or []
-        # The data source's record when each rollout generated.
+        self.outcomes: list[tuple[tuple[int, float | None], ...]] = []
         self.records: list[dict[str, Any]] = []
+
+    def queue_outcomes(self, *outcomes: list[tuple[int, float | None]]) -> None:
+        """Validate all trial pairs, then append a copy of each rollout to the queue."""
+        for outcome in outcomes:
+            for group_index, reward in outcome:
+                if type(group_index) is not int or group_index < 0:
+                    raise ValueError("A trial group index must be a nonnegative integer.")
+                if reward is not None and (type(reward) is not float or not math.isfinite(reward)):
+                    raise ValueError("A trial reward must be a finite float or None.")
+        self.outcomes.extend(tuple(outcome) for outcome in outcomes)
 
     def sync(self, actor_group) -> None:
         self.events.append("sync")
@@ -54,11 +68,15 @@ class TaskRolloutGroup(SlimeRolloutGroup):
         self.events.append("release")
 
     def generate(self, rollout_id: int) -> str:
+        """Remove the first queued rollout, write its results, and return ``rollout-data-{rollout_id}``.
+
+        If the queue is empty, write two trials in group 0, each with reward 1.0.
+        """
         self.events.append(f"generate:{rollout_id}")
         record = read_json(self.root / DATASET_FILE)
         self.records.append(record)
         source = TaskJobSource.from_record(record)
-        outcome = self.outcomes.pop(0) if self.outcomes else [(0, 1.0), (0, 1.0)]
+        outcome = self.outcomes.pop(0) if self.outcomes else ((0, 1.0), (0, 1.0))
         with open(Path(source.job_directory) / TASK_ROLLOUTS_FILE, "a", encoding="utf-8") as results:
             for group_index, reward in outcome:
                 assembled = reward is not None
@@ -150,7 +168,7 @@ def test_a_task_job_runs_slimes_loop_over_its_tasks_and_reports_their_rewards(tm
 @pytest.mark.unit
 def test_a_group_left_with_two_samples_trains_with_the_others_removed(tmp_path, task_stack) -> None:
     stack, _, group = task_stack
-    group.outcomes = [[(0, 1.0), (0, 1.0), (1, None), (1, 1.0)]]
+    group.queue_outcomes([(0, 1.0), (0, 1.0), (1, None), (1, 1.0)])
     stack.component.submit(task_job(stack, tmp_path, count=2))
     status = finished(stack.component, "job-0")
     assert status.state == "finished", status.error
@@ -160,11 +178,11 @@ def test_a_group_left_with_two_samples_trains_with_the_others_removed(tmp_path, 
 @pytest.mark.unit
 def test_checkpoint_rewards_compare_scored_trials_and_keep_scored_zeros(tmp_path, task_stack, monkeypatch) -> None:
     stack, _, group = task_stack
-    group.outcomes = [
+    group.queue_outcomes(
         [(0, -0.8), (0, -0.6), (1, None), (1, None)],
         [(0, -0.7), (0, -0.6), (1, -0.6), (1, -0.5)],
         [(0, 0.8), (0, 0.6), (1, 0.0), (1, 0.0)],
-    ]
+    )
     worker_means = iter([-0.35, -0.6, 0.35])
     monkeypatch.setattr(stack.group, "async_pop_metrics", lambda: [{"rollout/raw_reward": next(worker_means)}])
     stack.component.submit(task_job(stack, tmp_path, count=6, save_interval=1))
@@ -196,7 +214,7 @@ def test_a_rollout_with_no_group_to_train_fails_the_job_before_the_workers_train
     tmp_path, task_stack, outcome
 ) -> None:
     stack, events, group = task_stack
-    group.outcomes = [outcome]
+    group.queue_outcomes(outcome)
     stack.component.submit(task_job(stack, tmp_path, count=2))
     status = finished(stack.component, "job-0")
     assert status.state == "failed" and "the sandbox did not start" in status.error
@@ -231,7 +249,7 @@ def test_a_resumed_task_job_skips_the_rollouts_it_saved(tmp_path, task_stack, mo
 @pytest.mark.unit
 def test_a_task_checkpoint_keeps_its_score_after_an_interrupted_save(tmp_path, task_stack, monkeypatch) -> None:
     stack, _, group = task_stack
-    group.outcomes = [[(0, -0.8), (0, -0.6), (1, None), (1, None)]]
+    group.queue_outcomes([(0, -0.8), (0, -0.6), (1, None), (1, None)])
     job = task_job(stack, tmp_path, count=2)
     directory = stack.component.job_directory(job.job_id)
     directory.mkdir(parents=True)
