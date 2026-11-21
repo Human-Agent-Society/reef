@@ -18,9 +18,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact.artifact import Artifact
 from reef.core import RequestType
+from reef.core.chat_rendering import trained_turns
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.core.trajectories import make_trajectory
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
-from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
+from reef.service.inference_service import RECORD_HEADER, InferenceReplica, ServedModelsCache, add_inference_routes
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -33,14 +35,19 @@ CHUNKS = (
 
 
 class EchoHandler(InferenceHandler):
-    """An engine that answers every request and keeps each body that it receives."""
+    """Record each request payload in arrival order in ``received``.
 
-    def __init__(self) -> None:
+    ``completion`` is the JSON object returned by buffered inference. It defaults to ``COMPLETION``.
+    Streaming emits the fixed ``CHUNKS`` as server-sent events followed by ``[DONE]``.
+    """
+
+    def __init__(self, completion: dict[str, Any] = COMPLETION) -> None:
+        self.completion = completion
         self.received: list[dict[str, Any]] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.received.append(payload)
-        return COMPLETION
+        return self.completion
 
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         self.received.append(payload)
@@ -144,5 +151,48 @@ def test_by_default_the_engine_receives_and_the_record_holds_the_clients_body(tm
             assert response.status == 200
         assert handler.received == [{**body, "model": "engine-model"}]
         assert recorded_requests(storage) == [{**body, "artifact_id": "artifact-1"}]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("input_value", ["Look up Paris", [{"role": "user", "content": "Look up Paris"}]])
+def test_a_recorded_responses_tool_call_trains(tmp_path: Path, input_value: str | list[dict[str, str]]) -> None:
+    completion = {
+        "id": "resp_1",
+        "object": "response",
+        "output": [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Find the city."}]},
+            {"type": "function_call", "name": "lookup", "call_id": "call_1", "arguments": '{"city":"Paris"}'},
+        ],
+        "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+    }
+    body = {"model": "client-model", "input": input_value}
+
+    async def run() -> None:
+        client, storage = replica_client(tmp_path, EchoHandler(completion))
+        async with client:
+            response = await client.post("/v1/responses", json=body, headers={"x-reef-scenario": SCENARIO})
+            assert response.status == 200
+            record_id = response.headers[RECORD_HEADER]
+
+        store = storage.open(SCENARIO)
+        try:
+            assert store.records.trajectory(SCENARIO, record_id) == (record_id,)
+            record = store.records.read(SCENARIO, record_id)
+            assert record is not None
+            assert record.payload == {**body, "artifact_id": "artifact-1", "response": completion}
+        finally:
+            store.close()
+
+        trajectory = make_trajectory([record]).trajectory
+        conversation, trained = trained_turns(trajectory)
+        assert trained == [1, 2]
+        assert conversation[0] == {"role": "user", "content": "Look up Paris"}
+        assert conversation[1]["reasoning_content"] == "Find the city."
+        (call,) = conversation[2]["tool_calls"]
+        assert call["id"] == "call_1"
+        assert call["function"] == {"name": "lookup", "arguments": {"city": "Paris"}}
+        assert trajectory["steps"][2]["metrics"] == {"prompt_tokens": 12, "completion_tokens": 8}
 
     asyncio.run(run())

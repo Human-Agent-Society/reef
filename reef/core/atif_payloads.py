@@ -664,7 +664,7 @@ class AtifCall:
 
 
 def payload_provider(payload: Mapping[str, Any]) -> str | None:
-    """The provider of a payload with a message list, by its fields, or ``None`` for a payload without one."""
+    """The provider identified by the payload fields, or ``None`` for an unknown format."""
     if isinstance(payload.get("messages"), list):
         response = payload.get("response")
         if isinstance(response, Mapping) and response.get("type") == "message":
@@ -681,20 +681,25 @@ def payload_provider(payload: Mapping[str, Any]) -> str | None:
         if any(isinstance(block, Mapping) and block.get("type") in anthropic_blocks for block in blocks):
             return ANTHROPIC
         return OPENAI_CHAT
-    if isinstance(payload.get("input"), list):
+    if isinstance(payload.get("input"), list | str):
         return OPENAI_RESPONSES
     return None
 
 
 def call_shape(payload: Mapping[str, Any]) -> CallShape | None:
-    """Where ``payload`` keeps its parts, or ``None`` when the payload has no message list."""
+    """Where a stored call keeps its parts, or ``None`` when it has no message list.
+
+    The record store keeps non-list payloads, including Responses text input, in their original form.
+    """
     provider = payload_provider(payload)
     if provider is None:
+        return None
+    message_field = "input" if provider == OPENAI_RESPONSES else "messages"
+    if not isinstance(payload.get(message_field), list):
         return None
     system_field = next(
         (name for name in ("system", "instructions") if name in payload and provider != OPENAI_CHAT), None
     )
-    message_field = "input" if provider == OPENAI_RESPONSES else "messages"
     return CallShape(provider, message_field, system_field, "tools" in payload)
 
 
