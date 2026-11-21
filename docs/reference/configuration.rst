@@ -1789,7 +1789,10 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
        the publication policy: ``compare`` scores the candidate and the current tree (the training start) on the same tasks and repeats; ``floor`` scores the candidate alone and publishes it when every task has a run that completed and every run that completed scores at least ``floor_score``; ``none`` runs no task and publishes every candidate that passes validation
 
    ``evolution.evaluation.statistic`` : wins
-       what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses over the (task, repeat) pairs exceed ``min_margin``. ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``. A run that gave no answer scores 0. A run that the environment could not run (a failed run) drops its pair under ``wins`` and is left out of the mean under ``mean``
+       what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses exceed ``min_margin``.
+       ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``.
+       Both statistics use the same (task, repeat) pairs and drop each pair with a failed run.
+       A run that gave no answer scores 0. Reef rejects the candidate when no complete pair remains
 
    ``evolution.evaluation.min_margin`` : 0
        the margin a ``compare`` candidate must exceed: in wins minus losses, or in mean score; at least 0

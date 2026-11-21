@@ -331,10 +331,11 @@ state the whole problem.
      - nothing
      - always; it needs no tasks and no scorer
 
-A run that gave no answer scores 0. A failed run, one that the
-environment could not run, counts for neither tree: ``wins`` drops its pair
-and ``mean`` leaves it out. A tie publishes nothing. Reef keeps every scored run and reuses it for the same tree,
-task and repeat, so a step usually runs only the candidate's runs.
+A run that gave no answer scores 0. Under ``compare``, both statistics drop a
+pair if either run failed. ``mean`` reports how many pairs it used and dropped.
+A tie or an evaluation with no complete pairs publishes nothing. Reef keeps
+every scored run and reuses it for the same tree, task and repeat.
+Reef usually runs only the candidate's rollouts.
 `Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__
 lists every key.
 

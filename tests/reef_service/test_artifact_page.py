@@ -406,7 +406,7 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
     }
     metrics = {
         "selected": {"selected": True},
-        "rejected": {"selected": False},
+        "rejected": {"selected": False, "paired": 0, "dropped": 2},
         "skipped": {"skipped": UNCHANGED},
         "inactive": {"selected": True},
     }
@@ -424,6 +424,10 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
         # The hero's tone drives the palette, so the card headline and the pill agree.
         assert f'<main class="tone-{css_class}">' in page
         assert status_label(state) == label
+        if state == "rejected":
+            result = _section(page, "Result")
+            assert "<dt>Complete pairs</dt><dd>0</dd>" in result
+            assert "<dt>Dropped pairs</dt><dd>2</dd>" in result
     # The creation row is no step's result; it reads as the starting point.
     assert '<span class="creation">Starting point</span>' in _hero(build_artifact_page(0, [creation]))
 

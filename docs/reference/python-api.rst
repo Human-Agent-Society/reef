@@ -2250,6 +2250,12 @@ skipped or fails.
 (``floor``, with ``floor_score``) and ``NoEvaluationPolicy`` (``none``). A
 harness recipe takes no other policy.
 
+``ComparePolicy`` with ``statistic="mean"`` compares both means on pairs
+with two scores. The decision metrics report ``paired`` and ``dropped``
+counts. When a pair has two scores, the metrics include ``candidate_mean``
+and ``current_mean`` for the complete pairs. The policy rejects the candidate
+when there are no complete pairs.
+
 Candidate evaluation
 --------------------
 
