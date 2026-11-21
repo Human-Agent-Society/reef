@@ -238,40 +238,6 @@ def test_the_dataset_stage_has_the_job_size_a_weight_trainer_requires() -> None:
     assert stage.job_samples == 1
 
 
-@pytest.fixture
-def make_dataset_source(monkeypatch):
-    pytest.importorskip("slime.data.data_source", reason="requires Slime's optional dataset dependencies")
-    from reef.train.slime_backend import dataset_source
-
-    monkeypatch.setattr(dataset_source, "load_tokenizer", lambda *args, **kwargs: None)
-    monkeypatch.setattr(dataset_source, "load_processor", lambda *args, **kwargs: None)
-
-    def make_source(root: Path, *, rollout_batch_size: int):
-        return dataset_source.ReefDatasetSource(
-            Namespace(
-                save_hf=str(root / "hf" / "{rollout_id}"),
-                prompt_data=None,
-                hf_checkpoint="/models/m",
-                rollout_max_prompt_len=None,
-                input_key="input",
-                multimodal_keys=None,
-                label_key="label",
-                metadata_key="metadata",
-                tool_key=None,
-                apply_chat_template=False,
-                apply_chat_template_kwargs=None,
-                rollout_seed=0,
-                rollout_shuffle=False,
-                rollout_batch_size=rollout_batch_size,
-                n_samples_per_prompt=2,
-                buffer_filter_path=None,
-                dump_details=None,
-            )
-        )
-
-    return make_source
-
-
 @pytest.mark.unit
 def test_the_data_source_loads_the_recorded_job_and_skips_its_trained_rollouts(tmp_path, make_dataset_source) -> None:
     root = tmp_path / "save"
