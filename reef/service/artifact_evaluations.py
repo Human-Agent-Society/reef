@@ -86,7 +86,7 @@ from reef.storage.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
     EvaluationStateConflictError,
-    EvaluationStore,
+    KeyedEvaluationStore,
     StoredEvaluation,
     check_evaluation_start_id,
 )
@@ -881,13 +881,14 @@ class EvaluationResults:
             try:
                 with self.dispatcher.locked_scenario(scenario) as current:
                     evaluations = current.store.evaluations
-                    for evaluation_id, first_work_json in evaluations.pending_starts():
-                        started = evaluations.read(evaluation_id)
-                        if started is not None and started.state in ("queued", "running"):
-                            self.publish_start(evaluations, started, first_work_json)
-                        # A cancelled start can still need its first work item when the client resumes it.
-                        elif started is None or started.error != CANCELLED_ERROR:
-                            evaluations.complete_start(evaluation_id)
+                    if isinstance(evaluations, KeyedEvaluationStore):
+                        for evaluation_id, first_work_json in evaluations.pending_starts():
+                            started = evaluations.read(evaluation_id)
+                            if started is not None and started.state in ("queued", "running"):
+                                self.publish_start(evaluations, started, first_work_json)
+                            # A cancelled start can still need its first work item when the client resumes it.
+                            elif started is None or started.error != CANCELLED_ERROR:
+                                evaluations.complete_start(evaluation_id)
                     for stored in evaluations.newest(limit=MAX_STOPPED_EVALUATIONS):
                         if (
                             stored.state in ("queued", "running")
@@ -903,7 +904,7 @@ class EvaluationResults:
         return time.time() - stored.created_at >= self.dispatcher.work_retention_seconds
 
     def publish_start(
-        self, evaluations: EvaluationStore, stored: StoredEvaluation, first_work_json: str
+        self, evaluations: KeyedEvaluationStore, stored: StoredEvaluation, first_work_json: str
     ) -> StoredEvaluation:
         """Publish the pending work under the scenario lock, or fail if the queue could have removed it."""
         work = NewWork(**json.loads(first_work_json))
@@ -1008,6 +1009,11 @@ class ArtifactEvaluations:
             return None
         return self.accept(new.scenario, new.artifact_id, settings, state="queued")
 
+    def supports_keyed_start(self, scenario: str) -> bool:
+        """Return whether the scenario store can reserve evaluation start IDs."""
+        with self.dispatcher.locked_scenario(scenario) as current:
+            return isinstance(current.store.evaluations, KeyedEvaluationStore)
+
     def start(self, scenario: str, body: object) -> StoredEvaluation:
         """Check a client's request ``body`` against ``scenario``, store it, and queue its rollouts.
 
@@ -1024,6 +1030,8 @@ class ArtifactEvaluations:
         fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
         with self.dispatcher.locked_scenario(scenario) as current:
             evaluations = current.store.evaluations
+            if not isinstance(evaluations, KeyedEvaluationStore):
+                raise NotImplementedError("the scenario store does not support evaluation start IDs")
             previous = evaluations.read_started(start_id, fingerprint)
             if previous is None:
                 artifact_id, settings = request_settings(payload)
@@ -1145,9 +1153,12 @@ class ArtifactEvaluations:
             # An evaluation on e2b can end before it added a rollout: its template items are then all it has.
             templates = self.results.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             ended = stored.state in ("finished", "failed")
+            evaluations = current.store.evaluations
+            start_store = evaluations if isinstance(evaluations, KeyedEvaluationStore) else None
             first_work_json = (
-                current.store.evaluations.pending_start(evaluation_id)
-                if resumes
+                start_store.pending_start(evaluation_id)
+                if start_store is not None
+                and resumes
                 and not items
                 and not templates
                 and (not ended or stored.error == CANCELLED_ERROR)
@@ -1208,9 +1219,9 @@ class ArtifactEvaluations:
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             reopened = current.store.evaluations.reopen(evaluation_id) if ended else stored
-            if first_work_json is not None:
+            if start_store is not None and first_work_json is not None:
                 self.queue.append(NewWork(**json.loads(first_work_json)))
-                current.store.evaluations.complete_start(evaluation_id)
+                start_store.complete_start(evaluation_id)
             # A rollout that requires prepared templates runs again only once its task's template item finished.
             # Each template item of these tasks that did not finish goes to the queue again, or back to it when the
             # queue no longer holds it, and the task's rollouts wait until it is final (``settle``).
@@ -1492,6 +1503,8 @@ class ArtifactEvaluations:
             first_work = template_work(first) if request.environment == "e2b" else rollout_work(first)
             with self.dispatcher.locked_scenario(scenario) as current:
                 evaluations = current.store.evaluations
+                if not isinstance(evaluations, KeyedEvaluationStore):
+                    raise NotImplementedError("the scenario store does not support evaluation start IDs")
                 stored = evaluations.create(
                     evaluation_id=evaluation_id,
                     owner=QUEUE_OWNER,

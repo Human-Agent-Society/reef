@@ -180,7 +180,8 @@ def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEva
     """The start, the cancel, the retry and the resume of an evaluation, which control accepts."""
 
     async def capabilities(request: web.Request) -> web.Response:
-        return web.json_response({"evaluation_start_id": True}, headers={"Cache-Control": "no-store"})
+        supported = await asyncio.to_thread(evaluations.supports_keyed_start, request.match_info["scenario"])
+        return web.json_response({"evaluation_start_id": supported}, headers={"Cache-Control": "no-store"})
 
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)

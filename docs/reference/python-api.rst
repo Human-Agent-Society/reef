@@ -618,6 +618,9 @@ Storage implementations explicitly subclass ``RecordStore``,
 methods and properties. Incomplete subclasses cannot be instantiated. The
 bundled ``ItemRecordStore``, ``CommitHistoryScenarioStore``, and
 ``SQLiteScenarioStorage`` inherit those bases, respectively.
+An existing ``EvaluationStore`` supports unkeyed evaluations.
+To support start IDs, implement ``KeyedEvaluationStore`` from ``reef.storage.evaluations``.
+Reserve the ID, save the evaluation, and save its pending work in one transaction.
 
 .. code:: python
 

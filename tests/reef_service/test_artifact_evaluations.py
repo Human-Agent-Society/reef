@@ -83,9 +83,10 @@ from reef.service.artifact_evaluations import (
 from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
 from reef.storage.data import MemoryDataStore, NewItem
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.record_items import evaluation_call_item
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 from reef.storage.work_queue import NewWork, WorkItem
 
@@ -285,6 +286,51 @@ def test_evaluation_start_id_replays_one_evaluation_and_rejects_a_different_requ
             )
             assert separate.status == 202
             assert (await separate.json())["evaluation_id"] != evaluation_id
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_store_without_keyed_starts_keeps_unkeyed_evaluations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evaluation_store = SQLiteScenarioDatabase.evaluation_store
+
+    def open_legacy_store(database: SQLiteScenarioDatabase) -> EvaluationStore:
+        store = evaluation_store(database)
+
+        class LegacyStore(EvaluationStore):
+            create = staticmethod(store.create)
+            begin = staticmethod(store.begin)
+            finish = staticmethod(store.finish)
+            fail = staticmethod(store.fail)
+            reopen = staticmethod(store.reopen)
+            limit_rollouts = staticmethod(store.limit_rollouts)
+            read = staticmethod(store.read)
+            newest = staticmethod(store.newest)
+
+        return LegacyStore()
+
+    monkeypatch.setattr(SQLiteScenarioDatabase, "evaluation_store", open_legacy_store)
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            route = "/reef/scenarios/s/evaluations"
+            capability = await client.get("/reef/scenarios/s/evaluation-capabilities", headers=AUTH)
+            assert capability.status == 200 and await capability.json() == {"evaluation_start_id": False}
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            unsupported = await client.post(route, headers=AUTH, json={**body, "start_id": "request-1"})
+            assert unsupported.status == 501
+            assert dispatcher.queue.items(EVALUATIONS_QUEUE, scenario="s") == ()
+            unkeyed = await client.post(route, headers=AUTH, json=body)
+            assert unkeyed.status == 202
+            accepted = await unkeyed.json()
+            cancelled = await client.post(f"{route}/{accepted['evaluation_id']}/cancel", headers=AUTH)
+            assert cancelled.status == 200
+            resumed = await client.post(f"{route}/{accepted['evaluation_id']}/resume", headers=AUTH)
+            assert resumed.status == 202
 
     asyncio.run(run())
 

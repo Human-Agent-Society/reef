@@ -181,33 +181,8 @@ class EvaluationStore(ABC):
         request: ArtifactEvaluationRequest,
         created_at: float,
         state: Literal["queued", "running"] = "running",
-        start: EvaluationStart | None = None,
     ) -> StoredEvaluation:
-        """Save a new evaluation in ``state`` and return it.
-
-        With ``start``, reserve its ID and save the first work item in the same transaction.
-        Raise ``ValueError`` when the store holds ``evaluation_id``.
-        Raise ``EvaluationStartConflictError`` when the start ID is already in use.
-        """
-
-    @abstractmethod
-    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, str | None] | None:
-        """Read the evaluation and its pending admission data, or return None for an unused start ID.
-
-        Raise ``EvaluationStartConflictError`` if the stored fingerprint differs.
-        """
-
-    @abstractmethod
-    def pending_starts(self) -> tuple[tuple[str, str], ...]:
-        """Return the evaluation ID and saved admission data of each pending start."""
-
-    @abstractmethod
-    def pending_start(self, evaluation_id: str) -> str | None:
-        """Return the saved admission data of this evaluation's pending start, else None."""
-
-    @abstractmethod
-    def complete_start(self, evaluation_id: str) -> None:
-        """Clear the pending first work item after the work queue stores it."""
+        """Save a new evaluation in ``state`` and return it. Raise ValueError for a duplicate evaluation ID."""
 
     @abstractmethod
     def begin(self, evaluation_id: str) -> StoredEvaluation:
@@ -246,10 +221,56 @@ class EvaluationStore(ABC):
         return self.newest(limit=limit)
 
 
+class KeyedEvaluationStore(EvaluationStore):
+    """An evaluation store that reserves start IDs and persists pending work atomically.
+
+    Each start ID in this scenario maps to one evaluation ID, its request fingerprint,
+    and its pending work until the queue accepts that work.
+    """
+
+    @abstractmethod
+    def create(
+        self,
+        *,
+        evaluation_id: str,
+        owner: str,
+        request: ArtifactEvaluationRequest,
+        created_at: float,
+        state: Literal["queued", "running"] = "running",
+        start: EvaluationStart | None = None,
+    ) -> StoredEvaluation:
+        """Save a new evaluation in ``state`` and return it.
+
+        With ``start``, reserve its ID and save the first work item in the same transaction.
+        Raise ``ValueError`` when the store holds ``evaluation_id``.
+        Raise ``EvaluationStartConflictError`` when the start ID is already in use.
+        """
+
+    @abstractmethod
+    def read_started(self, start_id: str, fingerprint: str) -> tuple[StoredEvaluation, str | None] | None:
+        """Read the evaluation and its pending admission data, or return None for an unused start ID.
+
+        Raise ``EvaluationStartConflictError`` if the stored fingerprint differs.
+        """
+
+    @abstractmethod
+    def pending_starts(self) -> tuple[tuple[str, str], ...]:
+        """Return the evaluation ID and saved admission data of each pending start."""
+
+    @abstractmethod
+    def pending_start(self, evaluation_id: str) -> str | None:
+        """Return the saved admission data of this evaluation's pending start, else None."""
+
+    @abstractmethod
+    def complete_start(self, evaluation_id: str) -> None:
+        """Clear the pending first work item after the work queue stores it."""
+
+
 __all__ = [
     "EVALUATION_STATES",
     "EvaluationState",
     "EvaluationStateConflictError",
     "EvaluationStore",
+    "KeyedEvaluationStore",
     "StoredEvaluation",
 ]

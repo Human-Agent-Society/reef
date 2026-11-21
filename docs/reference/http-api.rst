@@ -1506,7 +1506,8 @@ If an interrupted start has no initial work after the queue retention period,
 Reef marks the evaluation failed. A replay still returns its original ID.
 
 ``GET /reef/scenarios/{scenario}/evaluation-capabilities`` on control returns
-``{"evaluation_start_id": true}`` when this operation is available.
+``{"evaluation_start_id": true}`` when the scenario store supports keyed starts.
+An unsupported store returns false and rejects requests with ``start_id`` with HTTP 501.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
 it runs and after it ends:
@@ -1616,6 +1617,9 @@ The default, ``sort=task``, keeps task order. Each task's rollouts keep repeat
 order. Filtered pages and pages sorted by score include ``task_means``.
 It gives the mean of all scored repeats for each task on the page, by task index.
 For each page, call totals use only the rollouts it returns.
+The default page reads only the selected rollout rows. A state filter or
+score sort reads all rollout rows. A benchmark filter alone reads all
+repeats for the tasks on the page to compute their means.
 Without ``limit``, the route gives the original full response.
 
 To add up the totals, Reef reads every kept call of the evaluation. The query

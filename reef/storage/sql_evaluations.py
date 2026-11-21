@@ -35,7 +35,7 @@ from reef.storage.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
     EvaluationStateConflictError,
-    EvaluationStore,
+    KeyedEvaluationStore,
     StoredEvaluation,
 )
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
@@ -107,7 +107,7 @@ def evaluation_start_table(metadata: MetaData, *, foreign_key: str | None = None
     )
 
 
-class SQLEvaluationStore(EvaluationStore):
+class SQLEvaluationStore(KeyedEvaluationStore):
     """The artifact evaluations of one scenario in its record database."""
 
     def __init__(self, database: SQLScenarioDatabase, table: ScopedTable, starts: ScopedTable, digests: Table) -> None:
