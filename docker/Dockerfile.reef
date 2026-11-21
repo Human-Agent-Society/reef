@@ -141,6 +141,10 @@ RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
                from sglang.srt.layers.rotary_embedding.utils import apply_rotary_pos_emb_native; \
                assert transformers_api_supported()"
 
+# Reduce Slime's OPSM clip fraction over active response tokens.
+RUN SLIME_SITE=$(python -c "from importlib.metadata import distribution; print(distribution('slime').locate_file(''))") && \
+    git -C "$SLIME_SITE" apply "$PWD/docker/patch/slime_opsm_clip_fraction.patch"
+
 # With context parallel size 1, Slime's Qwen3.5-VL trainer rejects every packed
 # sequence with an odd length ("must be divisible by 2 * CP size 1"). So it
 # fails in the first training step. The patch returns the full packed stream
