@@ -1387,7 +1387,8 @@ downgrade without restoring a compatible backup.
 
        Upgrade every evaluation controller and worker before enabling pinning.
        A custom template builder must override ``build_for_version`` to honor the stored digest or the pinned
-       task directory. The built-in Dockerfile builder uses that directory. Keep the task versions and any
+       task directory. This includes subclasses that override a legacy build hook. The built-in Dockerfile
+       builder uses the pinned directory. Keep the task versions and any
        registry images they require available for the retry period.
        To roll back, disable pinning for new evaluations and let active pinned evaluations finish.
        Use a compatible release to retry or resume a pinned evaluation.

@@ -13,6 +13,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from reef_client.serve import CapturedTurn
@@ -21,6 +22,7 @@ from tests.support.polling import wait_until
 from reef.core.errors import ReefError
 from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
@@ -29,6 +31,7 @@ from reef.evaluation.rollout_worker import (
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
+    LocalCandidateEndpoints,
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
@@ -614,6 +617,24 @@ class OwnerBuilder(TaskTemplateBuilder):
         self.builds.append((owner, scenario, task_name))
 
 
+class OwnerDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with legacy owner-based registry selection."""
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        pass
+
+
+class CustomDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with a legacy name-based build."""
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("pinned work must skip the legacy build")
+
+
+class InheritedDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with the default build hooks."""
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("queued_owner", "record_owner", "error"),
@@ -650,9 +671,12 @@ def test_a_template_item_builds_for_the_owner_of_the_scenarios_record_and_never_
 def test_a_template_item_gives_the_builder_its_pinned_task_digest(tmp_path):
     versions = []
 
-    class VersionBuilder(OwnerBuilder):
+    class VersionBuilder(OwnerDockerfileBuilder):
         async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
             versions.append((owner, task_name, task_digest))
+
+    class InheritedVersionBuilder(VersionBuilder):
+        pass
 
     class VersionEndpoints(OwnedEndpoints):
         def task_version(self, rollout):
@@ -664,7 +688,7 @@ def test_a_template_item_gives_the_builder_its_pinned_task_digest(tmp_path):
     value = replace(e2b_rollout(), owner=owner, task_digest=digest)
     item_id = template_item_id(value.evaluation_id, value.task_index)
     queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
-    builder = VersionBuilder()
+    builder = InheritedVersionBuilder()
     worker = TaskTemplateWorker(queue, VersionEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
     assert worker.run_once() is True
     assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
@@ -672,17 +696,22 @@ def test_a_template_item_gives_the_builder_its_pinned_task_digest(tmp_path):
 
 
 @pytest.mark.unit
-def test_a_queued_pinned_template_never_uses_an_owner_only_builder(tmp_path):
+@pytest.mark.parametrize("builder_type", [OwnerBuilder, OwnerDockerfileBuilder, CustomDockerfileBuilder])
+def test_a_queued_pinned_template_never_uses_a_legacy_builder(tmp_path, builder_type):
+    class VersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), rollout.task_digest
+
     queue = memory_coordination().work_queue
     owner = "workspace-7"
     value = replace(e2b_rollout(), owner=owner, task_digest="1" * 64)
     item_id = template_item_id(value.evaluation_id, value.task_index)
     queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
-    builder = OwnerBuilder()
-    worker = TaskTemplateWorker(queue, OwnedEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
+    builder = builder_type()
+    worker = TaskTemplateWorker(queue, VersionEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
     assert worker.run_once() is True
     item = queue.read(EVALUATIONS_QUEUE, item_id)
-    assert (item.state, item.attempt_count, builder.builds) == ("failed", 1, [])
+    assert (item.state, item.attempt_count) == ("failed", 1)
     assert "does not support pinned task files" in str(item.error)
 
 
@@ -700,6 +729,24 @@ def test_a_pinned_rollout_refuses_name_only_or_mismatched_resolution(tmp_path, r
     message = "returned different files" if returns_mismatch else "does not support pinned task files"
     with pytest.raises(ItemFailedError, match=message):
         worker.score(value, threading.Event(), 1)
+
+
+@pytest.mark.unit
+def test_a_pinned_local_endpoint_uses_the_digest_resolver_instead_of_an_inherited_name_hook(tmp_path):
+    current, pinned = tmp_path / "current", tmp_path / "pinned"
+
+    class NameBasedEndpoints(LocalCandidateEndpoints):
+        def task_directory(self, rollout):
+            return current
+
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.candidate_task_for_digest.return_value = pinned
+    digest = "1" * 64
+    value = replace(rollout(), task_digest=digest)
+    endpoints = NameBasedEndpoints(artifacts)
+    assert endpoints.task_directory(rollout()) == current
+    assert endpoints.task_version(value) == (pinned, digest)
+    artifacts.candidate_task_for_digest.assert_called_once_with(value.scenario, value.task_name, digest)
 
 
 def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:

@@ -36,6 +36,7 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
     ``build_for_version`` also receives the stored files digest of the evaluation's task, or None if unavailable.
     Its default calls ``build_for_owner`` for unpinned work. A builder supports pinned work when it overrides
     ``build_for_version``. The override uses the admitted digest or builds from the supplied pinned directory.
+    A subclass that changes a legacy build hook must also declare how to build the admitted version.
 
     Purpose: the evaluation service's ``TaskTemplateWorker`` calls ``build_for_version`` for each template item.
     """
@@ -43,7 +44,13 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
     @classmethod
     def supports_pinned_versions(cls) -> bool:
         """Return whether this builder declares how it builds the admitted task version."""
-        return cls.build_for_version is not TaskTemplateBuilder.build_for_version
+        for base in cls.__mro__:
+            methods = base.__dict__
+            if "build_for_version" in methods:
+                return methods["build_for_version"] is not TaskTemplateBuilder.build_for_version
+            if "build_for_owner" in methods or "build" in methods:
+                return False
+        return False
 
     @abstractmethod
     async def build(self, scenario: str, task_name: str, task_directory: Path) -> None: ...

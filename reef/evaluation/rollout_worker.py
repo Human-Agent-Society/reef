@@ -400,7 +400,10 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
         if rollout.task_digest is None:
             return self.artifacts.candidate_task_version(rollout.scenario, rollout.task_name)
-        return self.task_directory(rollout), rollout.task_digest
+        task_directory = self.artifacts.candidate_task_for_digest(
+            rollout.scenario, rollout.task_name, rollout.task_digest
+        )
+        return task_directory, rollout.task_digest
 
     def task_owner(self, rollout: EvaluationRollout) -> str | None:
         return self.artifacts.task_owner(rollout.scenario)

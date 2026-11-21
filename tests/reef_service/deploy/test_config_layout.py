@@ -443,9 +443,10 @@ def test_task_file_pinning_requires_a_boolean_in_service_settings() -> None:
         dataclasses.replace(default, evaluation_pin_task_files="false")
 
 
-def test_pinning_refuses_a_legacy_template_builder_without_changing_unpinned_settings() -> None:
-    legacy = "tests.evaluation.test_rollout_worker:OwnerBuilder"
-    builtin = "reef.evaluation.task_templates:DockerfileTemplateBuilder"
+@pytest.mark.parametrize("builder_name", ["OwnerBuilder", "OwnerDockerfileBuilder", "CustomDockerfileBuilder"])
+def test_pinning_refuses_a_legacy_template_builder_without_changing_unpinned_settings(builder_name: str) -> None:
+    legacy = f"tests.evaluation.test_rollout_worker:{builder_name}"
+    builtin = "tests.evaluation.test_rollout_worker:InheritedDockerfileBuilder"
     default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
     assert dataclasses.replace(default, evaluation_task_template_builder=legacy).evaluation_pin_task_files is False
     assert dataclasses.replace(
