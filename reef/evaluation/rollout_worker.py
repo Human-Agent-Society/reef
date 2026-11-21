@@ -400,6 +400,13 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
         if rollout.task_digest is None:
             return self.artifacts.candidate_task_version(rollout.scenario, rollout.task_name)
+        for base in type(self).__mro__:
+            if "task_version" in base.__dict__:
+                break
+            if "task_directory" in base.__dict__:
+                raise ItemFailedError(
+                    "a custom task directory resolver must override task_version for pinned task files"
+                )
         task_directory = self.artifacts.candidate_task_for_digest(
             rollout.scenario, rollout.task_name, rollout.task_digest
         )

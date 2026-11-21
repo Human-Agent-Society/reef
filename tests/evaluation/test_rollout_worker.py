@@ -732,10 +732,18 @@ def test_a_pinned_rollout_refuses_name_only_or_mismatched_resolution(tmp_path, r
 
 
 @pytest.mark.unit
-def test_a_pinned_local_endpoint_uses_the_digest_resolver_instead_of_an_inherited_name_hook(tmp_path):
+def test_a_local_endpoint_with_a_custom_task_directory_must_declare_its_pinned_lookup(tmp_path):
     current, pinned = tmp_path / "current", tmp_path / "pinned"
 
     class NameBasedEndpoints(LocalCandidateEndpoints):
+        def task_directory(self, rollout):
+            return current
+
+    class VersionEndpoints(NameBasedEndpoints):
+        def task_version(self, rollout):
+            return super().task_version(rollout)
+
+    class NewNameBasedEndpoints(VersionEndpoints):
         def task_directory(self, rollout):
             return current
 
@@ -745,7 +753,12 @@ def test_a_pinned_local_endpoint_uses_the_digest_resolver_instead_of_an_inherite
     value = replace(rollout(), task_digest=digest)
     endpoints = NameBasedEndpoints(artifacts)
     assert endpoints.task_directory(rollout()) == current
-    assert endpoints.task_version(value) == (pinned, digest)
+    for custom_endpoint in (endpoints, NewNameBasedEndpoints(artifacts)):
+        with pytest.raises(ItemFailedError, match="must override task_version"):
+            custom_endpoint.task_version(value)
+    artifacts.candidate_task_for_digest.assert_not_called()
+
+    assert VersionEndpoints(artifacts).task_version(value) == (pinned, digest)
     artifacts.candidate_task_for_digest.assert_called_once_with(value.scenario, value.task_name, digest)
 
 
