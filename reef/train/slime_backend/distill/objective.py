@@ -394,8 +394,8 @@ def distill_loss(
         raise NotImplementedError("the distill loss supports context parallel = 1 only")
     settings = settings_from_args(args)
     centering_settings = centering_settings_from_args(args)
-    rollout_log_probs = batch.get("rollout_log_probs")
-    if centering_settings is not None and settings.importance_sampling_cap > 0 and not rollout_log_probs:
+    sampler_log_probs = batch.get("rollout_log_probs")
+    if centering_settings is not None and settings.importance_sampling_cap > 0 and not sampler_log_probs:
         raise ValueError("Score-centered distillation with importance sampling requires sampler log-probs.")
     total_lengths = batch["total_lengths"]
     response_lengths = batch["response_lengths"]
@@ -441,7 +441,9 @@ def distill_loss(
                 response_lengths=response_lengths,
                 with_entropy=False,
             )
-            if not rollout_log_probs:
+            if sampler_log_probs:
+                rollout_log_probs = sampler_log_probs
+            else:
                 rollout_log_probs = batch.get("log_probs") or [values.detach() for values in outputs["log_probs"]]
             if settings.importance_sampling_level == "token":
                 # This is the correction's own f(p / q) = min(p / q, cap); the clamp on the log ratio only

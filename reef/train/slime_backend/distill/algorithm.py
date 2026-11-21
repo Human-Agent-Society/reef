@@ -252,6 +252,21 @@ class DistillAlgorithm(SlimeAlgorithm):
     same positions, from the training forward over the plain request, against
     it. The family's settings travel on ``args`` under ``distill_*`` names,
     whatever the recipe's flag prefix, so the hooks read one contract.
+
+    ``teacher`` is a TeacherEngine that scores samples in the driver, or
+    None when the actor scores them. The driver binds the engine from the
+    job's teacher settings.
+
+    ``validate_specific_args(args, source)`` checks the parsed Slime options.
+    ``source`` names the caller in validation errors. The ``distill_*`` options
+    must define valid DistillAlgorithmSettings. A rollout has one optimizer
+    step. A count of None or zero selects that default. Per-token loss
+    requires a zero response skip count. Student-selected top-K requires
+    zero attention and hidden dropout. An engine teacher requires a rollout
+    temperature of 1 and fast tokenizers with matching vocabularies and
+    decoders. Validation returns None for valid options. It raises
+    RuntimeError for unsupported step, masking, or dropout combinations.
+    It raises ValueError for invalid settings, temperature, or tokenizers.
     """
 
     loss_type = "custom_loss"
