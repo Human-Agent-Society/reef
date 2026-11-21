@@ -312,6 +312,14 @@ def create_app(
     )
     app = service_application(accepted_tokens, evaluation_tokens=evaluation_tokens)
     app[REQUEST_SERVICE_KEY] = request_service
+    if close_dispatcher:
+
+        async def stop_taking_work(app: web.Application) -> None:
+            # The first shutdown hook, before any later hook waits, such as the finalization of managed requests:
+            # the workers take no new work from now on, and a stop deadline starts here.
+            app[REQUEST_SERVICE_KEY].dispatcher.workers.begin_stop()
+
+        app.on_shutdown.append(stop_taking_work)
     if routing is not None:
         app.middlewares.insert(1, routed_routes_only)
     if lifecycle is not None and writes is not None:

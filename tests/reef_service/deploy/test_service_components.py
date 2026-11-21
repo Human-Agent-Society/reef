@@ -615,6 +615,56 @@ def test_the_evaluation_service_runs_on_its_own_and_an_unknown_service_is_refuse
 
 
 @pytest.mark.unit
+def test_the_evaluation_service_starts_the_finish_timeout_of_its_rollouts_when_it_shuts_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[Dispatcher] = []
+
+    def build_dispatcher(*args, **kwargs) -> Dispatcher:
+        dispatcher = assembly.build_dispatcher(*args, **kwargs)
+        built.append(dispatcher)
+        return dispatcher
+
+    monkeypatch.setattr(component_apps, "build_dispatcher", build_dispatcher)
+    config = replace(settings(tmp_path), evaluation_on_stop="finish", evaluation_finish_timeout_s=600.0)
+    app = build_component_app("evaluation", config)
+    [dispatcher] = built
+    [worker] = [worker for worker in dispatcher.workers.workers if isinstance(worker, EvaluationRolloutWorker)]
+    assert (worker.on_stop, worker.finish_timeout_s) == ("finish", 600.0)
+    at_shutdown: list[bool] = []
+
+    async def observe(app) -> None:
+        # The service's own shutdown hook ran first: the worker takes no new rollout, and its timer runs.
+        timer = worker.cancel_timer
+        at_shutdown.append(worker.stopped.is_set() and timer is not None and timer.is_alive())
+
+    app.on_shutdown.append(observe)
+
+    async def run() -> None:
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.get("/healthz")).status == 200
+
+    asyncio.run(run())
+    assert at_shutdown == [True]
+    # The cleanup stopped the worker and its timer, though the timeout had not ended.
+    assert worker.cancel_timer is None and not worker.rollouts_cancelled.is_set()
+    assert dispatcher.workers.workers == []
+
+
+@pytest.mark.unit
+def test_the_one_process_app_begins_to_stop_its_workers_in_its_first_shutdown_hook(tmp_path: Path) -> None:
+    # A later shutdown hook can wait, such as the finalization of managed requests: the workers' stop starts first.
+    app = assembly.build_app(settings(tmp_path), environ={})
+    dispatcher = get_dispatcher(app)
+    [worker] = [worker for worker in dispatcher.workers.workers if isinstance(worker, EvaluationRolloutWorker)]
+    try:
+        asyncio.run(app.on_shutdown[0](app))
+        assert worker.stopped.is_set()
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_the_harness_service_needs_a_recipe_that_evolves_a_harness(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="evolves no harness, so it has no harness service"):
         build_component_app("harness", settings(tmp_path))

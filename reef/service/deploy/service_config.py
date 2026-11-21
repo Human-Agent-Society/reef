@@ -18,7 +18,7 @@ from typing import Any
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
-from reef.evaluation.rollout_worker import ON_STOP_CHOICES
+from reef.evaluation.rollout_worker import ON_STOP_CHOICES, check_finish_timeout
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
@@ -290,6 +290,16 @@ class ServiceSettings:
         public_path=("evaluation", "on_stop"),
         help="requeue or finish: what a stopping evaluation process does with the rollouts that it runs.",
     )
+    #: With ``evaluation_on_stop`` ``finish``: the seconds from the start of a stop to the cancellation of the rollouts
+    #: that still run, which go back to the queue. None waits for every rollout.
+    evaluation_finish_timeout_s: float | None = config_option(
+        None,
+        public_path=("evaluation", "finish_timeout_s"),
+        help=(
+            "With evaluation.on_stop: finish, the seconds that a stopping evaluation process lets its running "
+            "rollouts finish; it then gives the rest back to the queue. Default: no limit."
+        ),
+    )
     #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
     evaluation_trial_observer: str | Mapping[str, Any] | None = config_option(
         None,
@@ -545,6 +555,7 @@ class ServiceSettings:
             raise ValueError("evaluation.max_sandboxes must be a positive integer")
         if self.evaluation_on_stop not in ON_STOP_CHOICES:
             raise ValueError(f"evaluation.on_stop must be one of {', '.join(ON_STOP_CHOICES)}")
+        check_finish_timeout(self.evaluation_on_stop, self.evaluation_finish_timeout_s, prefix="evaluation.")
         if self.evaluation_trial_observer is not None:
             TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
         if self.evaluation_task_template_builder is not None:
