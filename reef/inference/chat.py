@@ -150,6 +150,31 @@ def _new_call_id() -> str:
     return f"call_{uuid.uuid4().hex[:24]}"
 
 
+@dataclass(frozen=True)
+class StreamedToolCall:
+    """One tool argument delta supplied by a native parser adapter to the chat relay.
+
+    ``index`` is the parser's integer call position. ``name`` is a nonempty tool name or None when omitted.
+    ``arguments`` is the argument fragment, which may be empty. The relay checks the position and name.
+    """
+
+    index: int
+    name: str | None
+    arguments: str
+
+
+class StreamingToolParser(ABC):
+    """Read one tool parser's incremental text and emit typed tool call deltas.
+
+    ``parse_stream_chunk`` returns the visible text and tool call deltas in the order read from that chunk.
+    An adapter that has only a buffered parser returns no visible text or tool deltas.
+    """
+
+    @abstractmethod
+    def parse_stream_chunk(self, text: str) -> tuple[str, list[StreamedToolCall]]:
+        """Parse the next text fragment of this reply."""
+
+
 class _StreamedToolCalls:
     """Keep the tool calls that ``ChatStreamRelay`` announced in one stream.
 
@@ -366,7 +391,7 @@ class _AnthropicEventWriter(_StreamWriter):
 class ChatStreamRelay:
     """Translate one model reply into protocol frames and check the completed parse.
 
-    The writer encodes one protocol. The parser is absent or a provider tool parser. The tool calls hold the
+    The writer encodes one protocol. The parser is absent or a ``StreamingToolParser``. The tool calls hold the
     indices, names, IDs, and argument fragments already sent. Text and reasoning fragments are nonempty strings
     in send order. Pending reasoning whitespace holds only whitespace after the last emitted reasoning character.
 
@@ -378,7 +403,7 @@ class ChatStreamRelay:
     or the protocol cannot append to an earlier block. The caller sends a terminal event only on success.
     """
 
-    def __init__(self, writer: _StreamWriter, stream_tool_parser: Any) -> None:
+    def __init__(self, writer: _StreamWriter, stream_tool_parser: StreamingToolParser | None) -> None:
         self.writer = writer
         self._parser = stream_tool_parser
         self._tools = _StreamedToolCalls()
@@ -404,31 +429,22 @@ class ChatStreamRelay:
             if len(trimmed) < len(value):
                 self.reasoning_whitespace.append(value[len(trimmed) :])
             return frames
-        normal_text, calls = value, []
-        if self._parser is not None:
-            parse = getattr(self._parser, "parse_stream_chunk", None)
-            if parse is None:
-                # Third-party test/fallback parsers without an incremental
-                # API cannot safely distinguish a partial tool marker from
-                # visible text. Reconciliation emits the final parsed tool
-                # call at stream end.
-                normal_text = ""
-            else:
-                normal_text, calls = parse(value)
+        calls: list[StreamedToolCall]
+        if self._parser is None:
+            normal_text, calls = value, []
+        else:
+            normal_text, calls = self._parser.parse_stream_chunk(value)
         output: list[bytes] = []
         if normal_text:
             self.text_fragments.append(normal_text)
             output.extend(self.writer.text(normal_text))
-        for fallback_index, call in enumerate(calls):
-            index = getattr(call, "tool_index", fallback_index)
-            index = fallback_index if index is None else int(index)
-            name = getattr(call, "name", None)
-            announced = self._tools.announce(index, str(name) if name else None)
-            arguments = _argument_text(getattr(call, "parameters", ""))
-            self._tools.add_arguments(index, arguments)
+        for call in calls:
+            index = call.index
+            announced = self._tools.announce(index, call.name)
+            self._tools.add_arguments(index, call.arguments)
             output.extend(
                 self.writer.tool_call(
-                    index, self._tools.ids[index], self._tools.names[index], arguments, announced=announced
+                    index, self._tools.ids[index], self._tools.names[index], call.arguments, announced=announced
                 )
             )
         return output
@@ -461,7 +477,7 @@ class ChatStreamRelay:
                 if self._tools.names[index] != name:
                     raise ValueError("the streamed tool-call name differs from the completed response")
                 call["id"] = self._tools.ids[index]
-            arguments = _argument_text(function["arguments"])
+            arguments = argument_text(function["arguments"])
             emitted = "".join(self._tools.arguments.get(index, ()))
             missing = remaining_tool_arguments(emitted, arguments)
             if missing or not announced:
@@ -469,7 +485,7 @@ class ChatStreamRelay:
         return output
 
 
-def _argument_text(arguments: Any) -> str:
+def argument_text(arguments: Any) -> str:
     return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
 
 

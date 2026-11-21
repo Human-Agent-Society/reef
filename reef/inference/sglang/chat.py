@@ -17,7 +17,10 @@ from reef.inference.chat import (
     ChatCall,
     ChatStreamRelay,
     NativeGenerateClient,
+    StreamedToolCall,
+    StreamingToolParser,
     TokenNativeChatHandler,
+    argument_text,
     finite_log_prob,
     normalize_finish_reason,
     positive_max_tokens,
@@ -155,6 +158,36 @@ def normalize_native_response(response: dict[str, Any]) -> dict[str, Any]:
         normalized_meta["runtime_load_id"] = version
     response["meta_info"] = normalized_meta
     return response
+
+
+class SGLangStreamingToolParser(StreamingToolParser):
+    """Adapt one SGLang tool parser to the chat relay.
+
+    ``parser`` is the native parser for one request. Its incremental method may be absent on buffered parsers.
+    Each native delta supplies argument text and may omit its name or index. Use its position in the returned
+    list when the index is absent.
+    """
+
+    def __init__(self, parser: Any) -> None:
+        self.parser = parser
+
+    def parse_stream_chunk(self, text: str) -> tuple[str, list[StreamedToolCall]]:
+        parse = getattr(self.parser, "parse_stream_chunk", None)
+        if parse is None:
+            return "", []
+        visible, deltas = parse(text)
+        calls = []
+        for position, delta in enumerate(deltas):
+            index = getattr(delta, "tool_index", None)
+            name = getattr(delta, "name", None)
+            calls.append(
+                StreamedToolCall(
+                    position if index is None else int(index),
+                    str(name) if name else None,
+                    argument_text(getattr(delta, "parameters", "")),
+                )
+            )
+        return visible, calls
 
 
 class NativeStreamCapture:
@@ -295,7 +328,8 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         native_payload = self.client.payload(call.request, call.prompt_ids, call.sampling_params, stream=True)
         upstream = await HttpInferenceHandler.inference_stream(self, artifact, SGLANG_GENERATE_PATH, native_payload)
         chat_id, message_id, created = stream_ids()
-        relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), call.tool_parser)
+        parser = SGLangStreamingToolParser(call.tool_parser) if call.tool_parser is not None else None
+        relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), parser)
 
         async def chunks() -> AsyncIterator[bytes]:
             # ``stream`` is bound below, before the first chunk is pulled; the
