@@ -33,13 +33,13 @@ from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secr
 from reef.inference.residency import ADAPTER_NAME_PREFIX
 
 # The inference service binds its connector only while it handles a request.
-_inference_connector = ContextVar[tuple[asyncio.AbstractEventLoop, TCPConnector] | None](
+inference_connector = ContextVar[tuple[asyncio.AbstractEventLoop, TCPConnector] | None](
     "inference_connector", default=None
 )
 
 
-def _provider_session(timeout_s: float, *, auto_decompress: bool = True) -> aiohttp.ClientSession:
-    scoped = _inference_connector.get()
+def provider_session(timeout_s: float, *, auto_decompress: bool = True) -> aiohttp.ClientSession:
+    scoped = inference_connector.get()
     connector = (
         scoped[1] if scoped is not None and scoped[0] is asyncio.get_running_loop() and not scoped[1].closed else None
     )
@@ -146,15 +146,18 @@ def provider_request_headers(api_key: str) -> RequestHeadersFactory:
 class HttpInferenceHandler(InferenceHandler):
     """POST native inference requests to an HTTP provider.
 
-    RequestHeadersFactory implementations provide artifact identity, provider
-    authentication, or deployment-specific headers.
+    The handler holds a non-empty upstream URL string after removing trailing slashes, a
+    ``RequestHeadersFactory``, a positive timeout in seconds, and an error label string. The constructor
+    uses ``ArtifactRequestHeaders`` when no factory is supplied. The factory supplies artifact identity,
+    provider authentication, or deployment-specific headers. The error label identifies the upstream in
+    errors reported to the caller.
 
     ``inference`` returns the provider's JSON object. A provider status of 400 or more raises
     ``UpstreamStatusError`` with that status; a successful status whose body is not one JSON object raises
     it with status 502, since the provider failed and not the caller. ``inference_stream`` owns its
     provider session until it returns: on any failure or cancellation before then it closes the session
-    and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close`` releases it. In the inference service, sessions borrow the
-    service connector.
+    and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close`` releases it.
+    In the inference service, sessions borrow the service connector.
     """
 
     def __init__(
@@ -168,7 +171,7 @@ class HttpInferenceHandler(InferenceHandler):
         upstream = upstream_url.rstrip("/")
         if not upstream:
             raise ValueError("upstream_url must be non-empty")
-        if timeout_s <= 0:
+        if not timeout_s > 0:
             raise ValueError("timeout_s must be positive")
         self._upstream_url = upstream
         self._request_headers = request_headers if request_headers is not None else ArtifactRequestHeaders()
@@ -211,7 +214,7 @@ class HttpInferenceHandler(InferenceHandler):
         from aiohttp import ContentTypeError
 
         async with (
-            _provider_session(self._timeout_s) as session,
+            provider_session(self._timeout_s) as session,
             session.post(**self.post_arguments(artifact, path, payload)) as response,
         ):
             if response.status >= 400:
@@ -235,7 +238,7 @@ class HttpInferenceHandler(InferenceHandler):
     ) -> InferenceStream:
         """Open the provider stream. Its owner closes it after consuming or cancelling it."""
         # The session outlives this call: the stream owns it until closed.
-        session = _provider_session(self._timeout_s, auto_decompress=False)
+        session = provider_session(self._timeout_s, auto_decompress=False)
         try:
             response = await session.post(**self.post_arguments(artifact, path, payload))
         except BaseException:
