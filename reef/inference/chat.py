@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
-from reef.core.values import JsonValue
+from reef.core.values import JsonValue, require_integer
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.interfaces import InferenceArtifact, InferenceStream, parse_full_weight_name
@@ -313,6 +313,7 @@ class _AnthropicEventWriter(_StreamWriter):
     """
 
     def __init__(self, message_id: str, *, model: str, input_tokens: int) -> None:
+        require_integer(input_tokens, "the input token count")
         self._message_id = message_id
         self._model = model
         self._input_tokens = input_tokens
