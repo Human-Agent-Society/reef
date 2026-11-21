@@ -322,12 +322,12 @@ class SQLEvaluationStore(EvaluationStore):
         return None if row is None else stored_evaluation(row)
 
     def newest(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
-        return self._newest(limit, include_task_digests=True)
+        return self.select_newest(limit, include_task_digests=True)
 
     def newest_for_list(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
-        return self._newest(limit, include_task_digests=False)
+        return self.select_newest(limit, include_task_digests=False)
 
-    def _newest(self, limit: int, *, include_task_digests: bool) -> tuple[StoredEvaluation, ...]:
+    def select_newest(self, limit: int, *, include_task_digests: bool) -> tuple[StoredEvaluation, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         table = self.table.table

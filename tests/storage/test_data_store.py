@@ -464,6 +464,9 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
     assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
     assert store.query("acme", benchmark="unknown") == ()
     assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ()) == {}
+    with pytest.raises(ValueError, match="owner"):
+        store.benchmark_item_ids("", ())
     assert store.benchmark_item_ids("acme", ["full", "lite", "unknown"]) == {
         "full": {"add", "sort"},
         "lite": {"add"},

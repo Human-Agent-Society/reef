@@ -144,6 +144,11 @@ def test_the_evaluation_list_can_omit_digests_without_changing_the_stored_reques
         assert legacy.newest_for_list(limit=1) == (created,)
 
 
+def test_an_evaluation_start_fingerprint_must_be_a_string():
+    with pytest.raises(ValueError, match="fingerprint"):
+        EvaluationStart("start-1", ("a",) * 64, "{}")  # type: ignore[arg-type]
+
+
 def test_the_start_reservation_and_work_share_the_evaluation_transaction(storage):
     with closing(storage.open("math")) as session, closing(storage.open("other")) as other:
         evaluations = session.evaluations

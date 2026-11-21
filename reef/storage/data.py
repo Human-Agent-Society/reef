@@ -879,8 +879,10 @@ class DataStore(Plugin, JobDataReader, ABC):
     def benchmark_item_ids(self, owner: str, benchmarks: Sequence[str]) -> dict[str, set[str]]:
         """Map each requested benchmark to the IDs of its current task items.
 
-        A benchmark without any task items maps to an empty set.
+        A benchmark without any task items maps to an empty set. The owner must satisfy ``check_owner``,
+        including when no benchmarks were requested.
         """
+        check_owner(owner)
         found: dict[str, set[str]] = {benchmark: set() for benchmark in benchmarks}
         if not found:
             return found

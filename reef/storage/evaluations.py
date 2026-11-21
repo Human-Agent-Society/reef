@@ -50,7 +50,11 @@ class EvaluationStart:
 
     def __post_init__(self) -> None:
         check_evaluation_start_id(self.start_id)
-        if len(self.fingerprint) != 64 or any(digit not in "0123456789abcdef" for digit in self.fingerprint):
+        if (
+            not isinstance(self.fingerprint, str)
+            or len(self.fingerprint) != 64
+            or any(digit not in "0123456789abcdef" for digit in self.fingerprint)
+        ):
             raise ValueError("the request fingerprint must be a SHA-256 hex string")
         if not isinstance(self.first_work_json, str) or not self.first_work_json:
             raise ValueError("the saved admission data must be a non-empty string")

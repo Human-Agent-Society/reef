@@ -573,7 +573,9 @@ class EvaluationResults:
         evaluation: their IDs start with one prefix."""
         prefix = rollout_item_id(evaluation_id, 0, 0).rsplit(":", 2)[0] + ":"
         found = self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND, id_prefix=prefix)
-        return tuple(sorted(found, key=lambda item: item.id))
+        return tuple(
+            sorted(found, key=lambda item: (cast(int, item.payload["task_index"]), cast(int, item.payload["repeat"])))
+        )
 
     def templates(self, evaluation_id: str, scenario: str) -> dict[int, WorkItem]:
         """The template items of one evaluation (``template_work``), by task index. Only an evaluation on e2b has

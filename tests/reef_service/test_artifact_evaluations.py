@@ -78,6 +78,7 @@ from reef.service.artifact_evaluations import (
     NewArtifacts,
     StoredCalls,
     attempt_trajectories,
+    rollout_work,
 )
 from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
@@ -662,6 +663,65 @@ def test_a_rollout_page_materializes_only_its_range_of_a_large_waiting_evaluatio
             assert (await client.get(f"{route}?limit=501", headers=AUTH)).status == 400
             filtered = await (await client.get(f"{route}?limit=1&benchmark=full", headers=AUTH)).json()
             assert (filtered["total"], filtered["rollouts"], filtered["task_means"]) == (0, [], {})
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_filtered_rollout_pages_keep_numeric_repeat_order(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            harness = {"name": "terminus-2"}
+            request = ArtifactEvaluationRequest(
+                artifact_id,
+                "weights",
+                harness=harness,
+                task_names=("add",),
+                rollouts_per_task=100_001,
+                max_concurrent_rollouts=2,
+            )
+            evaluation_id = "large"
+            # Keep only the two repeats at the width boundary in the queue.
+            for repeat in (100_000, 99_999):
+                rollout = EvaluationRollout(
+                    "s",
+                    evaluation_id,
+                    artifact_id,
+                    "weights",
+                    0,
+                    "add",
+                    repeat,
+                    PolicyModel("m"),
+                    harness,
+                    "docker",
+                    {},
+                )
+                queue.append(rollout_work(rollout))
+            taken = [queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]) for _ in range(2)]
+            with dispatcher.locked_scenario("s") as current:
+                current.store.evaluations.create(
+                    evaluation_id=evaluation_id, owner="test", request=request, created_at=time.time()
+                )
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}/rollouts"
+            unfiltered = await client.get(f"{route}?offset=99999&limit=2&calls=false", headers=AUTH)
+            assert unfiltered.status == 200, await unfiltered.text()
+            assert [row["repeat"] for row in (await unfiltered.json())["rollouts"]] == [99_999, 100_000]
+            for state in ("running", "failed"):
+                for offset, repeat in enumerate((99_999, 100_000)):
+                    response = await client.get(
+                        f"{route}?offset={offset}&limit=1&state={state}&calls=false", headers=AUTH
+                    )
+                    assert response.status == 200, await response.text()
+                    page = await response.json()
+                    assert (page["total"], [row["repeat"] for row in page["rollouts"]]) == (2, [repeat])
+                if state == "running":
+                    for item in taken:
+                        assert item is not None
+                        queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox stopped", retryable=False)
 
     asyncio.run(run())
 
