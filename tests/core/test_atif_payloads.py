@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from harbor.models.trajectories import Trajectory
 
+from reef.core import trajectories
 from reef.core.atif_payloads import (
     atif_call,
     canonical_json,
@@ -16,6 +17,7 @@ from reef.core.atif_payloads import (
 )
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import has_image_content, make_trajectory
+from reef.core.trajectory_index import atif_form
 
 CHAT = {
     "model": "m",
@@ -369,3 +371,69 @@ def test_has_image_content_finds_an_image(payload) -> None:
 )
 def test_has_image_content_ignores_text_and_tools(payload) -> None:
     assert not has_image_content(payload)
+
+
+@pytest.mark.parametrize(
+    ("before_args", "after_args", "shared"),
+    [
+        ('{"count":2,"flag":true}', '{"count":2,"flag":true}', True),
+        ('{"count":2,"flag":true}', '{"flag":true, "count":2}', True),
+        ('{"flag":true}', {"flag": True}, True),
+        ({"flag": True, "args": ["a", 1]}, {"args": ["a", 1], "flag": True}, True),
+        ({"flag": True}, {"flag": 1}, False),
+        ({"count": 2}, {"count": 2.0}, False),
+        ({"zero": -0.0}, {"zero": 0.0}, False),
+    ],
+)
+def test_trajectory_history_matches_the_canonical_provider_comparison(monkeypatch, before_args, after_args, shared):
+    def request(arguments, *, alternate=False):
+        function = {"name": "inspect", "arguments": arguments}
+        if alternate:
+            function = dict(reversed(list(function.items())))
+        return [
+            {"role": "user", "content": "Read the file."},
+            {
+                "role": "assistant",
+                "reasoning_content": "Check the contents first.",
+                "tool_calls": [{"type": "function", "id": "read-1", "function": function}],
+                "content": None,
+            },
+            {"role": "tool", "tool_call_id": "read-1", "content": "result" * 2048},
+        ]
+
+    response = {"role": "assistant", "content": "The file is ready."}
+    records = [
+        AgentRecord(
+            "first",
+            "scenario",
+            RequestType.INFERENCE,
+            {"messages": request(before_args), "response": {"choices": [{"message": response}]}},
+            0.0,
+        ),
+        AgentRecord(
+            "second",
+            "scenario",
+            RequestType.INFERENCE,
+            {
+                "messages": [
+                    *request(after_args, alternate=True),
+                    {"content": [{"type": "text", "text": response["content"]}], "role": "assistant"},
+                    {"role": "user", "content": "Summarize it."},
+                ],
+                "response": {"choices": [{"message": {"role": "assistant", "content": "Done."}}]},
+            },
+            1.0,
+        ),
+    ]
+    actual = make_trajectory(records)
+
+    def canonical_match(previous, current, provider):
+        return canonical_json(atif_form(previous, provider)) == canonical_json(atif_form(current, provider))
+
+    monkeypatch.setattr(trajectories, "_same_history_message", canonical_match)
+    reference = make_trajectory(records)
+    assert canonical_json(actual.trajectory) == canonical_json(reference.trajectory)
+    assert actual.source_agent_record_ids == reference.source_agent_record_ids == ("first", "second")
+    repeated_calls = [step for step in actual.trajectory["steps"] if step.get("tool_calls")]
+    assert len(repeated_calls) == (1 if shared else 2)
+    assert all(step["is_copied_context"] for step in repeated_calls)
