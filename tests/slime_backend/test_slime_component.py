@@ -365,7 +365,7 @@ def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpo
 
 @pytest.mark.unit
 def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path)
+    stack = stacks(tmp_path, rank_metrics=[{"_reef_optimizer_updates": 1}])
     stack.component.submit(
         TrainingJob(
             "job-0",
@@ -681,7 +681,10 @@ def test_a_symlinked_checkpoint_fails_the_job(tmp_path, stacks, monkeypatch) -> 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("progress", ["before_save", "after_save", "recorded"])
+@pytest.mark.parametrize(
+    "progress",
+    ["before_save", "after_save", "after_start", "recorded", "foreign_owner", "wrong_rollout", "unsafe_start"],
+)
 def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_saved_rollout(
     tmp_path, stacks, progress
 ) -> None:
@@ -693,20 +696,28 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
             "scenario": "s",
             "start": str(tmp_path / "reef-starts" / "base"),
             "data": submitted_data(data),
-            "parameters": parameters("sft"),
+            "parameters": parameters("sft", WARMUP),
         },
     )
     # The job started training rollout 0 before the restart.
     write_json(jobs / ROLLOUT_FILE, {"rollout_id": 0, "step": 2})
     start_rollout_id = 0
-    if progress in ("after_save", "recorded"):
+    if progress != "before_save":
         # Megatron saved the rollout, which the restarted workers loaded again.
         (tmp_path / "hf" / "0").mkdir(parents=True)
         (tmp_path / "megatron" / "iter_0000000").mkdir(parents=True)
         start_rollout_id = 1
     saved_start = tmp_path / "reef-starts" / "rollout_0"
+    storage = checkpoint_storage(tmp_path)
+    if progress not in ("before_save", "after_save"):
+        storage.complete("another-job" if progress == "foreign_owner" else "job-0", 0, reward=1.0)
+        target = tmp_path / "unrelated" if progress == "unsafe_start" else saved_start
+        rollout_id = 1 if progress == "wrong_rollout" else 0
+        SlimeStart(rollout_id, "sft", {"steps": 1}, LearningRateScheduleState(WARMUP, 1)).write(target)
+        if progress == "unsafe_start":
+            saved_start.parent.mkdir()
+            saved_start.symlink_to(target, target_is_directory=True)
     if progress == "recorded":
-        SlimeStart(0, "sft", {"steps": 1}, None).write(saved_start)
         write_json(
             jobs / "checkpoints.json",
             {
@@ -722,16 +733,25 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
             },
         )
 
-    stack = stacks(tmp_path, start_rollout_id=start_rollout_id)
+    stack = stacks(
+        tmp_path, storage=storage, start_rollout_id=start_rollout_id, rank_metrics=[{"_reef_optimizer_updates": 1}]
+    )
     status = finished(stack.component, "job-0")
 
+    errors = {"foreign_owner": "wrong owner", "wrong_rollout": "wrong rollout", "unsafe_start": "unsafe"}
+    if progress in errors:
+        assert status.state == "failed" and errors[progress] in status.error
+        assert status.checkpoints == ()
+        assert stack.group.train_calls == []
+        return
     assert status.state == "finished"
     (checkpoint,) = status.checkpoints
     if progress == "before_save":
         # Nothing was saved: the job trains its rollout again.
         assert stack.group.train_calls == [(0, ["packed"])]
+        assert stack.worker_switch(0)["learning_rate_schedule_state"]["completed_steps"] == 0
         assert checkpoint.path == str(tmp_path / "reef-starts" / "rollout_0")
-    elif progress == "after_save":
+    elif progress in ("after_save", "after_start"):
         assert stack.group.train_calls == []
         assert (status.metrics["rollout_id"], status.metrics["resumed"]) == (0, 1)
         assert checkpoint.path == str(tmp_path / "reef-starts" / "rollout_0")
@@ -742,6 +762,10 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
     else:
         assert stack.group.train_calls == []
         assert checkpoint.path == str(saved_start)
+
+    # An interrupted save has only its legacy estimate. A normal checkpoint records the actual update count.
+    expected_steps = 2 if progress == "after_save" else 1
+    assert SlimeStart.read(Path(checkpoint.path)).schedule_state == LearningRateScheduleState(WARMUP, expected_steps)
 
 
 @pytest.mark.unit
@@ -801,29 +825,60 @@ def test_a_family_the_workers_cannot_train_is_refused(tmp_path, stacks) -> None:
 
 
 @pytest.mark.unit
-def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path)
+@pytest.mark.parametrize("first_updates", [0, 1, 2])
+def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tmp_path, stacks, first_updates) -> None:
+    stack = stacks(tmp_path, rank_metrics=[{"_reef_optimizer_updates": first_updates}])
     first = stack.run("sft", step=0, schedule=WARMUP)
     worker_switch = stack.worker_switch(0)
     assert worker_switch is not None
     assert worker_switch["learning_rate_schedule_state"] == LearningRateScheduleState(WARMUP, 0).to_dict()
-    # Two samples, one optimizer step each: the job's last step ran at the rate of step 1.
-    assert first.checkpoints[0].metrics["learning_rate"] == pytest.approx(2.5e-5)
-    assert first.checkpoints[0].metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": 2}
+    (checkpoint,) = first.checkpoints
+    assert SlimeStart.read(Path(checkpoint.path)).schedule_state == LearningRateScheduleState(WARMUP, first_updates)
+    if first_updates:
+        assert checkpoint.metrics["learning_rate"] == pytest.approx(2.5e-5 * (first_updates - 1))
+        assert checkpoint.metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": first_updates}
+    else:
+        assert "learning_rate" not in checkpoint.metrics
+    stack.group.rank_metrics = [{"_reef_optimizer_updates": 2}]
     second = stack.run("sft", step=1, schedule=WARMUP)
-    assert stack.worker_switch(1)["learning_rate_schedule_state"]["completed_steps"] == 2
-    # The progress is saved with the rollout's start.
-    assert SlimeStart.read(Path(second.checkpoints[0].path)).schedule_state == LearningRateScheduleState(WARMUP, 4)
+    # With zero updates the workers retain the same schedule state.
+    switch = stack.worker_switch(1)
+    if first_updates:
+        assert switch["learning_rate_schedule_state"]["completed_steps"] == first_updates
+    else:
+        assert switch is None
+    assert SlimeStart.read(Path(second.checkpoints[0].path)).schedule_state == LearningRateScheduleState(
+        WARMUP, first_updates + 2
+    )
     stack.component.close()
 
-    # Workers that loaded the second checkpoint continue the warmup where it stopped.
-    restarted = stacks(tmp_path, start_rollout_id=2)
+    restarted = stacks(tmp_path, start_rollout_id=2, rank_metrics=[{"_reef_optimizer_updates": 2}])
     assert restarted.start == second.checkpoints[0].path
     restarted.run("sft", step=2, schedule=WARMUP)
-    assert restarted.worker_switch(0)["learning_rate_schedule_state"]["completed_steps"] == 4
+    assert restarted.worker_switch(0)["learning_rate_schedule_state"]["completed_steps"] == first_updates + 2
     # A job that selects no schedule keeps the active one.
     restarted.run("sft", step=3)
-    assert restarted.worker_switch(1)["learning_rate_schedule_state"]["completed_steps"] == 6
+    assert restarted.worker_switch(1)["learning_rate_schedule_state"]["completed_steps"] == first_updates + 4
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("rank_counts", "accepted"), [((1, 1), True), ((2, 1), False), ((1, None), False), ((1,), False)]
+)
+def test_recipe_progress_requires_one_matching_update_count_per_actor_rank(tmp_path, stacks, rank_counts, accepted):
+    stack = stacks(tmp_path)
+    stack.group.world_size = 2
+    stack.group.rank_metrics = [{} if count is None else {"_reef_optimizer_updates": count} for count in rank_counts]
+    status = stack.run("sft", step=0, schedule=WARMUP)
+    if accepted:
+        assert status.state == "finished"
+        (checkpoint,) = status.checkpoints
+        assert SlimeStart.read(Path(checkpoint.path)).schedule_state == LearningRateScheduleState(WARMUP, 1)
+        assert "_reef_optimizer_updates" not in checkpoint.metrics
+    else:
+        assert status.state == "failed" and "Actor ranks did not agree" in status.error
+        assert status.checkpoints == ()
+        assert stack.group.saved == []
 
 
 @pytest.mark.unit

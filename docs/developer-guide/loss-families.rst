@@ -297,9 +297,13 @@ A learning-rate schedule sets the rate of each actor optimizer step through
 Slime's before-train-step hook. Reef runs any
 ``--custom-megatron-before-train-step-hook-path`` first. Megatron's scheduler
 keeps its configured curve, so a checkpoint still loads under the startup
-flags. The component records the schedule's progress with each saved
-checkpoint (in the start's ``start.json``), so the next job continues it. A
-job that selects a schedule fails when the run uses ``--decoupled-lr``.
+flags. The recipe schedule advances only after a successful actor optimizer
+update. A rejected attempt uses the same rate on the next attempt. Reef
+records the completed update count in the checkpoint's ``start.json``. If
+Megatron saves the weights and Reef stops before it writes ``start.json``,
+recovery estimates the count from the planned steps. If Reef wrote
+``start.json``, recovery uses the count in that file. A job that selects a
+schedule fails when the run uses ``--decoupled-lr``.
 
 The distillation base
 ---------------------

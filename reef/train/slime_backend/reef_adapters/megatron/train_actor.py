@@ -38,6 +38,8 @@ from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import (
 )
 from reef.train.slime_backend.reef_adapters.megatron.scheduler_resume import restore_scheduler_progress
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
+    APPLIED_LEARNING_RATE,
+    OPTIMIZER_UPDATES_METRIC,
     _loss_family_spec,
     drain_worker_metrics,
     record_worker_metrics,
@@ -63,7 +65,13 @@ def _loss_family_hook(args: Any, arg_name: str) -> Any:
 
 
 class ReefMegatronTrainRayActor(MegatronTrainRayActor):
-    """Add what the training component calls on each worker beyond Slime's own actor."""
+    """Expose Reef training operations on one Slime actor or critic rank.
+
+    ``optimizer_updates`` counts this rollout's successful actor updates under a recipe schedule.
+    It is None before an actor reports a count or after ``pop_metrics`` consumes it.
+    """
+
+    optimizer_updates: int | None = None
 
     _get_current_node_ip_and_free_port = staticmethod(reef_node_ip_and_free_port)
 
@@ -110,10 +118,22 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         return dict(self.train_parallel_config)
 
     def train_actor(self, rollout_id, rollout_data, external_data=None):
+        self.optimizer_updates = None
         pre_train_hook = _loss_family_hook(self.args, "reef_actor_pre_train_hook_path")
         if pre_train_hook is not None:
             pre_train_hook(self, rollout_data)
+        if self.args.reef_learning_rate_schedule_state is not None:
+            APPLIED_LEARNING_RATE.begin_rollout()
+            start_samples = self.opt_param_scheduler.num_steps
+        else:
+            start_samples = None
         result = super().train_actor(rollout_id, rollout_data, external_data=external_data)
+        if start_samples is not None:
+            samples = self.opt_param_scheduler.num_steps
+            if APPLIED_LEARNING_RATE.step_start_samples is None and samples != start_samples:
+                raise RuntimeError("The actor updated its scheduler without running the recipe schedule hook.")
+            APPLIED_LEARNING_RATE.observe(samples)
+            self.optimizer_updates = APPLIED_LEARNING_RATE.completed_updates
         if megatron_lora_enabled(self.args):
             record_worker_metrics(collect_lora_train_metrics(self.model))
         return result
@@ -156,8 +176,14 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             ]
         return rollout_data
 
-    def pop_metrics(self) -> dict[str, float]:
-        return drain_worker_metrics()
+    def pop_metrics(self) -> dict[str, int | float | list[dict[str, float]]]:
+        """Drain worker metrics and the actor's own update count, if available."""
+        metrics = drain_worker_metrics()
+        metrics.pop(OPTIMIZER_UPDATES_METRIC, None)
+        if self.optimizer_updates is not None:
+            metrics[OPTIMIZER_UPDATES_METRIC] = self.optimizer_updates
+            self.optimizer_updates = None
+        return metrics
 
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         # Not ``@timer``: Slime's own ``save_model`` carries that decorator, and

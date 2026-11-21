@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.train.learning_rate import LearningRateScheduleState
@@ -29,6 +29,8 @@ _WORKER_STEP_METRICS: list[dict[str, float]] = []
 #: under the ``train/step`` step key; the flat merge above keeps only the
 #: last, this keeps them all for experiment trackers that plot every step.
 WORKER_STEP_METRICS_KEY = "train_steps"
+#: Reserved for the actor's count in the metrics RPC. The runner removes it before reporting metrics.
+OPTIMIZER_UPDATES_METRIC = "_reef_optimizer_updates"
 
 
 @dataclass
@@ -37,10 +39,27 @@ class AppliedLearningRate:
 
     ``value`` is ``None`` while no recipe-selected learning-rate schedule is
     active. Slime logs its own scheduler's rate (``train/lr-pg_*``), which the
-    schedule overrides.
+    schedule overrides. ``step_start_samples`` is Slime's scheduler sample count
+    at the latest observation, or None before the first attempt.
+    ``completed_updates`` is the nonnegative count of successful updates observed in this rollout.
+    The before-step hook sets the rate. The actor reports the final update count.
     """
 
-    value: float | None = None
+    value: float | None = field(init=False, default=None)
+    step_start_samples: int | None = field(init=False, default=None)
+    completed_updates: int = field(init=False, default=0)
+
+    def begin_rollout(self) -> None:
+        """Clear the applied rate and start with no observed updates."""
+        self.value = None
+        self.step_start_samples = None
+        self.completed_updates = 0
+
+    def observe(self, samples: int) -> None:
+        """Count the pending attempt if Slime advanced its scheduler, then record the counter."""
+        if self.step_start_samples is not None and samples > self.step_start_samples:
+            self.completed_updates += 1
+        self.step_start_samples = samples
 
 
 APPLIED_LEARNING_RATE = AppliedLearningRate()
@@ -414,9 +433,10 @@ def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, op
     ``args.reef_learning_rate_schedule_state`` is the job's schedule state (the
     schedule and the steps it completed before the job), or ``None`` to leave
     Slime's configured scheduler in charge. ``step_id`` counts the job's
-    optimizer steps from 0. Megatron's scheduler keeps its own count, so a
-    checkpoint still loads under the startup options.
+    attempts from 0. Slime advances its native sample counter only after an update.
+    Read that counter to identify successful attempts.
     """
+    samples_before_hook = opt_param_scheduler.num_steps if args.reef_learning_rate_schedule_state is not None else None
     chained_hook_path = args.reef_chained_before_train_step_hook_path
     if chained_hook_path:
         from slime.utils.misc import load_function
@@ -427,7 +447,15 @@ def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, op
         APPLIED_LEARNING_RATE.value = None
         return
     schedule_state = LearningRateScheduleState.from_dict(schedule_state_record)
-    learning_rate = schedule_state.schedule.learning_rate(schedule_state.completed_steps + step_id)
+    if step_id == 0:
+        APPLIED_LEARNING_RATE.begin_rollout()
+    if samples_before_hook is not None:
+        APPLIED_LEARNING_RATE.observe(samples_before_hook)
+    # The chained hook can adjust the scheduler between optimizer attempts.
+    APPLIED_LEARNING_RATE.step_start_samples = opt_param_scheduler.num_steps
+    learning_rate = schedule_state.schedule.learning_rate(
+        schedule_state.completed_steps + APPLIED_LEARNING_RATE.completed_updates
+    )
     for param_group in optimizer.param_groups:
         param_group["lr"] = learning_rate * param_group.get("lr_mult", 1.0)
     APPLIED_LEARNING_RATE.value = learning_rate
@@ -474,6 +502,8 @@ def record_worker_metrics(metrics: Mapping[str, Any]) -> None:
     into the durable training-job marker with ``allow_nan=False``.
     """
     for name, value in metrics.items():
+        if name == OPTIMIZER_UPDATES_METRIC:
+            continue
         if name.endswith("explained_variance_valid") and value == 0:
             _WORKER_METRICS.pop(name.removesuffix("_valid"), None)
         if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
@@ -485,14 +515,18 @@ def record_worker_step(metrics: Mapping[str, Any]) -> None:
     numeric = {
         str(name): float(value)
         for name, value in metrics.items()
-        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+        if name != OPTIMIZER_UPDATES_METRIC
+        and isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
     }
     if numeric:
         _WORKER_STEP_METRICS.append(numeric)
 
 
-def drain_worker_metrics() -> dict[str, Any]:
-    metrics: dict[str, Any] = dict(_WORKER_METRICS)
+def drain_worker_metrics() -> dict[str, int | float | list[dict[str, float]]]:
+    """Drain numeric metrics and the ordered per-step metric mappings."""
+    metrics: dict[str, int | float | list[dict[str, float]]] = dict(_WORKER_METRICS)
     _WORKER_METRICS.clear()
     if _WORKER_STEP_METRICS:
         metrics[WORKER_STEP_METRICS_KEY] = list(_WORKER_STEP_METRICS)

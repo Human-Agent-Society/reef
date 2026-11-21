@@ -45,7 +45,7 @@ class SlimeTrainGroup:
     Custom executors receive the Slime launch configuration in
     ``ExecutorLaunch.options`` and must provide workers with Slime's methods
     and rollout-data transport. Selecting a launcher does not reshard model
-    state or change the configured parallel topology.
+    state or change the configured parallel topology. ``world_size`` counts all worker ranks.
     """
 
     def __init__(
@@ -70,7 +70,7 @@ class SlimeTrainGroup:
         self.role = role
         self._with_ref = with_ref
         self._with_opd_teacher = with_opd_teacher
-        self._world_size = num_nodes * num_gpus_per_node
+        self.world_size = num_nodes * num_gpus_per_node
         backend = args.reef_executor_backend if executor_backend is None else executor_backend
         # Resolve before reserving or launching any workers.
         executor_class = slime_executor_class(backend)
@@ -120,7 +120,7 @@ class SlimeTrainGroup:
                 kwargs={"with_ref": self._with_ref, "with_opd_teacher": self._with_opd_teacher},
                 timeout=DEFAULT_TRAIN_TIMEOUT_S,
             )
-            if len(start_ids) != self._world_size or len(set(start_ids)) != 1:
+            if len(start_ids) != self.world_size or len(set(start_ids)) != 1:
                 raise RuntimeError(f"Slime workers disagree on start rollout id: {start_ids!r}")
             layouts = executor.collective_rpc("parallel_layout", timeout=DEFAULT_TRAIN_TIMEOUT_S)
             if not layouts or not isinstance(layouts[0], dict) or any(layout != layouts[0] for layout in layouts):
@@ -150,7 +150,7 @@ class SlimeTrainGroup:
     def async_train(self, rollout_id, rollout_data_ref, external_data=None):
         # Validate before dispatch: one wrong-length critic result must not
         # launch only part of a collective and strand the other ranks.
-        if isinstance(external_data, list) and len(external_data) != self._world_size:
+        if isinstance(external_data, list) and len(external_data) != self.world_size:
             raise ValueError("critic results must contain one entry per training worker")
         return [
             self.executor.rpc(
@@ -160,7 +160,7 @@ class SlimeTrainGroup:
                 kwargs={"external_data": external_data[rank] if isinstance(external_data, list) else external_data},
                 non_block=True,
             )
-            for rank in range(self._world_size)
+            for rank in range(self.world_size)
         ]
 
     def save_model(self, rollout_id, force_sync=False):
