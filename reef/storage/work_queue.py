@@ -321,11 +321,13 @@ class WorkQueue(ABC):
         progress: Mapping[str, JsonValue],
         *,
         number: int,
+        attempt: int | None = None,
         now: float | None = None,
     ) -> WorkItem:
         """Append ``progress`` as progress number ``number`` (0-based) of the held item. Adding a number that the
         item already has changes nothing, so a worker that continues the item can report again safely; a number
-        beyond the next one raises ``ValueError``. ``WorkLeaseLostError`` when ``worker_id`` does not hold the item."""
+        beyond the next one raises ``ValueError``. Raise ``WorkLeaseLostError`` unless ``worker_id`` holds the item
+        and, if specified, ``attempt`` equals its attempt count."""
 
     @abstractmethod
     def finish(
@@ -373,13 +375,16 @@ class WorkQueue(ABC):
         """
 
     @abstractmethod
-    def write_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+    def write_metadata(
+        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: tuple[str, int] | None = None
+    ) -> WorkItem | None:
         """Set ``metadata[name]`` of the item to ``value``, whatever the item's state, and return the item; None
         when it does not exist.
 
         A reader of the item uses it to record a fact about the work that it learns after the item exists, such as
-        the experiment run that records a training job (``reef.train.job_queue``). No lease is needed, and the
-        state, payload, progress, result, error and times do not change. When ``metadata[name]`` already equals
+        the experiment run that records a training job (``reef.train.job_queue``). If ``lease`` specifies a worker ID
+        and attempt count, raise ``WorkLeaseLostError`` unless that attempt holds the item. The state, payload,
+        progress, result, error and times do not change. When ``metadata[name]`` already equals
         ``value``, nothing changes; otherwise the change gets the next change sequence. ``name`` is a non-empty
         string.
         """
@@ -405,6 +410,13 @@ class WorkQueue(ABC):
     def read(self, queue: str, item_id: str) -> WorkItem | None:
         """The item, or None."""
 
+    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+        """The items in ``queue`` in the order of ``item_ids``.
+
+        Include one result per occurrence of an ID that exists in the queue. Skip missing IDs.
+        """
+        return tuple(item for item_id in item_ids if (item := self.read(queue, item_id)) is not None)
+
     @abstractmethod
     def read_changes(self, queue: str, after_sequence: int, *, limit: int = 1000) -> tuple[WorkItem, ...]:
         """The items of ``queue`` with ``changed_sequence > after_sequence``, in that order, at most ``limit``."""
@@ -416,6 +428,25 @@ class WorkQueue(ABC):
         """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order. ``id_prefix``,
         a non-empty string, keeps only the items whose ID starts with it; a store reads only those. Raise
         ``ValueError`` for another ``id_prefix``."""
+
+    def prefix_state_counts(
+        self, queue: str, *, scenario: str, kind: str, id_prefix: str, marker: str
+    ) -> dict[str, tuple[int, str, bool]]:
+        """Count items of the given queue, scenario, and kind whose IDs start with ``id_prefix``.
+
+        For each state with matching items, return the count and the largest ID in code point order.
+        The third field is true if a matching item in that state has the top-level metadata key
+        ``marker`` with the Boolean value true.
+
+        All arguments are non-empty strings. Only ``id_prefix`` can have surrounding spaces.
+        Raise ValueError for an invalid argument.
+        """
+        check_prefix_state_counts(queue, scenario, kind, id_prefix, marker)
+        counts: dict[str, tuple[int, str, bool]] = {}
+        for item in self.items(queue, scenario=scenario, kind=kind, id_prefix=id_prefix):
+            count, greatest, marked = counts.get(item.state, (0, "", False))
+            counts[item.state] = (count + 1, max(greatest, item.id), marked or item.metadata.get(marker) is True)
+        return counts
 
     def page(
         self,
@@ -446,6 +477,19 @@ class WorkQueue(ABC):
         for item in self.items(queue, scenario=scenario):
             counts[item.state] += 1
         return counts
+
+
+def check_id_prefix(id_prefix: object) -> None:
+    """Raise ValueError unless ``id_prefix`` is a non-empty string."""
+    if not isinstance(id_prefix, str) or not id_prefix:
+        raise ValueError("id_prefix must be a non-empty string")
+
+
+def check_prefix_state_counts(queue: str, scenario: str, kind: str, id_prefix: str, marker: str) -> None:
+    """Check the inputs of ``WorkQueue.prefix_state_counts``."""
+    for value, name in ((queue, "queue"), (scenario, "scenario"), (kind, "kind"), (marker, "marker")):
+        require_text(value, name)
+    check_id_prefix(id_prefix)
 
 
 def check_page(state: str | None, before_sequence: int | None, limit: int) -> None:

@@ -13,6 +13,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from reef_client.serve import CapturedTurn
@@ -21,6 +22,7 @@ from tests.support.polling import wait_until
 from reef.core.errors import ReefError
 from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
@@ -29,6 +31,7 @@ from reef.evaluation.rollout_worker import (
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
+    LocalCandidateEndpoints,
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
@@ -43,7 +46,7 @@ from reef.evaluation.rollout_worker import (
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
-from reef.execution.workers import ServiceWorkers, WorkerStoppedError
+from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork, WorkLeaseLostError, WorkQueue
@@ -614,6 +617,24 @@ class OwnerBuilder(TaskTemplateBuilder):
         self.builds.append((owner, scenario, task_name))
 
 
+class OwnerDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with legacy owner-based registry selection."""
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        pass
+
+
+class CustomDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with a legacy name-based build."""
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("pinned work must skip the legacy build")
+
+
+class InheritedDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with the default build hooks."""
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("queued_owner", "record_owner", "error"),
@@ -644,6 +665,173 @@ def test_a_template_item_builds_for_the_owner_of_the_scenarios_record_and_never_
         return
     assert (item.state, item.attempt_count, builder.builds) == ("failed", 1, [])
     assert error in str(item.error)
+
+
+@pytest.mark.unit
+def test_a_template_item_gives_the_builder_its_pinned_task_digest(tmp_path):
+    versions = []
+
+    class VersionBuilder(OwnerDockerfileBuilder):
+        async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+            versions.append((owner, task_name, task_digest))
+
+    class InheritedVersionBuilder(VersionBuilder):
+        pass
+
+    class VersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), rollout.task_digest
+
+    queue = memory_coordination().work_queue
+    owner = "workspace-7"
+    digest = "1" * 64
+    value = replace(e2b_rollout(), owner=owner, task_digest=digest)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = InheritedVersionBuilder()
+    worker = TaskTemplateWorker(queue, VersionEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert versions == [(owner, value.task_name, digest)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder_type", [OwnerBuilder, OwnerDockerfileBuilder, CustomDockerfileBuilder])
+def test_a_queued_pinned_template_never_uses_a_legacy_builder(tmp_path, builder_type):
+    class VersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), rollout.task_digest
+
+    queue = memory_coordination().work_queue
+    owner = "workspace-7"
+    value = replace(e2b_rollout(), owner=owner, task_digest="1" * 64)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = builder_type()
+    worker = TaskTemplateWorker(queue, VersionEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert (item.state, item.attempt_count) == ("failed", 1)
+    assert "does not support pinned task files" in str(item.error)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("returns_mismatch", [False, True])
+def test_a_pinned_rollout_refuses_name_only_or_mismatched_resolution(tmp_path, returns_mismatch):
+    class WrongVersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), "0" * 64
+
+    endpoint_type = WrongVersionEndpoints if returns_mismatch else OwnedEndpoints
+    endpoints = endpoint_type(tmp_path, "workspace-7")
+    worker = EvaluationRolloutWorker(memory_coordination().work_queue, endpoints, worker_id="w")
+    value = replace(rollout(), task_digest="1" * 64)
+    message = "returned different files" if returns_mismatch else "does not support pinned task files"
+    with pytest.raises(ItemFailedError, match=message):
+        worker.score(value, threading.Event(), 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize(
+    "resolver", ["base", "legacy", "inherited_legacy", "version", "explicit", "legacy_after_version"]
+)
+def test_template_and_trial_resolve_the_same_local_task(tmp_path, pinned, resolver):
+    current, custom, explicit, admitted = (tmp_path / name for name in ("current", "custom", "explicit", "admitted"))
+    for directory in (current, custom, explicit, admitted):
+        directory.mkdir()
+        (directory / "task.toml").write_text("")
+
+    class Endpoints(LocalCandidateEndpoints):
+        """Local endpoints whose trial opens without an inference server."""
+
+        open = OpenEndpoints.open
+
+    class NameBasedEndpoints(Endpoints):
+        """Endpoints whose legacy resolver always selects the custom directory."""
+
+        def task_directory(self, rollout):
+            return custom
+
+    class InheritedNameBasedEndpoints(NameBasedEndpoints):
+        """Endpoints that inherit the custom legacy resolver."""
+
+    class VersionEndpoints(NameBasedEndpoints):
+        """Endpoints that delegate explicit version resolution to the built-in resolver."""
+
+        def task_version(self, rollout):
+            return super().task_version(rollout)
+
+    class ExplicitVersionEndpoints(NameBasedEndpoints):
+        """Endpoints that resolve unpinned versions to their own directory and known digest."""
+
+        def task_version(self, rollout):
+            if rollout.task_digest is None:
+                return explicit, custom_digest
+            return super().task_version(rollout)
+
+    class NewNameBasedEndpoints(VersionEndpoints):
+        """Endpoints that replace the legacy hook below an inherited version resolver."""
+
+        def task_directory(self, rollout):
+            return custom
+
+    class Builder(RecordedBuilder):
+        """A builder that records the directory and digest passed to preparation."""
+
+        async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+            prepared.append((task_directory, task_digest))
+
+    class Lab(NoSandboxLab):
+        """A lab that checks the trial uses the prepared directory, then simulates no sandbox."""
+
+        async def run(self, task_path, agent, *, key, tags, overrides):
+            [expected] = prepared
+            assert Path(task_path) == expected[0]
+            return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.task_owner.return_value = None
+    artifacts.candidate_task.return_value = current
+    current_digest, admitted_digest, custom_digest = "0" * 64, "1" * 64, "2" * 64
+    artifacts.candidate_task_version.return_value = (current, current_digest)
+    artifacts.candidate_task_for_digest.return_value = admitted
+    endpoint_type = {
+        "base": Endpoints,
+        "legacy": NameBasedEndpoints,
+        "inherited_legacy": InheritedNameBasedEndpoints,
+        "version": VersionEndpoints,
+        "explicit": ExplicitVersionEndpoints,
+        "legacy_after_version": NewNameBasedEndpoints,
+    }[resolver]
+    endpoints = endpoint_type(artifacts)
+    value = replace(e2b_rollout(), task_digest=admitted_digest if pinned else None)
+    queue = memory_coordination().work_queue
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    prepared = []
+    assert TaskTemplateWorker(queue, endpoints, Builder(), worker_id="template").run_once()
+    template = queue.read(EVALUATIONS_QUEUE, item_id)
+    worker = ServedWorker(queue, endpoints, worker_id="rollout", lab=Lab(tmp_path / "trials"))
+
+    if pinned and resolver not in ("base", "version", "explicit"):
+        assert template.state == "failed" and "must override task_version" in template.error
+        assert not prepared
+        with pytest.raises(ItemFailedError, match="must override task_version"):
+            worker.score(value, threading.Event(), 1)
+        return
+
+    assert template.state == "finished"
+    if pinned:
+        assert prepared == [(admitted, admitted_digest)]
+    elif resolver == "base":
+        assert prepared == [(current, current_digest)]
+    elif resolver == "explicit":
+        assert prepared == [(explicit, custom_digest)]
+    else:
+        assert prepared == [(custom, None)]
+    with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
+        worker.score(replace(value, requires_prepared_templates=True), threading.Event(), 1)
 
 
 def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:

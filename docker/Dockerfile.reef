@@ -83,6 +83,10 @@ RUN pip uninstall -y slime && \
     PIP_CONSTRAINT= pip install --no-cache-dir --no-deps --group runtime && \
     pip install --no-cache-dir -e .
 
+# Count only active loss tokens in Slime's optimizer step. An empty step reports zero loss.
+RUN SLIME_SITE=$(python -c "from importlib.metadata import distribution; print(distribution('slime').locate_file(''))") && \
+    git -C "$SLIME_SITE" apply "$PWD/docker/patch/slime_active_token_count.patch"
+
 # The base installs SGLang, Megatron-Core (with megatron.training) and Slime
 # editable into its environment, so nothing goes on PYTHONPATH: an entry
 # would also win over a ``pip install -e`` of a mounted checkout, silently

@@ -813,6 +813,7 @@ def build_app(
         new_artifacts=new_artifacts,
         sources=ArtifactSources.from_setting(settings.artifact_sources),
         requires_prepared_templates=settings.evaluation_require_prepared_templates,
+        pin_task_files=settings.evaluation_pin_task_files,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.

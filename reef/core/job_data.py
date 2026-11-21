@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from reef.core.training_request import TrainingRequest
+
+#: The lowercase hex SHA-256 that the task file store uses to identify a directory.
+FILES_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)

@@ -28,6 +28,7 @@ from pathlib import Path
 from threading import RLock
 from typing import cast
 
+import sqlalchemy
 from sqlalchemy import (
     URL,
     BigInteger,
@@ -42,6 +43,7 @@ from sqlalchemy import (
     Table,
     Text,
     and_,
+    case,
     create_engine,
     delete,
     exists,
@@ -51,6 +53,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
@@ -73,6 +76,7 @@ from reef.storage.served_models import (
     serving_serial_key,
     without_redeploy,
 )
+from reef.storage.sql_records import batches
 from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 from reef.storage.work_queue import (
     FINAL_STATES,
@@ -85,8 +89,10 @@ from reef.storage.work_queue import (
     WorkLeaseLostError,
     WorkLogLine,
     WorkQueue,
+    check_id_prefix,
     check_log_page,
     check_page,
+    check_prefix_state_counts,
     clock,
 )
 
@@ -1010,12 +1016,15 @@ class SQLWorkQueue(WorkQueue):
             raise ReefError(f"work item {item.queue}/{item.id} disappeared")
         return saved
 
-    def held(self, connection: Connection, queue: str, item_id: str, worker_id: str, now: float) -> WorkItem:
+    def held(
+        self, connection: Connection, queue: str, item_id: str, worker_id: str, now: float, attempt: int | None = None
+    ) -> WorkItem:
         item = self.row(connection, queue, item_id, lock=True)
         if (
             item is None
             or item.state not in HELD_STATES
             or item.worker_id != worker_id
+            or (attempt is not None and item.attempt_count != attempt)
             or (item.lease_expires_at is not None and item.lease_expires_at < now)
         ):
             raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
@@ -1211,11 +1220,12 @@ class SQLWorkQueue(WorkQueue):
         progress: Mapping[str, JsonValue],
         *,
         number: int,
+        attempt: int | None = None,
         now: float | None = None,
     ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
             if number < len(item.progress):
                 return item
             if number != len(item.progress):
@@ -1312,16 +1322,23 @@ class SQLWorkQueue(WorkQueue):
                 ended_at=moment,
             )
 
-    def write_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+    def write_metadata(
+        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: tuple[str, int] | None = None
+    ) -> WorkItem | None:
         require_text(name, "name")
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.row(connection, queue, item_id, lock=True)
+            moment = time.time()
+            if lease is None:
+                item = self.row(connection, queue, item_id, lock=True)
+            else:
+                worker_id, attempt = lease
+                item = self.held(connection, queue, item_id, worker_id, moment, attempt)
             if item is None or (
                 name in item.metadata and canonical_json(item.metadata[name]) == canonical_json(value)
             ):
                 return item
             return self.write_item(
-                connection, counter, item, time.time(), metadata_json=canonical_json({**item.metadata, name: value})
+                connection, counter, item, moment, metadata_json=canonical_json({**item.metadata, name: value})
             )
 
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
@@ -1359,6 +1376,19 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
+    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+        if not item_ids:
+            return ()
+        found = {}
+        query = select(self.table).where(self.table.c.queue == queue)
+        with self.database.read() as connection:
+            for batch in batches(dict.fromkeys(item_ids)):
+                rows = connection.execute(query.where(self.table.c.item_id.in_(batch))).mappings()
+                for row in rows:
+                    item = item_from_row(row)
+                    found[item.id] = item
+        return tuple(found[item_id] for item_id in item_ids if item_id in found)
+
     def read_changes(self, queue: str, after_sequence: int, *, limit: int = 1000) -> tuple[WorkItem, ...]:
         query = (
             select(self.table)
@@ -1378,12 +1408,38 @@ class SQLWorkQueue(WorkQueue):
         if kind is not None:
             conditions.append(self.table.c.kind == kind)
         if id_prefix is not None:
-            if not isinstance(id_prefix, str) or not id_prefix:
-                raise ValueError("id_prefix must be a non-empty string")
+            check_id_prefix(id_prefix)
             conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
         query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
+
+    def prefix_state_counts(
+        self, queue: str, *, scenario: str, kind: str, id_prefix: str, marker: str
+    ) -> dict[str, tuple[int, str, bool]]:
+        check_prefix_state_counts(queue, scenario, kind, id_prefix, marker)
+        item_id = self.database.code_point_order(self.table.c.item_id)
+        with self.database.read() as connection:
+            marked: ColumnElement[bool]
+            if connection.dialect.name == "sqlite":
+                keys = func.json_each(self.table.c.metadata_json).table_valued("key", "type")
+                marked = exists(select(1).select_from(keys).where(keys.c.key == marker, keys.c.type == "true"))
+            else:
+                marked = sqlalchemy.cast(self.table.c.metadata_json, JSONB).contains({marker: True})
+            query = (
+                select(self.table.c.state, func.count(), func.max(item_id), func.max(case((marked, 1), else_=0)))
+                .where(
+                    self.table.c.queue == queue,
+                    self.table.c.scenario == scenario,
+                    self.table.c.kind == kind,
+                    prefix_range(item_id, id_prefix),
+                )
+                .group_by(self.table.c.state)
+            )
+            return {
+                state: (count, largest, bool(has_marker))
+                for state, count, largest, has_marker in connection.execute(query)
+            }
 
     def page(
         self,

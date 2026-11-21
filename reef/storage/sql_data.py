@@ -1361,6 +1361,27 @@ class SQLDataStore(DataStore):
         with self.transaction(read_only=True) as connection:
             return int(connection.execute(statement).scalar() or 0)
 
+    def benchmark_item_ids(self, owner: str, benchmarks: Sequence[str]) -> dict[str, set[str]]:
+        check_owner(owner)
+        found: dict[str, set[str]] = {benchmark: set() for benchmark in benchmarks}
+        if not found:
+            return found
+        items, members = self.items_table, self.item_sets_table
+        statement = (
+            select(members.c.name, items.c.item_id)
+            .join(items, and_(items.c.owner == members.c.owner, items.c.sequence == members.c.sequence))
+            .where(
+                members.c.owner == owner,
+                members.c.kind == "benchmark",
+                members.c.name.in_(found),
+                items.c.kind == "task",
+            )
+        )
+        with self.transaction(read_only=True) as connection:
+            for benchmark, item_id in connection.execute(statement):
+                found[benchmark].add(item_id)
+        return found
+
     def collections(self, owner: str) -> tuple[TaskCollection, ...]:
         check_owner(owner)
         table = self.collections_table

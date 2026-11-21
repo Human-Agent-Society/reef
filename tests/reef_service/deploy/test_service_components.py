@@ -15,7 +15,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.harness_jobs import evolution_config, runtime
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent, live_objects
+from tests.support.runtime_stubs import (
+    VERSION_FILE,
+    StubFacts,
+    StubInferenceRuntime,
+    StubTrainingComponent,
+    live_objects,
+)
 from tests.support.training_deployment import LocalFacts, LocalServingFactory, facts_component_factory
 from tests.support.trajectories import policy_trajectory
 
@@ -136,9 +142,9 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     root = tmp_path / "root"
     root.mkdir()
     (root / "config.json").write_text("{}")
-    assembly.build_artifact_backend(replace(config, artifact_work_dir=str(tmp_path / "control-work")))(
-        "math"
-    ).register(Artifact.local(root), metadata={})
+    control_config = replace(config, artifact_work_dir=str(tmp_path / "control-work"))
+    backend = assembly.build_artifact_backend(control_config)("math")
+    backend.register(Artifact.local(root), metadata={})
     component = StubTrainingComponent(tmp_path / "checkpoints")
     deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
     monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ, runs_training: deployment)
@@ -168,7 +174,8 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
                 await asyncio.sleep(0.01)
             # The service stored the checkpoint's files in the artifact store, and names that content.
             (checkpoint,) = view.status("one").checkpoints
-            assert (checkpoint.content, checkpoint.artifact_path) == ("one:0", None)
+            assert checkpoint.content and checkpoint.artifact_path is None
+            assert (backend.materialize_content(checkpoint.content) / VERSION_FILE).read_text() == "w1"
             assert coordination.control_lease.current() is None
             assert not Path(config.task_file_dir).exists()
         assert component.closed

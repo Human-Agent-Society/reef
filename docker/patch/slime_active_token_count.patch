@@ -1,0 +1,22 @@
+--- a/slime/backends/megatron_utils/loss.py
++++ b/slime/backends/megatron_utils/loss.py
+@@ -1526,7 +1526,7 @@
+         - `logging_dict` has keys "keys" (list of str metric names) and
+           "values" (1D tensor: [count, metric1, metric2, ...]).
+     """
+-    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in batch["loss_masks"]])
++    num_tokens = sum(loss_mask.sum() for loss_mask in batch["loss_masks"])
+
+     sum_of_sample_mean = get_sum_of_sample_mean(
+         batch["total_lengths"],
+--- a/slime/observability/train_metric_utils.py
++++ b/slime/observability/train_metric_utils.py
+@@ -52,6 +52,8 @@
+
+     if calculate_per_token_loss:
+         num_samples_or_tokens = values[0]
++        if num_samples_or_tokens == 0:
++            return dict.fromkeys(keys, 0.0)
+         cp_factor = cp_size
+     else:
+         num_samples_or_tokens = step_global_batch_size

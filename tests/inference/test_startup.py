@@ -44,10 +44,10 @@ from reef.recipe.composite import CompositeRecipe
 from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
-from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
+from reef.storage.served_models import REDEPLOY, SERVE_ARTIFACT_KIND, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import WorkLeaseLostError
+from reef.storage.work_queue import NewWork, WorkLeaseLostError
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
@@ -820,6 +820,72 @@ def test_the_runtime_s_slots_start_that_many_scenarios_at_once(stoppable):
     while time.monotonic() < deadline and not all(routes.read_scenario(name) for name in ("math", "code")):
         time.sleep(0.02)
     assert all(routes.read_scenario(name) for name in ("math", "code"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stoppable", [2], indirect=True)
+@pytest.mark.parametrize("standalone", [False, True], ids=["selection", "evaluation"])
+def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, monkeypatch, standalone):
+    control, worker, runtime = stoppable
+    runtime.release.set()
+    control.create_scenario("math")
+    assert worker.run_once()
+    worker.item_threads[-1].join(5)
+    routes = control.coordination.served_models
+    served = routes.read_scenario("math")["active"]
+    selection = routes.current_request("math").payload["selection"]
+    control.set_served("math", {})
+    if standalone:
+        monkeypatch.setattr(runtime, "serve_artifact", lambda artifact, scenario: served)
+        worker.queue.append(
+            NewWork(
+                SERVING_QUEUE,
+                "evaluation-candidate",
+                "math",
+                SERVE_ARTIFACT_KIND,
+                {"selection": selection, "component": "weights"},
+            )
+        )
+    else:
+        control.set_served("math", {served.artifact_id: 100})
+
+    finishing = threading.Event()
+    publish = threading.Event()
+    retirement_waiting = threading.Event()
+    retired = threading.Event()
+    finish = worker.finish_item
+    wait = worker.serving_work_changed.wait
+
+    def wait_for_result(timeout=None):
+        retirement_waiting.set()
+        return wait(timeout)
+
+    def finish_item(item, result):
+        if item.kind != STOP_SERVING_KIND:
+            finishing.set()
+            assert publish.wait(15)
+        finish(item, result)
+        if item.kind == STOP_SERVING_KIND:
+            retired.set()
+
+    monkeypatch.setattr(worker, "finish_item", finish_item)
+    monkeypatch.setattr(worker.serving_work_changed, "wait", wait_for_result)
+    assert worker.run_once()
+    try:
+        assert finishing.wait(5)
+        routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=control.publisher.lease_number)
+        assert worker.run_once()
+        assert retirement_waiting.wait(5)
+    finally:
+        publish.set()
+    assert retired.wait(5)
+    if standalone:
+        item = worker.queue.read(SERVING_QUEUE, "evaluation-candidate")
+        assert item.result == {"served": served.to_json()}
+    else:
+        assert routes.read_scenario("math")["active"] == served
+    assert routes.due_stops(time.time()) == ()
+    assert runtime.stops == []
 
 
 @pytest.mark.unit

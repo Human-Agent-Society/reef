@@ -1380,6 +1380,18 @@ downgrade without restoring a compatible backup.
    ``evaluation.require_prepared_templates`` : false
        Set to ``true`` to require prepared task and verifier templates for new ``e2b`` evaluations.
        If preparation fails, the affected rollouts report the error and skip the trial.
+   ``evaluation.pin_task_files`` : false
+       Set to ``true`` to keep the task files that Reef selects when it accepts an evaluation.
+       Template preparation and every rollout attempt use those files, including after a task edit or service restart.
+       Start a new evaluation to use edited files. The setting applies to evaluations accepted after enabling it.
+
+       Upgrade every evaluation controller and worker before enabling pinning.
+       A custom template builder must override ``build_for_version`` to honor the stored digest or the pinned
+       task directory. This includes subclasses that override a legacy build hook. The built-in Dockerfile
+       builder uses the pinned directory. Keep the task versions and any
+       registry images they require available for the retry period.
+       To roll back, disable pinning for new evaluations and let active pinned evaluations finish.
+       Use a compatible release to retry or resume a pinned evaluation.
 
 Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
