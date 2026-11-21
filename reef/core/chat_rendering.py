@@ -22,12 +22,21 @@ from reef.core.trajectories import atif_messages
 
 
 def flatten_content(content: Any) -> str:
-    """The plain text of an OpenAI-style message content field."""
+    """Join adjacent text blocks and use a space across non-text blocks."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [item.get("text", "") for item in content if isinstance(item, Mapping) and item.get("type") == "text"]
-        return " ".join(parts) if parts else ""
+        parts: list[str] = []
+        after_non_text = False
+        for item in content:
+            if isinstance(item, Mapping) and item.get("type") == "text":
+                if after_non_text:
+                    parts.append(" ")
+                parts.append(item.get("text", ""))
+                after_non_text = False
+            elif parts:
+                after_non_text = True
+        return "".join(parts)
     return str(content) if content is not None else ""
 
 
