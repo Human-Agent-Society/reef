@@ -23,6 +23,7 @@ from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.dataset import DATASET_FILE
 from reef.train.slime_backend.harbor_rollouts import TASK_ROLLOUTS_FILE, TaskJobSource
 from reef.train.slime_backend.objectives import SlimeObjective, register_objective, unregister_objective
+from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionSettings
 from reef.train.slime_backend.rollout_group import SlimeRolloutGroup
 
 OBJECTIVE = "slime_dataset"
@@ -33,10 +34,12 @@ HARBOR = {"environment": "modal", "concurrency": 4}
 class TaskRolloutGroup(SlimeRolloutGroup):
     """The serving session's engines: each rollout writes the results that the rollout manager would write.
 
-    ``outcomes`` holds one ``(group_index, assembled)`` list per rollout; the default is a group of two samples.
+    ``outcomes`` holds one ``(group_index, reward)`` list per rollout; the default is a group of two samples.
     """
 
-    def __init__(self, events: list[str], root: Path, outcomes: list[list[tuple[int, bool]]] | None = None) -> None:
+    def __init__(
+        self, events: list[str], root: Path, outcomes: list[list[tuple[int, float | None]]] | None = None
+    ) -> None:
         super().__init__(SimpleNamespace(manager=None), colocated=True, router_url="http://router:3000")
         self.events = events
         self.root = root
@@ -55,14 +58,15 @@ class TaskRolloutGroup(SlimeRolloutGroup):
         record = read_json(self.root / DATASET_FILE)
         self.records.append(record)
         source = TaskJobSource.from_record(record)
-        outcome = self.outcomes.pop(0) if self.outcomes else [(0, True), (0, True)]
+        outcome = self.outcomes.pop(0) if self.outcomes else [(0, 1.0), (0, 1.0)]
         with open(Path(source.job_directory) / TASK_ROLLOUTS_FILE, "a", encoding="utf-8") as results:
-            for group_index, assembled in outcome:
+            for group_index, reward in outcome:
+                assembled = reward is not None
                 result = {
                     "token": source.token,
                     "task": source.tasks[0][0],
                     "group_index": group_index,
-                    "reward": 1.0 if assembled else None,
+                    "reward": reward,
                     "assembled": assembled,
                     "error": "" if assembled else "the sandbox did not start",
                 }
@@ -146,7 +150,7 @@ def test_a_task_job_runs_slimes_loop_over_its_tasks_and_reports_their_rewards(tm
 @pytest.mark.unit
 def test_a_group_left_with_two_samples_trains_with_the_others_removed(tmp_path, task_stack) -> None:
     stack, _, group = task_stack
-    group.outcomes = [[(0, True), (0, True), (1, False), (1, True)]]
+    group.outcomes = [[(0, 1.0), (0, 1.0), (1, None), (1, 1.0)]]
     stack.component.submit(task_job(stack, tmp_path, count=2))
     status = finished(stack.component, "job-0")
     assert status.state == "finished", status.error
@@ -154,12 +158,38 @@ def test_a_group_left_with_two_samples_trains_with_the_others_removed(tmp_path, 
 
 
 @pytest.mark.unit
+def test_checkpoint_rewards_compare_scored_trials_and_keep_scored_zeros(tmp_path, task_stack, monkeypatch) -> None:
+    stack, _, group = task_stack
+    group.outcomes = [
+        [(0, -0.8), (0, -0.6), (1, None), (1, None)],
+        [(0, -0.7), (0, -0.6), (1, -0.6), (1, -0.5)],
+        [(0, 0.8), (0, 0.6), (1, 0.0), (1, 0.0)],
+    ]
+    worker_means = iter([-0.35, -0.6, 0.35])
+    monkeypatch.setattr(stack.group, "async_pop_metrics", lambda: [{"rollout/raw_reward": next(worker_means)}])
+    stack.component.submit(task_job(stack, tmp_path, count=6, save_interval=1))
+    status = finished(stack.component, "job-0")
+    assert status.state == "finished", status.error
+    scores = [checkpoint.metrics["rollout/raw_reward"] for checkpoint in status.checkpoints]
+    assert scores == pytest.approx([-0.7, -0.6, 0.35])
+    assert status.metrics["rollout/raw_reward"] == pytest.approx(0.35)
+    retention_scores = [read_json(stack.storage._record_path(i))["reward"] for i in range(3)]
+    assert retention_scores == pytest.approx([-0.7, -0.6, 0.35])
+    # Fit the latest pair, one older pair, and the reservation for a new pair.
+    reservation = stack.storage.validate_capacity()["reservation_bytes"]
+    stack.storage.config = RetentionSettings(
+        policy="best_reward", max_storage_bytes=reservation + 4, min_free_space_bytes=0
+    )
+    assert stack.storage.validate_capacity()["delete"] == [0]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "outcome",
     [
-        [(0, False), (0, False)],
+        [(0, None), (0, None)],
         # A group of one sample has advantage 0 with Slime's group baseline.
-        [(0, True), (0, False), (1, True), (1, False)],
+        [(0, 1.0), (0, None), (1, 1.0), (1, None)],
     ],
 )
 def test_a_rollout_with_no_group_to_train_fails_the_job_before_the_workers_train(
@@ -196,6 +226,35 @@ def test_a_resumed_task_job_skips_the_rollouts_it_saved(tmp_path, task_stack, mo
     assert [rollout for rollout, _ in stack.group.train_calls] == [1]
     assert [checkpoint.step for checkpoint in stack.component.saved(directory)] == [1, 2]
     assert metrics["rollout_samples"] == 4, "both drivers' rollouts report"
+
+
+@pytest.mark.unit
+def test_a_task_checkpoint_keeps_its_score_after_an_interrupted_save(tmp_path, task_stack, monkeypatch) -> None:
+    stack, _, group = task_stack
+    group.outcomes = [[(0, -0.8), (0, -0.6), (1, None), (1, None)]]
+    job = task_job(stack, tmp_path, count=2)
+    directory = stack.component.job_directory(job.job_id)
+    directory.mkdir(parents=True)
+
+    def interrupt(*args, **kwargs) -> None:
+        raise OSError("checkpoint catalog unavailable")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(stack.storage, "complete", interrupt)
+        with pytest.raises(OSError, match="checkpoint catalog unavailable"):
+            stack.component.run(job, directory)
+
+    # A new driver loads the checkpoint that the first driver's workers saved.
+    restarted = Stack(tmp_path, start_rollout_id=1, loss_family=FAMILY, rollout_group=group, storage=stack.storage)
+    try:
+        metrics = restarted.component.run(job, directory)
+        (checkpoint,) = restarted.component.saved(directory)
+        assert checkpoint.metrics["rollout/raw_reward"] == pytest.approx(-0.7)
+        assert metrics["rollout/raw_reward"] == pytest.approx(-0.7)
+        assert read_json(stack.storage._record_path(0))["reward"] == pytest.approx(-0.7)
+        assert restarted.group.train_calls == []
+    finally:
+        restarted.component.close()
 
 
 @pytest.mark.unit
