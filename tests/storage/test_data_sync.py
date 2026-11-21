@@ -10,13 +10,13 @@ import pytest
 from tests.support.samples import sample_store
 
 from reef.core.errors import ScenarioDeletedError
-from reef.service.task_import import DataScenarioStorage
 from reef.storage.data import NewItem
 from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
 from reef.storage.data_sync import data_sync_key, request_data_sync
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.task_import import DataScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
 
