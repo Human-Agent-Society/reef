@@ -141,11 +141,18 @@ def test_the_compare_policy_decides_by_wins_or_by_the_mean_score() -> None:
     margin = ComparePolicy(evaluator, min_margin=1)
     assert margin.decide(candidate, margin.evaluate(candidate)).selected is False
 
-    # The mean averages the runs that completed; a failed run does not count as 0.
+    # Both means use the same completed pair.
     mean = ComparePolicy(evaluator, statistic="mean")
     decision = mean.decide(candidate, mean.evaluate(candidate))
     assert decision.selected is True
-    assert (decision.metrics["candidate_mean"], decision.metrics["current_mean"]) == (1.0, 0.4)
+    assert decision.metrics == {
+        "statistic": "mean",
+        "min_margin": 0.0,
+        "candidate_mean": 1.0,
+        "current_mean": 0.4,
+        "paired": 1,
+        "dropped": 1,
+    }
     assert decision.reason.startswith("candidate scored 1.0000 against 0.4000")
     for min_margin, selected in ((0.5, True), (0.7, False)):
         policy = ComparePolicy(evaluator, statistic="mean", min_margin=min_margin)
@@ -153,8 +160,33 @@ def test_the_compare_policy_decides_by_wins_or_by_the_mean_score() -> None:
     # A run that completed but gave no answer scores 0, which is a loss and lowers the mean.
     unanswered = PairedScores(task_scores(1.0, 0.0), task_scores(0.4, 0.4))
     assert ComparePolicy(unanswered).decide(candidate, unanswered.evaluate(candidate)).metrics["losses"] == 1
+    policy = ComparePolicy(unanswered, statistic="mean")
+    assert policy.decide(candidate, policy.evaluate(candidate)).selected is True
     policy = ComparePolicy(unanswered, statistic="mean", min_margin=0.2)
     assert policy.decide(candidate, policy.evaluate(candidate)).selected is False
+
+
+@pytest.mark.parametrize(
+    ("candidate_runs", "current_runs", "paired", "dropped"),
+    [
+        ((0.5, 1.0, None), (0.6, None, 0.0), 1, 2),
+        ((1.0, None), (None, 0.0), 0, 2),
+    ],
+)
+def test_mean_compares_only_complete_rollout_pairs(
+    candidate_runs: tuple[float | None, ...], current_runs: tuple[float | None, ...], paired: int, dropped: int
+) -> None:
+    candidate = UpdateCandidate("job-7")
+    evaluator = PairedScores(task_scores(candidate_runs), task_scores(current_runs))
+    policy = ComparePolicy(evaluator, statistic="mean")
+
+    decision = policy.decide(candidate, policy.evaluate(candidate))
+
+    assert decision.selected is False
+    assert (decision.metrics["paired"], decision.metrics["dropped"]) == (paired, dropped)
+    assert (decision.metrics.get("candidate_mean"), decision.metrics.get("current_mean")) == (
+        (0.5, 0.6) if paired else (None, None)
+    )
 
 
 def test_the_compare_policy_refuses_unpaired_scores_and_publishes_nothing_unscored() -> None:
@@ -162,14 +194,15 @@ def test_the_compare_policy_refuses_unpaired_scores_and_publishes_nothing_unscor
     unscored = ComparePolicy(PairedScores([], []), statistic="mean")
     decision = unscored.decide(candidate, unscored.evaluate(candidate))
     assert decision.selected is False and decision.reason == "no evaluation task was scored"
+    assert decision.metrics == {"paired": 0, "dropped": 0}
     # Every candidate run failed: no pair is left to compare.
     failed = PairedScores(task_scores(None, None), task_scores(0.4, 0.4))
+    unpaired = PairedScores(task_scores(1.0), [{"task": "other", "scores": [1.0]}])
     for statistic in ("wins", "mean"):
         policy = ComparePolicy(failed, statistic=statistic)
         assert policy.decide(candidate, policy.evaluate(candidate)).selected is False
-    unpaired = PairedScores(task_scores(1.0), [{"task": "other", "scores": [1.0]}])
-    with pytest.raises(ValueError, match="same tasks"):
-        ComparePolicy(unpaired).decide(candidate, unpaired.evaluate(candidate))
+        with pytest.raises(ValueError, match="same tasks"):
+            policy.decide(candidate, unpaired.evaluate(candidate))
     with pytest.raises(ValueError, match="statistic must be one of wins, mean"):
         ComparePolicy(PairedScores([], []), statistic="median")
     with pytest.raises(ValueError, match="min_margin must be a finite number of at least 0"):

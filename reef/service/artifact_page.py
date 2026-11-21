@@ -30,14 +30,13 @@ from reef.core.evaluation import FAILED
 from reef.core.requirements import required_by
 from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span
 
-#: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
-#: wins, losses, ties and the pairs it dropped, or the two means; a floor writes passed, failed, the failed runs and
-#: floor_score, and evaluation_sides when it ran one side only; a step that ran its method writes the method's runs and model use.
-#: ``selected`` is not among them: the result headline above the numbers already says whether the step was published.
+#: The Result section shows these evaluation metrics when the row carries them.
+#: The result headline shows whether the step was published.
 RESULT_FIELDS = (
     "wins",
     "losses",
     "ties",
+    "paired",
     "dropped",
     "candidate_mean",
     "current_mean",
@@ -63,6 +62,7 @@ RESULT_LABELS = {
     "wins": "Wins",
     "losses": "Losses",
     "ties": "Ties",
+    "paired": "Complete pairs",
     "dropped": "Dropped pairs",
     "candidate_mean": "Candidate mean",
     "current_mean": "Current mean",
