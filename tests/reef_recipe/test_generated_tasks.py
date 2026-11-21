@@ -14,12 +14,14 @@ from tests.reef_recipe.support import (
     DESCRIPTION,
     InlineWorker,
     ScriptedGenerator,
+    finished_job,
     generated,
     handed_out_names,
     job_data_stage,
     rounds,
     scenario_session,
     stage_settings,
+    submit_job,
     train_job,
 )
 from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
@@ -1123,6 +1125,28 @@ def test_the_end_of_the_next_job_gives_a_cancelled_jobs_tasks_a_failure(tmp_path
     saved = rollout_results(p.record2sample.task_store)
     assert saved["harbor-00000-001"].rollout_rewards == (1.0, 0.0)
     assert saved["harbor-00000-000"].infrastructure_failure and unfinished(p) == 0
+
+
+@pytest.mark.unit
+def test_a_job_end_saves_the_results_of_its_own_tasks_and_leaves_the_tasks_of_the_next_job(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1, 2, 3)])
+    p, _ = rounds(tmp_path, task_generator, rounds=1)
+    looked(p)
+    assert submit_job(p) == ["harbor-00000-000", "harbor-00000-001"]
+    # The trainer submits the next job before the samples service reads the first job's end.
+    assert p.ready(BATCH_SIZE) and submit_job(p) == ["harbor-00000-002", "harbor-00000-003"]
+    p.job_ended(finished_job("job-1", {"harbor-00000-000": (1.0, 0.0), "harbor-00000-001": ()}))
+    store = p.record2sample.task_store
+    assert rollout_results(store) == {
+        "harbor-00000-000": TaskRolloutResult("harbor-00000-000", (1.0, 0.0)),
+        "harbor-00000-001": TaskRolloutResult(
+            "harbor-00000-001", error="no rollout of the task ran", infrastructure_failure=True
+        ),
+    }
+    assert unfinished(p) == 2 and task_generator.result_generations == [], "the next job's tasks wait for its end"
+    p.job_ended(finished_job("job-2", {"harbor-00000-002": (0.0, 1.0), "harbor-00000-003": (1.0, 1.0)}))
+    assert rollout_results(store)["harbor-00000-002"].rollout_rewards == (0.0, 1.0) and unfinished(p) == 0
+    assert task_generator.result_generations == [0]
 
 
 def test_a_task_that_trained_before_its_result_was_saved_gets_it_when_the_restart_repeats_the_end(

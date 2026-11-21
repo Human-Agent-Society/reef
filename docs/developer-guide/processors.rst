@@ -847,10 +847,12 @@ rollouts.
 4. When the commit of the job's end is durable, the samples service reads it
    and gives the job's outcome to the record-to-sample stage
    (``Record2Sample.job_ended``). The
-   stage gives each task that a committed job trained and that has no result
-   its rewards from ``rollout_rewards``. A task without rewards, for example
-   in a job that failed or that a ``train-from`` cancelled, gets an
-   infrastructure-failure result, so its generation's feedback still goes out.
+   stage gives each task of the ended job, and of an earlier job that a
+   ``train-from`` cancelled, that has no result its rewards from
+   ``rollout_rewards``. A task without rewards, for example in a job that
+   failed or that a ``train-from`` cancelled, gets an infrastructure-failure
+   result, so its generation's feedback still goes out. A task of a job that
+   started before the stage read the end waits for that job's end.
 
 A result that the task store fails to save is saved again by the next job. On
 a restart, the scenario still uses the task items that did not train, and a
