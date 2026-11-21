@@ -584,20 +584,19 @@ class SlimeJobRunner(SlimeJobs):
                 if rollout.schedule_state is not None:
                     planned_steps = len(rollout_data["external_step_sizes"])
                     updates = [rank.get(OPTIMIZER_UPDATES_METRIC) if rank is not None else None for rank in per_rank]
+                    confirmed = updates[0] if updates else None
                     if (
-                        not updates
-                        or len(updates) != self.group.world_size
+                        len(updates) != self.group.world_size
+                        or not isinstance(confirmed, int | float)
+                        or not 0 <= confirmed <= planned_steps
+                        or int(confirmed) != confirmed
                         or any(
-                            not isinstance(count, int | float)
-                            or isinstance(count, bool)
-                            or not 0 <= count <= planned_steps
-                            or int(count) != count
-                            or count != updates[0]
+                            not isinstance(count, int | float) or isinstance(count, bool) or count != confirmed
                             for count in updates
                         )
                     ):
                         raise RuntimeError("Actor ranks did not agree on a valid optimizer update count.")
-                    completed_steps = int(updates[0])
+                    completed_steps = int(confirmed)
                     saved_schedule = rollout.schedule_state.advanced(completed_steps)
                     if completed_steps:
                         rates = rollout.schedule_state.learning_rates(completed_steps)
