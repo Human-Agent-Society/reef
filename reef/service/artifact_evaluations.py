@@ -99,6 +99,7 @@ STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
 CANCELLED_ERROR = "cancelled by request"
 #: The error of each rollout that was not final when its evaluation stopped for failed rollouts.
 FAILURES_ERROR = "stopped: too many rollouts failed"
+FAILURE_STOP_PREFIX = "too many rollouts failed:"
 #: The rollouts that must end before Reef checks ``max_failed_fraction``; a smaller evaluation checks at its end.
 FAILURE_CHECK_ROLLOUTS = 10
 #: The last seconds whose ended rollouts give the rate of an evaluation's time left.
@@ -110,6 +111,8 @@ MAX_STOPPED_EVALUATIONS = 1000
 #: The metadata of a rollout that a retry or a resume runs again once ``max_concurrent_rollouts`` lets it
 #: (``rollout_waits``).
 RETRY_WAIT_METADATA = "waits_for_retry"
+#: Marks a retry of a failure stop that left unstarted rollouts but no cancelled items.
+RETRY_STOP_METADATA = "retry_stopped"
 #: The seconds between two reads of the queue's changes when nothing changed.
 RESULT_POLL_SECONDS = 0.2
 #: How many tasks of an evaluation on e2b have template items before the evaluation adds their rollouts: from the task
@@ -604,10 +607,9 @@ class EvaluationResults:
         templates and waits to run again also waits until its task's template item is final; until then it keeps no
         place of ``max_concurrent_rollouts`` from the rollouts of other tasks.
 
-        A rollout that a cancel or a stop ended (``rollout_cancelled``) stays ended in a running evaluation only after
-        a retry of a cancelled or stopped evaluation. While one does, no rollout starts its first run, the failure
-        check does not count it, and the evaluation fails with its error again once the other rollouts end. A resume
-        runs those rollouts again."""
+        A retry of a cancelled or stopped evaluation leaves cancelled and unstarted rollouts for a resume.
+        Cancelled rollouts count as neither ended nor failed for the failure check. A retry of a failure stop
+        without cancelled rollouts keeps a stop marker in rollout metadata until a resume."""
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.read(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
@@ -618,13 +620,15 @@ class EvaluationResults:
             request = stored.request
             templates = self.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             cancelled = [item for item in items if rollout_cancelled(item)]
+            retry_stopped = any(item.metadata.get(RETRY_STOP_METADATA) is True for item in items)
+            waits_for_resume = bool(cancelled) or retry_stopped
             ended = [item for item in items if rollout_ended(item) and not rollout_cancelled(item)]
             failed = sum(rollout_failed(item) for item in ended)
             total = len(request.task_names) * request.rollouts_per_task
             limit = request.max_failed_fraction
             if limit is not None and len(ended) >= min(FAILURE_CHECK_ROLLOUTS, total) and failed > limit * len(ended):
                 error = (
-                    f"too many rollouts failed: {failed} of {len(ended)} ended ({failed / len(ended):.0%}), "
+                    f"{FAILURE_STOP_PREFIX} {failed} of {len(ended)} ended ({failed / len(ended):.0%}), "
                     f"over the limit of {limit:.0%}"
                 )
                 logger.warning("evaluation %s of %s stopped: %s", evaluation_id, scenario, error)
@@ -643,7 +647,7 @@ class EvaluationResults:
             per_task = request.rollouts_per_task
             held = {(cast(int, item.payload["task_index"]), cast(int, item.payload["repeat"])) for item in items}
             missing = [position for position in range(total) if divmod(position, per_task) not in held]
-            waiting = len(missing)
+            waiting = 0 if retry_stopped else len(missing)
             retry_waiting = [item for item in items if rollout_waits(item)]
             if waiting > 0 or retry_waiting:
                 # An evaluation on e2b can have template items and no rollout yet; the task's first rollout is the
@@ -668,7 +672,7 @@ class EvaluationResults:
                 # A ready rollout that the limit holds back leaves no place, so the next settle queues it first. A
                 # rollout whose template builds again keeps no place, so the ready tasks' rollouts can start.
                 free -= len(retried)
-                if request.environment == "e2b" and not cancelled:
+                if request.environment == "e2b" and not waits_for_resume:
                     # A template that builds slowly holds one of these places only: the window moves on as the
                     # rollouts of the other tasks go to the queue.
                     tasks = list(dict.fromkeys(position // per_task for position in missing))
@@ -681,7 +685,7 @@ class EvaluationResults:
                             templates[index] = self.queue.retry(EVALUATIONS_QUEUE, template.id) or template
                 # Only a resume starts the rollouts that a cancel or a stop held back.
                 added = 0
-                for position in [] if cancelled else missing:
+                for position in [] if waits_for_resume else missing:
                     if added >= free:
                         break
                     index, repeat = divmod(position, per_task)
@@ -703,7 +707,11 @@ class EvaluationResults:
             if any(item.error == CANCELLED_ERROR for item in cancelled):
                 error = CANCELLED_ERROR
             else:
-                error = f"too many rollouts failed: the stop ended {len(cancelled)} rollouts, which wait for a resume"
+                error = f"{FAILURE_STOP_PREFIX} the stop ended {len(cancelled)} rollouts, which wait for a resume"
+            self.end(scenario, evaluation_id, request, result=None, error=error)
+            return
+        if retry_stopped:
+            error = f"{FAILURE_STOP_PREFIX} {len(missing)} unstarted rollouts wait for a resume"
             self.end(scenario, evaluation_id, request, result=None, error=error)
             return
         rollouts = [EvaluationRollout.from_item(item) for item in items]
@@ -1043,6 +1051,18 @@ class ArtifactEvaluations:
                     scenario,
                     request.max_concurrent_rollouts,
                 )
+            if resumes:
+                for item in items:
+                    if item.metadata.get(RETRY_STOP_METADATA) is True:
+                        self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_STOP_METADATA, False)
+            elif (
+                stored.error is not None
+                and stored.error.startswith(FAILURE_STOP_PREFIX)
+                and len(items) < total
+                and not any(rollout_cancelled(item) for item in items)
+            ):
+                # Keep the stop across reopening, which clears the evaluation's error.
+                self.queue.write_metadata(EVALUATIONS_QUEUE, again[0].id, RETRY_STOP_METADATA, True)
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             reopened = current.store.evaluations.reopen(evaluation_id) if ended else stored
