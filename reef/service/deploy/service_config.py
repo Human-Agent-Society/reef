@@ -563,10 +563,11 @@ class ServiceSettings:
         if not isinstance(self.evaluation_pin_task_files, bool):
             raise ValueError("evaluation.pin_task_files must be true or false")
         if self.evaluation_task_template_builder is not None:
-            builder = TaskTemplateBuilder.reference(
+            reference = TaskTemplateBuilder.reference(
                 self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
             )
-            if self.evaluation_pin_task_files and not builder.plugin_class.supports_pinned_versions():
+            builder = TaskTemplateBuilder.referenced_class(reference)
+            if self.evaluation_pin_task_files and not builder.supports_pinned_versions():
                 raise ValueError("evaluation.pin_task_files needs a template builder that overrides build_for_version")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
