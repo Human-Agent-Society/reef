@@ -42,6 +42,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
     MAX_SOCKET_PATH_BYTES,
     LifecycleStatus,
 )
+from reef.service.routed_shadow import ShadowTasks
 from reef.service.routing import RoutingAdapter, RoutingRequestError, finite_positive_seconds, is_router_config_hash
 
 WriteResult = TypeVar("WriteResult")
@@ -301,7 +302,9 @@ class RequestAcceptance:
     ``close_policy`` until admission opens, a full close takes over, or the owner is lost; otherwise it is None.
     ``forced_requests`` (≥ 0) counts cancellation requests from commands with
     ``cancel_active=True`` or from owner loss. ``publisher`` is given at construction and never replaced; it is
-    None without routing.
+    None without routing. ``shadows`` is the service's ``ShadowTasks`` or None. Its running shadow calls are no
+    admitted requests: a policy close never waits for them, a full close's drain also waits for them, and a
+    forced cancellation or owner loss cancels them too.
     Operations: ``control`` applies one validated command. ``open`` opens admission. ``close`` and ``stop``
     close it, and ``stop`` also sets ``stopping``. ``activate`` replaces ``settings`` through ``publisher``
     after the applicable drain. ``abort_policy`` reopens after a policy close that did not publish anything.
@@ -313,10 +316,16 @@ class RequestAcceptance:
     """
 
     def __init__(
-        self, settings: LifecycleSettings, writes: PendingWrites, *, publisher: RoutingPublisher | None = None
+        self,
+        settings: LifecycleSettings,
+        writes: PendingWrites,
+        *,
+        publisher: RoutingPublisher | None = None,
+        shadows: ShadowTasks | None = None,
     ) -> None:
         self.settings = settings
         self.writes = writes
+        self.shadows = shadows
         self.accepting = False
         self.stopping = False
         self.control_revision = -1
@@ -369,7 +378,7 @@ class RequestAcceptance:
         if self.policy_close_revision is not None:
             if self.selecting:
                 raise web.HTTPConflict(text="routing policy activation requires completed selections")
-        elif self.active or self.writes.count_before(self.drain_sequence):
+        elif self.active or self.writes.count_before(self.drain_sequence) or self.pending_shadows():
             raise web.HTTPConflict(text="routing policy activation requires drained requests and writes")
         if self.settings.snapshot_version != expected_snapshot_version:
             raise web.HTTPConflict(text="routing policy activation expected another current snapshot")
@@ -386,6 +395,12 @@ class RequestAcceptance:
             if not task.done() and not task.cancelling():
                 self.forced_requests += 1
                 task.cancel()
+        if self.shadows is not None:
+            self.shadows.cancel()
+
+    def pending_shadows(self) -> int:
+        """The shadow tasks that run now, or that have just ended and are still tracked."""
+        return 0 if self.shadows is None else len(self.shadows.tasks)
 
     def owner_lost(self) -> None:
         """Close permanently when the parent lease disappears."""
@@ -410,6 +425,7 @@ class RequestAcceptance:
             forced_requests=self.forced_requests,
             pending_selections=len(self.selecting),
             policy_closed=self.policy_close_revision is not None,
+            pending_shadows=self.pending_shadows(),
         ).to_json()
 
     def readiness_deadline(self, body: Mapping[str, object]) -> float | None:
