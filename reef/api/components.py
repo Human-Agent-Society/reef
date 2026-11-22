@@ -13,7 +13,7 @@ processes on several hosts, SQLite for processes on one host. The services are:
 - ``data``: the data routes and the reads of each scenario, record copies, imports and exports
   (``reef.control.operations.data_service``). It needs no control lease.
 - ``harness``: the routes that a harness client calls (``reef.api.routes.harness``); control commits each
-  import (``reef.api.harness_imports``). It needs no control lease.
+  import (``reef.control.operations.harness_imports``). It needs no control lease.
 
 A service that only takes work from a queue answers ``/healthz`` alone. ``reef serve`` without ``--component`` runs
 all of them in one process, on the same interfaces.

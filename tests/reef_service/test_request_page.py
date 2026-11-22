@@ -27,7 +27,8 @@ from tests.support.harness_service import harness_dispatcher
 from reef.api.app import create_app
 from reef.api.artifact_page import build_artifact_page
 from reef.api.auth import page_key_for_digest
-from reef.api.request_page import MAX_ACTIVITY_SHOWN, REFRESH_SECONDS, STATE_WORDS, build_request_page, settled_step
+from reef.api.request_page import MAX_ACTIVITY_SHOWN, REFRESH_SECONDS, build_request_page
+from reef.control.operations.harness import STATE_WORDS, settled_step
 from reef.core import AgentRecord, RequestType
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend.backend import JobProgress

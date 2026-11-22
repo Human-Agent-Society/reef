@@ -48,7 +48,7 @@ from urllib.parse import urlencode
 from reef_client import ReefClient, ReefClientError
 
 from recipes.beta.reefine.agent import launch_pi, tool_calls
-from reef.api.artifact_page import result_of
+from reef.control.operations.harness import result_of
 from reef.execution.sandbox.process import LocalExecutor, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding

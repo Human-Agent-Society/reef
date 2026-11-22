@@ -13,7 +13,6 @@ from aiohttp import web
 
 from reef.api.auth import normalize_tokens
 from reef.api.cors import configure_browser_access
-from reef.api.harness_imports import QueuedImports
 from reef.api.inference_service import InferenceReplica, ServedModelsCache
 from reef.api.lifecycle import (
     LifecycleSettings,
@@ -35,6 +34,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
 from reef.control.operations.artifact_evaluations import ArtifactEvaluations
 from reef.control.operations.artifact_imports import ArtifactImports
+from reef.control.operations.harness_imports import QueuedImports
 from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler

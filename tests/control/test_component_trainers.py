@@ -50,11 +50,12 @@ from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.trajectories import policy_trajectory
 
 from reef.api.app import create_app
-from reef.api.request_service import RequestService
+from reef.api.artifact_page import harness_artifact_page
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.repository import Repository
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import harness_artifacts, harness_manifest
 from reef.control.scenario import Scenario
 from reef.control.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.control.scenario.scenario import validate_component_trainers
@@ -1374,17 +1375,15 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     """Clients pull the tree: a step that carried it forward unchanged is not announced or listed as a snapshot."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
-    service = RequestService(dispatcher)
-    headers = {"x-reef-scenario": "agent"}
     assert append_commit(scenario, HARNESS) is not None
     harness_snapshot = scenario.current_snapshot().revision
     assert append_commit(scenario, WEIGHTS) is not None
     assert scenario.current_snapshot().revision != harness_snapshot
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
-    manifest = service.harness_manifest(headers)
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
+    manifest = harness_manifest(dispatcher, "agent")
     assert manifest["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
     assert manifest["files"] == {"harness.txt": "harness step 1"}
-    catalog = service.harness_artifacts(headers)["artifacts"]
+    catalog = harness_artifacts(dispatcher, "agent")["artifacts"]
     assert [row["operation"] for row in catalog] == ["creation", "training"]
     # The root snapshot made the creation's artifacts; the harness step made its own.
     base = scenario.repository.start_artifact.revision
@@ -1418,8 +1417,6 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     """A rejected step, an unlisted weights step and an activation never break the chain or list a new row."""
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     scenario = loaded(dispatcher)
-    service = RequestService(dispatcher)
-    headers = {"x-reef-scenario": "agent"}
     creation = scenario.current_snapshot().revision
     _append_records(scenario, 1)
     requires = {"training_request": {"id": "r1", "requires": [{"name": "TOKEN", "kind": "env"}]}}
@@ -1434,14 +1431,14 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert append_commit(scenario, HARNESS) is not None
     assert not any(record.made_artifact for record in scenario.store.history()[-2:])
     assert scenario.current_snapshot().revision == w1
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h1, HARNESS)
-    catalog = service.harness_artifacts(headers)["artifacts"]
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, h1, HARNESS)
+    catalog = harness_artifacts(dispatcher, "agent")["artifacts"]
     # The rejected row is named by the listed snapshot it ran on, so a client's poll agrees with the head;
     # like a flat scenario's rejected row, it lists the head's parent, not itself.
     assert listed_revisions(scenario) == [creation, h1, h1]
     assert catalog[-1]["metrics"]["selected"] is False
-    assert "ran on" in service.harness_artifact_page(headers, 2).lower()
-    assert service.harness_manifest(headers, form="source")["artifact_id"] == component_id(scenario, h1, HARNESS)
+    assert "ran on" in harness_artifact_page(dispatcher, "agent", 2).lower()
+    assert harness_manifest(dispatcher, "agent", form="source")["artifact_id"] == component_id(scenario, h1, HARNESS)
 
     # The next harness artifact descends from h1 in the listed chain; the weights artifact it was published
     # on stays under another name, and the requires chain walks the listed rows.
@@ -1449,11 +1446,11 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     _append_records(scenario, 3)
     assert append_commit(scenario, HARNESS) is not None
     h2 = scenario.current_snapshot().revision
-    catalog = service.harness_artifacts(headers)["artifacts"]
+    catalog = harness_artifacts(dispatcher, "agent")["artifacts"]
     assert listed_revisions(scenario) == [creation, h1, h1, h2]
     assert required_by(catalog, component_id(scenario, h2, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h2, HARNESS)
-    page = service.harness_artifact_page(headers, 3)
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, h2, HARNESS)
+    page = harness_artifact_page(dispatcher, "agent", 3)
     assert component_id(scenario, h2, HARNESS) in page
     assert h2 not in page
 
@@ -1462,9 +1459,9 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     scenario.activate(component_id(scenario, h1, HARNESS), HARNESS)
     activated_view = scenario.current_snapshot().revision
     assert activated_view not in (h1, h2)
-    catalog = service.harness_artifacts(headers)["artifacts"]
+    catalog = harness_artifacts(dispatcher, "agent")["artifacts"]
     assert listed_revisions(scenario) == [creation, h1, h1, h2]
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, h1, HARNESS)
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, h1, HARNESS)
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
     # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
@@ -1480,9 +1477,9 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     h3 = scenario.current_snapshot().revision
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 3"
-    catalog = service.harness_artifacts(headers)["artifacts"]
+    catalog = harness_artifacts(dispatcher, "agent")["artifacts"]
     assert listed_revisions(scenario) == [creation, h1, h1, h2, h3]
-    assert service.harness_manifest(headers, form="source")["artifact_id"] == component_id(scenario, h3, HARNESS)
+    assert harness_manifest(dispatcher, "agent", form="source")["artifact_id"] == component_id(scenario, h3, HARNESS)
     assert required_by(catalog, component_id(scenario, h3, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
 
@@ -1597,8 +1594,6 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_artifact(dispat
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     backends[WEIGHTS].hold_next = True
     scenario = loaded(dispatcher)
-    service = RequestService(dispatcher)
-    headers = {"x-reef-scenario": "agent"}
     creation = scenario.current_snapshot().revision
     _append_records(scenario, 1)
     assert append_commit(scenario, WEIGHTS) is not None
@@ -1608,7 +1603,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_artifact(dispat
     held = checkpoint.snapshot.revision
     scenario.activate(component_id(scenario, held, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, creation, HARNESS)
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, creation, HARNESS)
     assert listed_revisions(scenario) == [creation]
 
 
@@ -1617,8 +1612,6 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     """An activation that changes only the weights names the same harness artifact; none adds a row."""
     dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = loaded(dispatcher)
-    service = RequestService(dispatcher)
-    headers = {"x-reef-scenario": "agent"}
     base = scenario.current_snapshot().revision
     _append_records(scenario, 1)
     assert append_commit(scenario, HARNESS) is not None
@@ -1631,13 +1624,13 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     # Back to the first weights under the same tree: nothing to pull.
     scenario.activate(component_id(scenario, first_weights, WEIGHTS), WEIGHTS)
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, harness_snapshot, HARNESS)
     assert listed_revisions(scenario) == [base, harness_snapshot]
 
     # Back to the root's harness: the seed tree is served again, named by the root snapshot.
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
-    assert service.harness_manifest(headers)["artifact_id"] == component_id(scenario, base, HARNESS)
-    assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
+    assert harness_manifest(dispatcher, "agent")["artifact_id"] == component_id(scenario, base, HARNESS)
+    assert harness_manifest(dispatcher, "agent")["files"] == {"harness.txt": "harness seed"}
     assert listed_revisions(scenario) == [base, harness_snapshot]
 
 

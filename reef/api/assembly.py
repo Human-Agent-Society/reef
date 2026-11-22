@@ -22,9 +22,7 @@ from aiohttp import web
 
 from reef.api.app import create_app
 from reef.api.auth import evaluation_token_for
-from reef.api.harness_imports import HarnessSyncWorker
 from reef.api.lifecycle import LifecycleSettings
-from reef.api.request_service import RequestService
 from reef.api.routed_inference import InferenceRetryPolicy
 from reef.api.serving import serving_runtime_config
 from reef.api.settings import ServiceSettings, service_owned_keys
@@ -36,6 +34,7 @@ from reef.control.operations.artifact_evaluations import ArtifactEvaluations, Ne
 from reef.control.operations.artifact_imports import ArtifactImports
 from reef.control.operations.data_service import DataWorker, data_jobs
 from reef.control.operations.data_transfer import ArchiveWriters
+from reef.control.operations.harness_imports import HarnessSyncWorker
 from reef.control.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.control.scenario.live_objects import (
     LiveObjects,
@@ -710,7 +709,7 @@ def build_dispatcher(
         ):
             # The harness service runs in another process: it sends each import here to commit.
             dispatcher.workers.add(
-                HarnessSyncWorker(dispatcher.queue, RequestService(dispatcher), worker_id=instance_id("harness-sync"))
+                HarnessSyncWorker(dispatcher.queue, dispatcher, worker_id=instance_id("harness-sync"))
             )
         if dispatcher.services.runs_data and data_store is not None:
             dispatcher.workers.add(

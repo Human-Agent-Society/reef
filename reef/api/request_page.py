@@ -31,12 +31,22 @@ from reef.api.artifact_page import (
     missed_run_text,
     missed_runs,
     recorded_patch,
-    result_of,
     served_step,
     step_href,
     unscored_failures,
 )
 from reef.api.page_layout import document, escape, requires_table, stamp, status_span
+from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import (
+    STATE_WORDS,
+    file_scenario,
+    files_trainer,
+    request_state,
+    request_view,
+    result_of,
+    settled_step,
+    step_progress,
+)
 from reef.core.requirements import required_by
 from reef.train.harness_backend.backend import JobProgress
 
@@ -102,14 +112,6 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 .layout{gap:16px}}
 """
 
-#: What each state means, in the words the page prints beside it.
-STATE_WORDS = {
-    "queued": "no step has taken the request yet; the trainer runs one step per request, oldest first",
-    "proposing": "the method is making the change; the activity shows what it has done so far",
-    "evaluating": "the evaluation is running the candidate through its runs",
-    "running": "the step holds the request and reports no phase; its row follows",
-}
-
 
 @dataclass(frozen=True)
 class NextAction:
@@ -173,16 +175,6 @@ def rejection_text(metrics: Mapping[str, object]) -> str:
     return f"did not pass the checks ({reason}): {missed_run_text(missed[0])}. Nothing changed; {advice}."
 
 
-def settled_step(rows: Sequence[Mapping[str, object]], record_id: str) -> int | None:
-    """The step whose row answered the request: the one whose ``metrics.training_request.id`` is ``record_id``."""
-    for index, row in enumerate(rows):
-        metrics = row.get("metrics")
-        request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
-        if isinstance(request, Mapping) and request.get("id") == record_id:
-            return index
-    return None
-
-
 def elapsed(seconds: float) -> str:
     """Seconds as a person reads them: ``42 s`` under two minutes, else ``3 min 05 s``."""
     whole = max(0, int(seconds))
@@ -227,15 +219,6 @@ def activity_html(progress: JobProgress, now: float) -> str:
         else ""
     )
     return '<ol class="activity" aria-label="Method activity, newest first">' + "".join(items) + "</ol>" + more
-
-
-def request_state(record: Mapping[str, object], progress: JobProgress | None, consumed: bool) -> str:
-    """Read the backend phase or reserved job data; an unreserved request is queued."""
-    if progress is not None and progress.request_id == record["agent_record_id"]:
-        return progress.phase
-    if consumed:
-        return "running"
-    return "queued"
 
 
 def request_html(record: Mapping[str, object]) -> str:
@@ -464,15 +447,40 @@ def build_request_page(
     )
 
 
+def harness_request_page(
+    dispatcher: Dispatcher, scenario_name: str, record_id: str, link_query: Mapping[str, str] | None = None
+) -> str:
+    """One HTML page for the harness request stored as agent record ``record_id``, live until its step settles.
+
+    The record is the ``POST /reef/train`` request as stored; the
+    catalog row whose ``training_request.id`` names it settles the page.
+    Until then the page reads the running step's progress from the
+    progress file of the harness training component, when a step runs, and
+    whether the trainer holds the request in its reserved job data.
+    ``link_query`` is carried to the version page link, so a page opened
+    through query parameters links one that opens the same way. An
+    unknown id, or one that is not a training request, raises
+    ArtifactNotFoundError naming it.
+    """
+    scenario = file_scenario(dispatcher, scenario_name)
+    # The step a request settled as counts the catalog rows, the ones the snapshot page opens.
+    rows = list(reversed(scenario.harness_rows()))
+    record = request_view(scenario, record_id, rows)
+    progress = step_progress(scenario)
+    reserved = files_trainer(scenario).pending_job_data
+    consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
+    return build_request_page(
+        record, rows, scenario=scenario.name, progress=progress, consumed=consumed, link_query=link_query
+    )
+
+
 __all__ = [
     "MAX_ACTIVITY_SHOWN",
     "REFRESH_SECONDS",
-    "STATE_WORDS",
     "NextAction",
     "activity_html",
     "build_request_page",
+    "harness_request_page",
     "next_action",
     "rejection_text",
-    "request_state",
-    "settled_step",
 ]

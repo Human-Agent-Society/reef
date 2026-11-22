@@ -64,7 +64,7 @@ Reef is organized around an application kernel and three capability domains, not
      - ``reef serve``: the configuration of a deployment, the startup of its processes, and their lifecycle
      - HTTP routes, request handling
    * - ``reef/control/``
-     - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers. ``operations/`` holds the operations that a client asks for, without HTTP: data items, artifact evaluations, artifact imports, and the reads of a scenario's files and samples.
+     - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers. ``operations/`` holds the operations that a client asks for, without HTTP: data items, artifact evaluations, artifact imports, the harness tree and its sync, and the reads of a scenario's files and samples.
      - A concrete record backend, HTTP, training algorithms, repository implementations
    * - ``reef/recipe/``
      - The contract that a method implements, dotted resolution, the recipe loader, the base harness evolution recipe, the built-in SFT and generated-task recipes. A recipe is configuration only.
@@ -188,7 +188,7 @@ The shared store has four parts. Each row names the module that defines its cont
      - ``reef/artifact/``
      - The snapshots of each scenario, and the stored content of checkpoints
 
-A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/samples/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/coordination/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data/queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/api/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
+A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/samples/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/coordination/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data/queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/control/operations/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
 
 Choose a destination
 --------------------

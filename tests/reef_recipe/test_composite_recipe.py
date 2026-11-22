@@ -24,12 +24,12 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.api.app import create_app
-from reef.api.request_service import RequestService
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.composite import compose_snapshot
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import harness_manifest
 from reef.control.scenario.factory import read_trainer_specs, scenario_report_type, with_record2sample_configs
 from reef.control.scenario.live_objects import (
     LiveObjects,
@@ -583,7 +583,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         status = dispatcher.build_training_status()["scenarios"]["agent"]
         assert status["components"]["harness"]["last_training_commit"]["commit_number"] == 3
         assert status["components"]["config"]["last_training_commit"] is None
-        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
+        manifest = harness_manifest(dispatcher, "agent", form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
         assert manifest["components"]["harness"] == scenario.artifact_status()["harness"]["active"]
@@ -757,22 +757,22 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None and not scenario.store.durable
-        service = RequestService(dispatcher)
-        headers = {"x-reef-scenario": "agent"}
         evolved = tmp_path / "evolved"
         evolved.mkdir()
         (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_snapshot().revision
-        source = service.harness_manifest(headers, form="source")
+        source = harness_manifest(dispatcher, "agent", form="source")
         assert source["files"] == {"rules.md": "evolved"}
         artifact_id = source["artifact_id"]
         assert artifact_id != head
         assert scenario.artifact_selection().components["harness"] == artifact_id
         assert any(row["artifact_id"] == artifact_id and row["active"] for row in scenario.artifacts())
-        assert service.harness_manifest(headers, artifact_id=artifact_id, form="source")["files"] == source["files"]
+        assert (
+            harness_manifest(dispatcher, "agent", artifact_id=artifact_id, form="source")["files"] == source["files"]
+        )
         # The default form renders the source tree for the adapter.
-        assert service.harness_manifest(headers)["files"]["plugin/rules.md"].startswith("evolved")
+        assert harness_manifest(dispatcher, "agent")["files"]["plugin/rules.md"].startswith("evolved")
     finally:
         dispatcher.close()
 

@@ -228,13 +228,9 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
 
    * - Today
      - Target
-   * - ``reef/api/request_service.py`` and ``reef/api/harness_imports.py``
-     - ``control/operations/``
    * - The part of ``TrainingPipeline`` in ``reef/train/pipeline.py`` that makes samples
      - ``samples``. The part that builds job data stays in ``train``.
    * - ``reef/recipe/generated_tasks/``
      - ``recipes/``
-
-The request service moves after its imports change. ``reef/api/request_service.py`` imports the harness pages, the wire shapes, the pending writes and the routed inference of ``reef/api/``, and ``reef/api/harness_imports.py`` imports the request service.
 
 ``routing`` is in place (`RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__). Its commands are in ``reef/deploy/routing/cli.py``.

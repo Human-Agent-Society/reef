@@ -5,9 +5,11 @@ import asyncio
 from aiohttp import web
 
 from reef.api.auth import page_query
-from reef.api.harness_imports import HarnessImports
 from reef.api.request_service import RequestService
 from reef.api.routes.payload import read_object
+from reef.api.wire import scenario_header
+from reef.control.operations.harness import harness_artifacts, harness_manifest
+from reef.control.operations.harness_imports import HarnessImports
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 
@@ -16,30 +18,31 @@ def register_harness_routes(app: web.Application, *, request_service: RequestSer
     """The routes that a harness client calls: the active tree, the snapshots, the import of a person's files, and the
     adapters. Control's app and the harness service's app both serve them; ``imports`` commits an import."""
 
-    async def harness(request: web.Request) -> web.Response:
+    dispatcher = request_service.dispatcher
+
+    async def manifest(request: web.Request) -> web.Response:
         form = request.query.get("form", "rendered")
         service_url = request.query.get("service_url") or None
         root = request.query.get("root") or None
-        manifest = await asyncio.to_thread(
-            request_service.harness_manifest,
-            request.headers,
+        answer = await asyncio.to_thread(
+            harness_manifest,
+            dispatcher,
+            scenario_header(request.headers),
             form,
             service_url,
             root,
             artifact_id=request.query.get("artifact_id") or None,
+            inference_url=request_service.inference_url,
         )
-        return web.json_response(
-            manifest,
-            headers={"x-reef-artifact-id": manifest["artifact_id"]},
-        )
-
-    async def harness_import(request: web.Request) -> web.Response:
-        payload = await read_object(request)
-        answer = await asyncio.to_thread(imports.import_files, request.headers, payload)
         return web.json_response(answer, headers={"x-reef-artifact-id": answer["artifact_id"]})
 
-    async def harness_artifacts(request: web.Request) -> web.Response:
-        catalog = await asyncio.to_thread(request_service.harness_artifacts, request.headers)
+    async def import_files(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        answer = await asyncio.to_thread(imports.import_files, scenario_header(request.headers), payload)
+        return web.json_response(answer, headers={"x-reef-artifact-id": answer["artifact_id"]})
+
+    async def artifacts(request: web.Request) -> web.Response:
+        catalog = await asyncio.to_thread(harness_artifacts, dispatcher, scenario_header(request.headers))
         # Each row names its step's page, the step being its position oldest first; the link carries a page key in
         # place of the token.
         query = page_query(request, catalog["scenario"])
@@ -73,9 +76,9 @@ def register_harness_routes(app: web.Application, *, request_service: RequestSer
             )
         return web.json_response({"adapters": entries})
 
-    app.router.add_get("/reef/harness", harness)
-    app.router.add_post("/reef/harness/import", harness_import)
-    app.router.add_get("/reef/harness/artifacts", harness_artifacts)
+    app.router.add_get("/reef/harness", manifest)
+    app.router.add_post("/reef/harness/import", import_files)
+    app.router.add_get("/reef/harness/artifacts", artifacts)
     app.router.add_get("/reef/harness/adapters", adapters)
 
 
