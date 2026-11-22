@@ -23,7 +23,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.record2sample import (
+from reef.samples import (
     GroupDecision,
     InferenceRecordSamples,
     NoSamples,
@@ -36,16 +36,16 @@ from reef.record2sample import (
     SingleRecordSet,
     SkippedReport,
 )
-from reef.record2sample.service import Selection
-from reef.record2sample.staleness import ServedArtifacts
-from reef.record2sample.traces import TraceSamples
-from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.storage.commits import CommitRecord
-from reef.storage.data import MAX_QUERY_LIMIT, NewItem
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.work_queue import WorkLeaseLostError
+from reef.samples.service import Selection
+from reef.samples.staleness import ServedArtifacts
+from reef.samples.traces import TraceSamples
+from reef.storage.coordination.work_queue import WorkLeaseLostError
+from reef.storage.data.store import MAX_QUERY_LIMIT, NewItem
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 

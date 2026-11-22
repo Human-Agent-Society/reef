@@ -46,7 +46,7 @@ its argument and the stage's config (see `Uploaded trajectories
 The contract
 ------------
 
-Subclass ``reef.record2sample.Record2Sample``, or one of the `built-in
+Subclass ``reef.samples.Record2Sample``, or one of the `built-in
 stages`_.
 
 Required members:
@@ -96,7 +96,7 @@ A stage declares its keys as a frozen dataclass that inherits
 
    from reef.core.config import config_option
    from reef.core.plugins import PluginSettings
-   from reef.record2sample import ReportSamples
+   from reef.samples import ReportSamples
 
 
    @dataclass(frozen=True)
@@ -133,7 +133,7 @@ Failure behavior
 Built-in stages
 ---------------
 
-Extend one of these classes of ``reef.record2sample`` when it fits:
+Extend one of these classes of ``reef.samples`` when it fits:
 
 - ``NoSamples``: nothing. The default of a recipe that trains no weights.
 - ``ReportSamples``: one sample per valid report, alone or in groups

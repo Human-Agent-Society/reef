@@ -35,8 +35,8 @@ from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
+from reef.storage.data.job_data import JobDataKind
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.component import SavedCheckpoint, TrainingJob

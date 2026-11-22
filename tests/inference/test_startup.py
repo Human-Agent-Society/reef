@@ -22,12 +22,16 @@ from tests.support.runtime_stubs import (
 )
 from tests.support.serving import Engines
 
+from reef.api.app import create_app
+from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, SnapshotRef
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
+from reef.control.workers import serving
+from reef.control.workers.serving import ServingWorker
 from reef.core.errors import ScenarioDeletedError
 from reef.core.served_models import ScheduledStop, ServedArtifact
-from reef.dispatcher import Dispatcher, serving
-from reef.dispatcher.serving import ServingWorker
 from reef.inference.checkpoint_slots import CheckpointSlotsRuntime
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import (
@@ -41,13 +45,16 @@ from reef.inference.serving import FullWeightServingRuntime, OpenedEngines
 from reef.inference.startup import StartupFailedError, StartupStoppedError, redeploying, report_startup, stopping
 from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
-from reef.scenario.live_objects import LiveObjects
-from reef.service.app import create_app
-from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
-from reef.storage.served_models import REDEPLOY, SERVE_ARTIFACT_KIND, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
-from reef.storage.sql_coordination import memory_coordination, open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.coordination.served_models import (
+    REDEPLOY,
+    SERVE_ARTIFACT_KIND,
+    SERVING_KIND,
+    SERVING_QUEUE,
+    STOP_SERVING_KIND,
+)
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.sql.coordination import memory_coordination, open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
@@ -700,10 +707,10 @@ def test_the_worker_logs_its_ownership_its_opening_and_each_activation(startup, 
     control, worker, runtime = startup[0], startup[1], startup[2]
     runtime.release.set()
     control.create_scenario("math")
-    with caplog.at_level("INFO", logger="reef.dispatcher.serving"):
+    with caplog.at_level("INFO", logger="reef.control.workers.serving"):
         assert worker.run_once()
         worker.stop()
-    messages = [record.getMessage() for record in caplog.records if record.name == "reef.dispatcher.serving"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "reef.control.workers.serving"]
     assert any("holds runtime ownership" in message for message in messages)
     assert any("opened the inference runtime" in message for message in messages)
     assert any("kept 0 of 0 routes from before" in message for message in messages)

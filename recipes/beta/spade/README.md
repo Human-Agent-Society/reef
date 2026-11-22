@@ -2,7 +2,7 @@
 
 **Status: beta.** SPADE remains under `recipes/beta/spade/` until complete, reproducible learning results are published. The tests validate the experience section and the generator's generations against stand ins; they do not establish learning performance. See [issue #482](https://github.com/Human-Agent-Society/reef/issues/482) and [issue #498](https://github.com/Human-Agent-Society/reef/issues/498) for the pieces, [issue #447](https://github.com/Human-Agent-Society/reef/issues/447) for the pipeline they belong to, and [issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this classification.
 
-[SPADE](https://arxiv.org/abs/2608.19197), self play in adaptive synthetic executable environments, as a Reef task generator: one policy plays an Environment Designer that writes executable environments and a Reasoning Agent that learns in them. Reef knows one task format, Harbor, and writes and checks Harbor tasks and runs their rollouts in `reef.record2sample.generator`: the task contract as a prompt, the served model asked through Reef (every proposal a record with a receipt), the reply held to the authoring rules and written with `reef.core.tasks`, Harbor's oracle and nop agents on the result, and the rollout runner. That runs as the generator service `reef serve` starts beside the HTTP service. What SPADE adds is the method, and it lives here.
+[SPADE](https://arxiv.org/abs/2608.19197), self play in adaptive synthetic executable environments, as a Reef task generator: one policy plays an Environment Designer that writes executable environments and a Reasoning Agent that learns in them. Reef knows one task format, Harbor, and writes and checks Harbor tasks and runs their rollouts in `reef.samples.generator`: the task contract as a prompt, the served model asked through Reef (every proposal a record with a receipt), the reply held to the authoring rules and written with `reef.core.tasks`, Harbor's oracle and nop agents on the result, and the rollout runner. That runs as the generator service `reef serve` starts beside the HTTP service. What SPADE adds is the method, and it lives here.
 
 - Paper: [arXiv:2608.19197](https://arxiv.org/abs/2608.19197)
 - Reference code: [spade-rl/spade](https://github.com/spade-rl/spade)
@@ -99,7 +99,7 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks import GeneratorState
-from reef.record2sample.generator import HttpGenerator, TaskGenerationRequest
+from reef.samples.generator import HttpGenerator, TaskGenerationRequest
 
 
 async def rebuild_task(
@@ -125,7 +125,7 @@ Materials can be UTF-8 files or directories on the caller's machine. The client 
 
 Use a prepared snapshot containing only the materials the Designer should see. The client rejects symlinks, special files, non-text files, and unreadable files. Limits are 128 files, 256 KiB of file contents, and 512 KiB of JSON for records and files combined. Oversized inputs fail before a Designer call. The client and service do not truncate these inputs.
 
-The input contract is `TaskGenerationRequest` in `reef.record2sample.generator`. Both SPADE and the generator service use this type. For materials already in memory, pass `asset_files={"state.txt": "file contents"}` instead of `assets`.
+The input contract is `TaskGenerationRequest` in `reef.samples.generator`. Both SPADE and the generator service use this type. For materials already in memory, pass `asset_files={"state.txt": "file contents"}` instead of `assets`.
 
 To call the generator directly, wrap the shared request in `DesignerRequest(inputs=request, difficulty="hard")`. Then call `HttpGenerator.propose(...)`. `DesignerRequest` holds the shared input and adds Designer settings. The HTTP client reads local `assets` into `asset_files`. The service reconstructs the same input type. Each source record retains its payload, type, timestamp, references, and artifact version. Use matching client and generator versions for historical inputs.
 

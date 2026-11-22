@@ -46,7 +46,7 @@ The contract
 ------------
 
 ``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
-``TaskGenerationRequest`` in ``reef.record2sample.generator``. A generator
+``TaskGenerationRequest`` in ``reef.samples.generator``. A generator
 gets what it needs from its ``config`` and from these calls only.
 
 - ``from_config(config, *, scenario, environ, state)``: class method,
@@ -147,7 +147,7 @@ Container work
 --------------
 
 Operations that need containers run in the generator service
-(``reef.record2sample.generator``), which ``reef serve`` starts from the
+(``reef.samples.generator``), which ``reef serve`` starts from the
 ``generator`` section (see `generator configuration
 <../reference/configuration-generated-tasks.rst#the-generator-section>`__). A generator can
 run rollouts of a task through that service, as SPADE does. Those rollouts

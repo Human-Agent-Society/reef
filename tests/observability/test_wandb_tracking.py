@@ -9,6 +9,7 @@ import pytest
 from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.artifact_selection import ArtifactSelection
+from reef.deploy.service_config import service_config_from_mapping
 from reef.observability.base import (
     ExperimentRun,
     TrainFromExperimentEvent,
@@ -17,7 +18,6 @@ from reef.observability.base import (
 )
 from reef.observability.operations import OperationMetrics
 from reef.observability.wandb import WandbExperimentTracker, WandbSettings
-from reef.service.deploy.service_config import service_config_from_mapping
 
 
 class _StubRun:

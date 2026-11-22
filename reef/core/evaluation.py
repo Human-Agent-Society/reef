@@ -1009,7 +1009,7 @@ class EvaluationCall:
     capture proxy kept no JSON object.
 
     Purpose: the evaluation worker makes it for each captured call, and the data store keeps it as a record item
-    (``reef.storage.record_items.evaluation_call_item``). The call route answers it with ``to_json``.
+    (``reef.storage.scenario.record_items.evaluation_call_item``). The call route answers it with ``to_json``.
     """
 
     summary: EvaluationCallSummary
@@ -1042,7 +1042,7 @@ class EvaluationTrajectory:
     (``TrajectorySample`` checks it). ``(task_index, repeat, attempt, index)`` is its key in its evaluation.
 
     Purpose: the evaluation worker reads it from the trial; the data store keeps it as a trajectory item
-    (``reef.storage.record_items.evaluation_trajectory_item``), and the trajectories route answers it.
+    (``reef.storage.scenario.record_items.evaluation_trajectory_item``), and the trajectories route answers it.
     """
 
     task_index: int

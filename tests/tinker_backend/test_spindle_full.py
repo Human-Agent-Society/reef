@@ -12,6 +12,7 @@ from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.job_data import job_data_ref
 
+from reef.api.training import training_deployment_for
 from reef.artifact import (
     BASE_FILE,
     REFERENCE_FILE,
@@ -25,7 +26,6 @@ from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.tinker import TinkerInferenceRuntime
-from reef.service.deploy.training import training_deployment_for
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.component import TrainingArtifactLayout, TrainingJob, job_id_for

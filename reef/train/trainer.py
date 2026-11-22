@@ -26,14 +26,14 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
-from reef.pipeline_context import PipelineContext
-from reef.record2sample.service import ProducedSamples, Selection
-from reef.record2sample.staleness import ServedArtifacts
-from reef.storage.commits import CommitRecord
-from reef.storage.record_items import used_record, used_records
-from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
-from reef.storage.tasks import TaskStorage
+from reef.samples.context import PipelineContext
+from reef.samples.service import ProducedSamples, Selection
+from reef.samples.staleness import ServedArtifacts
+from reef.storage.data.tasks import TaskStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.record_items import used_record, used_records
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
 from reef.train.component import JobCheckPendingError, ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline

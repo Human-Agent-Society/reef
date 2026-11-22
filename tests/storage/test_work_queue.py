@@ -13,8 +13,8 @@ from reef.core.errors import RuntimeConfigError
 from reef.core.plugins import PluginConfigError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
-from reef.storage.control_lease import ControlLease
-from reef.storage.served_models import (
+from reef.storage.coordination.control_lease import ControlLease
+from reef.storage.coordination.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
     SERVING_KIND,
@@ -23,7 +23,8 @@ from reef.storage.served_models import (
     ControlLeaseConflictError,
     ServedModelsWriter,
 )
-from reef.storage.sql_coordination import (
+from reef.storage.coordination.work_queue import NewWork, WorkConflictError, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.sql.coordination import (
     ADDED_INDEXES,
     PostgresCoordinationDatabase,
     SQLControlLease,
@@ -31,7 +32,6 @@ from reef.storage.sql_coordination import (
     SQLServedModels,
     SQLWorkQueue,
 )
-from reef.storage.work_queue import NewWork, WorkConflictError, WorkItem, WorkLeaseLostError, WorkQueue
 
 
 @dataclass
@@ -905,7 +905,7 @@ def test_queue_pages_and_counts_are_scoped_and_newest_first(open_coordination):
 
 @pytest.mark.unit
 def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coordination):
-    from reef.storage.work_queue import WorkLogLine
+    from reef.storage.coordination.work_queue import WorkLogLine
 
     queue = open_coordination().queue
     queue.append(job("a"), now=0)

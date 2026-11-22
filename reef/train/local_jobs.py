@@ -18,8 +18,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from reef.storage.data.job_data import JobDataRef, LocalJobData
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataRef, LocalJobData
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 
 logger = logging.getLogger(__name__)

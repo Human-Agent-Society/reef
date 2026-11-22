@@ -8,7 +8,7 @@ The storage contracts under a scenario's tasks and a deployment's data: ``TaskSt
 Task stores
 -----------
 
-A ``TaskStore`` (``reef.storage.tasks``) holds published Harbor tasks, each in the ``train`` or ``eval`` split. A record-to-sample stage that generates tasks saves them in a task store before any rollout, so generation and rollout recover independently after a restart.
+A ``TaskStore`` (``reef.storage.data.tasks``) holds published Harbor tasks, each in the ``train`` or ``eval`` split. A record-to-sample stage that generates tasks saves them in a task store before any rollout, so generation and rollout recover independently after a restart.
 
 To open a store, call ``task_storage.open(name)``. A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``, and each record-to-sample stage uses its own ``name``. For a composite recipe, each component's ``TaskStorage`` opens ``<component>/<name>``, so two components never share a store.
 
@@ -65,7 +65,7 @@ The scenario's imported tasks are not a task store. They are task items that the
 Task file stores
 ----------------
 
-A ``TaskFileStore`` (``reef.storage.tasks``) keeps the directories of the published tasks, addressed by the digest of their files. The digest covers the directory name and each file's path, bytes, and executable flag, so a repeated save of the same files changes nothing. The flag is set if any executable bit is set. Existing digests still address their stored directories. The store can reuse a legacy digest when the files and their executable flags match. Use the digest that the store returns to read a saved directory.
+A ``TaskFileStore`` (``reef.storage.data.tasks``) keeps the directories of the published tasks, addressed by the digest of their files. The digest covers the directory name and each file's path, bytes, and executable flag, so a repeated save of the same files changes nothing. The flag is set if any executable bit is set. Existing digests still address their stored directories. The store can reuse a legacy digest when the files and their executable flags match. Use the digest that the store returns to read a saved directory.
 
 A deployment selects the store in ``storage.task_file_backend`` (`Choose the task file store <../user-guide/storage.rst#choose-the-task-file-store>`__). ``LocalTaskFileStore`` is the built-in store. An embedded caller can give a store to ``SQLiteScenarioStorage(..., task_files=...)`` or ``PostgresScenarioStorage(..., task_files=...)``. Without one, the storage uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
 
@@ -127,19 +127,19 @@ The codes of ``task_limit_errors`` are:
 Data stores
 -----------
 
-A ``DataStore`` (``reef.storage.data``) keeps the deployment's data items. An item is ``(id, content, metadata)``:
+A ``DataStore`` (``reef.storage.data.store``) keeps the deployment's data items. An item is ``(id, content, metadata)``:
 
 - Its content never changes: the JSON object of a trajectory or a record, or the directory of a task, which the task file store keeps in the owner's partition.
 - Its metadata is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or ``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or ``eval``) and, for a record or artifact, ``origin`` (``{scenario, artifact_id}``). The keys in ``FIXED_KEYS`` (``kind``, ``owner``, ``origin`` and ``evaluation_id``) never change.
 
-A deployment selects the store in ``storage.data_store``. ``SQLiteDataStore`` and ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are built in.
+A deployment selects the store in ``storage.data_store``. ``SQLiteDataStore`` and ``PostgresDataStore`` (``reef.storage.sql.data``) and ``MemoryDataStore`` are built in.
 
 - Every operation names one owner and reads or writes only its items.
 - Every store links the record items of each owner into trajectories.
 - The SQL stores keep only the messages that each item adds; reads return the whole content. With a segment store, the SQL stores keep the content of trajectory items and record messages in segments (`Segment stores`_).
 - The store checks the form of the metadata. The service checks that ``scenarios`` names only scenarios of the owner.
 
-The table gives the members that a caller uses most. A plugin implements every abstract member of the class, including the scenario uses, holds, collections and job data directories that ``reef/storage/data.py`` describes.
+The table gives the members that a caller uses most. A plugin implements every abstract member of the class, including the scenario uses, holds, collections and job data directories that ``reef/storage/data/store.py`` describes.
 
 .. list-table::
    :header-rows: 1
@@ -150,7 +150,7 @@ The table gives the members that a caller uses most. A plugin implements every a
    * - ``from_config(config, *, directory, task_files, segments, job_directory_ttl_seconds=...)``
      - Class method that builds the store that a deployment names. ``directory`` is ``storage.agent_record_dir``. The caller owns ``task_files``. ``segments`` is the ``storage.segment_backend`` store or ``None``; the data store owns it and closes it. ``job_directory_ttl_seconds`` is ``storage.job_directory_ttl_s``.
    * - ``create(owner, items, *, generation=None)``
-     - Stores ``NewItem`` values, all or none. The same ID and content again changes nothing; other content is ``ItemConflictError``. Bad metadata is ``ValueError``. A task's content is a local task directory, which the store copies into the owner's task file partition, or a ``TaskFilesReference(digest)`` (``reef.storage.item_kinds``) to a directory that the partition holds. A reference that it does not hold is ``TaskFilesNotFoundError``.
+     - Stores ``NewItem`` values, all or none. The same ID and content again changes nothing; other content is ``ItemConflictError``. Bad metadata is ``ValueError``. A task's content is a local task directory, which the store copies into the owner's task file partition, or a ``TaskFilesReference(digest)`` (``reef.storage.data.item_kinds``) to a directory that the partition holds. A reference that it does not hold is ``TaskFilesNotFoundError``.
    * - ``read(owner, item_id)``
      - The ``StoredItem``, or ``None``.
    * - ``query(owner, *, kind, scenario, after, limit, content=True, ...)``
@@ -183,7 +183,7 @@ The table gives the members that a caller uses most. A plugin implements every a
 Segment stores
 --------------
 
-A ``SegmentStore`` (``reef.storage.segments``) keeps segments: immutable JSON Lines files, each in one partition. The SQL data stores use one partition per owner. A deployment selects the store in ``storage.segment_backend`` (`Keep large content in segment files <../user-guide/storage.rst#keep-large-content-in-segment-files>`__). ``LocalSegmentStore`` is the built-in store.
+A ``SegmentStore`` (``reef.storage.data.segments``) keeps segments: immutable JSON Lines files, each in one partition. The SQL data stores use one partition per owner. A deployment selects the store in ``storage.segment_backend`` (`Keep large content in segment files <../user-guide/storage.rst#keep-large-content-in-segment-files>`__). ``LocalSegmentStore`` is the built-in store.
 
 .. list-table::
    :header-rows: 1

@@ -25,8 +25,8 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.job_data import JobData, JobOutcome
-from reef.storage.data import DataStore, MemoryDataStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.store import DataStore, MemoryDataStore
+from reef.storage.data.tasks import LocalTaskFileStore
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob, job_id_for
 from reef.train.types import TrainingCommit
 

@@ -157,7 +157,7 @@ Opt-in suites
 .. code:: bash
 
    REEF_TEST_RAY=1 PYTHONPATH="$PWD" NO_PROXY='*' \
-     .venv/bin/python -m pytest tests/reef_service/deploy/test_service_executor_ray.py \
+     .venv/bin/python -m pytest tests/deploy/test_service_executor_ray.py \
        tests/inference/sglang/test_inference_control.py -q
 
    REEF_TEST_POSTGRES_URL=postgresql://... \

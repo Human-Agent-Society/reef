@@ -21,7 +21,7 @@ from reef_client import ReefClientError
 from tests.support import records
 from tests.support.conversations import conversation
 
-from reef.record2sample import ReportSamples
+from reef.samples import ReportSamples
 from reef.train import PipelineContext
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
