@@ -21,10 +21,10 @@ from reef.execution.sandbox.agentenv_build import (
     AgentEnvBuildError,
     AgentEnvTemplates,
     DockerfileBuild,
+    TransientBuildError,
     dockerfile_build,
     dockerfile_sets_start_command,
     ensure_aenv_template,
-    TransientBuildError,
 )
 
 #: A fake ``aenv``: it records its arguments, the credentials that it reads and each run, then acts as FAKE_AENV_MODE
