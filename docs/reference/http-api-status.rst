@@ -56,7 +56,7 @@ Fields of each scenario:
 - ``job_data_ready`` says whether the training pipeline has a job's data waiting.
 - ``training_mode`` is the selected mode.
 - ``artifacts`` gives two ``artifact_id`` values for each component: its active artifact and its trainer's training start. A value is ``null`` when Reef does not know it. Both values start at the creation artifact.
-- ``pipeline`` includes ``ready_samples``, the untrained samples that the next automatic job takes, from recorded traffic and uploaded trajectories; ``job_samples``, the samples that automatic job data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most samples that one automatic job takes, beside the rest of a group. A processor that takes requests also reports ``pending_requests``.
+- ``pipeline`` includes ``ready_samples``, the untrained samples that the next automatic job takes, from recorded traffic and uploaded trajectories; ``job_samples``, the samples that automatic job data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most samples that one automatic job takes, beside the rest of a group. A training pipeline that takes requests also reports ``pending_requests``.
 - ``processor`` is the older name of ``pipeline``. The answer holds the same object under both keys, in each scenario and in each entry of ``components``, so that a caller that reads ``processor`` continues to work. Read ``pipeline`` in new code.
 
 A scenario that trains weights also reports its training jobs:
