@@ -1307,7 +1307,8 @@ def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_
     """The reviewed case: sequential provider checks outlast the old budget of only Scenario previews (11 s here)."""
     policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=1)
     controller = RoutingDeploymentController(
-        ServiceSettings(recipe="base", routing_deployment=policy, inference_timeout_s=6),
+        policy,
+        ServiceSettings(recipe="base", inference_timeout_s=6).routed_service(),
         FakeRuntime([]),
         registry_root=tmp_path / "registry",
     )

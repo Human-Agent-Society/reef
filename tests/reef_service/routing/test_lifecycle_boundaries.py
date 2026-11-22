@@ -122,7 +122,7 @@ def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_forc
         deployment_id="test-managed", drain_timeout_seconds=0.03, finalization_timeout_seconds=0.03
     )
     controller = RoutingDeploymentController(
-        ServiceSettings(recipe="base", routing_deployment=policy), runtime, registry_root=tmp_path / "registry"
+        policy, ServiceSettings(recipe="base").routed_service(), runtime, registry_root=tmp_path / "registry"
     )
     controller.registry.acquire()
     controller.directory = tmp_path / "generation"
@@ -188,7 +188,7 @@ def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_forc
     monkeypatch.setattr(runtime, "start", slow_create)
     monkeypatch.setattr(runtime, "remove", second_signal_then_remove)
     monkeypatch.setattr(orchestrator, "DockerComposeRuntime", lambda: runtime)
-    monkeypatch.setattr(orchestrator, "RoutingDeploymentController", lambda settings, selected: controller)
+    monkeypatch.setattr(orchestrator, "RoutingDeploymentController", lambda policy, service, selected: controller)
     monkeypatch.setattr(orchestrator, "_Stack", RoutingOnlyStack)
     sender = threading.Thread(target=signal_during_create)
     sender.start()

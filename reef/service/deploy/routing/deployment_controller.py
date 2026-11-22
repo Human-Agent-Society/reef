@@ -62,7 +62,7 @@ from reef.service.deploy.routing.renderer import (
     router_configuration,
     write_private_document,
 )
-from reef.service.deploy.service_config import ServiceSettings
+from reef.service.deploy.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
 from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
 
@@ -99,6 +99,9 @@ class RoutingDeploymentController:
     only set stop intent. No monitor thread may mutate the container deployment. The startup future is joined
     before cleanup.
 
+    ``policy`` holds the router's settings. ``service`` holds the settings of the REEF service that the controller
+    reads.
+
     A new controller is not prepared: ``ownership``, ``control``, ``management``, ``event_stream`` and
     ``semantic_router_image`` are None, ``snapshot_version`` is empty and ``directory`` is a placeholder.
     ``prepare`` fills all but ``event_stream`` for one new generation. ``semantic_router_image`` is the image
@@ -122,11 +125,15 @@ class RoutingDeploymentController:
     """
 
     def __init__(
-        self, settings: ServiceSettings, runtime: ContainerRuntime, *, registry_root: Path | None = None
+        self,
+        policy: RoutingDeploymentSettings,
+        service: RoutedServiceSettings,
+        runtime: ContainerRuntime,
+        *,
+        registry_root: Path | None = None,
     ) -> None:
-        policy = settings.routing_deployment
         self.policy = policy
-        self.service_settings = settings
+        self.service = service
         self.runtime = runtime
         self.registry = DeploymentRegistry(policy.require_identity(), root=registry_root)
         self.ownership: DeploymentOwnership | None = None
@@ -303,7 +310,7 @@ class RoutingDeploymentController:
         distinct provider URL and credential once, so the enabled-target count bounds those checks
         without resolving credentials here. Each check gets the child's own timeout.
         """
-        provider_check_seconds = min(self.service_settings.inference_timeout_s, MAX_READINESS_TIMEOUT_SECONDS)
+        provider_check_seconds = min(self.service.inference_timeout_seconds, MAX_READINESS_TIMEOUT_SECONDS)
         preview_seconds = self.policy.selection_timeout_seconds + RESPONSE_WRITE_ALLOWANCE_SECONDS
         enabled_targets = sum(target.enabled for target in snapshot.targets.values())
         return (
@@ -318,10 +325,10 @@ class RoutingDeploymentController:
         The version is None when the source omits the router image: the version names the image, which only
         startup resolves. The source, the settings and a domain classifier are checked as a render checks them.
         """
-        settings = self.service_settings
-        if settings.routing_manifest is None or not settings.tokens or settings.host != "127.0.0.1":
+        service = self.service
+        if service.routing_manifest is None or not service.has_tokens or service.host != "127.0.0.1":
             raise ValueError("managed routing requires routing_manifest, tokens and reef.host=127.0.0.1")
-        if settings.port == self.policy.sr_management_port:
+        if service.port == self.policy.sr_management_port:
             raise ValueError("reef.port must differ from routing sr_management_port")
         source = self.startup_source()
         snapshot = RoutingSnapshot.load(source)
@@ -684,12 +691,11 @@ class RoutingDeploymentController:
         the committed manifest instead: the source may hold the uncommitted
         candidate. Without that copy, startup stays closed for an operator.
         """
-        settings = self.service_settings
-        if settings.routing_manifest is None:
+        if self.service.routing_manifest is None:
             raise ValueError("managed routing requires routing_manifest")
         state = self.policy_store.load()
         if state.pending is None:
-            return Path(settings.routing_manifest)
+            return Path(self.service.routing_manifest)
         source = None if state.committed is None else Path(state.committed.source)
         if source is None or not source.is_file():
             raise RoutingDeploymentError(
@@ -761,14 +767,13 @@ class RoutingDeploymentController:
     def render_policy(self) -> tuple[Path, RoutingSnapshot]:
         """Render the configured source manifest beside this generation without changing anything running."""
         ownership, _ = self.require_clients()
-        settings = self.service_settings
-        if settings.routing_manifest is None:
+        if self.service.routing_manifest is None:
             raise ValueError("managed routing has no source manifest")
         current_manifest = Path(self.committed_policy().manifest)
         self.policy_count += 1
         directory = self.directory / "policies" / f"{self.policy_count:04d}"
         directory.parent.mkdir(mode=0o700, exist_ok=True)
-        candidate = self.render(Path(settings.routing_manifest), directory, ownership)
+        candidate = self.render(Path(self.service.routing_manifest), directory, ownership)
         check_policy_change(RoutingSnapshot.load(current_manifest), candidate)
         deployment = yaml.safe_load((directory / "manifest.yaml").read_text())["deployment"]
         if deployment != yaml.safe_load(current_manifest.read_text())["deployment"]:

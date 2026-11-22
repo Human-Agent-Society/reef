@@ -24,7 +24,11 @@ from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.service.deploy.routing.settings import (
+    RoutedServiceSettings,
+    RoutingDeploymentSettings,
+    routing_deployment_settings,
+)
 from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.records import RecordRetention
@@ -619,6 +623,16 @@ class ServiceSettings:
                 "record_database_url and record_database_schema require storage.record_backend or "
                 "storage.coordination_backend: postgres"
             )
+
+    def routed_service(self) -> RoutedServiceSettings:
+        """The settings that the controller of a routing deployment reads."""
+        return RoutedServiceSettings(
+            routing_manifest=self.routing_manifest,
+            host=self.host,
+            port=self.port,
+            has_tokens=bool(self.tokens),
+            inference_timeout_seconds=self.inference_timeout_s,
+        )
 
 
 def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:

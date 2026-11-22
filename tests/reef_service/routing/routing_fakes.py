@@ -613,7 +613,7 @@ def controller_case(tmp_path: Path) -> Iterator[ControllerCase]:
         container_stop_timeout_seconds=0.03,
     )
     controller = RoutingDeploymentController(
-        ServiceSettings(recipe="base", routing_deployment=policy), runtime, registry_root=tmp_path / "registry"
+        policy, ServiceSettings(recipe="base").routed_service(), runtime, registry_root=tmp_path / "registry"
     )
     controller.registry.acquire()
     controller.directory = tmp_path / "generation"

@@ -7,8 +7,8 @@ from typing import Any
 
 from aiohttp import web
 
+from reef.core.values import strict_json_object
 from reef.service.lifecycle import REQUEST_ACCEPTANCE
-from reef.service.wire import strict_json_object
 
 
 async def read_object(request: web.Request, *, strict: bool = False) -> dict[str, Any]:

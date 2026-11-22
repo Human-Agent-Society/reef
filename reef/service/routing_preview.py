@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import ClientConnectionError, ClientError, ClientResponse, ClientSession, ClientTimeout, DummyCookieJar
 
+from reef.core.values import strict_json_object
 from reef.service.routing import (
     DEFAULT_RULE,
     RoutingAdapter,
@@ -37,7 +38,6 @@ from reef.service.routing import (
     RoutingScenario,
     scenario_entrypoint,
 )
-from reef.service.wire import strict_json_object
 
 PREVIEW_PATH = "/api/v1/routing/preview"
 #: The runtime hash a preview must run against, and the one it actually used (pkg/headers/config_hash.go).

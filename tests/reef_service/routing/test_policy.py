@@ -342,7 +342,9 @@ def started_case(tmp_path: Path, source: Path, *, resolved_image: str | None = N
         recipe="recipe", host="127.0.0.1", routing_manifest=str(source), tokens=("service",), routing_deployment=policy
     )
     runtime = FakeRuntime(actions)
-    controller = RoutingDeploymentController(settings, runtime, registry_root=tmp_path / "registry")
+    controller = RoutingDeploymentController(
+        settings.routing_deployment, settings.routed_service(), runtime, registry_root=tmp_path / "registry"
+    )
     controller.registry.acquire()
     controller.directory = tmp_path / "generation"
     controller.ownership = controller.registry.prepare("generation-one", tmp_path / "generation")

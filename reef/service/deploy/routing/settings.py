@@ -111,6 +111,24 @@ class RoutingDeploymentSettings:
         return self.deployment_id
 
 
+@dataclass(frozen=True)
+class RoutedServiceSettings:
+    """The settings of the REEF service that the controller of a routing deployment reads.
+
+    Values: ``routing_manifest`` is None or the non-empty path of the source manifest. ``host`` is the HTTP bind
+    address of the service, and ``port`` is its HTTP bind port. ``has_tokens`` is whether the service has at least
+    one bearer token. ``inference_timeout_seconds`` is the timeout of one provider call, in seconds.
+    Purpose: ``ServiceSettings.routed_service`` makes it from the settings that it checked;
+    ``RoutingDeploymentController`` reads it to check a managed deployment and to bound the time of one ``open``.
+    """
+
+    routing_manifest: str | None
+    host: str
+    port: int
+    has_tokens: bool
+    inference_timeout_seconds: float
+
+
 def routing_deployment_settings(section: Mapping[str, object] | None) -> RoutingDeploymentSettings:
     """Parse the public object and reject unknown or misspelled settings before any process starts."""
     if section is None:

@@ -784,7 +784,9 @@ def test_partial_prepare_failure_keeps_lock_until_safe_cleanup(
         routing_manifest=str(manifest),
         routing_deployment=RoutingDeploymentSettings(deployment_id="partial"),
     )
-    controller = RoutingDeploymentController(settings, runtime, registry_root=tmp_path / "registry")
+    controller = RoutingDeploymentController(
+        settings.routing_deployment, settings.routed_service(), runtime, registry_root=tmp_path / "registry"
+    )
     monkeypatch.setattr(controller, "validate_candidate", lambda: "already-validated")
     with pytest.raises(ValueError, match="renderer"):
         controller.prepare()
@@ -818,7 +820,9 @@ def preparing_controller(
     )
     with DeploymentRegistry("resolved", root=tmp_path / "registry") as registry:
         registry.prepare("previous", tmp_path / "previous")
-    return RoutingDeploymentController(settings, runtime, registry_root=tmp_path / "registry")
+    return RoutingDeploymentController(
+        settings.routing_deployment, settings.routed_service(), runtime, registry_root=tmp_path / "registry"
+    )
 
 
 @pytest.mark.parametrize("image", [None, "sha256:" + "f" * 64, "registry.example/sr@sha256:" + "e" * 64])
@@ -867,7 +871,7 @@ def test_a_source_edited_during_the_image_build_does_not_reach_the_generation_be
         """The public source manifest changes while the image builds."""
 
         def resolve_image(self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]) -> str:
-            source = Path(str(controller.service_settings.routing_manifest))
+            source = Path(str(controller.service.routing_manifest))
             if edit == "named_image":
                 named = routing_manifest("http://127.0.0.1:9", image="registry.example/sr@sha256:" + "e" * 64)
                 source.write_text(json.dumps(named), encoding="utf-8")
@@ -1051,13 +1055,9 @@ def test_invalid_candidate_cannot_touch_an_existing_generation(
     def invalid_candidate() -> str:
         raise ValueError("invalid routing candidate")
 
-    case.controller.service_settings = ServiceSettings(
-        recipe="base",
-        host="127.0.0.1",
-        tokens=("test-token",),
-        routing_manifest="invalid.yaml",
-        routing_deployment=case.controller.policy,
-    )
+    case.controller.service = ServiceSettings(
+        recipe="base", host="127.0.0.1", tokens=("test-token",), routing_manifest="invalid.yaml"
+    ).routed_service()
     monkeypatch.setattr(controller_module.sys, "platform", "linux")
     monkeypatch.setattr(case.controller, "validate_candidate", invalid_candidate)
     before = case.actions.copy()
@@ -1083,7 +1083,8 @@ def test_the_open_budget_covers_each_provider_check_and_preview_with_the_childs_
     path.write_text(json.dumps(manifest), encoding="utf-8")
     policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=7)
     controller = RoutingDeploymentController(
-        ServiceSettings(recipe="base", routing_deployment=policy, inference_timeout_s=inference_timeout_s),
+        policy,
+        ServiceSettings(recipe="base", inference_timeout_s=inference_timeout_s).routed_service(),
         FakeRuntime([]),
         registry_root=tmp_path / "registry",
     )
@@ -1098,4 +1099,9 @@ def test_the_open_budget_covers_each_provider_check_and_preview_with_the_childs_
 
 def test_routing_requires_a_deployment_identity(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="deployment_id"):
-        RoutingDeploymentController(ServiceSettings(recipe="base"), FakeRuntime([]), registry_root=tmp_path)
+        RoutingDeploymentController(
+            RoutingDeploymentSettings(),
+            ServiceSettings(recipe="base").routed_service(),
+            FakeRuntime([]),
+            registry_root=tmp_path,
+        )

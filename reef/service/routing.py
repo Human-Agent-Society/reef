@@ -26,8 +26,8 @@ from urllib.parse import urlsplit
 import yaml
 
 from reef.core.errors import ReefError
+from reef.core.records_types import SCENARIO_HEADER
 from reef.inference.http import HttpInferenceHandler, provider_request_headers
-from reef.service.wire import SCENARIO_HEADER
 
 #: The catch-all rule that sends automatic requests to a scenario's default target.
 DEFAULT_RULE = "default"

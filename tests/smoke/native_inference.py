@@ -72,7 +72,7 @@ from tests.smoke.inference_lifecycle import NoTraining, SeededWeights
 from tests.smoke.inference_recovery import ObservedEngines, ServingLog, ended_checks, first_check, serving_log
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
-from reef.core.records_types import ROLLOUT_HEADER, AgentRecord
+from reef.core.records_types import ROLLOUT_HEADER, SCENARIO_HEADER, AgentRecord
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
@@ -117,7 +117,6 @@ from reef.service.routing import (
     scenario_entrypoint,
 )
 from reef.service.routing_preview import PreviewSettings
-from reef.service.wire import SCENARIO_HEADER
 from reef.storage.coordination import Coordination
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
