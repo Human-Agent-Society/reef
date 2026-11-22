@@ -10,7 +10,7 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, RenderError, render_tree
 
 GOLDEN = Path(__file__).parent / "data" / "terminus_golden"

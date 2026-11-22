@@ -50,7 +50,7 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.components import FileTree, TextFileTree
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import Format, TreeLayout
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 #: The component name of a harness evolution recipe's harness.

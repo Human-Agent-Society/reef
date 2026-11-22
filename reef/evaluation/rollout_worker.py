@@ -63,7 +63,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
-from reef.harness.tasks.model_binding import token_limits
+from reef.harness.runs.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue

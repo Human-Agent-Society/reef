@@ -53,7 +53,7 @@ from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_lo
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.mounts import HostMounts
 from reef.harness.runners.native.selftools import HostTool, ServeState, self_tools
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, validate_patch
 
 SERVE_LOG = "serve.jsonl"

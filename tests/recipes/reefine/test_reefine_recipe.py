@@ -18,7 +18,7 @@ from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.sandbox.process import LocalExecutor
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError

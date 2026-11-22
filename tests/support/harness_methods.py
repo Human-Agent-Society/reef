@@ -20,8 +20,8 @@ from tests.support.harness_jobs import configured_live, make_pi_binary
 
 from reef.control.scenario.live_objects import LiveObjects
 from reef.evaluation.harness import TaskScorer
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe

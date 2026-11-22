@@ -51,9 +51,9 @@ from recipes.beta.reefine.agent import launch_pi, tool_calls
 from reef.control.operations.harness import result_of
 from reef.execution.sandbox.process import LocalExecutor, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.trajectory import final_assistant_text
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.trajectory import final_assistant_text
+from reef.harness.runs.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port

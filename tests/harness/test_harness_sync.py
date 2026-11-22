@@ -7,8 +7,8 @@ import json
 import pytest
 
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.sync import TOKEN_PLACEHOLDER, TreeMerge, import_files, layer_install, merge_lines, merge_trees
-from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"

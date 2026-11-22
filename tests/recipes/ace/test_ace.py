@@ -27,7 +27,7 @@ from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample
 from reef.evaluation.harness import EvaluationSettings, NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.runs.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import HarnessEvolutionRecipe

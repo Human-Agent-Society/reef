@@ -19,9 +19,9 @@ from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.process import ProgramTimeoutError
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
-from reef.harness.tasks.run import run_task
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.run import run_task
+from reef.harness.runs.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_E2B") != "1", reason="opt-in paid E2B/OpenRouter test")

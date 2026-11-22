@@ -33,7 +33,7 @@ from recipes.gepa import GEPA, Feedback, GEPASettings
 from recipes.gepa.archive import Archive
 from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.evaluation.harness import ComparePolicy
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData

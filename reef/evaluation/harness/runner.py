@@ -35,9 +35,9 @@ from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import RUN_OWNER_LEASE, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.harbor.agent import run_harbor_task
-from reef.harness.tasks.model_binding import ModelBindings
-from reef.harness.tasks.run import TaskResult, TaskRunError, run_task
-from reef.harness.tasks.trajectory import (
+from reef.harness.runs.model_binding import ModelBindings
+from reef.harness.runs.run import TaskResult, TaskRunError, run_task
+from reef.harness.runs.trajectory import (
     TrajectoryError,
     agent_work,
     failed_trial_error,

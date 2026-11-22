@@ -45,7 +45,7 @@ from reef.execution.sandbox.process import (
     ProgramTimeoutError,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.trajectory import reader_for
+from reef.harness.runs.trajectory import reader_for
 
 
 class TaskRunError(ReefError):

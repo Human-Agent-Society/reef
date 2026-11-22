@@ -15,7 +15,7 @@ from tests.support.harness_jobs import rebuilt_recipe
 
 from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.harness import TaskResult
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 
 __all__ = ["fake_git_lfs"]

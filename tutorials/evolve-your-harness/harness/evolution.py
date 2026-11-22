@@ -25,6 +25,6 @@ def grade_text(task: str, text: str | None) -> float:
 
 def evaluate(task: str, result) -> float:
     """Grade the run's final assistant text against this tutorial's own answers."""
-    from reef.harness.tasks.trajectory import final_assistant_text
+    from reef.harness.runs.trajectory import final_assistant_text
 
     return grade_text(task, final_assistant_text(result.trajectory))

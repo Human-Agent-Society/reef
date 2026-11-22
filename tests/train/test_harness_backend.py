@@ -37,7 +37,7 @@ from reef.core.tasks import HarborTask, write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import FloorPolicy, RunRecord
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.harness_backend import Workspace

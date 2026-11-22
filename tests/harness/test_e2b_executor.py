@@ -15,8 +15,8 @@ from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProgramLaunchError, SandboxUnavailableError
 from reef.execution.sandbox.remote import probe_command, protected_command, remote_root, unpack
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.run import run_task
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.run import run_task
+from reef.harness.runs.vendor_install import AdapterProgram
 
 
 def test_factory_reads_only_explicit_environment_and_binds_the_remote_binary(monkeypatch):

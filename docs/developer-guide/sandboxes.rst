@@ -121,7 +121,7 @@ it::
 
 ``for_program`` returns the bound executor and the binary its processes
 launch. Pass ``binary=`` to override the resolved binary. The harness package
-provides ``reef.harness.tasks.vendor_install.AdapterProgram`` for an adapter.
+provides ``reef.harness.runs.vendor_install.AdapterProgram`` for an adapter.
 
 .. list-table::
    :header-rows: 1

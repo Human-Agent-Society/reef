@@ -1,4 +1,4 @@
-"""Guarantees of reef.harness.tasks.run, hermetic: a fake harness binary is
+"""Guarantees of reef.harness.runs.run, hermetic: a fake harness binary is
 driven through the real descriptor, render, and run path (CI installs
 neither pi nor opencode)."""
 
@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.run import TaskRunError, remove_run_root, run_task
-from reef.harness.tasks.trajectory import (
+from reef.harness.runs.run import TaskRunError, remove_run_root, run_task
+from reef.harness.runs.trajectory import (
     ClaudeSessionReader,
     CodexSessionReader,
     DeepseekSessionReader,
@@ -245,7 +245,7 @@ def test_run_cleanup_failure_is_not_suppressed(tmp_path: Path, monkeypatch) -> N
     def fail(*_args, **_kwargs):
         raise OSError("locked")
 
-    monkeypatch.setattr("reef.harness.tasks.run.shutil.rmtree", fail)
+    monkeypatch.setattr("reef.harness.runs.run.shutil.rmtree", fail)
     with pytest.raises(TaskRunError, match=r"cannot remove run root.*locked"):
         remove_run_root(root)
 

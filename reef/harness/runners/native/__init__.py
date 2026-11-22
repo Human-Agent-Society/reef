@@ -41,7 +41,7 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.runners.native.graph import TurnLoop
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError
+from reef.harness.runs.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.checks import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 from reef.inference.provider_protocol import usage_of
 

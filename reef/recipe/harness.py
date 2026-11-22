@@ -45,8 +45,8 @@ from reef.execution.executor.config import ExecutorSettings, role_executor_setti
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.harbor.agent import can_run_in_task_container
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
-from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import ConfigReader, reader_field, section_field

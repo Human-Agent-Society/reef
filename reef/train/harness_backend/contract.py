@@ -26,7 +26,7 @@ from reef.evaluation.harness import RunRecord
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import ModelCalls
-from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.runs.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult
 from reef.train.harness_backend.workspace import Workspace
 

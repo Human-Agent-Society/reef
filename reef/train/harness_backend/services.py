@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from reef.evaluation.harness import HarnessTaskEvaluator, History, RunRecord
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import ModelCalls
-from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.runs.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend.agent.run import run_agent
 from reef.train.harness_backend.calls import JobCalls, budgeted_bindings

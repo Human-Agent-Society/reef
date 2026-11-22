@@ -16,7 +16,7 @@ from typing import Any
 from reef.execution.sandbox.config import REMOTE_EXECUTORS, host_sandbox, remote_executor
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.vendor_install import AdapterProgram
 from reef.train.harness_backend.contract import AgentExecution
 
 logger = logging.getLogger(__name__)

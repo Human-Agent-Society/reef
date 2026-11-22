@@ -16,7 +16,7 @@ from reef.core.errors import ConfigError
 from reef.core.snapshot import RootSource
 from reef.evaluation.harness import EvaluationSettings
 from reef.execution.sandbox.config import build_executor
-from reef.harness.tasks.harness_models import HarnessModels
+from reef.harness.runs.harness_models import HarnessModels
 from reef.harness.tree import HarnessTree
 from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.component import HarnessTrainingComponent

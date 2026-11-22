@@ -18,8 +18,8 @@ from string import Template
 
 from reef.core.prompts import untrusted_text
 from reef.evaluation.harness import TaskScorer
-from reef.harness.tasks.model_binding import ModelBindingError
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.model_binding import ModelBindingError
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend import Method, MethodJob, Trace
 

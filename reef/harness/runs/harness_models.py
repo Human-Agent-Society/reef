@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from reef.core.errors import ConfigError
 from reef.core.model_metadata import ModelMetadata
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
 from reef.inference.interfaces import InferenceRuntime
 
 

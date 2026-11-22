@@ -29,8 +29,8 @@ from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.evaluation.harness import ComparePolicy, DecisionRecord, FailureObservation, History, RunRecord
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState

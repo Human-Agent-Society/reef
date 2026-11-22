@@ -12,8 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from reef.evaluation.harness import TaskScorer, verifier_reward
-from reef.harness.tasks.run import TaskResult
-from reef.harness.tasks.trajectory import final_assistant_text
+from reef.harness.runs.run import TaskResult
+from reef.harness.runs.trajectory import final_assistant_text
 
 #: Expected final answers, keyed by the stable prefix each task starts with (the example serve config's tasks).
 ANSWERS = {
