@@ -389,6 +389,39 @@ def test_reefs_e2b_template_is_harbors_and_keeps_the_modes_of_copy_chmod(
 
 
 @pytest.mark.unit
+def test_a_cancelled_template_build_ends_and_is_not_built_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that stops, such as a process at its shutdown, cancels the build. The build's retry must not take the
+    cancellation as a failed attempt: the build would run again, and its caller would never end."""
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    reef = harbor_e2b_environments(tmp_path)["reef"]
+    builds: list[DockerfileBuild] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        builds.append(build)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+
+    async def cancelled() -> bool:
+        task = asyncio.create_task(reef._create_template())
+        while not builds:
+            await asyncio.sleep(0)
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=5)
+        return bool(done) and task.cancelled()
+
+    assert asyncio.run(cancelled()) and len(builds) == 1
+
+
+@pytest.mark.unit
 def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -703,7 +703,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     # The parity test in tests/sandbox/test_task_environment.py compares the build with Harbor's for a Dockerfile
     # without ``--chmod``.
     @retry(
-        retry=retry_if_not_exception_type(TemplateNotPreparedError),
+        # tenacity gives every BaseException to the condition. A cancelled build must end, not build again.
+        retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(TemplateNotPreparedError),
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
