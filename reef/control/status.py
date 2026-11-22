@@ -6,10 +6,10 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from reef.control.errors import TrainingErrors, error_text
 from reef.control.scenario.live_objects import LiveObjects, weight_component_name
 from reef.control.scenario.registry import ScenarioRegistry
 from reef.control.scenario.scenario import Scenario
+from reef.control.training_errors import TrainingErrors, error_text
 from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.train.jobs import JobLoopState

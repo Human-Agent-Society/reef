@@ -134,9 +134,9 @@ class _ConfigRecipe(Recipe):
 CONFIG_FILE = "config.json"
 
 COMPOSITE = "reef.recipe.composite:CompositeRecipe"
-TREE = "tests.reef_recipe.test_composite_recipe:_TreeRecipe"
+TREE = "tests.recipe.test_composite_recipe:_TreeRecipe"
 HARNESS = "reef.recipe.harness:HarnessEvolutionRecipe"
-CONFIG = "tests.reef_recipe.test_composite_recipe:_ConfigRecipe"
+CONFIG = "tests.recipe.test_composite_recipe:_ConfigRecipe"
 
 
 def composite_config(harness: Mapping[str, Any], *, name: str = "harness", **sections: Any) -> dict[str, Any]:

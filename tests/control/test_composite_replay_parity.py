@@ -49,7 +49,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.evaluation.harness import EvaluationSettings
 from reef.execution.jobs import SupportsReceipt
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.samples import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.samples.assembly import SampleAssemblySettings
 from reef.samples.context import PipelineContext
@@ -188,7 +188,7 @@ def composite_dispatcher(
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
         # No samples worker: only the test makes samples, in ``step``.
-        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        components=frozenset(SERVICE_NAMES) - {"samples"},
     )
     return dispatcher
 

@@ -30,7 +30,7 @@ remains in the recipe package.
 
 Tests and deployment configuration stay at repository level, never inside an
 integration subtree: ``tests/slime_backend/`` for runtime internals,
-``tests/plugin_contracts/`` for package boundaries, ``tests/reef_service/``
+``tests/plugin_contracts/`` for package boundaries, ``tests/api/``
 for service-facing contracts, with runnable examples owned by their method
 packages.
 """

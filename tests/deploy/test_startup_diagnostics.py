@@ -81,7 +81,7 @@ def test_command_line_startup_reports_environment_and_flag_sources(monkeypatch):
 
 def test_declared_environment_fallbacks_are_reported(tmp_path):
     raw = {
-        "recipe": {"implementation": "tests.reef_recipe.test_recipe_config_fields:ConfiguredRecipe"},
+        "recipe": {"implementation": "tests.recipe.test_recipe_config_fields:ConfiguredRecipe"},
         "inference": {"model-path": "/models/demo"},
         "training": {"options": {"global-batch-size": 1}},
     }

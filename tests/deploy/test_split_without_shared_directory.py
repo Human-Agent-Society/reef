@@ -48,7 +48,7 @@ from reef.control.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.control.workers.scenario_deletes import DELETES_QUEUE
 from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.snapshot import ItemIdentity
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.harness.tree import TreePatch
 from reef.recipe import Recipe
 from reef.recipe.base import WEIGHTS_COMPONENT
@@ -207,7 +207,7 @@ def split(
         scenario_storage=storage,
         record_storage=storage.inner,
         coordination=coordination,
-        components=frozenset(SERVICE_COMPONENTS) - {"training"} - names,
+        components=frozenset(SERVICE_NAMES) - {"training"} - names,
     )
     apart: dict[str, Dispatcher] = {} if services is None else services
     for name in sorted(names):
@@ -285,7 +285,7 @@ def real_lfs(monkeypatch: pytest.MonkeyPatch) -> None:
     trainer's worker polls a job every ``POLL_SECONDS``, which is 2 seconds in a deployment."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.05)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.05)
 
 
 @pytest.mark.integration

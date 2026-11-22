@@ -26,9 +26,9 @@ from tests.support.threshold_processor import ThresholdJobData
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
-from reef.control.errors import TrainingErrors, local_error_source
 from reef.control.scenario.live_objects import LiveObjects
-from reef.control.workers.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
+from reef.control.training_errors import TrainingErrors, local_error_source
+from reef.control.workers.training import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
 from reef.core.job_data import JobOutcome
 from reef.recipe import CompositeRecipe, Recipe
 from reef.samples import NoSamples
@@ -389,7 +389,7 @@ def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_w
 ) -> None:
     # What POST /reef/scenarios does for a recipe that needs no record, such as generated tasks: no record or
     # upload ever wakes the worker, so the worker must start with the scenario and poll while the step runs.
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     dispatcher, step_finished, component = background_step_dispatcher(tmp_path)
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
@@ -404,7 +404,7 @@ def test_a_status_read_leaves_a_finished_step_to_the_worker_which_trains_its_job
 ) -> None:
     # A status read between the worker's last step and its wait does not advance the pipeline: the finished
     # step stays running until the worker's next cycle collects it, so the worker keeps polling and trains it.
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     wait = LocalTrainingWorkers.wait
     waits = 0
     read_ready: list[bool] = []

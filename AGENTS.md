@@ -320,7 +320,7 @@ endorsements of every sentence or historical API detail:
 
 Read [tests/AGENTS.md](tests/AGENTS.md) before adding or moving tests. Place new
 tests under their owning component, not directly under `tests/`. Keep
-`tests/reef_service/` for service contracts and service workflows. Update CI
+`tests/api/` for service contracts and service workflows. Update CI
 selection and fixture paths with every move; preserve existing test coverage.
 
 Start with the smallest existing suite that exercises the changed behavior.

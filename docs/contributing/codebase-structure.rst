@@ -117,9 +117,9 @@ Nothing under ``reef/`` imports a method package. A weight method keeps its obje
 Services and the shared store
 -----------------------------
 
-A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
+A deployment runs seven services (``SERVICE_NAMES`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
 
-``reef/api/components.py`` holds one app builder per service (``COMPONENT_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/api/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
+``reef/api/services.py`` holds one app builder per service (``SERVICE_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/api/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
 
 .. list-table::
    :header-rows: 1
@@ -343,7 +343,7 @@ Code for a concrete integration lives together under its package, but its surrou
 - component and integration tests in ``tests/<owner>/``
 - cookbook method tests in ``tests/recipes/<method>/``
 - import and packaging contracts in ``tests/plugin_contracts/``
-- service-facing contracts in ``tests/reef_service/``
+- service-facing contracts in ``tests/api/``
 - the learn-nothing deployment stacks, and the smallest example around them, in ``recipes/basic/``
 - the configuration of one runnable deployment under ``recipes/<name>/examples/``
 - container and environment setup under ``docker/``

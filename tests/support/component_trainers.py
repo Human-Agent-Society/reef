@@ -37,7 +37,7 @@ from reef.train.sample2job import Sample2Job
 
 WEIGHTS = "weights"
 HARNESS = "harness"
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.train.types import TrainingCommit
 
 
@@ -444,7 +444,7 @@ def _dispatcher(
     backend_factory: Any = None,
     experiment_tracker: ExperimentTracker | None = None,
     hold_local_cycles: bool = False,
-    components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+    components: frozenset[str] = frozenset(SERVICE_NAMES),
     live: LiveObjects | None = None,
 ) -> tuple[Dispatcher, dict[str, Any]]:
     """A dispatcher over the two trainer recipe, or over ``recipe`` when one is given, and the training components

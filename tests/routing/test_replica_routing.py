@@ -31,7 +31,7 @@ from tests.routing.routing_fakes import (
 )
 
 from reef.api import routed_replica
-from reef.api.components import build_component_app
+from reef.api.services import build_service_app
 from reef.api.settings import ServiceSettings
 from reef.core.errors import DeployConfigError
 from reef.deploy import orchestrator
@@ -99,7 +99,7 @@ async def replica(
             assert router.settings is not None
             port = urlsplit(router.settings.base_url).port
             assert port is not None
-            app = build_component_app("inference", external_settings(tmp_path, path, port), environ=ENVIRONMENT)
+            app = build_service_app("inference", external_settings(tmp_path, path, port), environ=ENVIRONMENT)
             async with TestClient(TestServer(app)) as client:
                 yield client, router
 
@@ -214,9 +214,9 @@ def test_a_replica_refuses_settings_that_cannot_route(tmp_path: Path) -> None:
     path.write_text(json.dumps(routing_manifest("http://127.0.0.1:1")), encoding="utf-8")
     settings = external_settings(tmp_path, path)
     with pytest.raises(ValueError, match=MANAGEMENT_TOKEN_ENV):
-        build_component_app("inference", settings, environ={})
+        build_service_app("inference", settings, environ={})
     with pytest.raises(ValueError, match="service token"):
-        build_component_app("inference", replace(settings, tokens=()), environ=ENVIRONMENT)
+        build_service_app("inference", replace(settings, tokens=()), environ=ENVIRONMENT)
 
 
 @pytest.mark.unit
@@ -234,7 +234,7 @@ def test_a_replica_refuses_a_manifest_without_its_router_image_before_any_routin
     monkeypatch.setattr(routed_replica, "RoutingPreviewClient", no_client)
     monkeypatch.setattr(routed_replica, "RouterManagementClient", no_client)
     with pytest.raises(ValueError, match=re.escape(EXTERNAL_IMAGE_MESSAGE)):
-        build_component_app("inference", external_settings(tmp_path, path), environ=ENVIRONMENT)
+        build_service_app("inference", external_settings(tmp_path, path), environ=ENVIRONMENT)
 
 
 @pytest.mark.unit
@@ -245,7 +245,7 @@ def test_external_routing_is_only_for_the_inference_component(tmp_path: Path) ->
 
     async def run() -> None:
         # The services of a deployment share one config, so the other services ignore the manifest.
-        async with TestClient(TestServer(build_component_app("control", settings, environ={}))) as client:
+        async with TestClient(TestServer(build_service_app("control", settings, environ={}))) as client:
             assert (await client.get("/healthz")).status == 200
             assert (await client.get("/readyz")).status == 404
 

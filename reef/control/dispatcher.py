@@ -17,7 +17,6 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.artifact.sources import SourceFiles
 from reef.control import ingest
-from reef.control.errors import TrainingErrors
 from reef.control.scenario.admission import ScenarioAdmission
 from reef.control.scenario.committer import ComponentArtifact
 from reef.control.scenario.factory import ItemStart
@@ -25,14 +24,15 @@ from reef.control.scenario.live_objects import LiveObjects, RecipeChecks, check_
 from reef.control.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.control.scenario.scenario import Scenario
 from reef.control.status import TrainingStatus
-from reef.control.workers.data_sync_worker import DataSyncWorker, ItemSync
-from reef.control.workers.local_workers import LocalTrainingWorkers
-from reef.control.workers.manager_worker import ManagedTraining, TrainingManagerWorker
+from reef.control.training_errors import TrainingErrors
+from reef.control.workers.data_sync import DataSyncWorker, ItemSync
 from reef.control.workers.samples import LocalSampleProducers
 from reef.control.workers.scenario_deletes import DeletedScenarioCleanup, DeletedScenarioFollower, request_cleanup
-from reef.control.workers.served import ControlInstance, ServedModelsPublisher, take_control_lease
+from reef.control.workers.served_models import ControlInstance, ServedModelsPublisher, take_control_lease
 from reef.control.workers.serving import ServingWorker
 from reef.control.workers.store_changes import StoreChanges, StoreChangesWatcher
+from reef.control.workers.training import LocalTrainingWorkers
+from reef.control.workers.training_manager import ManagedTraining, TrainingManagerWorker
 from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
@@ -44,7 +44,7 @@ from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import ItemIdentity
 from reef.core.trajectories import has_image_content
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
-from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
+from reef.execution.workers import SERVICE_NAMES, ServiceSet, ServiceWorkers
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
@@ -140,7 +140,7 @@ class Dispatcher(
         coordination: Coordination,
         control_lease: ControlLeaseState | None = None,
         workers: ServiceWorkers | None = None,
-        components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+        components: frozenset[str] = frozenset(SERVICE_NAMES),
         work_retention_seconds: float = 7 * 24 * 3600.0,
         training_max_jobs: int = 1,
         training_manager: TrainingManager | None = None,
@@ -187,7 +187,7 @@ class Dispatcher(
         queue's views, and the store of the job data directories. A process that runs every service takes the same
         path as control of a split deployment.
 
-        ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
+        ``components``: the services that this process runs (``SERVICE_NAMES``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
         dispatcher queues serving requests, watches the shared store, and runs the trainers' local workers, which
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads

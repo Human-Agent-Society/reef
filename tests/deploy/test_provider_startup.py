@@ -388,7 +388,7 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(pr
 def test_readme_client_example_runs_twice_on_one_service(provider_service):
     pytest.importorskip("httpx", reason="the README example uses httpx")
     base_url, requests, log_path = provider_service
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     env = {**os.environ, "REEF_TOKEN": "test-token", "MODEL_PATH": "demo"}
     # The second run repeats the scenario creation of the first run.
     for name in ("README.md", "README.zh.md"):

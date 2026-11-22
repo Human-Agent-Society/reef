@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.inference.served_artifacts import ArtifactEcho, two_artifacts
+from tests.api.inference.served_artifacts import ArtifactEcho, two_artifacts
 from tests.support.serving import wait_for_serving
 
 from reef.api.app import create_app

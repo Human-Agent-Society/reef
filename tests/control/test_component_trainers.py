@@ -66,7 +66,7 @@ from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.execution.jobs import SupportsReceipt
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.recipe import CompositeRecipe, Recipe
 from reef.samples import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.samples.assembly import SampleAssemblySettings
@@ -176,7 +176,7 @@ class _Dispatchers:
 @pytest.fixture
 def dispatchers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Dispatchers]:
     # A trainer's worker polls a job that runs, or that waits for its check, at this interval.
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.05)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.05)
     opened = _Dispatchers(tmp_path)
     yield opened
     opened.close()
@@ -1259,7 +1259,7 @@ def on_policy_weights(
     dispatcher, _ = dispatchers.open(
         recipe=two_trainer_recipe(weights=weights),
         hold_local_cycles=True,
-        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        components=frozenset(SERVICE_NAMES) - {"samples"},
         **options,
     )
     scenario = _scenario(dispatcher)
@@ -1968,7 +1968,7 @@ def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenar
         training=training,
         hold_local_cycles=True,
         backend_factory=factory,
-        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+        components=frozenset(SERVICE_NAMES) - {"training"},
     )
     scenario = loaded(dispatcher, 1)
     # The training service answers the job's check and runs no job, so the job waits in the queue.
@@ -2022,7 +2022,7 @@ def test_a_job_queued_after_the_delete_does_not_run_when_the_cycle_stops_before_
         training=training,
         hold_local_cycles=True,
         backend_factory=factory,
-        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+        components=frozenset(SERVICE_NAMES) - {"training"},
     )
     scenario = loaded(dispatcher, 1)
     checks = TrainingCheckWorker(
@@ -2078,7 +2078,7 @@ def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
         training=training,
         hold_local_cycles=True,
         backend_factory=factory,
-        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+        components=frozenset(SERVICE_NAMES) - {"training"},
     )
     scenario = loaded(dispatcher, 1)
     trainer = scenario.trainer_for(WEIGHTS)
