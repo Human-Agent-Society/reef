@@ -26,9 +26,9 @@ from reef.recipe.generated_tasks.generator import (
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.samples.context import PipelineContext
 from reef.samples.generator.inputs import TaskGenerationRequest
-from reef.storage.commits import CommitRecord
-from reef.storage.samples import SampleStore
-from reef.storage.scenario import ScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore
+from reef.storage.scenario.store import ScenarioStore
 from reef.train.pipeline import TrainingPipeline
 from reef.train.sample2job import Sample2JobSettings
 

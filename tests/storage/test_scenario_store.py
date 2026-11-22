@@ -19,12 +19,12 @@ from tests.support.records import memory_records
 from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.snapshot import SnapshotRef
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord
-from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.scenario import ScenarioStoreConflictError
-from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.store import ScenarioStoreConflictError
+from reef.storage.sql.postgres import PostgresScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 
 def record(record_id: str, *, scenario: str = "math") -> AgentRecord:
@@ -448,7 +448,7 @@ def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_file
     commit."""
     import sqlite3
 
-    import reef.storage.sqlite as sqlite_module
+    import reef.storage.sql.sqlite as sqlite_module
 
     factory = SQLiteScenarioStorage(tmp_path)
     reader = factory.open("math")
@@ -496,7 +496,7 @@ def test_sqlite_storage_does_not_require_posix_locks(tmp_path):
 
         sys.modules['fcntl'] = None
         import reef
-        from reef.storage.sqlite import SQLiteScenarioStorage
+        from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
         with closing(SQLiteScenarioStorage()) as factory:
             with closing(factory.open('math')) as store:

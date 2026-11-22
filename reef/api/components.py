@@ -56,10 +56,10 @@ from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.deployment import harness_adapter
-from reef.storage.coordination import Coordination, instance_id
-from reef.storage.data import DataStore
-from reef.storage.observer import ObservedScenarioStorage
-from reef.storage.tasks import TaskFileStore
+from reef.storage.coordination.store import Coordination, instance_id
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import TaskFileStore
+from reef.storage.scenario.observer import ObservedScenarioStorage
 from reef.train.job_queue import TrainingCheckWorker, TrainingJobWorker
 
 

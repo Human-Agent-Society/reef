@@ -23,23 +23,23 @@ from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ScenarioDeletedError
 from reef.core.plugins import NoSettings
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.data import DataStore
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.sql_commits import SQLCommitHistory, commit_table
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sql_evaluations import (
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import LocalTaskFileStore, TaskFileStore
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.scenario.store import ScenarioSettings, ScenarioStorage
+from reef.storage.sql.commits import SQLCommitHistory, commit_table
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.evaluations import (
     SQLEvaluationStore,
     evaluation_digest_table,
     evaluation_start_table,
     evaluation_table,
 )
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
-from reef.storage.sql_samples import SQLTrainingState, stage_record_table
-from reef.storage.sql_setup import enable_wal
-from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+from reef.storage.sql.records import ScopedTable, SQLScenarioDatabase
+from reef.storage.sql.samples import SQLTrainingState, stage_record_table
+from reef.storage.sql.setup import enable_wal
+from reef.storage.sql.tasks import SQLTaskStorage, task_tables
 
 # Named memory databases share table locks; weak references release locks after their last store is gone.
 memory_locks: WeakValueDictionary[str, RLock] = WeakValueDictionary()

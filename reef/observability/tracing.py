@@ -1,6 +1,6 @@
 """The ``observability.tracing`` configuration for record tracing.
 
-The storage wrappers in :mod:`reef.storage.observer` report every first-time
+The storage wrappers in :mod:`reef.storage.scenario.observer` report every first-time
 record insert and every landed commit; :mod:`reef.observability.open_telemetry`
 turns those into spans for whatever tracing backend this section points at.
 Validating the section needs no tracing SDK.

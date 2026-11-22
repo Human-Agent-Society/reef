@@ -17,7 +17,7 @@ from reef.samples.service import (
     selection_key,
     selection_triggers,
 )
-from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
+from reef.storage.sql.coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 
 
 class Producers(SampleProducers):

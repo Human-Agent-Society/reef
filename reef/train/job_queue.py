@@ -64,7 +64,7 @@ stores when the job ends and which stays for the pages of control. A scenario's 
 are moved aside by the training service, when control asks (``archive``).
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
-(``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
+(``reef.storage.data.job_data``) before it adds the item, and the training worker opens the directory from the data
 store before the component runs the job.
 """
 
@@ -95,9 +95,9 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.storage.data import DataStore
-from reef.storage.job_data import JobDataKind
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.data.job_data import JobDataKind
+from reef.storage.data.store import DataStore
 from reef.train.component import (
     JobCheckPendingError,
     JobStatus,

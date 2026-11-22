@@ -27,8 +27,8 @@ from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.samples import ReportSamples
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import JobData
 from reef.train.job_queue import TrainingJobWorker
 from reef.train.pipeline import PipelineSpec

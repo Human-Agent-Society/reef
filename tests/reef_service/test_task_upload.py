@@ -23,7 +23,7 @@ from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.samples import NoSamples
-from reef.storage.item_kinds import task_partition
+from reef.storage.data.item_kinds import task_partition
 from reef.train import JobData
 from reef.train.pipeline import PipelineSettings
 from reef.train.sample2job import Sample2Job
@@ -275,7 +275,7 @@ def test_a_body_over_the_archive_setting_is_refused_and_a_task_over_a_file_limit
     tmp_path: Path, monkeypatch
 ) -> None:
     dispatcher = dispatcher_for(tmp_path, task_recipe())
-    monkeypatch.setattr("reef.storage.tasks.MAX_TASK_DIRECTORY_ENTRIES", 2)
+    monkeypatch.setattr("reef.storage.data.tasks.MAX_TASK_DIRECTORY_ENTRIES", 2)
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, max_task_archive_bytes=64))) as client:

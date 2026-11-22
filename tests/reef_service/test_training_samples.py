@@ -102,7 +102,7 @@ def test_a_listing_pages_through_the_store(tmp_path):
 
 
 def test_sample_processing_reads_retained_tasks_and_rejects_cross_scenario_details(tmp_path):
-    from reef.storage.work_queue import NewWork
+    from reef.storage.coordination.work_queue import NewWork
 
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
@@ -137,7 +137,7 @@ def test_sample_processing_reads_retained_tasks_and_rejects_cross_scenario_detai
 
 def test_sample_processing_folds_tasks_that_changed_nothing_and_shows_triggers_and_progress(tmp_path):
     from reef.samples.service import SAMPLES_QUEUE
-    from reef.storage.work_queue import NewWork
+    from reef.storage.coordination.work_queue import NewWork
 
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
     queue = dispatcher.queue
@@ -192,7 +192,7 @@ def test_sample_processing_folds_tasks_that_changed_nothing_and_shows_triggers_a
 
 def test_sample_processing_reads_the_log_of_each_attempt_of_a_task(tmp_path):
     from reef.samples.service import SAMPLES_QUEUE
-    from reef.storage.work_queue import NewWork, WorkLogLine
+    from reef.storage.coordination.work_queue import NewWork, WorkLogLine
 
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
     queue = dispatcher.queue
@@ -229,7 +229,7 @@ def test_sample_processing_reads_the_log_of_each_attempt_of_a_task(tmp_path):
 def test_sample_processing_counts_the_records_after_the_last_one_that_each_trainer_read(tmp_path):
     from reef.control.operations.sample_processing import list_processing
     from reef.samples.service import SAMPLES_QUEUE
-    from reef.storage.work_queue import NewWork
+    from reef.storage.coordination.work_queue import NewWork
 
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
     queue = dispatcher.queue

@@ -27,8 +27,8 @@ from reef.core.records_types import AgentRecord
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, full_weight_name
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "math"}
 #: The model name of each row of the retry tests, by (engine, artifact): the full-weight name of the runtime load that

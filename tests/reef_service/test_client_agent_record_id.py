@@ -16,9 +16,9 @@ from tests.support.records import memory_records
 from reef.api.app import create_app
 from reef.control.dispatcher import build_default_dispatcher
 from reef.core import AgentRecord, RequestType
-from reef.storage.records import RecordConflictError
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.records import RecordConflictError
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "idempotency"}
 

@@ -22,7 +22,7 @@ from reef.samples.generator import (
     WrittenTask,
     content_hash,
 )
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 DOCUMENT = {
     "instruction": (

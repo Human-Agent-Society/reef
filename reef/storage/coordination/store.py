@@ -1,7 +1,7 @@
 """The coordination store of a deployment, as one process opens it.
 
 Every service of a deployment opens the same coordination store: the ``served_models`` table, the work queues, the
-control lease. ``reef.storage.sql_coordination.open_coordination`` opens it in a deployment's database;
+control lease. ``reef.storage.sql.coordination.open_coordination`` opens it in a deployment's database;
 ``memory_coordination`` opens it in an in-memory SQLite database of one process. This module loads no database
 adapter until ``memory_coordination`` runs, so a component that receives the store does not either.
 """
@@ -14,15 +14,15 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from reef.storage.control_lease import ControlLease
-from reef.storage.served_models import ServedModelsWriter
-from reef.storage.work_queue import WorkQueue
+from reef.storage.coordination.control_lease import ControlLease
+from reef.storage.coordination.served_models import ServedModelsWriter
+from reef.storage.coordination.work_queue import WorkQueue
 
 
 class CoordinationResource(ABC):
     """What holds the coordination tables and must be released: a database connection pool, or nothing.
 
-    Purpose: ``Coordination.close`` releases it; ``reef.storage.sql_coordination.CoordinationDatabase`` is one.
+    Purpose: ``Coordination.close`` releases it; ``reef.storage.sql.coordination.CoordinationDatabase`` is one.
     """
 
     @abstractmethod

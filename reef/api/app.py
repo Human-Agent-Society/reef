@@ -42,7 +42,7 @@ from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
 from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.routing.preview import PreviewSettings, RoutingPreviewClient
-from reef.storage.records import RecordRetention
+from reef.storage.scenario.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0

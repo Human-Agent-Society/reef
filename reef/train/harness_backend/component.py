@@ -64,8 +64,8 @@ from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
+from reef.storage.data.job_data import JobDataKind
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings

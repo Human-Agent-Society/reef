@@ -20,11 +20,11 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.snapshot import SnapshotRef
 from reef.deploy.service_config import service_config_from_mapping
 from reef.observability import TracingSettings, build_record_observer
-from reef.storage.commits import CommitRecord
-from reef.storage.observer import ObservedScenarioStorage, RecordObserver
-from reef.storage.samples import consumed_sample_id, stage_item_id
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.observer import ObservedScenarioStorage, RecordObserver
+from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 # -- configuration -----------------------------------------------------------
 

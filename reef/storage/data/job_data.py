@@ -13,7 +13,7 @@ Format 2 of a directory:
   store (``TaskFiles``), and the name of the directory itself.
 
 The directory holds no task files. The task file store keeps the one copy of each task's directory
-(``reef.storage.tasks.TaskFileStore``).
+(``reef.storage.data.tasks.TaskFileStore``).
 
 A job holds a reference to its directory (``JobDataRef``), and the reference copies nothing. A component that trains
 in Reef's own process or host reads ``JobDataRef.path`` and ``JobDataRef.task_paths``, or ``JobDataRef.read``. That

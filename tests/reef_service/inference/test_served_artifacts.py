@@ -30,8 +30,8 @@ from reef.control.workers.serving import ServingWorker
 from reef.core.errors import ReefError
 from reef.core.served_models import ScheduledStop, ServedArtifact
 from reef.inference.interfaces import FixedEngineClients
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}

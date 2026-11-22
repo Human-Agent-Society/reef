@@ -18,26 +18,26 @@ Three abstract bases hold a scenario's state. A storage implementation subclasse
      - Module
      - Role
    * - ``RecordStore``
-     - ``reef.storage.records``
+     - ``reef.storage.scenario.records``
      - Appends, reads and audits records (`Record storage and audit`_).
    * - ``ScenarioStore``
-     - ``reef.storage.scenario``
+     - ``reef.storage.scenario.store``
      - One scenario's session: a ``RecordStore`` with the committed scenario state. It settles each step and its record progress together.
    * - ``ScenarioStorage``
-     - ``reef.storage.scenario``
+     - ``reef.storage.scenario.store``
      - Opens the sessions and keeps all per-scenario state.
 
-``reef.storage.scenario`` also exports ``ScenarioSettings`` and ``ScenarioStoreConflictError``. The bundled implementations are ``ItemRecordStore``, ``CommitHistoryScenarioStore``, ``SQLiteScenarioStorage`` and ``PostgresScenarioStorage``.
+``reef.storage.scenario.store`` also exports ``ScenarioSettings`` and ``ScenarioStoreConflictError``. The bundled implementations are ``ItemRecordStore``, ``CommitHistoryScenarioStore``, ``SQLiteScenarioStorage`` and ``PostgresScenarioStorage``.
 
-An existing ``EvaluationStore`` supports unkeyed evaluations. To support start IDs, implement ``KeyedEvaluationStore`` from ``reef.storage.evaluations``. Reserve the ID, save the evaluation, and save its pending work in one transaction.
+An existing ``EvaluationStore`` supports unkeyed evaluations. To support start IDs, implement ``KeyedEvaluationStore`` from ``reef.storage.scenario.evaluations``. Reserve the ID, save the evaluation, and save its pending work in one transaction.
 
 .. code:: python
 
    from pathlib import Path
 
    from reef.control.dispatcher import Dispatcher
-   from reef.storage.sql_coordination import memory_coordination
-   from reef.storage.sqlite import SQLiteScenarioStorage
+   from reef.storage.sql.coordination import memory_coordination
+   from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
    storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
    dispatcher = Dispatcher(
@@ -141,9 +141,9 @@ Artifact bytes and backend head movement remain outside ``ScenarioStore``. ``Sce
 Record storage and audit
 ------------------------
 
-``reef.storage.records`` defines ``RecordStore``, the record result and error types, and ``RecordRetention``. ``reef.RecordStore`` is the same class.
+``reef.storage.scenario.records`` defines ``RecordStore``, the record result and error types, and ``RecordRetention``. ``reef.RecordStore`` is the same class.
 
-``reef.storage.record_items.ItemRecordStore`` is the ``RecordStore`` of one scenario over the data store. It appends each record as its record item, and reads the record items that the scenario made, in item sequence order. ``SQLiteScenarioStorage`` and ``PostgresScenarioStorage`` give one to each session. Both take a data store (``data=``). Without one, the SQLite storage keeps its records in ``<directory>/data``, and the PostgreSQL storage in the schema ``<schema>_data``.
+``reef.storage.scenario.record_items.ItemRecordStore`` is the ``RecordStore`` of one scenario over the data store. It appends each record as its record item, and reads the record items that the scenario made, in item sequence order. ``SQLiteScenarioStorage`` and ``PostgresScenarioStorage`` give one to each session. Both take a data store (``data=``). Without one, the SQLite storage keeps its records in ``<directory>/data``, and the PostgreSQL storage in the schema ``<schema>_data``.
 
 An older database keeps its records in the tables ``agent_record``, ``record_node``, ``consumed_agent_record``, ``record_consumption`` and ``record_eviction``. The storage drops these tables when the record item of the newest record of each active scenario is in the data store: the PostgreSQL storage when it starts, the SQLite storage at the first open of each scenario. Otherwise it keeps them and logs a warning: run Reef 83a6f3ab once to copy the records.
 

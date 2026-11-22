@@ -65,8 +65,8 @@ from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_direct
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
-from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -374,12 +374,12 @@ class CandidateEndpoints(ABC):
     @abstractmethod
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
         """Keep ``call``, a call of ``rollout``, as a record item in the data store
-        (``reef.storage.record_items.evaluation_call_item``)."""
+        (``reef.storage.scenario.record_items.evaluation_call_item``)."""
 
     @abstractmethod
     def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
         """Keep ``trajectory``, which the verifier of ``rollout`` wrote, as a trajectory item in the data store
-        (``reef.storage.record_items.evaluation_trajectory_item``)."""
+        (``reef.storage.scenario.record_items.evaluation_trajectory_item``)."""
 
 
 class LocalCandidateEndpoints(CandidateEndpoints):

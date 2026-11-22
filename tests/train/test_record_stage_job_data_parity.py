@@ -51,8 +51,8 @@ from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
 from reef.samples.distill import DistillSamples
 from reef.samples.staleness import ServedArtifacts, lags_behind
 from reef.samples.traces import TraceSamples
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.sql_coordination import memory_coordination
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.sql.coordination import memory_coordination
 from reef.train import PipelineContext, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSpec

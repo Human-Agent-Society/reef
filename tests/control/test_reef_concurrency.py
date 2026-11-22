@@ -19,8 +19,8 @@ from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from reef.artifact import Artifact, ArtifactConflictError, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.core import AgentRecord
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import TrainingJobWorker
 from reef.train.types import TrainingCommit

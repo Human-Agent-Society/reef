@@ -23,7 +23,7 @@ from reef.core.errors import DeployConfigError, RuntimeConfigError
 from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.execution.executor.config import role_executor_settings, select_executor
 from reef.execution.processes import http_readiness_command
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.component import TrainingBackendFacts, TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import TrainingDeployment
 from reef.train.slime_backend.facts import SlimeFacts

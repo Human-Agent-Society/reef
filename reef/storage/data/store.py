@@ -7,7 +7,7 @@ one owner only. Training state, such as train counts, is not data and stays in t
 storage.
 
 This module defines the item values, the metadata rules, the ``DataStore`` plugin base and an in-memory store.
-``reef.storage.sql_data`` implements the store in a SQL database.
+``reef.storage.sql.data`` implements the store in a SQL database.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.core.values import require_integer
-from reef.storage.item_kinds import ITEM_KIND_RULES, TaskFilesReference, task_partition
-from reef.storage.job_data import (
+from reef.storage.data.item_kinds import ITEM_KIND_RULES, TaskFilesReference, task_partition
+from reef.storage.data.job_data import (
     JOB_DATA_PREFIX,
     JobDataReader,
     JobDataRef,
@@ -43,9 +43,9 @@ from reef.storage.job_data import (
     job_task_files,
     write_job_data,
 )
-from reef.storage.segments import LocalSegmentStore, SegmentStore
-from reef.storage.task_collections import TaskCollection, check_names
-from reef.storage.tasks import FILES_DIGEST_PATTERN, SPLIT_NAMES, TaskFileStore
+from reef.storage.data.segments import LocalSegmentStore, SegmentStore
+from reef.storage.data.task_collections import TaskCollection, check_names
+from reef.storage.data.tasks import FILES_DIGEST_PATTERN, SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
@@ -212,7 +212,7 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     defaults to ``{}``. ``origin`` is required for a record (``check_record_origin``). An evaluation call, a record
     whose origin source is ``evaluation``, has empty ``scenarios`` and the ``evaluation_id`` of its origin, and no
     other record item has ``evaluation_id``. An artifact may have an origin, with a non-null
-    ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
+    ``artifact_id``, when a scenario made it (``reef.storage.data.artifact_items``); a trajectory or a task may have one
     when a trainer's stage made it (``check_stage_origin``). A trajectory that an evaluation's verifier wrote has
     empty ``scenarios``, an ``evaluation_id`` and ``evaluation`` (``check_evaluation_trajectory``), and no origin; no
     other item but an evaluation call has ``evaluation_id``. A task may have ``benchmarks``, and a trajectory ``trajectory_sets`` (``check_set_names``).
@@ -680,7 +680,7 @@ class DataStore(Plugin, JobDataReader, ABC):
       (``purge_deleted``), and a subclass can do more, such as moving content into segments. It changes no item.
       The data service calls it every few minutes.
 
-    The store also keeps the data directory of each training job (``reef.storage.job_data``), one directory for each
+    The store also keeps the data directory of each training job (``reef.storage.data.job_data``), one directory for each
     content, in the segment store ``job_directories``:
 
     * ``write_job_directory(data)`` writes the directory of ``data`` if the store does not hold it, records its use,

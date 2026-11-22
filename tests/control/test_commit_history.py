@@ -35,11 +35,11 @@ from reef.control.workers import local_workers
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
-from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord, active_snapshot
-from reef.storage.samples import consumed_sample_id, stage_item_id
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
+from reef.storage.scenario.commit_history import CommitHistoryError, CommitHistoryScenarioStore
+from reef.storage.scenario.commits import CommitRecord, active_snapshot
+from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.train import TrainingCommit
 from reef.train.component import SavedCheckpoint, SnapshotStart, TrainingJob
 from reef.train.jobs import JobLoopState

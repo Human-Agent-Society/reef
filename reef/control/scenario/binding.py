@@ -9,7 +9,7 @@ from reef.artifact.components import ScenarioComponents
 from reef.core.activation import ActivationRule
 from reef.core.reports import ReportBase
 from reef.inference.interfaces import InferenceRuntime
-from reef.storage.served_models import ServedModels
+from reef.storage.coordination.served_models import ServedModels
 from reef.train.component import TrainingComponent
 
 

@@ -40,7 +40,7 @@ from reef.core.errors import CommitPendingError, ReefError
 from reef.core.snapshot import ItemIdentity, RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
-from reef.storage.commits import (
+from reef.storage.scenario.commits import (
     SCENARIO_METADATA_KEY,
     CommitOperation,
     CommitRecord,
@@ -50,7 +50,7 @@ from reef.storage.commits import (
     scenario_metadata_for,
     to_json_value,
 )
-from reef.storage.scenario import ScenarioStore, ScenarioStoreConflictError
+from reef.storage.scenario.store import ScenarioStore, ScenarioStoreConflictError
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainingCommit
 

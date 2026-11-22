@@ -39,10 +39,10 @@ from reef.samples import (
 from reef.samples.service import Selection
 from reef.samples.staleness import ServedArtifacts
 from reef.samples.traces import TraceSamples
-from reef.storage.commits import CommitRecord
-from reef.storage.data import MAX_QUERY_LIMIT, NewItem
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.work_queue import WorkLeaseLostError
+from reef.storage.coordination.work_queue import WorkLeaseLostError
+from reef.storage.data.store import MAX_QUERY_LIMIT, NewItem
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.sample2job import Sample2Job, Sample2JobSettings

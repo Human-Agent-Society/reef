@@ -26,7 +26,7 @@ and names the class in its ``pipeline_spec()``.
 Everything numeric about a method, such as advantages and the loss family,
 lives in its backend training objective, not here. The package depends only
 on ``reef.core``, ``reef.observability``, ``reef.samples.context``,
-``reef.storage.samples``, and the two earlier stage
+``reef.storage.scenario.samples``, and the two earlier stage
 packages, whose classes ``Sample2Job.from_config`` receives.
 """
 

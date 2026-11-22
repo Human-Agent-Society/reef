@@ -8,7 +8,7 @@ its parent's, and the item's content keeps an empty payload. The tables are writ
 in the task file store, in each owner's partition.
 
 With a segment store, the content of a trajectory item, and the content of a trajectory node, can live in a segment
-line instead (``reef.storage.segments``). ``create`` writes the content of new trajectory items as one segment
+line instead (``reef.storage.data.segments``). ``create`` writes the content of new trajectory items as one segment
 when it is at least ``CREATE_SEGMENT_BYTES``. ``maintain`` moves the rest into segments once an owner has
 ``PACK_BYTES`` of it, merges the segments of small writes (``merge_small_segments``), and deletes the segments
 that no row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused
@@ -79,7 +79,9 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.records_types import RecordLoss
 from reef.core.trajectory_index import call_key
-from reef.storage.data import (
+from reef.storage.data.item_kinds import TaskFilesReference, task_partition
+from reef.storage.data.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
+from reef.storage.data.store import (
     HOLD_ITEM_KINDS,
     JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
@@ -111,10 +113,9 @@ from reef.storage.data import (
     replaced_task_digest,
     replaced_trajectory_digest,
 )
-from reef.storage.item_kinds import TaskFilesReference, task_partition
-from reef.storage.schema_upgrades import SchemaStep, upgrade_schema
-from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
-from reef.storage.sql_records import (
+from reef.storage.data.task_collections import TaskCollection
+from reef.storage.data.tasks import TaskFileStore
+from reef.storage.sql.records import (
     SEGMENT_COLUMNS,
     EvictionSizes,
     NewNode,
@@ -126,9 +127,8 @@ from reef.storage.sql_records import (
     row_line,
     trajectory_node_table,
 )
-from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
-from reef.storage.task_collections import TaskCollection
-from reef.storage.tasks import TaskFileStore
+from reef.storage.sql.schema_upgrades import SchemaStep, upgrade_schema
+from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
 PACK_BYTES = 64 * 2**20
@@ -143,7 +143,7 @@ PRUNE_PAGE_SIZE = 256
 GROUP_COMMIT_ITEMS = 200
 #: The table of the uses of items by scenarios.
 USES_TABLE = "data_item_use"
-#: The table of the version of the data tables (``reef.storage.schema_upgrades``).
+#: The table of the version of the data tables (``reef.storage.sql.schema_upgrades``).
 VERSION_TABLE = "data_schema_version"
 #: The name of the lock that serializes the writes of the holds of an owner and of the benchmarks of its items. No
 #: scenario has this name.
@@ -189,7 +189,7 @@ def use_id_prefix(uses: Table, prefix: str, *, sqlite: bool) -> ColumnElement[bo
 
 def item_is_inference(items: Table, *, sqlite: bool) -> ColumnElement[bool]:
     """The condition that an item row is a record item of the source ``inference``
-    (``reef.storage.data.record_source``), in the form of the predicate of the partial index ``data_item_of_inference``.
+    (``reef.storage.data.store.record_source``), in the form of the predicate of the partial index ``data_item_of_inference``.
 
     The condition holds only literals, not parameters, so that the database can prove that a query with the same
     condition reads only rows of the index, also in a prepared statement.

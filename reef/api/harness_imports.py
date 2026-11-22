@@ -24,7 +24,7 @@ from reef.artifact.artifact import ArtifactConflictError, ArtifactError, Artifac
 from reef.core.errors import InternalError, ReefError, ScenarioNotFoundError
 from reef.core.records_types import SCENARIO_HEADER, RequestType
 from reef.execution.workers import QueueWorker
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem, WorkQueue
 
 #: The queue of control's harness syncs, and the kind of its items.
 HARNESS_SYNC_QUEUE = "harness_sync"

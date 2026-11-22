@@ -10,14 +10,20 @@ from tests.support.conversations import conversation
 
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.data import MemoryDataStore, ScenarioArchivedError
-from reef.storage.item_kinds import copied_record
-from reef.storage.record_items import ItemRecordStore, evaluation_call_item, record_item, used_record, used_records
-from reef.storage.records import AppendResult, RecordConflictError
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.item_kinds import copied_record
+from reef.storage.data.store import MemoryDataStore, ScenarioArchivedError
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import (
+    ItemRecordStore,
+    evaluation_call_item,
+    record_item,
+    used_record,
+    used_records,
+)
+from reef.storage.scenario.records import AppendResult, RecordConflictError
+from reef.storage.scenario.store import ScenarioSettings
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 def record(record_id: str, request_type: RequestType = RequestType.REPORT, **payload) -> AgentRecord:

@@ -17,12 +17,12 @@ from typing import Any, Self
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.core.serving_config import ServingConfig
-from reef.storage.commits import CommitRecord, CommitSnapshots
-from reef.storage.data import DataStore, check_owner
-from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore, TrainingState
-from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.storage.data.store import DataStore, check_owner
+from reef.storage.data.tasks import TaskFileStore, TaskStorage
+from reef.storage.scenario.commits import CommitRecord, CommitSnapshots
+from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import SampleStore, TrainingState
 
 
 class ScenarioStoreConflictError(ReefError):

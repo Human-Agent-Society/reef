@@ -14,8 +14,8 @@ from typing import Any
 
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
-from reef.storage.tasks import TaskStorage
+from reef.storage.data.tasks import TaskStorage
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 
 
 @dataclass(frozen=True)

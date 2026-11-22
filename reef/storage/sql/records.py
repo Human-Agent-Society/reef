@@ -30,9 +30,9 @@ from reef.core.atif_payloads import (
 from reef.core.errors import ReefError
 from reef.core.serving_config import ServingConfig
 from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent
-from reef.storage.commit_history import Closeable
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.segments import SegmentLine, SegmentPartition
+from reef.storage.data.segments import SegmentLine, SegmentPartition
+from reef.storage.scenario.commit_history import Closeable
+from reef.storage.scenario.store import ScenarioSettings
 
 #: The most values in one SQL ``IN`` list, below the variable limit of every supported SQLite build.
 IN_LIST_SIZE = 500

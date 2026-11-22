@@ -1,7 +1,7 @@
 """The data sync: a data write tells each scenario that its items name (RFC #1028, RFC #1140).
 
 A scenario's trainers read its training samples, and the record items of other scenarios that it uses, from the data
-store (``reef.storage.samples``), so a write needs no copy of them. Control still runs a sync of each scenario that a
+store (``reef.storage.scenario.samples``), so a write needs no copy of them. Control still runs a sync of each scenario that a
 write touched: it wakes the scenario's trainers and its samples service, which read the new and changed items. The data service writes the data store;
 after each write it asks control for the sync with a ``data_sync`` item in control's sync queue
 (``request_data_sync``).
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
-from reef.storage.work_queue import WorkItem, WorkQueue
+from reef.storage.coordination.work_queue import WorkItem, WorkQueue
+from reef.storage.data.queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
 
 
 class ScenarioUses(ABC):

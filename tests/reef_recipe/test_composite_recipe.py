@@ -56,9 +56,9 @@ from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import weight_training_selection
 from reef.samples.context import PipelineContext
-from reef.storage.samples import consumed_sample_id, stage_item_id
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit, trainer_builder
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.harness_backend.settings import EvolutionSettings

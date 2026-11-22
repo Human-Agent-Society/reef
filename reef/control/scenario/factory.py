@@ -49,7 +49,8 @@ from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import CompositeRecipe, component_recipes
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.storage.commits import (
+from reef.storage.coordination.served_models import ServedModels
+from reef.storage.scenario.commits import (
     SCENARIO_METADATA_KEY,
     UNLOCATED_SNAPSHOT,
     CommitHistoryError,
@@ -60,8 +61,7 @@ from reef.storage.commits import (
     scenario_metadata_for,
     served_snapshot,
 )
-from reef.storage.scenario import ScenarioStorage, ScenarioStore
-from reef.storage.served_models import ServedModels
+from reef.storage.scenario.store import ScenarioStorage, ScenarioStore
 from reef.train.component import ScenarioRoot
 from reef.train.sample2job import NoJobData
 from reef.train.trainer import ComponentTrainer

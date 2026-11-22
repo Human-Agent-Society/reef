@@ -22,9 +22,9 @@ from reef.core.errors import ScenarioCapacityFullError, ScenarioLimitReachedErro
 from reef.evaluation.harness import EvaluationSettings
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.store import ScenarioSettings
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.pipeline import PipelineSpec

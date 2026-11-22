@@ -7,7 +7,7 @@ from typing import Any
 
 from reef.control.scenario.scenario import Scenario
 from reef.core.records_types import RequestType
-from reef.storage.records import StoredRecord
+from reef.storage.scenario.records import StoredRecord
 
 
 def record_metadata(stored: StoredRecord) -> dict[str, Any]:

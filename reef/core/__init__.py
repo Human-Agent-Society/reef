@@ -4,7 +4,7 @@
 recipe and runtime components; it does not discover or import components.
 
 Nothing here implements storage behavior or I/O. Record storage interfaces
-belong to ``reef.storage.records``; concrete record and artifact adapters build on the
+belong to ``reef.storage.scenario.records``; concrete record and artifact adapters build on the
 shared identities and wire types defined here.
 
 The admission bar is concrete: a type belongs here only when at least two

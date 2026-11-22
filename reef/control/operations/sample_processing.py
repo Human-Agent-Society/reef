@@ -6,8 +6,8 @@ import time
 
 from reef.control.dispatcher import Dispatcher
 from reef.samples.service import SAMPLES_QUEUE, selection_triggers
-from reef.storage.records import RecordStore
-from reef.storage.work_queue import HELD_STATES, JsonValue, WorkItem
+from reef.storage.coordination.work_queue import HELD_STATES, JsonValue, WorkItem
+from reef.storage.scenario.records import RecordStore
 
 #: The most tasks that one page with ``changed=True`` reads to fill the page.
 MAX_SCANNED_TASKS = 5000

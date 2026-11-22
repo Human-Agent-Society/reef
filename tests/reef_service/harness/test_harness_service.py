@@ -21,8 +21,8 @@ from reef.api.harness_imports import HarnessSyncWorker
 from reef.api.request_service import RequestService
 from reef.control.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.storage.sql_coordination import open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "demo"}
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"

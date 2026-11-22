@@ -41,10 +41,10 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.recipe import Recipe
-from reef.storage.data import MemoryDataStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.tasks import LocalTaskFileStore
-from reef.storage.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.data.store import MemoryDataStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.sql.coordination import memory_coordination
 from reef.train.component import (
     JobCheckPendingError,
     JobStatus,

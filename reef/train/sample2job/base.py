@@ -26,7 +26,7 @@ from reef.core.values import deep_merge
 from reef.observability import ExperimentLogger
 from reef.samples import Record2Sample
 from reef.samples.context import PipelineContext
-from reef.storage.samples import SampleKind
+from reef.storage.scenario.samples import SampleKind
 
 
 def require_optional_positive(value: object, name: str) -> None:

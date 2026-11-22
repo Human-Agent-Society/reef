@@ -9,7 +9,7 @@ import time
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.control.workers.scenario_deletes import DeletedScenarioCleanup
 from reef.execution.workers import ServiceWorker
-from reef.storage.work_queue import WorkQueue
+from reef.storage.coordination.work_queue import WorkQueue
 from reef.train.job_queue import JOBS_QUEUE, discard_ended_content
 
 logger = logging.getLogger(__name__)

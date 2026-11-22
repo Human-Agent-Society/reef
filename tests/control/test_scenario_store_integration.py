@@ -19,16 +19,16 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.recipe.base import Recipe
 from reef.samples import NoSamples
 from reef.samples.context import PipelineContext
-from reef.storage.commits import CommitRecord
-from reef.storage.data import DataStore
-from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.samples import TrainingState
-from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore, TaskFileStore, TaskStorage
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import LocalTaskFileStore, TaskFileStore, TaskStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.records import RecordRetention, RecordStore
+from reef.storage.scenario.samples import TrainingState
+from reef.storage.scenario.store import ScenarioSettings, ScenarioStorage, ScenarioStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 from reef.train.types import TrainingCommit

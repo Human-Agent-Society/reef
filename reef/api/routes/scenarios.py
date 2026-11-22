@@ -11,7 +11,7 @@ from reef.control.operations.artifact_evaluations import ArtifactEvaluations
 from reef.control.operations.artifact_imports import ArtifactImports
 from reef.core.errors import ScenarioNotFoundError
 from reef.core.records_types import RequestType
-from reef.storage.data import check_owner
+from reef.storage.data.store import check_owner
 from reef.train.job_queue import cancel_scenario_job
 
 

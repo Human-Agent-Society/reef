@@ -15,10 +15,10 @@ from reef.artifact.components import ScenarioComponents
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger
-from reef.storage.data import DataStore
-from reef.storage.records import RecordStore
-from reef.storage.samples import SampleKind, SampleStore, TrainerSamples
-from reef.storage.tasks import TaskStorage, TaskStore
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import TaskStorage, TaskStore
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import SampleKind, SampleStore, TrainerSamples
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingComponent, component_root
 from reef.train.jobs import JobLoop

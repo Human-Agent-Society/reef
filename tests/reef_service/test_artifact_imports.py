@@ -31,8 +31,8 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.operations.artifact_imports import ArtifactImports
 from reef.core.errors import CommitPendingError, ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer

@@ -1,6 +1,6 @@
 """Transport-independent handling of the collection routes (RFC #1312) and of a scenario's benchmarks (RFC #1420).
 
-A collection names benchmarks and other collections of one owner (``reef.storage.task_collections``). A client
+A collection names benchmarks and other collections of one owner (``reef.storage.data.task_collections``). A client
 stores, lists, reads and deletes the collections of an owner. A scenario holds sets of items: benchmarks, each in one
 split, and trajectory sets. It then uses the items of the set, and no item changes (``DataStore.hold``). A client
 holds and releases a set, lists a scenario's holds, and holds each benchmark of a collection in one call. No aiohttp
@@ -13,9 +13,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.control.operations.data import DataAccess, Use, check_uses, sync_touched
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, check_hold, check_owner
-from reef.storage.task_collections import CollectionNotFoundError, TaskCollection, collection_benchmarks
-from reef.storage.tasks import SPLIT_NAMES
+from reef.storage.data.store import MAX_QUERY_LIMIT, DataStore, check_hold, check_owner
+from reef.storage.data.task_collections import CollectionNotFoundError, TaskCollection, collection_benchmarks
+from reef.storage.data.tasks import SPLIT_NAMES
 
 
 def benchmark_tasks(store: DataStore, owner: str, benchmarks: Sequence[str]) -> dict[str, tuple[str, ...]]:

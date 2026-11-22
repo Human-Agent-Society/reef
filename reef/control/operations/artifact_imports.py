@@ -1,7 +1,7 @@
 """Transport-independent handling of artifact imports (RFC #980, RFC #995).
 
 A client imports one artifact into one component of a scenario by naming its directory with a URI, or by naming an
-artifact item of the scenario's owner, whose ``source_uri`` names the directory (``reef.storage.artifact_items``). An
+artifact item of the scenario's owner, whose ``source_uri`` names the directory (``reef.storage.data.artifact_items``). An
 artifact from an item keeps its one artifact ID in each scenario (RFC #1218). A source reader
 (``ArtifactSources``) opens the files there, and the dispatcher checks them against the component's layout and
 stores a copy, or a reference to a revision that cannot change, in a temporary directory under
@@ -26,7 +26,7 @@ from reef.control.scenario.factory import ItemStart
 from reef.control.scenario.scenario import Scenario
 from reef.core.errors import ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
-from reef.storage.data import ItemNotFoundError, StoredItem
+from reef.storage.data.store import ItemNotFoundError, StoredItem
 
 
 @dataclass(frozen=True)

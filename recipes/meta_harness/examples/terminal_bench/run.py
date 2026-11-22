@@ -28,8 +28,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
-from reef.storage.sql_coordination import open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.component import HISTORY_DIR, HarnessTrainingComponent
 from reef.train.jobs import JobLoopState
 

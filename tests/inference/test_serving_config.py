@@ -17,8 +17,8 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.workers.serving import ServingWorker
 from reef.core.values import JsonValue
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
 HEADERS = {"x-reef-scenario": "math"}

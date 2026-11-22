@@ -81,14 +81,14 @@ from reef.harness.tree import HarnessTree
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.composite import CompositeRecipe
-from reef.storage.commits import CommitRecord
-from reef.storage.data import MemoryDataStore, NewItem
-from reef.storage.evaluations import EvaluationStore
-from reef.storage.observer import ObservedScenarioStorage
-from reef.storage.record_items import evaluation_call_item
-from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore, files_digest
-from reef.storage.work_queue import NewWork, WorkItem
+from reef.storage.coordination.work_queue import NewWork, WorkItem
+from reef.storage.data.store import MemoryDataStore, NewItem
+from reef.storage.data.tasks import LocalTaskFileStore, files_digest
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.observer import ObservedScenarioStorage
+from reef.storage.scenario.record_items import evaluation_call_item
+from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 TOKEN = "artifact-evaluation-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

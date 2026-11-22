@@ -82,7 +82,7 @@ class SegmentStore(Plugin, ABC):
     * ``delete(partition, segment_id)`` removes the segment. A missing segment is not an error.
 
     The store also keeps directories of files, such as the data directories of training jobs
-    (``reef.storage.job_data``). A key names each directory; it is ``/``-separated words, with no ``.`` or ``..``:
+    (``reef.storage.data.job_data``). A key names each directory; it is ``/``-separated words, with no ``.`` or ``..``:
 
     * ``read_directory_uri(key)`` is the URI of the directory ``key``, or None when the store does not hold all of it.
     * ``write_directory(key, source)`` keeps a copy of the files under ``source`` as the directory ``key`` and returns

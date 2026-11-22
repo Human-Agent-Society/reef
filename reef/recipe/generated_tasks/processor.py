@@ -84,8 +84,8 @@ from reef.samples.context import PipelineContext
 from reef.samples.generator.client import Generator, HttpGenerator
 from reef.samples.generator.inputs import TaskGenerationRequest
 from reef.samples.reports import report_score
-from reef.storage.samples import TrainerSamples
-from reef.storage.tasks import GenerationState, SplitName, TaskConflictError, TaskStore, TaskStoreError
+from reef.storage.data.tasks import GenerationState, SplitName, TaskConflictError, TaskStore, TaskStoreError
+from reef.storage.scenario.samples import TrainerSamples
 from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample
 

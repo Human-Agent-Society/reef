@@ -50,7 +50,7 @@ from reef.control.operations.data import (
 )
 from reef.control.operations.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
 from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
-from reef.storage.data import MAX_QUERY_LIMIT
+from reef.storage.data.store import MAX_QUERY_LIMIT
 
 #: The content types of a task archive.
 TASK_ARCHIVE_TYPES = frozenset({"application/gzip", "application/x-gzip"})

@@ -62,8 +62,8 @@ from reef.samples import NoSamples, Record2Sample, RecordSetUnit
 from reef.samples.context import PipelineContext
 from reef.samples.service import Selection
 from reef.samples.staleness import ServedArtifacts
-from reef.storage.data import MAX_QUERY_LIMIT
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, StoredSample, consumed_sample_id, memory_samples
+from reef.storage.data.store import MAX_QUERY_LIMIT
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, StoredSample, consumed_sample_id, memory_samples
 from reef.train.sample2job import NoJobData, Sample2Job
 from reef.train.types import JobData, Sample, TrajectorySample
 

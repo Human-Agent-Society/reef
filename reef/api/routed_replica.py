@@ -30,7 +30,7 @@ from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSn
 from reef.routing.policy import RouterManagementClient, RouterPolicyError
 from reef.routing.preview import PreviewSettings, RoutingPreviewClient
 from reef.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
-from reef.storage.scenario import ScenarioStorage
+from reef.storage.scenario.store import ScenarioStorage
 
 logger = logging.getLogger(__name__)
 

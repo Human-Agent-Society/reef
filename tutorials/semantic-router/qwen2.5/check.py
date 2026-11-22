@@ -16,7 +16,7 @@ import yaml
 from hot_update import CHAT, observe_update, owner_events
 
 from reef.routing.manifest import RoutingSnapshot
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 SCENARIO = "qwen-demo"
 MODELS = {"student": "Qwen/Qwen2.5-0.5B-Instruct", "teacher": "Qwen/Qwen2.5-1.5B-Instruct"}

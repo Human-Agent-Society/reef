@@ -42,7 +42,7 @@ from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
-from reef.storage.job_data import JobDataKind, JobDataRef
+from reef.storage.data.job_data import JobDataKind, JobDataRef
 
 JobState = Literal["running", "finished", "failed"]
 #: The first characters of a start that names a snapshot (``SnapshotStart.to_text``). No component's own start
@@ -103,7 +103,7 @@ class TrainingJob:
     (the non-empty start: one that the component made, such as ``SavedCheckpoint.path``, or in a job that control
     queued the name of a snapshot, ``SnapshotStart.to_text``, which the training service replaces by the component's
     start of that snapshot before the component reads the job),
-    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.job_data``; a component
+    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.data.job_data``; a component
     that trains on Reef's host reads it with ``job.read_data()`` and cuts it into optimizer batches by its own batch
     size, and a component that runs the job elsewhere gives that place ``data_uri``),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose

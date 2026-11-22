@@ -9,9 +9,9 @@ from tests.support.samples_service import make_samples
 
 from reef.core.training_request import normalize_training_request_payload
 from reef.samples.context import PipelineContext
-from reef.storage.records import RecordConflictError
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.work_queue import NewWork
+from reef.storage.coordination.work_queue import NewWork
+from reef.storage.scenario.records import RecordConflictError
+from reef.storage.sql.coordination import memory_coordination
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 from reef.train.sample2job import Sample2Job

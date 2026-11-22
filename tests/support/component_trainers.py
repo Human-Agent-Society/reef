@@ -28,7 +28,7 @@ from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.samples import Record2Sample
-from reef.storage.sql_coordination import open_coordination
+from reef.storage.sql.coordination import open_coordination
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.job_queue import CHECKS_QUEUE, JobQueueComponent

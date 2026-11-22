@@ -18,8 +18,7 @@ from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
 from reef.core.job_data import TaskFiles
-from reef.storage.sql_records import SQLScenarioDatabase
-from reef.storage.tasks import (
+from reef.storage.data.tasks import (
     SPLIT_NAMES,
     GenerationState,
     SplitName,
@@ -31,6 +30,7 @@ from reef.storage.tasks import (
     TaskStore,
     TaskStoreError,
 )
+from reef.storage.sql.records import SQLScenarioDatabase
 
 
 @dataclass(frozen=True)

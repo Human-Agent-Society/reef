@@ -24,7 +24,7 @@ The modules follow these responsibilities:
   before the publication lock; readers never take the operation lock, so long
   training preparation does not block serving. ``history`` pages retained
   records and commits for the dispatcher.
-Persisted values and metadata encoding belong to ``reef.storage.commits``.
+Persisted values and metadata encoding belong to ``reef.storage.scenario.commits``.
 Recovery reads a ``CommitRecord`` (none at initial registration). Storage
 contracts and implementations never import this package.
 

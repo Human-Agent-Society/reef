@@ -23,9 +23,9 @@ from reef.control.scenario import Scenario
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPendingError
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import CHECKS_QUEUE, JobQueueComponent

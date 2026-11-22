@@ -20,7 +20,7 @@ giving it (RFC #1219).
 An evaluation of ``s`` keeps each model call of its rollouts as an evaluation call: a record item of ``o`` whose
 origin source is ``evaluation`` (``evaluation_call_item``). It is the data of no scenario, so its ``scenarios`` stays
 empty, and no record store, trainer or record route of ``s`` reads it. It links only to the calls of the same
-evaluation attempt and caller (``reef.storage.data.record_link_scope``), and ``prune_records`` keeps it. A trajectory
+evaluation attempt and caller (``reef.storage.data.store.record_link_scope``), and ``prune_records`` keeps it. A trajectory
 that the verifier of a rollout wrote is a trajectory item of ``o`` with empty ``scenarios``
 (``evaluation_trajectory_item``, RFC #1293).
 """
@@ -35,7 +35,14 @@ from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, Evaluati
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
-from reef.storage.data import (
+from reef.storage.data.item_kinds import (
+    copied_record,
+    evaluation_call_id,
+    evaluation_rollout_id_prefix,
+    evaluation_trajectory_id,
+    record_digest,
+)
+from reef.storage.data.store import (
     MAX_QUERY_LIMIT,
     DataStore,
     ItemConflictError,
@@ -44,14 +51,7 @@ from reef.storage.data import (
     group_value,
     record_source,
 )
-from reef.storage.item_kinds import (
-    copied_record,
-    evaluation_call_id,
-    evaluation_rollout_id_prefix,
-    evaluation_trajectory_id,
-    record_digest,
-)
-from reef.storage.records import AppendResult, RecordConflictError, RecordStore, StoredRecord
+from reef.storage.scenario.records import AppendResult, RecordConflictError, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
 RECORD_PAGE_SIZE = 256

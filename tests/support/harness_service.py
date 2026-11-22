@@ -35,7 +35,7 @@ from reef.evaluation.harness import ComparePolicy
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql.coordination import memory_coordination
 from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent

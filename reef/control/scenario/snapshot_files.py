@@ -11,8 +11,8 @@ from __future__ import annotations
 from reef.artifact.artifact import Artifact, ArtifactNotFoundError, SnapshotRef
 from reef.artifact.components import ScenarioComponents, TextFileTree
 from reef.artifact.repository import Repository
-from reef.storage.commits import CommitRecord
-from reef.storage.scenario import ScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.store import ScenarioStore
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 
 

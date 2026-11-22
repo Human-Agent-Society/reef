@@ -286,7 +286,7 @@ def test_scenario_limits_and_idle_unload_are_reef_settings():
             {"scenario_admission": "reef.control.scenario.admission:ScenarioLimits", "max_scenarios": 3},
             "configure the built-in admission",
         ),
-        ({"scenario_admission": "reef.storage.sqlite:SQLiteScenarioStorage"}, "must name a class that inherits"),
+        ({"scenario_admission": "reef.storage.sql.sqlite:SQLiteScenarioStorage"}, "must name a class that inherits"),
     ],
 )
 def test_invalid_scenario_admission_settings_are_refused(values, message):

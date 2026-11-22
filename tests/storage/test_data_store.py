@@ -26,8 +26,10 @@ from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, Evaluati
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
-from reef.storage import data as data_module
-from reef.storage.data import (
+from reef.storage.data import store as data_module
+from reef.storage.data.item_kinds import TaskFilesReference, json_digest, task_partition
+from reef.storage.data.job_data import job_data_key
+from reef.storage.data.store import (
     DeletedItem,
     ItemConflictError,
     ItemNotFoundError,
@@ -38,9 +40,9 @@ from reef.storage.data import (
     ScenarioHold,
     StoredItem,
 )
-from reef.storage.item_kinds import TaskFilesReference, json_digest, task_partition
-from reef.storage.job_data import job_data_key
-from reef.storage.record_items import (
+from reef.storage.data.task_collections import TaskCollection, collection_benchmarks
+from reef.storage.data.tasks import FilesDigest, LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.scenario.record_items import (
     evaluation_call_item,
     evaluation_call_items,
     evaluation_trajectory_item,
@@ -48,18 +50,16 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
-from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
-from reef.storage.sql_records import TrajectoryNodes
-from reef.storage.sql_setup import prefix_upper_bound
-from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import FilesDigest, LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.sql.data import USES_TABLE, PostgresDataStore, SQLiteDataStore
+from reef.storage.sql.records import TrajectoryNodes
+from reef.storage.sql.setup import prefix_upper_bound
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
 
 
 def record_content(record_id: str) -> dict:
-    """The content of the record item of the inference ``record_id`` (``reef.storage.record_items``)."""
+    """The content of the record item of the inference ``record_id`` (``reef.storage.scenario.record_items``)."""
     return {
         "agent_record_id": record_id,
         "request_type": "inference",
@@ -198,7 +198,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),
-        # The content of each kind follows its rules (reef.storage.item_kinds).
+        # The content of each kind follows its rules (reef.storage.data.item_kinds).
         (NewItem("x", {"steps": []}, {"kind": "trajectory"}), "ATIF"),
         (NewItem("coding/x", {"request": {}}, {"kind": "record", "origin": ORIGIN}), "exactly the keys"),
         (NewItem("other/r1", record_content("r1"), {"kind": "record", "origin": ORIGIN}), "has the ID"),
@@ -1111,7 +1111,7 @@ def deployment(tmp_path, **storage) -> ServiceSettings:
     [
         (None, SQLiteDataStore),
         ("sqlite", SQLiteDataStore),
-        ({"module": "reef.storage.data:MemoryDataStore"}, MemoryDataStore),
+        ({"module": "reef.storage.data.store:MemoryDataStore"}, MemoryDataStore),
     ],
 )
 def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, data_store, store_class):
@@ -1132,8 +1132,8 @@ def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, d
     ("data_store", "reason"),
     [
         ("unknown", "storage.data_store"),
-        ("reef.storage.data:DataStore", "abstract"),
-        ({"module": "reef.storage.sqlite:SQLiteScenarioStorage"}, "DataStore"),
+        ("reef.storage.data.store:DataStore", "abstract"),
+        ({"module": "reef.storage.sql.sqlite:SQLiteScenarioStorage"}, "DataStore"),
         ("postgres", "record_backend: postgres"),
     ],
 )

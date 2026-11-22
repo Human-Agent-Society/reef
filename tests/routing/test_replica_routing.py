@@ -39,8 +39,8 @@ from reef.deploy.routing.cli import main as routing_cli
 from reef.routing.manifest import RoutingSnapshot
 from reef.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.sql.data import SQLiteDataStore
 
 ENVIRONMENT = {MANAGEMENT_TOKEN_ENV: "management-test-token", SELECTION_TOKEN_ENV: SELECTION_TOKEN}
 CHAT = {"model": "auto", "messages": [{"role": "user", "content": "hello"}]}

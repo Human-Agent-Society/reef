@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from reef.core.errors import ConfigError, InternalError
 from reef.core.plugins import PluginConfigError
 from reef.execution.work_logs import capture_log
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 

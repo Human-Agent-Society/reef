@@ -42,7 +42,7 @@ from typing import cast
 
 from reef.execution.jobs import JOB_LISTENER, JobListener
 from reef.execution.workers import QueueWorker
-from reef.storage.work_queue import JsonValue, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, WorkItem, WorkLeaseLostError, WorkQueue
 
 #: The queue of sample work.
 SAMPLES_QUEUE = "samples"

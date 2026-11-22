@@ -59,9 +59,9 @@ from reef.recipe.loading import load_recipe
 from reef.samples import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.samples.context import PipelineContext
 from reef.samples.generator.inputs import TaskGenerationRequest
-from reef.storage.commits import CommitRecord
-from reef.storage.samples import consumed_sample_id, stage_item_id
-from reef.storage.tasks import TaskStorage
+from reef.storage.data.tasks import TaskStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
 from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 

@@ -57,10 +57,10 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.samples.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, Selection, request_selection
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.sql_coordination import memory_coordination, open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import NewWork
+from reef.storage.coordination.work_queue import NewWork
+from reef.storage.scenario.store import ScenarioSettings
+from reef.storage.sql.coordination import memory_coordination, open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobCheckPendingError, SnapshotStart, TrainingArtifactLayout, TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker

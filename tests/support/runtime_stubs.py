@@ -18,8 +18,8 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceBackend, InferenceHandler, InferenceRuntime
 from reef.inference.serving import OpenedEngines, ServingEngines
-from reef.storage.data import DataStore
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
+from reef.storage.data.store import DataStore
 from reef.train.component import (
     JobStatus,
     SavedCheckpoint,

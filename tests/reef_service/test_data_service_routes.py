@@ -37,8 +37,8 @@ from reef.control.operations import data_transfer
 from reef.control.operations.data_service import DataImport
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
-from reef.storage.data_queue import DATA_IMPORT_KIND, DATA_QUEUE
-from reef.storage.work_queue import NewWork
+from reef.storage.coordination.work_queue import NewWork
+from reef.storage.data.queue import DATA_IMPORT_KIND, DATA_QUEUE
 from reef.train.component import TrainingJob
 from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE, job_kind, job_payload
 

@@ -33,7 +33,10 @@ from reef.core.job_data import TrajectorySample
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.core.trajectories import has_image_content
 from reef.recipe.deployment import refuses_images
-from reef.storage.data import (
+from reef.storage.coordination.work_queue import WorkQueue
+from reef.storage.data.item_kinds import TaskFilesReference
+from reef.storage.data.queue import DATA_SYNC_QUEUE
+from reef.storage.data.store import (
     DELETED_ITEM_TTL_SECONDS,
     ITEM_KINDS,
     MAX_QUERY_LIMIT,
@@ -50,10 +53,7 @@ from reef.storage.data import (
     held_sets,
     patched_metadata,
 )
-from reef.storage.data_queue import DATA_SYNC_QUEUE
-from reef.storage.data_sync import ScenarioUses, request_data_sync
-from reef.storage.item_kinds import TaskFilesReference
-from reef.storage.work_queue import WorkQueue
+from reef.storage.data.sync import ScenarioUses, request_data_sync
 
 #: The most items in one create call: the most trajectories of one upload before RFC #1028.
 MAX_ITEMS_PER_CREATE = 1000
@@ -183,7 +183,7 @@ def create_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     """Create record and artifact items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
 
     1 to ``MAX_ITEMS_PER_CREATE`` items, whose content follows the rules of their kind
-    (``reef.storage.item_kinds``). A trajectory comes as JSON Lines (``create_trajectory_items``), and a task needs its files
+    (``reef.storage.data.item_kinds``). A trajectory comes as JSON Lines (``create_trajectory_items``), and a task needs its files
     (``create_task_items``), so this call refuses both. The response is ``{owner, items, synced}``, without content.
     """
     check_owner(owner)
@@ -257,7 +257,7 @@ def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait:
     transaction, then sync the scenarios that they name; return ``{owner, items, synced}``, without content.
 
     Each item's metadata passes ``created_metadata``, and its content follows the rules of its kind
-    (``reef.storage.item_kinds``), which the store checks. ``wait`` is as in ``sync_touched``.
+    (``reef.storage.data.item_kinds``), which the store checks. ``wait`` is as in ``sync_touched``.
     """
     if not 1 <= len(items) <= MAX_ITEMS_PER_CREATE:
         raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
@@ -575,7 +575,7 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
     ``purge_item`` or the store's purge after ``DELETED_ITEM_TTL_SECONDS`` removes it.
 
     Raise ``ValueError`` for the artifact item of an artifact that a scenario of ``owner`` made while the scenario
-    exists: the next artifact copy would make the item again (``reef.storage.artifact_items``).
+    exists: the next artifact copy would make the item again (``reef.storage.data.artifact_items``).
     """
     store = data.require_store()
     (item,) = touched_items(store, owner, [item_id])

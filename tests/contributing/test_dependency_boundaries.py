@@ -148,10 +148,10 @@ def test_snapshot_chain_does_not_depend_on_scenario_or_trainer() -> None:
 
 
 def test_record_contracts_and_retention_policy_do_not_import_database_adapters() -> None:
-    module = importlib.import_module("reef.storage.records")
+    module = importlib.import_module("reef.storage.scenario.records")
     tree = ast.parse(inspect.getsource(module))
 
-    imported = _imported_modules(tree, package="reef.storage")
+    imported = _imported_modules(tree, package="reef.storage.scenario")
     for dependency in (
         "reef.control.scenario",
         "reef.train",
@@ -165,32 +165,32 @@ def test_record_contracts_and_retention_policy_do_not_import_database_adapters()
 
 def test_importing_record_contracts_does_not_load_database_adapters() -> None:
     _assert_isolated_import(
-        "import sys; from reef.storage.records import RecordStore; "
-        "from reef.storage.scenario import ScenarioStorage, ScenarioStore; "
+        "import sys; from reef.storage.scenario.records import RecordStore; "
+        "from reef.storage.scenario.store import ScenarioStorage, ScenarioStore; "
         "assert not [name for name in sys.modules if name.startswith("
-        "('sqlalchemy', 'psycopg', 'sqlite3', 'reef.storage.sqlite', "
-        "'reef.storage.postgres', 'reef.storage.sql_records'))]; "
-        "from reef.storage.sqlite import SQLiteScenarioStorage; "
-        "from reef.storage.postgres import PostgresScenarioStorage; "
+        "('sqlalchemy', 'psycopg', 'sqlite3', 'reef.storage.sql.sqlite', "
+        "'reef.storage.sql.postgres', 'reef.storage.sql.records'))]; "
+        "from reef.storage.sql.sqlite import SQLiteScenarioStorage; "
+        "from reef.storage.sql.postgres import PostgresScenarioStorage; "
         "assert issubclass(SQLiteScenarioStorage, ScenarioStorage); "
         "assert issubclass(PostgresScenarioStorage, ScenarioStorage)"
     )
 
 
 def test_sql_record_implementations_do_not_depend_on_scenario_or_training() -> None:
-    for module_name in ("reef.storage.sql_records", "reef.storage.sqlite"):
+    for module_name in ("reef.storage.sql.records", "reef.storage.sql.sqlite"):
         module = importlib.import_module(module_name)
         tree = ast.parse(inspect.getsource(module))
 
-        imported = _imported_modules(tree, package="reef.storage")
+        imported = _imported_modules(tree, package="reef.storage.sql")
         assert _imports_of(imported, "reef.control.scenario") == [], module_name
         assert _imports_of(imported, "reef.train") == [], module_name
 
 
 def test_shared_sql_record_operations_do_not_select_sqlite() -> None:
-    module = importlib.import_module("reef.storage.sql_records")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.storage")
-    for dependency in ("reef.storage.sqlite", "sqlite3", "sqlalchemy.dialects.sqlite"):
+    module = importlib.import_module("reef.storage.sql.records")
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.storage.sql")
+    for dependency in ("reef.storage.sql.sqlite", "sqlite3", "sqlalchemy.dialects.sqlite"):
         assert _imports_of(imported, dependency) == []
 
 
@@ -209,20 +209,20 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
         any(
             target == contract or target.startswith(contract + ".")
             for contract in (
-                "reef.storage.artifact_items",
-                "reef.storage.control_lease",
-                "reef.storage.coordination",
-                "reef.storage.data",
-                "reef.storage.data_queue",
-                "reef.storage.data_sync",
-                "reef.storage.job_data",
-                "reef.storage.record_items",
-                "reef.storage.records",
-                "reef.storage.samples",
-                "reef.storage.served_models",
-                "reef.storage.scenario",
-                "reef.storage.tasks",
-                "reef.storage.work_queue",
+                "reef.storage.data.artifact_items",
+                "reef.storage.coordination.control_lease",
+                "reef.storage.coordination.store",
+                "reef.storage.data.store",
+                "reef.storage.data.queue",
+                "reef.storage.data.sync",
+                "reef.storage.data.job_data",
+                "reef.storage.scenario.record_items",
+                "reef.storage.scenario.records",
+                "reef.storage.scenario.samples",
+                "reef.storage.coordination.served_models",
+                "reef.storage.scenario.store",
+                "reef.storage.data.tasks",
+                "reef.storage.coordination.work_queue",
             )
         )
         for target in _imports_of(imported, "reef.storage")
@@ -239,7 +239,7 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
     module = importlib.import_module("reef.api.app")
     imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.api")
     assert all(
-        target == "reef.storage.records" or target.startswith("reef.storage.records.")
+        target == "reef.storage.scenario.records" or target.startswith("reef.storage.scenario.records.")
         for target in _imports_of(imported, "reef.storage")
     )
     assert _imports_of(imported, "reef.control.dispatcher.build_default_dispatcher") == []
@@ -249,30 +249,30 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
 
 def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> None:
     allowed_domains = {
-        "reef.storage.commits": ("reef.core",),
-        "reef.storage.tasks": ("reef.core",),
-        "reef.storage.segments": ("reef.core",),
-        "reef.storage.samples": ("reef.core", "reef.storage.data", "reef.storage.tasks"),
-        "reef.storage.item_kinds": ("reef.core", "reef.storage.tasks"),
-        "reef.storage.job_data": ("reef.core", "reef.storage.segments"),
-        "reef.storage.data": (
+        "reef.storage.scenario.commits": ("reef.core",),
+        "reef.storage.data.tasks": ("reef.core",),
+        "reef.storage.data.segments": ("reef.core",),
+        "reef.storage.scenario.samples": ("reef.core", "reef.storage.data.store", "reef.storage.data.tasks"),
+        "reef.storage.data.item_kinds": ("reef.core", "reef.storage.data.tasks"),
+        "reef.storage.data.job_data": ("reef.core", "reef.storage.data.segments"),
+        "reef.storage.data.store": (
             "reef.core",
-            "reef.storage.item_kinds",
-            "reef.storage.job_data",
-            "reef.storage.segments",
-            "reef.storage.task_collections",
-            "reef.storage.tasks",
+            "reef.storage.data.item_kinds",
+            "reef.storage.data.job_data",
+            "reef.storage.data.segments",
+            "reef.storage.data.task_collections",
+            "reef.storage.data.tasks",
         ),
-        "reef.storage.task_collections": ("reef.core",),
-        "reef.storage.evaluations": ("reef.core",),
-        "reef.storage.scenario": (
+        "reef.storage.data.task_collections": ("reef.core",),
+        "reef.storage.scenario.evaluations": ("reef.core",),
+        "reef.storage.scenario.store": (
             "reef.core",
-            "reef.storage.data",
-            "reef.storage.records",
-            "reef.storage.commits",
-            "reef.storage.tasks",
-            "reef.storage.samples",
-            "reef.storage.evaluations",
+            "reef.storage.data.store",
+            "reef.storage.scenario.records",
+            "reef.storage.scenario.commits",
+            "reef.storage.data.tasks",
+            "reef.storage.scenario.samples",
+            "reef.storage.scenario.evaluations",
         ),
     }
     for module_name, allowed in allowed_domains.items():
@@ -292,10 +292,10 @@ def test_scenario_state_enters_only_through_injected_storage() -> None:
         # Scenario state and served routes enter through injected storage readers. The data store of the job data
         # directories is injected too: the process gives it in its ``LiveObjects``.
         storage_imports = set(_imports_of(imported, "reef.storage")) - set(
-            _imports_of(imported, "reef.storage.records")
-            + _imports_of(imported, "reef.storage.scenario")
-            + _imports_of(imported, "reef.storage.commits")
-            + ["reef.storage.served_models.ServedModels", "reef.storage.data.DataStore"]
+            _imports_of(imported, "reef.storage.scenario.records")
+            + _imports_of(imported, "reef.storage.scenario.store")
+            + _imports_of(imported, "reef.storage.scenario.commits")
+            + ["reef.storage.coordination.served_models.ServedModels", "reef.storage.data.store.DataStore"]
         )
         assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
         for dependency in ("sqlite3", "sqlalchemy"):
@@ -465,6 +465,25 @@ def test_reef_package_dependencies_are_acyclic() -> None:
         raise AssertionError(f"Reef package dependency cycle: {cycle}\n" + "\n".join(details)) from exc
 
 
+def test_storage_subpackages_import_in_one_direction() -> None:
+    # ``sql`` implements the contracts of the other three. ``scenario`` builds on ``data``, and ``data`` on
+    # ``coordination``.
+    allowed = {
+        "coordination": ("reef.storage.coordination",),
+        "data": ("reef.storage.coordination", "reef.storage.data"),
+        "scenario": ("reef.storage.data", "reef.storage.scenario"),
+        "sql": ("reef.storage",),
+    }
+    for owner, prefixes in allowed.items():
+        for path in sorted((REPO_ROOT / "reef" / "storage" / owner).rglob("*.py")):
+            package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+            imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+            for target in _imports_of(imported, "reef.storage"):
+                assert any(
+                    target == prefix or target.startswith(prefix + ".") for prefix in prefixes
+                ), f"{path.relative_to(REPO_ROOT)} imports {target}"
+
+
 def test_core_storage_and_sandbox_only_depend_on_lower_layers() -> None:
     allowed = {
         "core": ("reef.core",),
@@ -487,9 +506,11 @@ def test_core_storage_and_sandbox_only_depend_on_lower_layers() -> None:
 
 
 def test_package_scan_includes_relative_local_and_facade_imports() -> None:
-    tree = ast.parse("from ...storage import commits\ndef load():\n    import reef\n    from reef import Scenario\n")
+    tree = ast.parse(
+        "from ...storage.scenario import commits\ndef load():\n    import reef\n    from reef import Scenario\n"
+    )
     assert _imported_modules(tree, package="reef.control.scenario") == [
-        "reef.storage.commits",
+        "reef.storage.scenario.commits",
         "reef",
         "reef.Scenario",
     ]
@@ -690,8 +711,8 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
         "reef.observability",
         "reef.samples.context",
         "reef.samples",
-        "reef.storage.samples",
-        "reef.storage.tasks",
+        "reef.storage.scenario.samples",
+        "reef.storage.data.tasks",
         "reef.train.sample2job",
     )
     paths = [

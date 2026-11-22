@@ -31,11 +31,11 @@ from reef.core.errors import (
 )
 from reef.routing.manifest import RoutingRequestError
 from reef.routing.preview import PREVIEW_BODY_LIMIT_BYTES
-from reef.storage.data import ItemConflictError, ItemNotFoundError
-from reef.storage.evaluations import EvaluationStartConflictError, EvaluationStateConflictError
-from reef.storage.records import RecordConflictError
-from reef.storage.task_collections import CollectionNotFoundError
-from reef.storage.tasks import TaskFilesNotFoundError
+from reef.storage.data.store import ItemConflictError, ItemNotFoundError
+from reef.storage.data.task_collections import CollectionNotFoundError
+from reef.storage.data.tasks import TaskFilesNotFoundError
+from reef.storage.scenario.evaluations import EvaluationStartConflictError, EvaluationStateConflictError
+from reef.storage.scenario.records import RecordConflictError
 
 logger = logging.getLogger(__name__)
 

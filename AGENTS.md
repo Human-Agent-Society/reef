@@ -59,7 +59,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/routing/` | The Semantic Router integration: the routing manifest, the routing preview, and the router container of a managed deployment |
 | `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
 | `reef/artifact/` | Versioned artifacts, repositories, and the components a recipe declares |
-| `reef/storage/` | Record storage contracts, persistence, and retention |
+| `reef/storage/` | Storage contracts, persistence, and retention: the stores of a scenario (`scenario/`), the data store (`data/`), the coordination store (`coordination/`), and their SQLite and PostgreSQL implementations (`sql/`) |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
 | `reef/execution/` | Shared job scheduling, local process ownership, worker executors, sandbox isolation, file transfer, and cleanup |
 | `reef/samples/` | The record-to-sample stage (`Record2Sample`): which records Reef uses, which train together (report grouping, judging, eligibility checks, the staleness check), and their samples; the samples service (`service/`); and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |

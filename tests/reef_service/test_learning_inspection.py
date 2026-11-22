@@ -13,13 +13,13 @@ from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core import AgentRecord, RequestType
 from reef.recipe import Recipe
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord
-from reef.storage.records import RecordRetention
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.records import RecordRetention
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path):

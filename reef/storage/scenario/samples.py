@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
-from reef.storage.data import (
+from reef.storage.data.store import (
     MAX_QUERY_LIMIT,
     DataStore,
     ItemConflictError,
@@ -33,7 +33,7 @@ from reef.storage.data import (
     NewItem,
     StoredItem,
 )
-from reef.storage.tasks import LocalTaskFileStore, SplitName, TaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore, SplitName, TaskFileStore
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
