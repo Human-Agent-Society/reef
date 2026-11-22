@@ -1,9 +1,9 @@
 Architecture
 ============
 
-This page describes the layout that the packages under ``reef/`` move to. For each package, it says what the package holds and what the package does not decide.
+This page describes the layout of the packages under ``reef/``. For each package, it says what the package holds and what the package does not decide.
 
-The code moves to this layout in steps. `Codebase structure <codebase-structure.rst>`__ maps the packages as they are today, and `What moves <architecture.rst#what-moves>`__ lists the steps that remain.
+`Codebase structure <codebase-structure.rst>`__ says which package owns a change, and maps the packages to the services of a deployment.
 
 Layers
 ------
@@ -77,7 +77,7 @@ The tree lists the packages from the top layer to the bottom layer. Within a lay
    ├── observability/   # Experiment logging and record tracing.
    ├── execution/       # Processes, workers, and sandboxes.
    ├── storage/         # The database and the work queues.
-   ├── artifact/        # The files of each published version.
+   ├── artifact/        # The stored content of each artifact.
    ├── tinker/          # The Tinker SDK pieces that training and inference share.
    └── core/            # Shared value types and errors.
 
@@ -107,7 +107,7 @@ Control layer
 control: the loaded scenarios
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **It holds each scenario.** ``control/scenario/`` holds the scenario's state, its bound components, its creation and its recovery. Its committer decides when a new version becomes the head.
+- **It holds each scenario.** ``control/scenario/`` holds the scenario's state, its bound components, its creation and its recovery. Its committer decides when a new snapshot becomes the chain tip.
 - **It owns every scenario of a process.** The dispatcher is that owner. ``control/workers/`` holds its background workers: the training threads, the sync with the shared store, and the cleanup.
 - **It holds each operation that a client can ask for.** ``control/operations/`` holds them: a model request, a change of data items, an artifact evaluation, an import. They contain no HTTP code.
 - **Operations call the dispatcher.** The dispatcher does not call operations.
@@ -118,8 +118,8 @@ Domain layer
 recipe: the contract that a method implements
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **A recipe is configuration only.** It says how records and their feedback become a new version of the weights or the harness.
-- **Methods are outside this package.** ``recipes/`` holds one package for each method. Only the SFT and dataset recipes ship with Reef.
+- **A recipe is configuration only.** It says how records and their feedback become a new artifact: new weights or a new harness tree.
+- **Methods are outside this package.** ``recipes/`` holds one package for each method. The SFT, dataset and generated-task recipes ship with Reef.
 - **It does not run training.** ``control`` binds a recipe to a scenario, and ``train`` runs the jobs.
 
 train: training jobs
@@ -128,14 +128,15 @@ train: training jobs
 - **The trainer builds each job.** It takes the samples of the next job from the store, shapes them into the job's data, and prepares the commit.
 - **A training backend runs the job.** Slime trains weights, Tinker trains LoRA weights on a remote service, and the harness backend evolves a harness tree.
 - **Control adds jobs, and the training service runs them.** The ``jobs`` queue connects the two.
-- **It does not make samples.** ``samples`` makes them.
+- **The training pipeline connects the two stages.** The trainer gives records to the pipeline and takes job data from it. The pipeline calls the record-to-sample stage of ``samples`` and the sample-to-job stage in ``train/sample2job/``.
+- **It does not decide which records train.** The record-to-sample stage in ``samples`` decides.
 
 samples: records become samples
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **It decides which records train, and turns them into samples.** It groups each report with its records, waits for judgments, and marks stale samples.
 - **It runs in the samples service, apart from training.** Slow work, such as judges, generated tasks and rollouts, does not hold the training path.
-- **It stores the samples as data items.** The trainer reads them from the store.
+- **Its samples are stored as data items.** The training pipeline stores them, and the trainer reads them from the store.
 - **It does not build jobs.** ``train`` decides which samples make the next job.
 
 evaluation: candidate evaluation
@@ -173,8 +174,8 @@ Foundation layer
 
 The packages of this layer are shared mechanisms. They do not decide when Reef trains, evaluates or publishes.
 
-observability: reports to external tools
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+observability: experiment logging and record tracing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **Experiment logging.** It turns each commit of a scenario into experiment events. W&B is the built-in provider.
 - **Record tracing.** It exports records to OpenTelemetry.
@@ -196,12 +197,12 @@ storage: the database and the work queues
 - **SQLite or PostgreSQL holds all of it.** ``storage/sql/`` implements each store in the two databases. The other three subpackages hold the contracts and import no SQL code.
 - **It does not decide how Reef uses the data.** The rule for which records train is in ``samples``.
 
-artifact: version files
-~~~~~~~~~~~~~~~~~~~~~~~
+artifact: the stored artifacts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **It stores the content of each publication.** The content is model weights or a harness file tree. Git LFS is the built-in backend.
-- **Each publication is an immutable snapshot in a chain.** The head of a chain moves only by compare-and-swap, so two concurrent publications conflict with an error and none is lost.
-- **It does not decide when the head moves.** The committer in ``control`` decides.
+- **It stores the content of each artifact.** The content is model weights or a harness file tree. Git LFS is the built-in backend.
+- **Each artifact is stored as an immutable snapshot in a snapshot chain.** The chain tip moves only by compare-and-swap, so two concurrent publications conflict with an error and none is lost.
+- **It does not decide when the chain tip moves.** The committer in ``control`` decides.
 
 tinker: the shared Tinker SDK pieces
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -217,20 +218,12 @@ core: shared value types
 - **The admission rule is concrete.** A type belongs here only when at least two packages that do not depend on each other need it.
 - **Every package imports it.** It imports no other package of Reef.
 
-What moves
-----------
+Parts that stay where they are
+------------------------------
 
-A new top-level package needs an accepted RFC (`Changes that need an RFC <../../CONTRIBUTING.md#changes-that-need-an-rfc>`__). The table lists each step from today's layout. The packages that the table does not name stay as they are.
+Two parts look as if they belong to another package. Each stays for a reason.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 46 54
+- **The training pipeline stays in ``train``.** ``TrainingPipeline`` (``reef/train/pipeline.py``) stores the samples that the record-to-sample stage makes, and it selects the samples of the next job. The two halves share the sample store and its state under the trainer's lock, and the class is a documented interface (`Training pipeline <../reference/python-api-pipeline.rst>`__). A split of the class changes that interface, so it needs an RFC (`Changes that need an RFC <../../CONTRIBUTING.md#changes-that-need-an-rfc>`__).
+- **The generated-task recipe stays in ``recipe``.** ``reef/recipe/generated_tasks/`` holds the recipe that trains on generated Harbor tasks, and ``TaskGenerator``, the base class of a task generator. A generator, such as SPADE in ``recipes/beta/``, is a plugin of this recipe. The ``recipes/`` tree does not ship in the Reef wheel, so the base class and its recipe must be in ``reef/``.
 
-   * - Today
-     - Target
-   * - The part of ``TrainingPipeline`` in ``reef/train/pipeline.py`` that makes samples
-     - ``samples``. The part that builds job data stays in ``train``.
-   * - ``reef/recipe/generated_tasks/``
-     - ``recipes/``
-
-``routing`` is in place (`RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__). Its commands are in ``reef/deploy/routing/cli.py``.
+A new top-level package needs an accepted RFC. ``routing`` came from `RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__. Its commands are in ``reef/deploy/routing/cli.py``.
