@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from reef.api.harness_imports import DirectImports
 from reef.api.inference_service import InferenceReplica, add_inference_routes
 from reef.api.request_service import RequestService
 from reef.api.routes.artifact_imports import register_artifact_import_routes
@@ -17,6 +16,7 @@ from reef.api.routes.system import register_system_routes
 from reef.api.routes.tasks import register_task_routes
 from reef.control.operations.artifact_evaluations import ArtifactEvaluations
 from reef.control.operations.artifact_imports import ArtifactImports
+from reef.control.operations.harness_imports import DirectImports
 from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 
 
@@ -38,7 +38,7 @@ def register_routes(
     register_scenario_writes(app, request_service=request_service, evaluations=evaluations, imports=imports)
     register_system_routes(app, request_service=request_service)
     # Control commits a harness import itself.
-    register_harness_routes(app, request_service=request_service, imports=DirectImports(request_service))
+    register_harness_routes(app, request_service=request_service, imports=DirectImports(request_service.dispatcher))
     register_record_routes(app, request_service=request_service)
     if request_service.dispatcher.services.runs_data:
         register_data_routes(app, request_service=request_service, max_task_archive_bytes=max_task_archive_bytes)

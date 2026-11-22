@@ -26,9 +26,10 @@ from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, report_records, wait_for_rows
 
 from reef.api.app import create_app
-from reef.api.artifact_page import before_artifact_id, build_artifact_page, result_of, served_step
+from reef.api.artifact_page import build_artifact_page, served_step
 from reef.api.page_layout import status_label
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import before_artifact_id, result_of
 from reef.core.plugins import PluginReference
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tasks.run import TaskResult

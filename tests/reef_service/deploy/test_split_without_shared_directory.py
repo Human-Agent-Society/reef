@@ -37,11 +37,11 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import VERSION_FILE, StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
 
-from reef.api.request_service import RequestService
 from reef.artifact import Artifact, ArtifactValidator, GitLFSRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import harness_import, harness_manifest, harness_step_records, step_progress
 from reef.control.operations.scenario_files import artifact_directory
 from reef.control.scenario.factory import ItemStart
 from reef.control.scenario.live_objects import LiveObjects, RecipeChecks
@@ -451,14 +451,12 @@ def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directo
         (job,) = scenario_jobs(control.queue, "demo")
         assert job["state"] == "finished" and len(job["checkpoints"]) == 1
         # The pages of control read the step's record files from the artifact store.
-        headers = {"x-reef-scenario": "demo"}
-        requests = RequestService(control)
-        inventory = requests.harness_step_records(headers, 1, None)
+        inventory = harness_step_records(control, "demo", 1, None)
         assert inventory["status"] == "retained"
         assert {"calls.json", "output/notes.json"} <= {entry["path"] for entry in inventory["files"]}
-        assert '"rules": 1' in requests.harness_step_records(headers, 1, "output/notes.json")["text"]
-        assert requests.step_progress(scenario) is None
-        assert requests.harness_manifest(headers)["files"]
+        assert '"rules": 1' in harness_step_records(control, "demo", 1, "output/notes.json")["text"]
+        assert step_progress(scenario) is None
+        assert harness_manifest(control, "demo")["files"]
 
         assert (training_state / "demo").is_dir()
         # The step's records are stored content, which lives as long as the scenario: the checkpoint's is gone.
@@ -529,8 +527,7 @@ def test_a_deleted_scenario_leaves_nothing_in_any_service_after_the_sweep(tmp_pa
             control.accept_record(record)
         wait_until(lambda: scenario.trainer.state["finished_jobs"] == 1, "the step did not train to a commit")
         # The harness service serves the trained tree to a harness client, from its own clone and cache.
-        harness_requests = RequestService(services["harness"])
-        assert harness_requests.harness_manifest({"x-reef-scenario": "demo"})["files"]
+        assert harness_manifest(services["harness"], "demo")["files"]
         assert stored_content_refs(tmp_path) and scenario_files(tmp_path / "training", "demo")
         assert scenario_files(tmp_path / "harness", "demo")
 
@@ -632,12 +629,10 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         assert active["weights"] != root["weights"] and active["harness"] != root["harness"]
         after_training = scenario.commit_number
 
-        headers = {"x-reef-scenario": "agent"}
-        requests = RequestService(control)
-        manifest = requests.harness_manifest(headers)
+        manifest = harness_manifest(control, "agent")
         assert any("marker rules" in text for text in manifest["files"].values())
         checked("harness manifest")
-        assert requests.harness_step_records(headers, 1, None)["status"] == "retained"
+        assert harness_step_records(control, "agent", 1, None)["status"] == "retained"
         checked("step records")
         assert (artifact_directory(control, "agent", active["harness"], "harness") / "rules.md").is_file()
         checked("artifact files of the harness")
@@ -646,8 +641,9 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         assert candidate.local_path is not None and not list(candidate.local_path.rglob(MODEL))
         checked("an evaluation candidate")
 
-        synced = requests.harness_import(
-            headers,
+        synced = harness_import(
+            control,
+            "agent",
             {
                 "base_artifact_id": manifest["artifact_id"],
                 "files": {

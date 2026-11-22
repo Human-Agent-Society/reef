@@ -1,6 +1,6 @@
 """How ``POST /reef/harness/import`` commits a sync of a person's harness files (RFC #1048, harness supplement).
 
-Control commits a sync itself (``RequestService.harness_import``). The harness service writes no snapshot: it adds a
+Control commits a sync itself (``reef.control.operations.harness.harness_import``). The harness service writes no snapshot: it adds a
 ``harness_sync`` item to control's sync queue, and control's ``HarnessSyncWorker`` commits the sync and finishes the
 item with its answer. The harness service waits up to ``SYNC_WAIT_SECONDS`` for the item.
 
@@ -18,11 +18,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any, cast
 
-from reef.api.request_service import RequestService
-from reef.api.wire import parse_request_headers
 from reef.artifact.artifact import ArtifactConflictError, ArtifactError, ArtifactNotFoundError
+from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import harness_import
 from reef.core.errors import InternalError, ReefError, ScenarioNotFoundError
-from reef.core.records_types import SCENARIO_HEADER, RequestType
 from reef.execution.workers import QueueWorker
 from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem, WorkQueue
 
@@ -45,25 +44,25 @@ class HarnessImportPendingError(ArtifactError):
 class HarnessImports(ABC):
     """How a harness app commits ``POST /reef/harness/import``.
 
-    Values: ``import_files(headers, payload)`` commits the sync of the person's files in ``payload`` for the
-    scenario that ``headers`` name and returns its answer (``RequestService.harness_import``), or raises the error
-    of a refused import: ``ArtifactConflictError``, ``ArtifactNotFoundError`` or ``ValueError``.
+    Values: ``import_files(scenario_name, payload)`` commits the sync of the person's files in ``payload`` for the
+    scenario ``scenario_name`` and returns its answer (``harness_import``), or raises the error of a refused
+    import: ``ArtifactConflictError``, ``ArtifactNotFoundError`` or ``ValueError``.
 
     Purpose: control's app uses ``DirectImports``; the harness service's app uses ``QueuedImports``.
     """
 
     @abstractmethod
-    def import_files(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]: ...
+    def import_files(self, scenario_name: str, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
 
 class DirectImports(HarnessImports):
     """Commits each import in this process, which runs control."""
 
-    def __init__(self, request_service: RequestService) -> None:
-        self.request_service = request_service
+    def __init__(self, dispatcher: Dispatcher) -> None:
+        self.dispatcher = dispatcher
 
-    def import_files(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.request_service.harness_import(headers, payload)
+    def import_files(self, scenario_name: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return harness_import(self.dispatcher, scenario_name, payload)
 
 
 class QueuedImports(HarnessImports):
@@ -78,18 +77,17 @@ class QueuedImports(HarnessImports):
     def __init__(self, queue: WorkQueue) -> None:
         self.queue = queue
 
-    def import_files(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+    def import_files(self, scenario_name: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         # Control checks the scenario and the files when it takes the item.
-        scenario = parse_request_headers(headers, RequestType.INFERENCE).scenario
         work = dict(payload)
-        encoded = json.dumps({"scenario": scenario, "payload": work}, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps({"scenario": scenario_name, "payload": work}, sort_keys=True, separators=(",", ":"))
         base_id = f"{HARNESS_SYNC_KIND}:{hashlib.sha256(encoded.encode()).hexdigest()}"
         item_id, number = base_id, 1
         # An item that ended answered an earlier import: the active tree may have moved since, so it is not reused.
         while (earlier := self.queue.read(HARNESS_SYNC_QUEUE, item_id)) is not None and earlier.final:
             number += 1
             item_id = f"{base_id}:{number}"
-        self.queue.append(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario, HARNESS_SYNC_KIND, work))
+        self.queue.append(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario_name, HARNESS_SYNC_KIND, work))
         deadline = time.monotonic() + SYNC_WAIT_SECONDS
         while True:
             item = self.queue.read(HARNESS_SYNC_QUEUE, item_id)
@@ -97,7 +95,7 @@ class QueuedImports(HarnessImports):
                 return import_answer(item)
             if time.monotonic() >= deadline:
                 raise HarnessImportPendingError(
-                    f"control did not commit the import of scenario {scenario!r} within {SYNC_WAIT_SECONDS:.0f} s; "
+                    f"control did not commit the import of scenario {scenario_name!r} within {SYNC_WAIT_SECONDS:.0f} s; "
                     "send it again to wait for it"
                 )
             time.sleep(SYNC_POLL_SECONDS)
@@ -126,27 +124,24 @@ def import_answer(item: WorkItem) -> dict[str, Any]:
 
 
 class HarnessSyncWorker(QueueWorker):
-    """Control's worker of the ``harness_sync`` items: it commits each import with ``RequestService``.
+    """Control's worker of the ``harness_sync`` items: it commits each import with ``harness_import``.
 
-    Values: as ``QueueWorker``, on ``HARNESS_SYNC_QUEUE``; ``request_service`` runs control. A refused import
+    Values: as ``QueueWorker``, on ``HARNESS_SYNC_QUEUE``; ``dispatcher`` runs control. A refused import
     finishes its item with ``{"refused": ...}``, so the harness service answers with its error; an artifact store
     failure fails the attempt, which a later attempt retries.
 
     Purpose: the assembly of a process that runs control starts one.
     """
 
-    def __init__(
-        self, queue: WorkQueue, request_service: RequestService, *, worker_id: str, poll_seconds: float = 0.2
-    ) -> None:
+    def __init__(self, queue: WorkQueue, dispatcher: Dispatcher, *, worker_id: str, poll_seconds: float = 0.2) -> None:
         super().__init__(
             queue, HARNESS_SYNC_QUEUE, [HARNESS_SYNC_KIND], worker_id=worker_id, poll_seconds=poll_seconds
         )
-        self.request_service = request_service
+        self.dispatcher = dispatcher
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        headers = {SCENARIO_HEADER: item.scenario}
         try:
-            answer = self.request_service.harness_import(headers, item.payload)
+            answer = harness_import(self.dispatcher, item.scenario, item.payload)
         except ArtifactConflictError as exc:
             return {"refused": {"kind": "conflict", "message": str(exc)}}
         except (ArtifactNotFoundError, ScenarioNotFoundError) as exc:

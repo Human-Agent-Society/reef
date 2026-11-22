@@ -15,11 +15,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import PI_SEED, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import harness_repository
 
-import reef.api.harness_imports as harness_imports
+import reef.control.operations.harness_imports as harness_imports
 from reef.api.app import create_harness_app
-from reef.api.harness_imports import HarnessSyncWorker
-from reef.api.request_service import RequestService
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness_imports import HarnessSyncWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.storage.sql.coordination import open_coordination
 from reef.storage.sql.sqlite import SQLiteScenarioStorage
@@ -49,7 +48,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
     control = open_service(tmp_path, repository, frozenset(SERVICE_COMPONENTS) - {"harness"})
     control.get_or_create_scenario("demo")
     # The assembly of a control process without the harness service starts this worker.
-    control.workers.add(HarnessSyncWorker(control.queue, RequestService(control), worker_id="harness-sync-test"))
+    control.workers.add(HarnessSyncWorker(control.queue, control, worker_id="harness-sync-test"))
     harness = open_service(tmp_path, repository, frozenset({"harness"}))
 
     async def run() -> None:

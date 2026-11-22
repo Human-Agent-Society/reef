@@ -27,6 +27,10 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from reef.api.page_layout import document, escape, requires_table, stamp, status_label, status_span
+from reef.artifact.artifact import ArtifactError, ArtifactNotFoundError
+from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import before_artifact_id, file_scenario, result_of, running_request_id
+from reef.control.scenario.snapshot_files import component_files
 from reef.core.evaluation import FAILED
 from reef.core.requirements import required_by
 
@@ -179,58 +183,10 @@ def recorded_patch(metrics: Mapping[str, Any] | None) -> dict[str, str | None]:
     return {str(path): value for path, value in patch.items() if value is None or isinstance(value, str)}
 
 
-def result_of(row: Mapping[str, Any]) -> str:
-    """The result of one ``GET /reef/harness/artifacts`` row, one of:
-
-    - ``rejected``: ``metrics.selected`` is false.
-    - ``inactive``: ``metrics.selected`` is true, the row made an artifact
-      (``checkpoint``) and that artifact was never active (``activated`` is
-      false). A person must activate it.
-    - ``selected``: ``metrics.selected`` is true otherwise.
-    - ``failed``: ``metrics.selected`` is absent, ``metrics.skipped`` is set and
-      ``metrics.error`` is non-blank text: the step raised and published nothing.
-    - ``skipped``: ``metrics.selected`` is absent and ``metrics.skipped`` is set otherwise.
-    - ``failed`` also for the end of a training job whose ``metrics.training_job.event`` is ``failed``: the step's
-      job raised and published nothing.
-    - the row's ``operation`` (``creation``, ``training`` or ``recovery``) for
-      any other row, ``unknown`` when the row names none.
-
-    The harness pages, the request page and the tutorial drivers read this function."""
-    metrics = row.get("metrics")
-    metrics = metrics if isinstance(metrics, Mapping) else {}
-    selected = metrics.get("selected")
-    if selected is False:
-        return "rejected"
-    if selected is True:
-        return "inactive" if row.get("checkpoint") and not row.get("activated") else "selected"
-    if metrics.get("skipped"):
-        error = metrics.get("error")
-        return "failed" if isinstance(error, str) and error.strip() else "skipped"
-    job = metrics.get("training_job")
-    if isinstance(job, Mapping) and job.get("event") == "failed":
-        return "failed"
-    return str(row.get("operation") or "unknown")
-
-
 def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
     """The step of the active selection: the index of the row the catalog marks ``active``; ``None`` when no
     listed row is active."""
     return next((index for index, row in enumerate(rows) if row.get("active")), None)
-
-
-def before_artifact_id(row: Mapping[str, Any]) -> str | None:
-    """The snapshot the step ran on: the parent of a snapshot the step made, the snapshot a rejected or skipped step
-    ran on.
-
-    A rejected or skipped step's row carries the id of the snapshot it ran
-    on, so its parent would be one snapshot too far back."""
-    selection_result = result_of(row)
-    if selection_result in ("selected", "inactive"):
-        parent = row.get("parent_artifact_id")
-        return str(parent) if parent else None
-    if selection_result in ("rejected", "skipped", "failed"):
-        return str(row.get("artifact_id") or "") or None
-    return None
 
 
 def step_href(step: int, link_query: Mapping[str, str] | None) -> str:
@@ -731,20 +687,57 @@ def build_artifact_page(
     )
 
 
+def harness_artifact_page(
+    dispatcher: Dispatcher, scenario_name: str, step: int, link_query: Mapping[str, str] | None = None
+) -> str:
+    """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
+
+    The rows are the ones ``harness_artifacts`` answers, so the step a
+    client counts there is the step this page names. The snapshot the
+    step ran on (the parent of a win, the head a rejected or skipped
+    step ran on) comes through the artifact snapshot when it is
+    restorable, so an updated file shows as a diff, else as its new text.
+    ``link_query`` is carried to the Chain's links, so a page
+    opened through query parameters links pages that open the same way.
+    An unknown step raises ArtifactNotFoundError naming the range.
+    """
+    scenario = file_scenario(dispatcher, scenario_name)
+    rows = list(reversed(scenario.harness_rows()))
+    if step == len(rows):
+        # The next step, while a request runs it: the catalog has no row yet, so the page says so and links the
+        # request's page, which follows the step live.
+        running = running_request_id(scenario)
+        if running is not None:
+            return build_running_step_page(step, running, link_query)
+    if not 0 <= step < len(rows):
+        raise ArtifactNotFoundError(
+            f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
+        )
+    before = before_artifact_id(rows[step])
+    component = scenario.components.files_component
+    before_files: Mapping[str, str] | None = None
+    if before is not None and component is not None:
+        try:
+            _, artifact = scenario.resolve_artifact(before, component)
+            before_files = component_files(scenario.components, artifact, component)
+        except ArtifactError:
+            before_files = None
+    return build_artifact_page(step, rows, before_files=before_files, link_query=link_query)
+
+
 __all__ = [
     "RESULT_FIELDS",
     "RESULT_LABELS",
-    "before_artifact_id",
     "build_artifact_page",
     "build_running_step_page",
     "failed_words",
     "floor_tasks_note",
+    "harness_artifact_page",
     "method_notes",
     "method_summary",
     "missed_run_text",
     "missed_runs",
     "recorded_patch",
-    "result_of",
     "served_step",
     "step_href",
     "unscored_failures",

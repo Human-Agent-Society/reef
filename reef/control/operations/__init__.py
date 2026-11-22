@@ -10,6 +10,8 @@ reads the request, calls one operation, and writes the response.
 - ``artifact_imports`` imports an artifact into a scenario.
 - ``scenario_files`` reads a scenario's artifact files.
 - ``samples`` and ``sample_processing`` read a scenario's training samples and the work that makes them.
+- ``harness`` holds the harness operations: the tree that a client pulls, the sync of a person's files, and the
+  steps of a scenario. ``harness_imports`` commits a sync in control, for control's app and for the harness service.
 
 Nothing here imports ``reef.api``, ``reef.deploy`` or aiohttp. The dispatcher, the scenario package and the workers do not
 import this package.
