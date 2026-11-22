@@ -61,7 +61,10 @@ ORPHAN_BUILDING_GRACE_S = 4500.0
 #: The HTTP statuses of an AgentENV API that is busy, down or overloaded for a while: a later request can pass. Each
 #: AgentENV worker runs a fixed number of builds at once, and refuses another with 429 ("node concurrent build limit
 #: reached; retry later").
-TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
+TRANSIENT_STATUSES = (429, 502, 503, 504)
+#: The status that also counts as transient when a proxy in front of the AgentENV API answers it, with an HTML page.
+#: The API's own 500 has a JSON body and names a failure that a later request meets again, such as a full disk.
+PROXY_ERROR_STATUS = 500
 #: The statuses of an AgentENV template build, with E2B's names.
 BUILD_STATUSES = ("waiting", "building", "ready", "error")
 #: The part of ``aenv build``'s error when another build holds the alias (AgentENV's ``AliasConflict``).
@@ -112,7 +115,8 @@ class AliasConflictError(AgentEnvBuildError):
 
 
 class TransientBuildError(AgentEnvBuildError):
-    """``aenv build`` received a transient status from the AgentENV API or timed out connecting to it."""
+    """``aenv build`` received a transient status from the AgentENV API, a ``PROXY_ERROR_STATUS`` page from a proxy
+    in front of it, or timed out connecting to it."""
 
 
 @dataclass(frozen=True)
@@ -281,7 +285,9 @@ class DockerfileBuild:
             and "client error (Connect)" in error
             and error.rstrip().endswith("operation timed out")
         )
-        if connect_timeout or any(error.startswith(f"HTTP {status}:") for status in TRANSIENT_STATUSES):
+        # aenv prints the message of the API's JSON error, and the whole body of any other answer.
+        proxy_error = error.startswith(f"HTTP {PROXY_ERROR_STATUS}: <")
+        if connect_timeout or proxy_error or any(error.startswith(f"HTTP {s}:") for s in TRANSIENT_STATUSES):
             raise TransientBuildError(message, template_id)
         if error.startswith("HTTP ") and ALIAS_CONFLICT_TEXT in error:
             raise AliasConflictError(f"another build holds the alias {self.alias}: {tail}", template_id)
@@ -294,9 +300,12 @@ def poll_interval() -> float:
 
 
 def is_transient(error: aiohttp.ClientError | asyncio.TimeoutError) -> bool:
-    """Whether ``error`` of a request to the AgentENV API can pass later: a status of ``TRANSIENT_STATUSES``, or no
-    answer at all."""
+    """Whether ``error`` of a request to the AgentENV API can pass later: a status of ``TRANSIENT_STATUSES``, a
+    ``PROXY_ERROR_STATUS`` with an HTML page, or no answer at all."""
     if isinstance(error, aiohttp.ClientResponseError):
+        if error.status == PROXY_ERROR_STATUS:
+            content_type = error.headers.get("Content-Type", "") if error.headers is not None else ""
+            return content_type.partition(";")[0].strip().lower() == "text/html"
         return error.status in TRANSIENT_STATUSES
     return isinstance(error, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
 
