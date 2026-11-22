@@ -52,7 +52,7 @@ from reef.harness.tasks.run import TrajectoryKeepError
 from reef.harness.tasks.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import clip_record_text
-from reef.storage.tasks import files_digest
+from reef.storage.data.tasks import files_digest
 
 #: The trees a candidate evaluation runs, in pairing order; a policy that evaluates the candidate alone names the
 #: first.

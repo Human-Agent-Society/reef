@@ -201,7 +201,7 @@ A sample alone in its group trains with advantage 0 on Slime and counts in ``rol
 The ``generator`` section
 -------------------------
 
-Absent by default. When present, ``reef serve`` starts the generator service (``python -m reef.service.deploy.generator_process``) before the HTTP service and publishes its address as ``${endpoints.generator}``. The generator writes and checks Harbor tasks for the generated-task recipe, and runs the plays of a task generator such as SPADE. It runs under the same interpreter as the Reef service. ``execution.generator`` selects its executor, so a deployment can place it on another host.
+Absent by default. When present, ``reef serve`` starts the generator service (``python -m reef.deploy.generator_process``) before the HTTP service and publishes its address as ``${endpoints.generator}``. The generator writes and checks Harbor tasks for the generated-task recipe, and runs the plays of a task generator such as SPADE. It runs under the same interpreter as the Reef service. ``execution.generator`` selects its executor, so a deployment can place it on another host.
 
 The generator's host needs the ``harbor`` command line and the Harbor environment that ``generator.environment`` selects; the Reef service itself needs neither.
 
@@ -236,7 +236,7 @@ The generator runs its proposals, checks and rollouts at the same time. ``genera
        where the rollout runner keeps trials
 
    ``generator.agent`` : terminus-2
-       the Harbor agent each rollout runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores a rollout whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
+       the Harbor agent each rollout runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.samples.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores a rollout whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
 
    ``generator.agent-host``
        an address of the host the task container can reach, for an agent that runs inside the container
@@ -282,7 +282,7 @@ The generator runs its proposals, checks and rollouts at the same time. ``genera
        config:
          generator_url: ${endpoints.generator}
 
-The generator reads the resolved deployment: the Reef address from ``reef.host`` and ``reef.port``, the token from ``reef.token``, and the served model from ``inference.model-path`` or ``inference.upstream-model``. Without ``reef serve``, ``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
+The generator reads the resolved deployment: the Reef address from ``reef.host`` and ``reef.port``, the token from ``reef.token``, and the served model from ``inference.model-path`` or ``inference.upstream-model``. Without ``reef serve``, ``python -m reef.deploy.generator_process -c serve.yaml`` runs it from the same file.
 
 The ``task-import`` section
 ---------------------------

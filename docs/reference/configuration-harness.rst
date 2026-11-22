@@ -8,8 +8,8 @@ The keys of ``recipe.config.evolution``: the method, the adapter, the limits of 
 The pipeline stages decide what a job trains on:
 
 - **Scored reports (default).** Every valid scored report is a trace, successful outcomes included. A job starts when ``pipeline.sample2job.config.job_samples`` traces are held, 1 by default.
-- **Recorded traffic alone.** Set ``pipeline.record2sample.module: reef.record2sample.traces:InferenceSamples``. A job then starts every ``job_samples`` requests, with unscored samples.
-- **Imported train tasks (offline).** Set ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskJobData``. Each uploaded train task trains once, in upload order. A job holds either traces or train tasks. A job of train tasks rolls out up to ``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on the head tree as the method's traces. Startup refuses this stage without an adapter that plays task directories (an npm ``install``) and ``evolution.evaluation.scorer``.
+- **Recorded traffic alone.** Set ``pipeline.record2sample.module: reef.samples.traces:InferenceSamples``. A job then starts every ``job_samples`` requests, with unscored samples.
+- **Imported train tasks (offline).** Set ``pipeline.sample2job.module: reef.train.sample2job.traces:TrainTaskJobData``. Each uploaded train task trains once, in upload order. A job holds either traces or train tasks. A job of train tasks rolls out up to ``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on the head tree as the method's traces. Startup refuses this stage without an adapter that plays task directories (an npm ``install``) and ``evolution.evaluation.scorer``.
 
 Reef refuses ``batch_size`` and ``batch_policy`` directly under ``recipe.config``.
 

@@ -170,6 +170,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     title: "Contributing",
     files: [
       "contributing/codebase-structure.rst",
+      "contributing/architecture.rst",
       "contributing/adding-components.rst",
       "contributing/development.rst",
       "contributing/testing.rst",

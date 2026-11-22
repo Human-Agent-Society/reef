@@ -42,7 +42,7 @@ from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
-from reef.storage.job_data import JobDataKind, JobDataRef
+from reef.storage.data.job_data import JobDataKind, JobDataRef
 
 JobState = Literal["running", "finished", "failed"]
 #: The first characters of a start that names a snapshot (``SnapshotStart.to_text``). No component's own start
@@ -103,7 +103,7 @@ class TrainingJob:
     (the non-empty start: one that the component made, such as ``SavedCheckpoint.path``, or in a job that control
     queued the name of a snapshot, ``SnapshotStart.to_text``, which the training service replaces by the component's
     start of that snapshot before the component reads the job),
-    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.job_data``; a component
+    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.data.job_data``; a component
     that trains on Reef's host reads it with ``job.read_data()`` and cuts it into optimizer batches by its own batch
     size, and a component that runs the job elsewhere gives that place ``data_uri``),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
@@ -363,7 +363,7 @@ class TrainingBackendFacts(ABC):
     ``check_job``, ``changed_parts`` and the jobs themselves.
 
     Purpose: control builds no training component. The scenario factory writes the root snapshot of a new scenario
-    from ``default_start`` and checks an item root with ``check_root_start`` (``reef.scenario.live_objects``).
+    from ``default_start`` and checks an item root with ``check_root_start`` (``reef.control.scenario.live_objects``).
     Control's view of the jobs queue (``reef.train.job_queue.JobQueueComponent``) answers a trainer from the facts
     and asks the training service for the rest. The inference service reads ``artifact_format``.
     """
@@ -597,7 +597,7 @@ class TrainingComponent(ABC):
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
         The training service calls it at its start for a recipe whose jobs train tasks
-        (``reef.scenario.live_objects.check_recipe_objects``), so a deployment that cannot run them fails before
+        (``reef.control.scenario.live_objects.check_recipe_objects``), so a deployment that cannot run them fails before
         any job. ``parameters`` are the recipe's parameters of a task job. The default refuses: the
         component trains trajectories only. ``check_job`` still checks each job.
         """
@@ -702,7 +702,7 @@ class TrainingArtifactLayout(ArtifactLayout):
     ``facts.artifact_format`` is not None: the snapshots then hold weight files, which the serving runtimes read
     through ``ArtifactWeightFiles``.
 
-    Purpose: ``reef.scenario.live_objects.scenario_components`` binds it on the weight component of a weight
+    Purpose: ``reef.control.scenario.live_objects.scenario_components`` binds it on the weight component of a weight
     recipe. In control ``remote`` is the jobs queue's view, which asks the training service. The inference service
     binds it without ``remote``: it loads artifacts that control admitted and stores no import.
     """

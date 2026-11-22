@@ -1,7 +1,7 @@
 """The SPADE task generator: the Environment Designer's generations, with the hint based regret as its signal.
 
 One ``generate`` call is one generation: ``count`` proposals across the configured ``skills``, each a
-Designer call through the generator service (``reef.record2sample.generator``), with the last generation's
+Designer call through the generator service (``reef.samples.generator``), with the last generation's
 results in the prompt as SPADE's experience section.
 
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
@@ -55,7 +55,7 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.record2sample.generator.client import (
+from reef.samples.generator.client import (
     DuplicateTaskError,
     Generator,
     GeneratorError,
@@ -64,8 +64,8 @@ from reef.record2sample.generator.client import (
     TaskNameConflictError,
     WrittenTask,
 )
-from reef.record2sample.generator.designer import DIFFICULTIES, DesignerRequest
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.generator.designer import DIFFICULTIES, DesignerRequest
+from reef.samples.generator.inputs import TaskGenerationRequest
 
 logger = logging.getLogger(__name__)
 

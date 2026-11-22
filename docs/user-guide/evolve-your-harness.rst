@@ -145,7 +145,7 @@ Change the deployment's evaluation and add a ``pipeline`` section:
            policy: compare
    pipeline:
      sample2job:
-       module: reef.sample2job.traces:TrainTaskJobData
+       module: reef.train.sample2job.traces:TrainTaskJobData
        config: {buffer_size: 4}
 
 Then upload Harbor task directories as task items of the scenario's owner,
@@ -275,12 +275,12 @@ each call is then one unscored trace:
 .. code-block:: yaml
 
    pipeline:
-     record2sample: {module: reef.record2sample.traces:InferenceSamples}
+     record2sample: {module: reef.samples.traces:InferenceSamples}
 
 Offline runs on uploaded tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.sample2job.traces:TrainTaskJobData`` makes each step from the train
+``reef.train.sample2job.traces:TrainTaskJobData`` makes each step from the train
 split of the scenario's imported tasks:
 
 - Each uploaded train task trains once, in upload order. A step runs up to

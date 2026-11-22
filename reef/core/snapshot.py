@@ -140,7 +140,7 @@ class ItemIdentity:
     Values: ``item_id`` is the item's non-empty ID. ``artifact_id`` is the item's artifact ID, which the new artifact
     keeps (RFC #1218), or None for a new one. Construction checks these types.
 
-    Purpose: ``reef.service.artifact_imports`` makes it from a stored item; a scenario's root (``ItemStart``) and an
+    Purpose: ``reef.control.operations.artifact_imports`` makes it from a stored item; a scenario's root (``ItemStart``) and an
     import (``ScenarioCommitter.import_artifact``) read it.
     """
 

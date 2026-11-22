@@ -76,7 +76,7 @@ The storage backend keeps the records, commits and settings of each scenario. Th
 - PostgreSQL 14 and newer are supported.
 - Archived scenarios stay in PostgreSQL under their old storage identifier, and a recreated scenario gets a new one. The retention settings apply to all active and archived stores of the schema, and preserve active records and retry hashes.
 
-**A plugin.** Subclass ``reef.storage.scenario.ScenarioStorage`` and implement all abstract methods, including ``from_config``:
+**A plugin.** Subclass ``reef.storage.scenario.store.ScenarioStorage`` and implement all abstract methods, including ``from_config``:
 
 .. code-block:: yaml
 
@@ -148,7 +148,7 @@ A recipe that generates tasks saves each published task as a Harbor task directo
 
 The default, ``local``, keeps the files in ``storage.task-file-dir`` (default: ``.reef/task-files``). Archiving a scenario moves its files under ``archived/`` in that directory.
 
-**A plugin.** Name a subclass of ``reef.storage.tasks.TaskFileStore`` in ``storage.task-file-backend``:
+**A plugin.** Name a subclass of ``reef.storage.data.tasks.TaskFileStore`` in ``storage.task-file-backend``:
 
 .. code-block:: yaml
 
@@ -183,13 +183,13 @@ Without ``storage.data-store``, the store follows ``storage.record-backend``:
    * - a plugin
      - As ``sqlite``.
 
-To use another database or schema, or your own store, name a subclass of ``reef.storage.data.DataStore``:
+To use another database or schema, or your own store, name a subclass of ``reef.storage.data.store.DataStore``:
 
 .. code-block:: yaml
 
    storage:
      data-store:
-       module: reef.storage.sql_data:PostgresDataStore
+       module: reef.storage.sql.data:PostgresDataStore
        config:
          database_url: ${REEF_DATA_DATABASE_URL}
          schema: reef_data
@@ -204,7 +204,7 @@ The data store's database grows with each trajectory and each record item. With 
 - In the same run, the data service merges segments of less than 1 MiB into segments of at least 64 MiB, when an owner has at least 64 MiB in them.
 - A segment that no item uses for 24 hours is deleted.
 
-``local`` keeps the segments in ``<agent-record-dir>/segments``. Only the services of one host can share this directory. To share segments between hosts, name a subclass of ``reef.storage.segments.SegmentStore``, for example a store in object storage:
+``local`` keeps the segments in ``<agent-record-dir>/segments``. Only the services of one host can share this directory. To share segments between hosts, name a subclass of ``reef.storage.data.segments.SegmentStore``, for example a store in object storage:
 
 .. code-block:: yaml
 

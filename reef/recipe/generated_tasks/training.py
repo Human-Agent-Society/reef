@@ -23,8 +23,8 @@ from reef.core.job_data import TaskSample
 from reef.core.tasks import read_harbor_task
 from reef.core.values import require_integer, require_text
 from reef.recipe.generated_tasks.generator import check_rewards
-from reef.storage.samples import StoredSample, TrainerSamples
-from reef.storage.tasks import GenerationState, StoredTask, TaskStore
+from reef.storage.data.tasks import GenerationState, StoredTask, TaskStore
+from reef.storage.scenario.samples import StoredSample, TrainerSamples
 
 #: The task store of the stage, and the prefix of the names of the samples that it makes.
 TASK_STORE_NAME = "generated-tasks"

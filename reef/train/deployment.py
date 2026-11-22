@@ -11,7 +11,7 @@ from typing import Any, Literal, get_args
 from reef.core.errors import DeployConfigError, RuntimeConfigError
 from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
 from reef.execution.executor.arguments import normalize_native_options
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.component import training_component_factory_for
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.

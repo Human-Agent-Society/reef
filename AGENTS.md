@@ -50,19 +50,21 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | Location | Responsibility |
 | --- | --- |
 | `reef/core/` | Shared value types, wire contracts, and errors |
-| `reef/dispatcher/`, `reef/scenario/` | Coordination, scenario state, commit ordering, and recovery |
-| `reef/service/` | HTTP, authentication, streaming, and deployment |
+| `reef/control/` | The loaded scenarios: scenario state, commit ordering, and recovery (`scenario/`), their coordination, control's background workers (`workers/`), and the operations that a client asks for, without HTTP (`operations/`) |
+| `reef/api/` | The HTTP process of each service: routes, authentication, streaming, and the assembly of the app |
+| `reef/deploy/` | `reef serve`: the configuration of a deployment and the startup of its processes |
 | `reef/recipe/`, `reef/train/` | Recipe contracts, built-in recipes, the training pipeline, training, and backend integrations |
 | `reef/evaluation/` | Candidate evaluation: running and scoring evaluation runs, deciding whether a candidate is published, and plugin configuration |
 | `reef/inference/` | Inference contracts, serving runtimes, and concrete inference integrations, engine control, and weight reception |
+| `reef/routing/` | The Semantic Router integration: the routing manifest, the routing preview, and the router container of a managed deployment |
 | `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
 | `reef/artifact/` | Versioned artifacts, repositories, and the components a recipe declares |
-| `reef/storage/` | Record storage contracts, persistence, and retention |
+| `reef/storage/` | Storage contracts, persistence, and retention: the stores of a scenario (`scenario/`), the data store (`data/`), the coordination store (`coordination/`), and their SQLite and PostgreSQL implementations (`sql/`) |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
 | `reef/execution/` | Shared job scheduling, local process ownership, worker executors, sandbox isolation, file transfer, and cleanup |
-| `reef/record2sample/` | The record-to-sample stage (`Record2Sample`): which records Reef uses, which train together (report grouping, judging, eligibility checks, the staleness check), and their samples; the samples service (`service/`); and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
-| `reef/sample2job/` | The sample-to-job stage: the samples of the next job into one training job's data (`Sample2Job`), and the job size `job_samples` |
-| `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |
+| `reef/samples/` | The record-to-sample stage (`Record2Sample`): which records Reef uses, which train together (report grouping, judging, eligibility checks, the staleness check), and their samples; the samples service (`service/`); and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
+| `reef/train/sample2job/` | The sample-to-job stage: the samples of the next job into one training job's data (`Sample2Job`), and the job size `job_samples` |
+| `reef/samples/context.py` | The context that the training pipeline and its stages read for one scenario |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |
 
@@ -318,7 +320,7 @@ endorsements of every sentence or historical API detail:
 
 Read [tests/AGENTS.md](tests/AGENTS.md) before adding or moving tests. Place new
 tests under their owning component, not directly under `tests/`. Keep
-`tests/reef_service/` for service contracts and service workflows. Update CI
+`tests/api/` for service contracts and service workflows. Update CI
 selection and fixture paths with every move; preserve existing test coverage.
 
 Start with the smallest existing suite that exercises the changed behavior.

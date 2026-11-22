@@ -9,14 +9,20 @@ import pytest
 from sqlalchemy import func, select
 from tests.support.conversations import conversation
 
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceSettings
-from reef.storage import sql_data
-from reef.storage.data import NewItem
-from reef.storage.record_items import record_item
-from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentNotFoundError, SegmentPartition, segment_lines
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
+from reef.storage.data.segments import (
+    LocalSegmentStore,
+    SegmentLine,
+    SegmentNotFoundError,
+    SegmentPartition,
+    segment_lines,
+)
+from reef.storage.data.store import NewItem
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import record_item
+from reef.storage.sql import data as sql_data
+from reef.storage.sql.data import PostgresDataStore, SQLiteDataStore
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}}
 

@@ -20,7 +20,7 @@ from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.samples import SAMPLE_KINDS, SampleKind
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
@@ -51,9 +51,9 @@ class Recipe:
     data. Specialized recipes are frozen dataclasses over this base: they
     add their own configuration fields. A recipe holds no runtime, no
     training component and no store (RFC #1390): the process holds them in
-    ``reef.scenario.live_objects.LiveObjects``. The scenario factory builds
+    ``reef.control.scenario.live_objects.LiveObjects``. The scenario factory builds
     the trainers from a recipe's values and those objects
-    (``reef.scenario.factory.read_trainer_specs``).
+    (``reef.control.scenario.factory.read_trainer_specs``).
     """
 
     config_sections: ClassVar[tuple[str, ...]] = ()
@@ -121,7 +121,7 @@ class Recipe:
         runtime capability, not a dataclass field or recipe configuration.
 
         A ``CompositeRecipe`` declares none of its own: the contract of a deployment is
-        ``reef.scenario.factory.scenario_report_type``, which reads each component's.
+        ``reef.control.scenario.factory.scenario_report_type``, which reads each component's.
         """
         return None
 
@@ -134,14 +134,14 @@ class Recipe:
         files a client pulls. The default declares none: the scenario records
         traffic only. Most recipes ignore ``scenario``. The value is a function
         of the recipe's configuration fields alone; the deployment's components are
-        ``reef.scenario.live_objects.scenario_components``, which adds the facts that live objects know.
+        ``reef.control.scenario.live_objects.scenario_components``, which adds the facts that live objects know.
         """
         return ScenarioComponents()
 
     def default_start(self) -> DefaultStart:
         """The content of a new scenario's root snapshot when no artifact item starts the scenario, as the recipe's
         configuration gives it; empty by default. The deployment's default start is
-        ``reef.scenario.live_objects.default_start``."""
+        ``reef.control.scenario.live_objects.default_start``."""
         return DefaultStart()
 
 
@@ -155,7 +155,7 @@ class WeightTrainingRecipe(Recipe):
 
     The deployment's training component runs the recipe's training jobs, and
     its runtime serves the weights. The recipe holds neither: the process holds
-    them in ``reef.scenario.live_objects.LiveObjects``, and
+    them in ``reef.control.scenario.live_objects.LiveObjects``, and
     ``check_recipe_objects`` refuses a deployment without them.
 
     A job's ``parameters`` belong to its training component, and Reef reads
@@ -174,7 +174,7 @@ class WeightTrainingRecipe(Recipe):
     :mod:`reef.recipe.config_fields`) is simultaneously the YAML key, the
     environment fallback, and the type-aware parser. The loader
     (``reef.recipe.loading.load_recipe``) and the training deployment
-    (``reef.service.deploy.training.training_recipe_config``) derive everything from those fields, so a
+    (``reef.api.training.training_recipe_config``) derive everything from those fields, so a
     recipe never repeats a setting's name or type anywhere else.
     """
 
@@ -188,7 +188,7 @@ class WeightTrainingRecipe(Recipe):
 
     trains_task_jobs: ClassVar[bool] = False
     """Whether every job of the recipe is a task job. The deployment's training component must then take the
-    recipe's task parameters (``reef.scenario.live_objects.check_recipe_objects``)."""
+    recipe's task parameters (``reef.control.scenario.live_objects.check_recipe_objects``)."""
 
     @classmethod
     def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
@@ -222,5 +222,5 @@ class WeightTrainingRecipe(Recipe):
 
     def build_components(self, scenario: str) -> ScenarioComponents:
         """One component, ``weights``. Its kind and its layout are not configuration yet: the runtime and the
-        training component give them (``reef.scenario.live_objects.scenario_components``)."""
+        training component give them (``reef.control.scenario.live_objects.scenario_components``)."""
         return ScenarioComponents({WEIGHTS_COMPONENT: ComponentSpec()})

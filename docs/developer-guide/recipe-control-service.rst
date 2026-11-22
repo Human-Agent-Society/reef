@@ -69,7 +69,7 @@ of another component.
 Sample-to-job stage
 -------------------
 
-The sample-to-job stage (``reef.sample2job.Sample2Job``) turns the stored
+The sample-to-job stage (``reef.train.sample2job.Sample2Job``) turns the stored
 samples of the next job into one ``JobData``, and gives the job its
 parameters. Each trainer cycle on control calls it when enough samples wait
 (``auto``) or a training request is queued (``manual``). Then control
@@ -105,7 +105,7 @@ Class attributes tell Reef what the stage accepts:
 - ``accepts_imported_tasks`` (default ``False``): train the scenario's
   imported ``train`` tasks.
 
-Built-in stages (``reef.sample2job``):
+Built-in stages (``reef.train.sample2job``):
 
 - ``NoJobData``: the default. The pipeline never becomes ready.
 - ``DistillJobData``: the samples as they come, in store order. The
@@ -117,7 +117,7 @@ A minimal stage:
 .. code:: python
 
    from reef.core.job_data import JobData
-   from reef.sample2job import Sample2Job, Sample2JobSettings
+   from reef.train.sample2job import Sample2Job, Sample2JobSettings
 
 
    class MyJobData(Sample2Job):

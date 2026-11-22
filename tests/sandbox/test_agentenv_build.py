@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -20,6 +21,7 @@ from reef.execution.sandbox.agentenv_build import (
     AgentEnvBuildError,
     AgentEnvTemplates,
     DockerfileBuild,
+    TransientBuildError,
     dockerfile_build,
     dockerfile_sets_start_command,
     ensure_aenv_template,
@@ -55,10 +57,11 @@ esac
 
 class FakeAgentEnv:
     """A fake AgentENV template API. ``states`` holds the answers to the reads of the alias, in order; the last answer
-    repeats. An answer is None (no template), ``(template_id, status)``, or an HTTP error status. A template
+    repeats. An answer is None (no template), ``(template_id, status)``, an HTTP error status, or ``"proxy"`` (the
+    HTML page of a proxy's 500). A template
     that ``deleted`` records, each deletion in order, reads as no template. Each build was made ``build_age`` ago."""
 
-    def __init__(self, states: list[tuple[str, str] | int | None], build_age: timedelta = timedelta()) -> None:
+    def __init__(self, states: list[tuple[str, str] | int | str | None], build_age: timedelta = timedelta()) -> None:
         self.states = states
         self.build_age = build_age
         self.deleted: list[str] = []
@@ -68,8 +71,11 @@ class FakeAgentEnv:
         async def alias(request: web.Request) -> web.Response:
             assert request.headers["X-API-Key"] == "key"
             answer = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            if answer == "proxy":
+                return web.Response(status=500, text="<html>Internal Server Error</html>", content_type="text/html")
             if isinstance(answer, int):
-                return web.Response(status=answer)
+                return web.json_response({"code": answer, "message": "backend error"}, status=answer)
+            assert not isinstance(answer, str)
             self.current = None if answer is not None and answer[0] in self.deleted else answer
             if self.current is None:
                 return web.json_response({"message": "template alias not found"}, status=404)
@@ -266,7 +272,7 @@ def test_a_template_building_long_past_its_deadline_is_an_orphan_that_is_deleted
     ("read_status", "build_error"),
     [
         pytest.param(503, "Error: HTTP 429: node concurrent build limit reached", id="worker-busy"),
-        pytest.param(500, "Error: HTTP 503: try later", id="alias-read-500"),
+        pytest.param("proxy", "Error: HTTP 503: try later", id="alias-read-proxy-500"),
         pytest.param(None, "Error: HTTP 500: <html>\n<center>nginx</center>\n</html>", id="proxy-500"),
         pytest.param(
             None,
@@ -277,7 +283,7 @@ def test_a_template_building_long_past_its_deadline_is_an_orphan_that_is_deleted
     ],
 )
 def test_a_build_and_a_read_that_an_overloaded_api_refuses_are_tried_again(
-    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, read_status: int | None, build_error: str
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, read_status: int | str | None, build_error: str
 ) -> None:
     monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
     monkeypatch.setenv("FAKE_AENV_ERROR", build_error)
@@ -345,3 +351,19 @@ def test_a_failed_build_deletes_the_waiting_template_that_it_made(
     with pytest.raises(AgentEnvBuildError, match="BuildKit build failed"):
         ensured(fake, task_build(tmp_path))
     assert fake.deleted == ["t1"]
+
+
+@pytest.mark.unit
+def test_a_500_of_the_agentenv_api_itself_is_not_tried_again(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The API's own 500 names a failure that the next request meets again, such as a full catalog disk.
+    full = "backend error: sync temp json '/srv/catalog/.tmp7': No space left on device (os error 28)"
+    monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
+    monkeypatch.setenv("FAKE_AENV_ERROR", f"Error: HTTP 500: {full}")
+    with pytest.raises(AgentEnvBuildError, match="No space left on device") as raised:
+        ensured(FakeAgentEnv([None]), task_build(tmp_path))
+    assert not isinstance(raised.value, TransientBuildError)
+    assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run"]
+    with pytest.raises(aiohttp.ClientResponseError, match="500"):
+        ensured(FakeAgentEnv([500]), task_build(tmp_path))
