@@ -227,9 +227,10 @@ With ``aenv``, the class uses a ready template and waits for a build that
 another trial runs. It deletes and rebuilds a failed template, and a template
 that stays ``waiting`` for three minutes with no build behind it. A failed
 ``aenv build`` deletes only the template that it made itself. Reef retries
-HTTP 429, 500, 502, 503 and 504 responses from the AgentENV API and
-connection timeouts until the build timeout. An AgentENV worker answers 429
-when it has no free build slot.
+HTTP 429, 502, 503 and 504 responses from the AgentENV API, the HTML page of
+a proxy's HTTP 500, and connection timeouts until the build timeout. The
+AgentENV API's own HTTP 500, for example for a full disk, fails the build at
+once. An AgentENV worker answers 429 when it has no free build slot.
 
 Build templates before the trials
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
