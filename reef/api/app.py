@@ -24,7 +24,7 @@ from reef.api.lifecycle import (
     create_control_app,
     register_admission,
 )
-from reef.api.request_service import InferenceRetryPolicy, RequestService
+from reef.api.request_handling import InferenceRetryPolicy, RequestHandling
 from reef.api.routes import register_data_service_routes, register_routes
 from reef.api.routes.harness import register_harness_routes
 from reef.api.routes.records import register_record_routes
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
 #: How often the data service calls ``DataStore.maintain``.
 DATA_STORE_MAINTENANCE_SECONDS = 300.0
-REQUEST_SERVICE_KEY = web.AppKey("reef_request_service", RequestService)
+REQUEST_HANDLING_KEY = web.AppKey("reef_request_handling", RequestHandling)
 #: The private lifecycle application of a managed child; ``serve_managed`` serves it on the control socket.
 CONTROL_APPLICATION = web.AppKey("reef_control_application", web.Application)
 #: The only public routes of a routed deployment: chat completions, feedback, and liveness.
@@ -60,7 +60,7 @@ def get_dispatcher(app: web.Application) -> Dispatcher:
 
     Raises ``KeyError`` for an app that ``create_app`` did not build.
     """
-    return app[REQUEST_SERVICE_KEY].dispatcher
+    return app[REQUEST_HANDLING_KEY].dispatcher
 
 
 @web.middleware
@@ -90,7 +90,7 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
 class RoutingPublication(RoutingPublisher):
     """Replace the service's routing policy, router runtime and per-target handlers together.
 
-    It holds ``request_service`` and reads and replaces only that service's ``routing`` adapter.
+    It holds ``request_handling`` and reads and replaces only its ``routing`` adapter.
     ``current`` returns it, None without routing. ``candidate`` refuses when routing is off, loads the
     manifest, and refuses one whose digest is not ``snapshot_version`` or that ``check_policy_change``
     refuses (a changed classifier, automatic model or set of Scenario names). Otherwise it builds the
@@ -100,22 +100,22 @@ class RoutingPublication(RoutingPublisher):
     refuses a missing or unpublished runtime, then checks every provider and previews every Scenario.
     """
 
-    def __init__(self, request_service: RequestService) -> None:
-        self.request_service = request_service
+    def __init__(self, request_handling: RequestHandling) -> None:
+        self.request_handling = request_handling
 
     def current(self) -> RoutingAdapter | None:
-        return self.request_service.routing
+        return self.request_handling.routing
 
     async def check_ready(self) -> None:
-        routing = self.request_service.routing
-        preview = self.request_service.preview
+        routing = self.request_handling.routing
+        preview = self.request_handling.preview
         if routing is None or routing.router_config_hash is None or preview is None:
             raise RoutingRequestError("routing has no verified router runtime", code="routing_unpublished", status=503)
         await routing.check_ready()
         await preview.check_ready(routing)
 
     def candidate(self, manifest_path: str, snapshot_version: str, router_config_hash: str | None) -> RoutingAdapter:
-        current = self.request_service.routing
+        current = self.request_handling.routing
         if current is None:
             raise ValueError("routing is not enabled")
         snapshot = RoutingSnapshot.load(manifest_path)
@@ -132,7 +132,7 @@ class RoutingPublication(RoutingPublisher):
 
     def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
         # One assignment: a request admitted later captures the new manifest, runtime hash and handlers together.
-        self.request_service.routing = self.candidate(manifest_path, snapshot_version, router_config_hash)
+        self.request_handling.routing = self.candidate(manifest_path, snapshot_version, router_config_hash)
 
 
 def maintain_data_store(app: web.Application, dispatcher: Dispatcher) -> None:
@@ -182,13 +182,13 @@ def create_data_app(
     """
     if not dispatcher.services.runs_data:
         raise ValueError("the data app runs the data service: build its dispatcher with the data service")
-    request_service = RequestService(dispatcher)
+    request_handling = RequestHandling(dispatcher)
     app = service_application(tokens)
     configure_browser_access(app, console_origins)
-    app[REQUEST_SERVICE_KEY] = request_service
+    app[REQUEST_HANDLING_KEY] = request_handling
     register_data_service_routes(
         app,
-        request_service=request_service,
+        request_handling=request_handling,
         evaluations=ArtifactEvaluations(dispatcher),
         max_task_archive_bytes=max_task_archive_bytes,
     )
@@ -217,11 +217,11 @@ def create_harness_app(
     """
     if not dispatcher.services.runs_harness or dispatcher.services.runs_control:
         raise ValueError("the harness app runs the harness service without control")
-    request_service = RequestService(dispatcher, inference_url=inference_url)
+    request_handling = RequestHandling(dispatcher, inference_url=inference_url)
     app = service_application(tokens)
     configure_browser_access(app, console_origins)
-    app[REQUEST_SERVICE_KEY] = request_service
-    register_harness_routes(app, request_service=request_service, imports=QueuedImports(dispatcher.queue))
+    app[REQUEST_HANDLING_KEY] = request_handling
+    register_harness_routes(app, request_handling=request_handling, imports=QueuedImports(dispatcher.queue))
 
     async def cleanup(app: web.Application) -> None:
         await asyncio.to_thread(dispatcher.close)
@@ -302,7 +302,7 @@ def create_app(
     publisher = dispatcher.publisher
     if publisher is None:
         raise ValueError("the Reef app runs control: build its dispatcher with the control service")
-    request_service = RequestService(
+    request_handling = RequestHandling(
         dispatcher,
         inference_url=harness_inference_url,
         retry_policy=inference_retry_policy,
@@ -311,19 +311,19 @@ def create_app(
         preview=preview_client,
     )
     app = service_application(accepted_tokens, evaluation_tokens=evaluation_tokens)
-    app[REQUEST_SERVICE_KEY] = request_service
+    app[REQUEST_HANDLING_KEY] = request_handling
     if close_dispatcher:
 
         async def stop_taking_work(app: web.Application) -> None:
             # The first shutdown hook, before any later hook waits, such as the finalization of managed requests:
             # the workers take no new work from now on, and a stop deadline starts here.
-            app[REQUEST_SERVICE_KEY].dispatcher.workers.begin_stop()
+            app[REQUEST_HANDLING_KEY].dispatcher.workers.begin_stop()
 
         app.on_shutdown.append(stop_taking_work)
     if routing is not None:
         app.middlewares.insert(1, routed_routes_only)
     if lifecycle is not None and writes is not None:
-        managed = RequestAcceptance(lifecycle, writes, publisher=RoutingPublication(request_service))
+        managed = RequestAcceptance(lifecycle, writes, publisher=RoutingPublication(request_handling))
         # Inside authentication, outside error translation, so generated error
         # responses for admitted requests also complete within their root lease.
         app.middlewares.insert(len(app.middlewares) - 1, create_acceptance_middleware(managed))
@@ -362,7 +362,7 @@ def create_app(
         )
         register_routes(
             app,
-            request_service=request_service,
+            request_handling=request_handling,
             replica=replica,
             evaluations=artifact_evaluations,
             imports=(
@@ -375,8 +375,8 @@ def create_app(
             max_task_archive_bytes=max_task_archive_bytes,
         )
     else:
-        register_routed_chat(app, request_service=request_service)
-        register_record_routes(app, request_service=request_service)
+        register_routed_chat(app, request_handling=request_handling)
+        register_record_routes(app, request_handling=request_handling)
     if routing is not None and preview_client is not None:
 
         async def run_selection(app: web.Application) -> AsyncIterator[None]:
@@ -401,12 +401,12 @@ def create_app(
             await asyncio.to_thread(artifact_evaluations.close)
 
     app.cleanup_ctx.append(evaluate_new_artifacts)
-    maintain_data_store(app, request_service.dispatcher)
+    maintain_data_store(app, request_handling.dispatcher)
     if record_retention is not None:
 
         async def maintain_records(app: web.Application):
             stopped = asyncio.Event()
-            task = asyncio.create_task(_maintain_records(request_service.dispatcher, record_retention, stopped))
+            task = asyncio.create_task(_maintain_records(request_handling.dispatcher, record_retention, stopped))
             try:
                 yield
             finally:
@@ -429,7 +429,7 @@ def create_app(
                         continue
                     writer.close()
                     break
-                await asyncio.to_thread(app[REQUEST_SERVICE_KEY].dispatcher.open_local_cycles)
+                await asyncio.to_thread(app[REQUEST_HANDLING_KEY].dispatcher.open_local_cycles)
 
             # on_startup runs before the site listens: wait for the socket, off the startup path.
             task = asyncio.create_task(once_listening())
@@ -445,10 +445,10 @@ def create_app(
 
         async def stop_local_cycles(app: web.Application) -> None:
             # The listening socket is closed by now: a harness cycle's calls through Reef fail from here on.
-            app[REQUEST_SERVICE_KEY].dispatcher.stop_local_cycles()
+            app[REQUEST_HANDLING_KEY].dispatcher.stop_local_cycles()
 
         async def cleanup(app: web.Application) -> None:
-            await asyncio.to_thread(app[REQUEST_SERVICE_KEY].dispatcher.close)
+            await asyncio.to_thread(app[REQUEST_HANDLING_KEY].dispatcher.close)
 
         app.on_shutdown.append(stop_local_cycles)
         app.on_cleanup.append(cleanup)
@@ -456,7 +456,7 @@ def create_app(
 
 
 __all__ = [
-    "RequestService",
+    "RequestHandling",
     "create_app",
     "create_data_app",
     "get_dispatcher",

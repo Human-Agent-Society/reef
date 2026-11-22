@@ -1,6 +1,6 @@
 """Transport-independent request handling behind the aiohttp routes.
 
-``RequestService`` normalizes typed Reef payloads, resolves the artifact
+``RequestHandling`` normalizes typed Reef payloads, resolves the artifact
 version before every provider call so concurrent publication cannot change
 what gets recorded, and stores each exchange as a record. No aiohttp types appear here;
 ``reef.api.routes`` adapts these methods to HTTP. The harness operations are in
@@ -41,7 +41,7 @@ def normalize_request_payload(
     return report.to_dict(), report.references
 
 
-class RequestService:
+class RequestHandling:
     """The request handling of one service app over ``dispatcher``.
 
     Values: ``inference_url`` is the address at which clients reach the inference service
@@ -172,6 +172,6 @@ class RequestService:
 __all__ = [
     "InferenceRetryPolicy",
     "InferenceRetryTimeoutError",
-    "RequestService",
+    "RequestHandling",
     "normalize_request_payload",
 ]

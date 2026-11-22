@@ -15,7 +15,7 @@ from typing import Any
 from aiohttp import web
 
 from reef.api.auth import add_signed_download, signed_download_url
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
 from reef.control.operations.collections import (
     HOLD_ROUTES,
@@ -93,12 +93,12 @@ async def write_body_file(request: web.Request, path: Path, max_bytes: int) -> N
 def register_data_routes(
     app: web.Application,
     *,
-    request_service: RequestService,
+    request_handling: RequestHandling,
     max_task_archive_bytes: int = DEFAULT_MAX_TASK_ARCHIVE_BYTES,
 ) -> None:
     """Register the data routes. ``max_task_archive_bytes`` is ``data.max_task_archive_bytes``: the most bytes of the
     body of a task archive."""
-    data = DataAccess.of(request_service.dispatcher)
+    data = DataAccess.of(request_handling.dispatcher)
 
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)

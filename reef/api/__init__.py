@@ -9,7 +9,7 @@ dispatcher; a recipe has no runtime and no training component. Assembly
 imports no concrete training framework.
 
 Everything HTTP lives here, and only the HTTP parts live in the HTTP layer.
-``RequestService`` is the transport-free core — it parses ``x-reef-*``
+``RequestHandling`` is the transport-free core — it parses ``x-reef-*``
 headers, freezes the snapshot before every provider call so
 concurrent publication cannot change what gets recorded, and stores each
 exchange as a record; ``routes/`` are thin aiohttp adapters over it and

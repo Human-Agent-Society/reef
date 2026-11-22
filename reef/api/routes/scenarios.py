@@ -5,7 +5,7 @@ import asyncio
 from aiohttp import web
 
 from reef.api.inference_service import TrafficWeights
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
 from reef.control.operations.artifact_evaluations import ArtifactEvaluations
 from reef.control.operations.artifact_imports import ArtifactImports
@@ -15,25 +15,25 @@ from reef.storage.data.store import check_owner
 from reef.train.job_queue import cancel_scenario_job
 
 
-def register_scenario_reads(app: web.Application, *, request_service: RequestService) -> None:
+def register_scenario_reads(app: web.Application, *, request_handling: RequestHandling) -> None:
     """The reads of what each scenario stores, which every service with the scenarios' stores answers."""
 
     async def list_scenarios(request: web.Request) -> web.Response:
-        return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
+        return web.json_response({"scenarios": list(request_handling.dispatcher.list_scenarios())})
 
     async def scenario_settings(request: web.Request) -> web.Response:
-        result = await asyncio.to_thread(request_service.dispatcher.scenario_settings, request.match_info["scenario"])
+        result = await asyncio.to_thread(request_handling.dispatcher.scenario_settings, request.match_info["scenario"])
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def list_artifacts(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        artifacts = await asyncio.to_thread(request_service.dispatcher.list_artifacts, scenario)
+        artifacts = await asyncio.to_thread(request_handling.dispatcher.list_artifacts, scenario)
         return web.json_response({"scenario": scenario, "artifacts": artifacts})
 
     async def record_list(request: web.Request) -> web.Response:
         request_type = request.query.get("request_type")
         result = await asyncio.to_thread(
-            request_service.dispatcher.read_records,
+            request_handling.dispatcher.read_records,
             request.match_info["scenario"],
             after_sequence=int(request.query.get("after_sequence", "0")),
             limit=int(request.query.get("limit", "50")),
@@ -44,7 +44,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
 
     async def commit_list(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
-            request_service.dispatcher.read_commits,
+            request_handling.dispatcher.read_commits,
             request.match_info["scenario"],
             after_commit_number=int(request.query.get("after_commit_number", "0")),
             limit=int(request.query.get("limit", "50")),
@@ -54,7 +54,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
 
     async def operation_list(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
-            request_service.dispatcher.read_commits,
+            request_handling.dispatcher.read_commits,
             request.match_info["scenario"],
             after_commit_number=int(request.query.get("after_commit_number", "0")),
             limit=int(request.query.get("limit", "50")),
@@ -65,7 +65,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
 
     async def record_detail(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
-            request_service.dispatcher.read_record,
+            request_handling.dispatcher.read_record,
             request.match_info["scenario"],
             request.match_info["record_id"],
         )
@@ -80,7 +80,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
     async def scenario_contract(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         return web.json_response(
-            request_service.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
+            request_handling.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
         )
 
     app.router.add_get("/reef/scenarios", list_scenarios)
@@ -96,7 +96,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
 def register_scenario_writes(
     app: web.Application,
     *,
-    request_service: RequestService,
+    request_handling: RequestHandling,
     evaluations: ArtifactEvaluations,
     imports: ArtifactImports,
 ) -> None:
@@ -131,7 +131,7 @@ def register_scenario_writes(
             raise web.HTTPBadRequest(text="serves must be a boolean: false creates a scenario that serves nothing")
         if component is not None and artifact_id is None:
             raise web.HTTPBadRequest(text="component names where artifact_id lands: give artifact_id too")
-        dispatcher = request_service.dispatcher
+        dispatcher = request_handling.dispatcher
         target = None if component is None else component.strip()
         # An existing scenario keeps its root: creation is idempotent.
         item_id = artifact_id.strip() if isinstance(artifact_id, str) and not dispatcher.has_scenario(name) else None
@@ -181,7 +181,7 @@ def register_scenario_writes(
         result: dict[str, object] = {"scenario": name}
         if "training_mode" in payload:
             result.update(
-                await asyncio.to_thread(request_service.dispatcher.set_training_mode, name, payload["training_mode"])
+                await asyncio.to_thread(request_handling.dispatcher.set_training_mode, name, payload["training_mode"])
             )
         changes: dict[str, object] = {
             key: payload[key] for key in ("artifact_evaluation", "activation") if key in payload
@@ -190,23 +190,25 @@ def register_scenario_writes(
             result.update(await asyncio.to_thread(evaluations.configure, name, changes))
         if "serving_config" in payload:
             result.update(
-                await asyncio.to_thread(request_service.dispatcher.set_serving_config, name, payload["serving_config"])
+                await asyncio.to_thread(
+                    request_handling.dispatcher.set_serving_config, name, payload["serving_config"]
+                )
             )
         if "record2sample_config" in payload:
             result.update(
                 await asyncio.to_thread(
-                    request_service.dispatcher.set_record2sample_config, name, payload["record2sample_config"]
+                    request_handling.dispatcher.set_record2sample_config, name, payload["record2sample_config"]
                 )
             )
         if "served" in payload:
             if not isinstance(payload["served"], dict):
                 raise ValueError("served must map artifact IDs to weights that sum to 100, or be empty")
             served = TrafficWeights.from_json(payload["served"]).by_artifact
-            result.update(await asyncio.to_thread(request_service.dispatcher.set_served, name, served, component))
+            result.update(await asyncio.to_thread(request_handling.dispatcher.set_served, name, served, component))
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:
-        result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
+        result = await asyncio.to_thread(request_handling.dispatcher.delete_scenario, request.match_info["scenario"])
         return web.json_response(result)
 
     async def read_artifact_selection(request: web.Request) -> tuple[str, str | None]:
@@ -228,17 +230,17 @@ def register_scenario_writes(
         if not isinstance(commit_number, int) or isinstance(commit_number, bool) or commit_number < 0:
             raise ValueError("restore commit_number must be a non-negative integer")
         scenario = request.match_info["scenario"]
-        components = await asyncio.to_thread(request_service.dispatcher.restore, scenario, commit_number)
+        components = await asyncio.to_thread(request_handling.dispatcher.restore, scenario, commit_number)
         return web.json_response({"scenario": scenario, "components": dict(components)})
 
     async def redeploy_scenario(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        await asyncio.to_thread(request_service.dispatcher.redeploy, scenario)
+        await asyncio.to_thread(request_handling.dispatcher.redeploy, scenario)
         return web.json_response({"scenario": scenario})
 
     async def cancel_job(request: web.Request) -> web.Response:
         scenario, job_id = request.match_info["scenario"], request.match_info["job_id"]
-        dispatcher = request_service.dispatcher
+        dispatcher = request_handling.dispatcher
         if not await asyncio.to_thread(dispatcher.has_scenario, scenario):
             raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         job = await asyncio.to_thread(cancel_scenario_job, dispatcher.queue, scenario, job_id)
@@ -248,7 +250,7 @@ def register_scenario_writes(
 
     async def cancel_request(request: web.Request) -> web.Response:
         scenario, request_id = request.match_info["scenario"], request.match_info["request_id"]
-        cancelled = await asyncio.to_thread(request_service.dispatcher.cancel_request, scenario, request_id)
+        cancelled = await asyncio.to_thread(request_handling.dispatcher.cancel_request, scenario, request_id)
         if cancelled is None:
             raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training request {request_id!r}")
         return web.json_response(
@@ -258,7 +260,7 @@ def register_scenario_writes(
     async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         artifact_id, component = await read_artifact_selection(request)
-        start = await asyncio.to_thread(request_service.dispatcher.train_from, scenario, artifact_id, component)
+        start = await asyncio.to_thread(request_handling.dispatcher.train_from, scenario, artifact_id, component)
         return web.json_response(
             {"scenario": scenario, "component": start.component, "artifact_id": start.artifact_id}
         )
