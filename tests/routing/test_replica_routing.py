@@ -1,4 +1,4 @@
-"""External routing: ``reef serve --component inference`` beside a router that another system runs.
+"""External routing: ``reef serve --service inference`` beside a router that another system runs.
 
 The router is ``routing_fakes.FakeSemanticRouter``, not the Semantic Router. The provider is a local aiohttp app.
 """
@@ -264,7 +264,7 @@ def test_external_routing_is_only_for_the_inference_component(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    with pytest.raises(DeployConfigError, match="--component inference"):
+    with pytest.raises(DeployConfigError, match="--service inference"):
         orchestrator.main(["--config", str(config)])
 
 

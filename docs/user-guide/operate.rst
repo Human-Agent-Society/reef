@@ -420,7 +420,7 @@ A step that fails stays for the next sweep, an hour later. The first sweep after
 Run the services in separate processes
 --------------------------------------
 
-A deployment has seven services: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` and ``harness``. By default, ``reef serve`` runs all of them in one process. To keep inference up while control restarts, or to run more replicas of one service, start each service in its own process with ``reef serve --component NAME``. `Run the services in separate processes <split-services.rst>`__ describes the layout, the routes of each service, and what happens while control restarts.
+A deployment has seven services: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` and ``harness``. By default, ``reef serve`` runs all of them in one process. To keep inference up while control restarts, or to run more replicas of one service, start each service in its own process with ``reef serve --service NAME``. `Run the services in separate processes <split-services.rst>`__ describes the layout, the routes of each service, and what happens while control restarts.
 
 Import Harbor tasks
 -------------------

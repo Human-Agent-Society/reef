@@ -1,4 +1,4 @@
-"""``reef serve --component``: each process runs the workers of its own services on the shared store."""
+"""``reef serve --service``: each process runs the workers of its own services on the shared store."""
 
 from __future__ import annotations
 
@@ -666,12 +666,21 @@ def test_the_harness_service_needs_a_recipe_that_evolves_a_harness(tmp_path: Pat
 
 
 @pytest.mark.unit
-def test_reef_serve_names_one_service_with_component() -> None:
+def test_reef_serve_names_one_service_with_service() -> None:
     parser = build_serve_parser()
-    assert parser.parse_args(["--component", "evaluation"]).component == "evaluation"
-    assert parser.parse_args([]).component is None
+    assert parser.parse_args(["--service", "evaluation"]).service == "evaluation"
+    assert parser.parse_args([]).service is None
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--service", "router"])
+
+
+@pytest.mark.unit
+def test_reef_serve_takes_the_older_name_of_the_service_flag() -> None:
+    parser = build_serve_parser()
+    assert parser.parse_args(["--component", "evaluation"]).service == "evaluation"
     with pytest.raises(SystemExit):
         parser.parse_args(["--component", "router"])
+    assert "--component" not in parser.format_help()
 
 
 @pytest.mark.unit
