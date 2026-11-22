@@ -43,7 +43,7 @@ from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox import relay as sandbox_relay
 from reef.execution.sandbox.environment import run_sync
 from reef.execution.sandbox.process import ProgramLaunchError
-from reef.execution.sandbox.remote import HOP_BY_HOP
+from reef.execution.sandbox.remote import HOP_BY_HOP, loopback_url
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
@@ -393,15 +393,30 @@ class AdapterAgent(BaseInstalledAgent):
             reply = f"{request['id']} {path}"
 
     async def answer(self, local: aiohttp.ClientSession, request: Mapping[str, Any]) -> dict[str, Any]:
-        """The relay's one piece that answers ``request`` from this host's ``bridge_port``: the whole answer."""
+        """The relay's one piece that answers ``request`` from this host's ``bridge_port``: the whole answer. A
+        request whose target is not a path of that port gets the status 400, and no request leaves this host
+        (``loopback_url``)."""
         headers = {
             name: value for name, value in (request.get("headers") or {}).items() if name.lower() not in HOP_BY_HOP
         }
         body = base64.b64decode(request.get("body") or "")
+        if self.bridge_port is None:
+            raise ProgramLaunchError("an agent without a bridge port answers no relayed call")
+        try:
+            url = loopback_url(self.bridge_port, request.get("path") or "/")
+        except ValueError as refused:
+            data = str(refused).encode()
+            return {
+                "status": 400,
+                "headers": {"Content-Type": "text/plain"},
+                "data": base64.b64encode(data).decode(),
+                "end": True,
+                "sequence": 0,
+            }
         try:
             async with local.request(
                 str(request.get("method") or "GET"),
-                f"http://127.0.0.1:{self.bridge_port}{request.get('path') or '/'}",
+                url,
                 headers=headers,
                 data=body or None,
                 timeout=aiohttp.ClientTimeout(total=None, sock_read=3600),
