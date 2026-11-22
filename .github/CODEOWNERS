@@ -17,8 +17,9 @@
 # Core product areas. Keep these entries separate so ownership can be
 # delegated one subsystem at a time as the maintainer group grows.
 /reef/service/ @BobbyZhouZijian @quao627
-/reef/scenario/ @BobbyZhouZijian @quao627
-/reef/dispatcher/ @BobbyZhouZijian @hanfeiyu
+/reef/control/ @BobbyZhouZijian @hanfeiyu
+/reef/control/scenario/ @BobbyZhouZijian @quao627
+/reef/control/operations/ @BobbyZhouZijian @quao627
 /reef/core/ @BobbyZhouZijian @quao627
 /recipes/basic/ @BobbyZhouZijian @quao627
 /third_party/ @BobbyZhouZijian @Benjamin-eecs
