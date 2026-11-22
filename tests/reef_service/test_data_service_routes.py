@@ -32,11 +32,11 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import DefaultStart, FileDownload
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations import data_transfer
+from reef.control.operations.data_service import DataImport
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
-from reef.service import data_transfer
 from reef.service.app import create_app
-from reef.service.data_service import DataImport
 from reef.storage.data_queue import DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.component import TrainingJob
@@ -323,7 +323,7 @@ def test_an_artifacts_file_list_gives_the_repositorys_urls_without_materializing
         assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
         artifacts = await (await client.get("/reef/scenarios/s/artifacts", headers=AUTH)).json()
         files_route = f"/reef/scenarios/s/artifacts/{artifacts['artifacts'][0]['artifact_id']}/files"
-        monkeypatch.setattr("reef.service.scenario_files.artifact_directory", materialized)
+        monkeypatch.setattr("reef.control.operations.scenario_files.artifact_directory", materialized)
         before = int(time.time())
         listing = await (await client.get(f"{files_route}?expires_in=600", headers=AUTH)).json()
         assert [(entry["path"], entry["bytes"], entry["url"]) for entry in listing["files"]] == [

@@ -27,10 +27,10 @@ from reef.artifact import (
 )
 from reef.artifact.artifact import training_starts_of
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.artifact_imports import ArtifactImports
 from reef.core.errors import CommitPendingError, ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
 from reef.service.app import create_app
-from reef.service.artifact_imports import ArtifactImports
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import SnapshotStart

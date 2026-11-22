@@ -227,8 +227,8 @@ def test_sample_processing_reads_the_log_of_each_attempt_of_a_task(tmp_path):
 
 
 def test_sample_processing_counts_the_records_after_the_last_one_that_each_trainer_read(tmp_path):
+    from reef.control.operations.sample_processing import list_processing
     from reef.record2sample.service import SAMPLES_QUEUE
-    from reef.service.sample_processing import list_processing
     from reef.storage.work_queue import NewWork
 
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())

@@ -4,10 +4,10 @@ import asyncio
 
 from aiohttp import web
 
+from reef.control.operations.artifact_evaluations import ArtifactEvaluations
+from reef.control.operations.artifact_imports import ArtifactImports
 from reef.core.errors import ScenarioNotFoundError
 from reef.core.records_types import RequestType
-from reef.service.artifact_evaluations import ArtifactEvaluations
-from reef.service.artifact_imports import ArtifactImports
 from reef.service.inference_service import TrafficWeights
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object

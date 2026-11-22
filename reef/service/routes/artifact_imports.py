@@ -4,7 +4,7 @@ import asyncio
 
 from aiohttp import web
 
-from reef.service.artifact_imports import ArtifactImports
+from reef.control.operations.artifact_imports import ArtifactImports
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 

@@ -61,7 +61,7 @@ Reef is organized around an application kernel and three capability domains, not
      - HTTP routes, auth, streaming, the app of each service, deployment and process lifecycle
      - Training methods, domain logic tied to aiohttp
    * - ``reef/control/``
-     - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers.
+     - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers. ``operations/`` holds the operations that a client asks for, without HTTP: data items, artifact evaluations, artifact imports, and the reads of a scenario's files and samples.
      - A concrete record backend, HTTP, training algorithms, repository implementations
    * - ``reef/recipe/``
      - The contract that a method implements, dotted resolution, the recipe loader, the base harness evolution recipe, the built-in SFT and generated-task recipes. A recipe is configuration only.
@@ -154,7 +154,7 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - Rollout results; ``serve_artifact`` items of the ``serving`` queue; the calls of each rollout
    * - ``data``
      - ``DataApp``
-     - ``reef/service/routes/data.py``, ``reef/service/routes/scenario_files.py``, ``reef/service/data.py``, ``DataWorker`` in ``reef/service/data_service.py``
+     - ``reef/service/routes/data.py``, ``reef/service/routes/scenario_files.py``, ``reef/control/operations/data.py``, ``DataWorker`` in ``reef/control/operations/data_service.py``
      - The ``data`` queue (artifact copies, imports, exports)
      - Data items and segments; ``data_sync`` items
    * - ``harness``
@@ -221,7 +221,7 @@ Choose a destination
    * - One service telling another what to do
      - A queue item or a table of the shared store, not a call (`Services and the shared store`_)
    * - A data route
-     - ``reef/service/data.py``, with the aiohttp adapter in ``reef/service/routes/data.py``
+     - ``reef/control/operations/data.py``, with the aiohttp adapter in ``reef/service/routes/data.py``
    * - HTTP-specific code
      - ``reef/service/routes/``. Transport-independent behavior goes in a service or domain object.
    * - A benchmark, task, grader or external environment

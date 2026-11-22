@@ -23,6 +23,10 @@ from aiohttp import web
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.artifact_evaluations import ArtifactEvaluations, NewArtifacts
+from reef.control.operations.artifact_imports import ArtifactImports
+from reef.control.operations.data_service import DataWorker, data_jobs
+from reef.control.operations.data_transfer import ArchiveWriters
 from reef.control.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.control.scenario.live_objects import (
     LiveObjects,
@@ -50,11 +54,7 @@ from reef.recipe.registry import recipe_class_for
 from reef.routing.manifest import RoutingAdapter
 from reef.routing.preview import PreviewSettings
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
-from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import evaluation_token_for
-from reef.service.data_service import DataWorker, data_jobs
-from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceSettings, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for, training_recipe_config

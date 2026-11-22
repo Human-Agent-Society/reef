@@ -6,7 +6,7 @@ data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` i
 (``reef.control.workers.data_sync_worker``).
 
 - ``artifact_copy``: make the artifact items of one scenario's artifacts (``copy_scenario_artifacts``).
-- ``data_import`` and ``data_export``: the transfers of ``reef.service.data_transfer``.
+- ``data_import`` and ``data_export``: the transfers of ``reef.control.operations.data_transfer``.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from collections.abc import Mapping, Sequence
 
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.data import MAX_ITEMS_PER_CREATE, DataAccess, DataStoreUnavailableError
+from reef.control.operations.data_transfer import ArchiveWriters, run_export, run_import
 from reef.execution.workers import QueueWorker
 from reef.recipe.deployment import harness_adapter
-from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, DataStoreUnavailableError
-from reef.service.data_transfer import ArchiveWriters, run_export, run_import
 from reef.storage.artifact_items import artifact_item
 from reef.storage.data import ItemConflictError, ItemNotFoundError, NewItem
 from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE

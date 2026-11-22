@@ -11,7 +11,7 @@ processes on several hosts, SQLite for processes on one host. The services are:
 - ``training``: runs the jobs of the jobs queue on the training component.
 - ``evaluation``: runs the evaluation rollouts of the evaluations queue; it serves each candidate itself.
 - ``data``: the data routes and the reads of each scenario, record copies, imports and exports
-  (``reef.service.data_service``). It needs no control lease.
+  (``reef.control.operations.data_service``). It needs no control lease.
 - ``harness``: the routes that a harness client calls (``reef.service.routes.harness``); control commits each
   import (``reef.service.harness_imports``). It needs no control lease.
 

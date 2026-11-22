@@ -39,7 +39,7 @@ from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 
 from reef.artifact.sources import ArtifactSources
-from reef.service.data import (
+from reef.control.operations.data import (
     KINDS,
     MAX_ITEMS_PER_CREATE,
     DataAccess,

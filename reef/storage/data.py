@@ -674,7 +674,7 @@ class DataStore(Plugin, JobDataReader, ABC):
       ``write_collection(owner, collection)`` stores ``collection``, in place of the one with its name if there is one.
       ``delete_collection(owner, name)`` removes it and returns True, or returns False for an unknown name. No
       collection operation changes an item. The store keeps each collection as it is given; the service checks that
-      the collections of an owner name each other without a cycle (``reef.service.collections``).
+      the collections of an owner name each other without a cycle (``reef.control.operations.collections``).
     * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
       ``job_directory_ttl_seconds``, purges the items deleted ``DELETED_ITEM_TTL_SECONDS`` ago or earlier
       (``purge_deleted``), and a subclass can do more, such as moving content into segments. It changes no item.

@@ -22,14 +22,14 @@ from reef.artifact import DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.data_service import DataWorker, data_jobs
+from reef.control.operations.data_transfer import ArchiveWriters
 from reef.control.scenario.live_objects import LiveObjects
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.service.data_service import DataWorker, data_jobs
-from reef.service.data_transfer import ArchiveWriters
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage

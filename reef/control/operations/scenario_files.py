@@ -12,7 +12,9 @@ from typing import Any
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.files import DirectoryFiles
 from reef.control.dispatcher import Dispatcher
-from reef.service.auth import MAX_DOWNLOAD_URL_SECONDS
+
+#: The most seconds that a signed download URL stays valid.
+MAX_DOWNLOAD_URL_SECONDS = 24 * 3600
 
 
 def artifact_directory(dispatcher: Dispatcher, scenario: str, artifact_id: str, component: str | None) -> Path:

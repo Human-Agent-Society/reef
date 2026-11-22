@@ -29,6 +29,9 @@ from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.sources import ArtifactSources, DirectorySource
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.data_service import DataJob, DataWorker
+from reef.control.operations.data_transfer import ArchiveWriters
+from reef.control.operations.scenario_files import artifact_directory
 from reef.control.scenario.live_objects import LiveObjects, check_recipe_objects, scenario_components
 from reef.control.workers.data_sync_worker import DataSyncWorker
 from reef.control.workers.samples import LocalSampleProducers
@@ -56,12 +59,9 @@ from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app, get_dispatcher
 from reef.service.components import build_component_app
-from reef.service.data_service import DataJob, DataWorker
-from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
-from reef.service.scenario_files import artifact_directory
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

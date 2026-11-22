@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.service.data import DataAccess, Use, check_uses, sync_touched
+from reef.control.operations.data import DataAccess, Use, check_uses, sync_touched
 from reef.storage.data import MAX_QUERY_LIMIT, DataStore, check_hold, check_owner
 from reef.storage.task_collections import CollectionNotFoundError, TaskCollection, collection_benchmarks
 from reef.storage.tasks import SPLIT_NAMES

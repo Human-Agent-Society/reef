@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from reef.service.artifact_evaluations import ArtifactEvaluations
-from reef.service.artifact_imports import ArtifactImports
+from reef.control.operations.artifact_evaluations import ArtifactEvaluations
+from reef.control.operations.artifact_imports import ArtifactImports
+from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.service.harness_imports import DirectImports
 from reef.service.inference_service import InferenceReplica, add_inference_routes
 from reef.service.request_service import RequestService
@@ -17,7 +18,6 @@ from reef.service.routes.scenario_files import register_scenario_file_routes
 from reef.service.routes.scenarios import register_scenario_reads, register_scenario_writes
 from reef.service.routes.system import register_system_routes
 from reef.service.routes.tasks import register_task_routes
-from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 
 
 def register_routes(

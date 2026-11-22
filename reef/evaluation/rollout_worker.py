@@ -1,7 +1,7 @@
 """The evaluation service's worker: it runs one rollout of an evaluation and writes its score.
 
 Control adds an evaluation to the ``evaluations`` queue as one ``evaluation`` item and one ``evaluation_rollout``
-item for each rollout (``reef.service.artifact_evaluations``). An ``EvaluationRolloutWorker`` takes a rollout item,
+item for each rollout (``reef.control.operations.artifact_evaluations``). An ``EvaluationRolloutWorker`` takes a rollout item,
 runs the task once with a Harbor agent against the candidate's model, and finishes the item with the rollout's
 ``RolloutScore``. Control reads the scores back when every rollout of the evaluation is final.
 

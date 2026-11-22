@@ -4,9 +4,9 @@ import asyncio
 
 from aiohttp import web
 
+from reef.control.operations.sample_processing import get_processing, list_processing, read_processing_log
+from reef.control.operations.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_job
 from reef.service.request_service import RequestService
-from reef.service.sample_processing import get_processing, list_processing, read_processing_log
-from reef.service.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_job
 
 
 def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:

@@ -39,6 +39,8 @@ from typing import Any, Literal, cast, overload
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.collections import collection_tasks
+from reef.control.operations.data import DataAccess, DataStoreUnavailableError
 from reef.control.scenario.scenario import Scenario
 from reef.core.errors import CommitPendingError, InternalError, ReefError, ScenarioNotFoundError
 from reef.core.evaluation import (
@@ -78,8 +80,6 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.adapters.parts import PLACEHOLDER
 from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tree import HarnessTree, validate_tree
-from reef.service.collections import collection_tasks
-from reef.service.data import DataAccess, DataStoreUnavailableError
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
 from reef.storage.evaluations import (

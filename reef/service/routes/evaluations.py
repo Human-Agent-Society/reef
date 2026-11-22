@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-
 from typing import cast
 
 from aiohttp import web
 
+from reef.control.operations.artifact_evaluations import ArtifactEvaluations
 from reef.core.evaluation import CALLERS, Caller
-from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.routes.payload import read_object
 
 
