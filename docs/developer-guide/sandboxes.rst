@@ -237,12 +237,18 @@ Tasks with Compose services on AgentENV
 
 A task can name more services next to ``main`` in
 ``environment/docker-compose.yaml``, for example the server of a CTF
-challenge. With ``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class runs that
-project in one sandbox with ``aenv compose up``
-(``reef.execution.sandbox.agentenv_compose``). The agent's commands and files
-go to ``main``, and the services reach one another by name, as under Docker
-Compose. Without ``aenv``, an ``e2b`` trial starts only the task's image, and
-the agent reaches no other service.
+challenge. By default, an ``e2b`` trial starts only the task's image, and the
+agent reaches no other service. With ``REEF_E2B_COMPOSE=aenv``, which needs
+``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class runs the project in one sandbox
+with ``aenv compose up`` (``reef.execution.sandbox.agentenv_compose``). The
+agent's commands and files go to ``main``, and the services reach one another
+by name, as under Docker Compose.
+
+Before you set ``REEF_E2B_COMPOSE=aenv``, check the tools that manage the
+repository of the AgentENV deployment. ``aenv build --image`` and
+``aenv compose up`` write image tags and image descriptions there
+(``images/tags`` and ``images/descriptions`` in a file repository). A tool
+that removes unused layers must read these records.
 
 - ``main`` runs the image that ``aenv build --image`` builds from the task's
   Dockerfile, or the task's ``docker_image``. Every other service needs an

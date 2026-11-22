@@ -12,8 +12,8 @@ asks for the hour again before it ends (:class:`SandboxKeeper`).
 so AgentENV deletes an abandoned sandbox instead of pausing it. It also keeps the file modes of a task's
 ``COPY --chmod``, which E2B's Dockerfile parser ignores (:func:`dockerfile_with_copy_modes`). On AgentENV, whose E2B
 template builds take no files, ``REEF_E2B_DOCKERFILE_BUILD=aenv`` makes it build a task's Dockerfile with
-``aenv build`` (:mod:`reef.execution.sandbox.agentenv_build`). There it also runs the Compose project of a task that
-has one in one sandbox, so that the agent reaches the task's other services
+``aenv build`` (:mod:`reef.execution.sandbox.agentenv_build`). There, ``REEF_E2B_COMPOSE=aenv`` also makes it run the
+Compose project of a task that has one in one sandbox, so that the agent reaches the task's other services
 (:mod:`reef.execution.sandbox.agentenv_compose`). The shared
 ``environment_config`` selects this class for Reef's Harbor rollouts and generator checks through ``import_path``.
 A standalone Harbor trial that selects only ``e2b`` uses Harbor's own class.
@@ -53,6 +53,7 @@ from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type
 
 from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv_build import (
+    DOCKERFILE_BUILD_VARIABLE,
     AgentEnvTemplates,
     DockerfileBuild,
     build_image,
@@ -62,11 +63,13 @@ from reef.execution.sandbox.agentenv_build import (
 )
 from reef.execution.sandbox.agentenv_compose import (
     COMPOSE_FILE,
+    COMPOSE_VARIABLE,
     AgentEnvComposeOps,
     ComposeHost,
     ComposeSandbox,
     ImageNotFoundError,
     TransientStartError,
+    compose_mode,
     compose_project,
     delete_sandbox,
     main_image,
@@ -478,9 +481,10 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     has none. When it is false, the environment builds no template: ``_create_template`` raises
     ``TemplateNotPreparedError``, and on AgentENV ``_does_template_exist`` is true only for a ready template.
 
-    ``compose_ops`` is not None if and only if ``dockerfile_build`` is ``aenv`` and the environment directory has
-    ``docker-compose.yaml``. The environment then runs the task's Compose project in one AgentENV sandbox
-    (``start_compose``), and it differs from the above in these points:
+    ``compose_ops`` is not None if and only if ``REEF_E2B_COMPOSE`` was ``aenv`` when the environment was made and
+    the environment directory has ``docker-compose.yaml``. ``REEF_E2B_COMPOSE=aenv`` needs ``dockerfile_build``
+    ``aenv``: the constructor raises ``ValueError`` without it. The environment then runs the task's Compose project
+    in one AgentENV sandbox (``start_compose``), and it differs from the above in these points:
 
     - The sandbox is the guest of the project, and each command and file transfer of the trial goes to the ``main``
       service. The project's services reach one another by name.
@@ -504,10 +508,11 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         super().__init__(*args, **kwargs)
         self.builds_templates = builds_templates
         self.dockerfile_build = dockerfile_build(os.environ)
+        runs_compose = compose_mode(os.environ) == "aenv"
+        if runs_compose and self.dockerfile_build != "aenv":
+            raise ValueError(f"{COMPOSE_VARIABLE}=aenv needs {DOCKERFILE_BUILD_VARIABLE}=aenv")
         self.compose_ops: AgentEnvComposeOps | None = (
-            AgentEnvComposeOps(self)
-            if self.dockerfile_build == "aenv" and (self.environment_dir / COMPOSE_FILE).is_file()
-            else None
+            AgentEnvComposeOps(self) if runs_compose and (self.environment_dir / COMPOSE_FILE).is_file() else None
         )
         # Harbor builds the template from the task's image when it has one; then the Dockerfile is not read.
         if self.task_env_config.docker_image:

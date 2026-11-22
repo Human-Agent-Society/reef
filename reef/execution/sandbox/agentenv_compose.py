@@ -10,8 +10,13 @@ networks. The services then reach one another by name, as under Docker Compose.
 This module holds the parts of that start that need no sandbox: the project that the sandbox runs
 (``compose_project``), the name of the image of ``main`` (``main_image``), and the ``aenv`` commands
 (``ComposeSandbox``, ``prepare_guest``, ``delete_sandbox``). ``KillOnTimeoutE2BEnvironment``
-(``reef.execution.sandbox.e2b``) uses it for a task with a Compose file when ``REEF_E2B_DOCKERFILE_BUILD`` is ``aenv``,
-and then runs the trial's commands in ``main`` with ``AgentEnvComposeOps``.
+(``reef.execution.sandbox.e2b``) uses it for a task with a Compose file when ``REEF_E2B_COMPOSE`` is ``aenv``, and then
+runs the trial's commands in ``main`` with ``AgentEnvComposeOps``.
+
+A deployment selects this with ``REEF_E2B_COMPOSE`` (``compose_mode``), and the default is ``off``. ``aenv build
+--image`` and ``aenv compose up`` write image tags and image descriptions to the repository of the AgentENV
+deployment, which a deployment without Compose tasks never has. A deployment that manages that repository with its
+own tools must make them read these records first.
 
 The ``aenv`` CLI and its planner ``aenv-compose-plan`` must be on ``PATH``, in one directory.
 """
@@ -48,6 +53,10 @@ from reef.execution.sandbox.agentenv_build import BUILD_OUTPUT_TAIL_CHARS, TRANS
 
 logger = logging.getLogger(__name__)
 
+#: The variable that selects how Reef's Harbor E2B class runs a task with a Compose file: ``off`` (only the task's own
+#: image, as Harbor's class does; the default) or ``aenv`` (the project, with ``aenv compose up``).
+COMPOSE_VARIABLE = "REEF_E2B_COMPOSE"
+COMPOSE_MODES = ("off", "aenv")
 #: The file of a task's environment that names its Compose services, as Harbor reads it.
 COMPOSE_FILE = "docker-compose.yaml"
 #: The Compose project name that ``aenv compose up`` gives every project.
@@ -73,6 +82,15 @@ class ImageNotFoundError(ComposeStartError):
 
 class TransientStartError(ComposeStartError):
     """``aenv compose up`` received a status of ``TRANSIENT_STATUSES`` from the AgentENV API."""
+
+
+def compose_mode(environ: Mapping[str, str]) -> str:
+    """The value of ``COMPOSE_VARIABLE`` in ``environ``: one of ``COMPOSE_MODES``, ``off`` when it is unset or empty.
+    Raise ``ValueError`` for any other value."""
+    value = environ.get(COMPOSE_VARIABLE, "").strip() or "off"
+    if value not in COMPOSE_MODES:
+        raise ValueError(f"{COMPOSE_VARIABLE} must be one of {', '.join(COMPOSE_MODES)}, not {value!r}")
+    return value
 
 
 def main_image(alias: str) -> tuple[str, str]:
@@ -326,6 +344,8 @@ class AgentEnvComposeOps(DinDComposeOps):
 
 __all__ = [
     "COMPOSE_FILE",
+    "COMPOSE_MODES",
+    "COMPOSE_VARIABLE",
     "GUEST_BASH_COMMAND",
     "MAIN_COMMAND",
     "PROJECT_NAME",
@@ -335,6 +355,7 @@ __all__ = [
     "ComposeStartError",
     "ImageNotFoundError",
     "TransientStartError",
+    "compose_mode",
     "compose_project",
     "delete_sandbox",
     "main_image",
