@@ -2,7 +2,7 @@
 under ``/reef/namespaces/{owner}/deleted-items``, and of its collections (RFC #1312), under
 ``/reef/namespaces/{owner}/collections``.
 
-``reef.service.data`` and ``reef.service.collections`` handle each route; this module reads the request and writes the response.
+``reef.control.operations.data`` and ``reef.control.operations.collections`` handle each route; this module reads the request and writes the response.
 """
 
 from __future__ import annotations
@@ -14,8 +14,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.service.auth import add_signed_download, signed_download_url
-from reef.service.collections import (
+from reef.control.operations.collections import (
     HOLD_ROUTES,
     add_to_scenario,
     delete_collection,
@@ -26,7 +25,7 @@ from reef.service.collections import (
     release_set,
     save_collection,
 )
-from reef.service.data import (
+from reef.control.operations.data import (
     DataAccess,
     create_items,
     create_task_items,
@@ -46,10 +45,11 @@ from reef.service.data import (
     set_listing,
     update_items,
 )
-from reef.service.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
+from reef.control.operations.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
+from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
+from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.storage.data import MAX_QUERY_LIMIT
 
 #: The content types of a task archive.

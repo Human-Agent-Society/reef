@@ -11,6 +11,8 @@ from urllib.parse import urlencode
 from aiohttp import web
 from aiohttp.typedefs import Handler
 
+from reef.control.operations.scenario_files import MAX_DOWNLOAD_URL_SECONDS
+
 
 def normalize_tokens(tokens: str | Iterable[str] | None) -> frozenset[str]:
     """Coerce a configured token value into the set of accepted Bearer tokens.
@@ -68,8 +70,6 @@ def page_query(request: web.Request, scenario: str) -> str:
 
 #: What a download signature's HMAC covers before the path, so a signature is good for nothing but one download.
 DOWNLOAD_SIGNATURE_CONTEXT = b"reef-download\n"
-#: The most seconds that a signed download URL stays valid.
-MAX_DOWNLOAD_URL_SECONDS = 24 * 3600
 
 #: The canonical paths of the routes of an app that a signed URL opens (``add_signed_download``).
 SIGNED_DOWNLOADS = web.AppKey("signed_downloads", set[str])
@@ -274,7 +274,6 @@ def create_authentication_middleware(
 
 __all__ = [
     "EVALUATION_ROUTES",
-    "MAX_DOWNLOAD_URL_SECONDS",
     "PAGE_KEY_CONTEXT",
     "PAGE_ROUTES",
     "SIGNED_DOWNLOADS",

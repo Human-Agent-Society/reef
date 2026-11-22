@@ -16,6 +16,7 @@ from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflictError, ArtifactError, ArtifactNotFoundError
 from reef.artifact.snapshot_chain import SnapshotNotRestorableError
+from reef.control.operations.data import DataStoreUnavailableError
 from reef.core.errors import (
     CommitPendingError,
     InferenceUnavailableError,
@@ -29,7 +30,6 @@ from reef.core.errors import (
 )
 from reef.routing.manifest import RoutingRequestError
 from reef.routing.preview import PREVIEW_BODY_LIMIT_BYTES
-from reef.service.data import DataStoreUnavailableError
 from reef.service.routed_inference import InferenceRetryTimeoutError
 from reef.storage.data import ItemConflictError, ItemNotFoundError
 from reef.storage.evaluations import EvaluationStartConflictError, EvaluationStateConflictError

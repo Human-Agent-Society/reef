@@ -29,6 +29,20 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.artifact_evaluations import (
+    CANCELLED_ERROR,
+    FAILURE_CHECK_ROLLOUTS,
+    FAILURES_ERROR,
+    READ_CALLS,
+    STOPPED_ERROR,
+    ArtifactEvaluations,
+    NewArtifact,
+    NewArtifacts,
+    StoredCalls,
+    attempt_trajectories,
+    rollout_work,
+)
+from reef.control.operations.data import DataAccess
 from reef.control.scenario.live_objects import LiveObjects
 from reef.control.scenario.snapshots import ScenarioSnapshots
 from reef.core.artifact_selection import ArtifactSelection
@@ -67,20 +81,6 @@ from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import (
-    CANCELLED_ERROR,
-    FAILURE_CHECK_ROLLOUTS,
-    FAILURES_ERROR,
-    READ_CALLS,
-    STOPPED_ERROR,
-    ArtifactEvaluations,
-    NewArtifact,
-    NewArtifacts,
-    StoredCalls,
-    attempt_trajectories,
-    rollout_work,
-)
-from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
 from reef.storage.data import MemoryDataStore, NewItem
 from reef.storage.evaluations import EvaluationStore
@@ -1011,7 +1011,7 @@ def test_a_resume_of_an_e2b_evaluation_needs_the_rollouts_of_the_tasks_before_it
 
 @pytest.mark.integration
 def test_an_evaluation_on_e2b_builds_the_templates_of_the_next_tasks_ahead(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("reef.service.artifact_evaluations.TEMPLATE_TASKS_AHEAD", 1)
+    monkeypatch.setattr("reef.control.operations.artifact_evaluations.TEMPLATE_TASKS_AHEAD", 1)
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -2724,7 +2724,7 @@ def test_a_changed_rollout_of_a_deleted_scenario_is_no_failure(tmp_path: Path, c
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     try:
         evaluations = ArtifactEvaluations(dispatcher)
-        with caplog.at_level(logging.ERROR, logger="reef.service.artifact_evaluations"):
+        with caplog.at_level(logging.ERROR, logger="reef.control.operations.artifact_evaluations"):
             evaluations.results.settle_changed("deleted-scenario", "evaluation-1")
         assert caplog.records == []
     finally:

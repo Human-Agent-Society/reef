@@ -27,12 +27,12 @@ from typing import Any
 from harbor.models.task.task import Task as HarborTaskLoader
 
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.tasks import MAX_TASKS_PER_UPLOAD, unpack_task_archive
 from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.core.trajectories import has_image_content
 from reef.recipe.deployment import refuses_images
-from reef.service.tasks import MAX_TASKS_PER_UPLOAD, unpack_task_archive
 from reef.storage.data import (
     DELETED_ITEM_TTL_SECONDS,
     ITEM_KINDS,
@@ -78,7 +78,7 @@ class DataAccess:
     ``refuses_images`` is whether the deployment refuses image content (``reef.recipe.deployment.refuses_images``).
 
     Purpose: the data routes and the data service make one from their dispatcher (``of``); the functions of this
-    module and of ``reef.service.data_transfer`` read it, and no other part of the dispatcher.
+    module and of ``reef.control.operations.data_transfer`` read it, and no other part of the dispatcher.
     """
 
     store: DataStore | None

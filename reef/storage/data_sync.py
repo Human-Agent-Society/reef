@@ -22,7 +22,7 @@ class ScenarioUses(ABC):
     exist. ``check_use(scenario, trajectories, train_tasks)`` raises ``ValueError`` unless ``scenario`` can train
     on new trajectories when ``trajectories``, and on train tasks when ``train_tasks``.
 
-    Purpose: the dispatcher implements it; the data writes (``reef.service.data``) call it before they store.
+    Purpose: the dispatcher implements it; the data writes (``reef.control.operations.data``) call it before they store.
     """
 
     @abstractmethod

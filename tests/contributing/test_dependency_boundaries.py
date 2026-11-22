@@ -89,6 +89,20 @@ def test_routing_never_imports_the_service() -> None:
     assert offenders == []
 
 
+def test_control_never_imports_the_service_or_aiohttp() -> None:
+    # Operations are what a client asks for, without HTTP: a route adapts each one. The dispatcher, the scenario
+    # package and the workers do not call operations.
+    control = REPO_ROOT / "reef" / "control"
+    for path in sorted(control.rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        name = str(path.relative_to(REPO_ROOT))
+        assert _imports_of(imported, "reef.service") == [], name
+        assert _imports_of(imported, "aiohttp") == [], name
+        if control / "operations" not in path.parents:
+            assert _imports_of(imported, "reef.control.operations") == [], name
+
+
 def test_scenario_domain_does_not_depend_on_recipes() -> None:
     module = importlib.import_module("reef.control.scenario.scenario")
     tree = ast.parse(inspect.getsource(module))

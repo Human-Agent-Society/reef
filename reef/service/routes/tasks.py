@@ -4,8 +4,8 @@ import asyncio
 
 from aiohttp import web
 
+from reef.control.operations.tasks import list_imported_tasks
 from reef.service.request_service import RequestService
-from reef.service.tasks import list_imported_tasks
 
 
 def register_task_routes(app: web.Application, *, request_service: RequestService) -> None:

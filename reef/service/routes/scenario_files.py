@@ -1,6 +1,6 @@
 """HTTP routes of the data service's scenario reads: an artifact's files and the scenario's training jobs.
 
-``reef.service.scenario_files`` handles each route; this module reads the request and writes the response.
+``reef.control.operations.scenario_files`` handles each route; this module reads the request and writes the response.
 """
 
 from __future__ import annotations
@@ -9,11 +9,11 @@ import asyncio
 
 from aiohttp import web
 
+from reef.control.operations.scenario_files import artifact_file, artifact_files
 from reef.core.errors import ScenarioNotFoundError
 from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.request_service import RequestService
 from reef.service.routes.data import download_seconds
-from reef.service.scenario_files import artifact_file, artifact_files
 from reef.train.job_queue import scenario_jobs
 
 

@@ -50,7 +50,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | Location | Responsibility |
 | --- | --- |
 | `reef/core/` | Shared value types, wire contracts, and errors |
-| `reef/control/` | The loaded scenarios: scenario state, commit ordering, and recovery (`scenario/`), their coordination, and control's background workers (`workers/`) |
+| `reef/control/` | The loaded scenarios: scenario state, commit ordering, and recovery (`scenario/`), their coordination, control's background workers (`workers/`), and the operations that a client asks for, without HTTP (`operations/`) |
 | `reef/service/` | HTTP, authentication, streaming, and deployment |
 | `reef/recipe/`, `reef/train/` | Recipe contracts, built-in recipes, the training pipeline, training, and backend integrations |
 | `reef/evaluation/` | Candidate evaluation: running and scoring evaluation runs, deciding whether a candidate is published, and plugin configuration |

@@ -13,14 +13,15 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.artifact_evaluations import ArtifactEvaluations
+from reef.control.operations.artifact_imports import ArtifactImports
+from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
 from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.routing.preview import PreviewSettings, RoutingPreviewClient
-from reef.service.artifact_evaluations import ArtifactEvaluations
-from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import normalize_tokens
 from reef.service.cors import configure_browser_access
 from reef.service.harness_imports import QueuedImports
@@ -40,7 +41,6 @@ from reef.service.routes import register_data_service_routes, register_routes
 from reef.service.routes.harness import register_harness_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.routed_chat import register_routed_chat
-from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.service.web import service_application
 from reef.storage.records import RecordRetention
 

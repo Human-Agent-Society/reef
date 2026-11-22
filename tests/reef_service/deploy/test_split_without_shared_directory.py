@@ -41,6 +41,7 @@ from reef.artifact import Artifact, ArtifactValidator, GitLFSRepositoryBackend, 
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.control.dispatcher import Dispatcher
+from reef.control.operations.scenario_files import artifact_directory
 from reef.control.scenario.factory import ItemStart
 from reef.control.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.control.workers.scenario_deletes import DELETES_QUEUE
@@ -53,7 +54,6 @@ from reef.recipe.base import WEIGHTS_COMPONENT
 from reef.recipe.composite import CompositeRecipe
 from reef.record2sample.service.worker import SAMPLES_QUEUE
 from reef.service.request_service import RequestService
-from reef.service.scenario_files import artifact_directory
 from reef.storage.sql_coordination import open_coordination
 from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.job_queue import (
