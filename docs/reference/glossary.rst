@@ -95,6 +95,17 @@ four kinds:
 - ``model``: a whole model, such as a provider's model or full weights.
 - ``model_adapter``: a LoRA adapter on a base model.
 
+Service
+-------
+
+One of the seven parts of a deployment, each with one kind of work:
+``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data``
+and ``harness``. ``reef serve`` runs all of them in one process, and
+``reef serve --service NAME`` runs one. No service calls another: each one
+reads and writes the deployment's shared store. A service is not a component.
+See `Run the services in separate processes
+<../user-guide/split-services.rst>`__.
+
 Component
 ---------
 

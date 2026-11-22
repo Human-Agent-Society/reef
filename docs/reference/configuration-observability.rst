@@ -79,8 +79,8 @@ The following names are relative to ``operations/``:
      - Age of the oldest waiting report; zero when none remain.
    * - ``pipeline/tracked_records``, ``pipeline/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
-   * - ``pipeline/waiting_candidates``
-     - Computed-feedback candidates that wait to become samples.
+   * - ``pipeline/waiting_calls``
+     - Inference calls of a ``TrajectorySamples`` stage that wait for their trajectory to end.
    * - ``pipeline/ready_samples``, ``pipeline/job_samples``, ``pipeline/buffer_size``
      - Samples that the next automatic job can take now, samples that automatic job data needs, and the most samples that one automatic job takes.
    * - ``training/reserved_job_data``
