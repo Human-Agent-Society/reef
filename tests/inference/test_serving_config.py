@@ -11,9 +11,9 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.workers.serving import ServingWorker
 from reef.core.values import JsonValue
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app

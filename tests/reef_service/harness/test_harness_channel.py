@@ -39,7 +39,7 @@ PI = get_adapter("pi")
 @pytest.fixture(autouse=True)
 def poll_stub_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Poll completed stub jobs without spending the HTTP assertion timeout on idle waits."""
-    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
 
 
 async def committed_step(client: TestClient) -> dict:

@@ -26,7 +26,7 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.service.app import create_app

@@ -40,18 +40,18 @@ from tests.support.samples import data_storage
 from reef.artifact import Artifact, ArtifactValidator, GitLFSRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.factory import ItemStart
+from reef.control.scenario.live_objects import LiveObjects, RecipeChecks
+from reef.control.workers.scenario_deletes import DELETES_QUEUE
+from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.snapshot import ItemIdentity
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.scenario_deletes import DELETES_QUEUE
-from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.harness.tree import TreePatch
 from reef.recipe import Recipe
 from reef.recipe.base import WEIGHTS_COMPONENT
 from reef.recipe.composite import CompositeRecipe
 from reef.record2sample.service.worker import SAMPLES_QUEUE
-from reef.scenario.factory import ItemStart
-from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.service.request_service import RequestService
 from reef.service.scenario_files import artifact_directory
 from reef.storage.sql_coordination import open_coordination
@@ -285,7 +285,7 @@ def real_lfs(monkeypatch: pytest.MonkeyPatch) -> None:
     trainer's worker polls a job every ``POLL_SECONDS``, which is 2 seconds in a deployment."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.05)
+    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.05)
 
 
 @pytest.mark.integration

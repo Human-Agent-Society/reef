@@ -175,9 +175,9 @@ class HarnessEvolutionRecipe(Recipe):
     runtime names none. The recipe builds no method, scorer, executor or
     agent: ``HarnessTrainingComponent`` builds them from ``harness_settings``.
     The recipe holds no runtime, no served endpoint and no training
-    component: the process holds them (``reef.scenario.live_objects.LiveObjects``).
+    component: the process holds them (``reef.control.scenario.live_objects.LiveObjects``).
     The model under test is that runtime
-    (``reef.scenario.live_objects.harness_models``), and the service builds
+    (``reef.control.scenario.live_objects.harness_models``), and the service builds
     the training component that runs the jobs
     (``reef.service.assembly.with_harness_components``).
     Purpose: a deployment names it as its recipe; the service loads it once

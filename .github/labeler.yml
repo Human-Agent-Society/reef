@@ -8,7 +8,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "reef/core/**"
-          - "reef/scenario/**"
+          - "reef/control/scenario/**"
 
 "area: docs":
   - changed-files:
@@ -56,7 +56,8 @@
   - changed-files:
       - any-glob-to-any-file:
           - "reef/artifact/**"
-          - "reef/dispatcher/**"
+          - "reef/control/*.py"
+          - "reef/control/workers/**"
           - "reef/execution/executor/**"
           - "reef/train/**"
           - "recipes/*/examples/*/serve.yaml"

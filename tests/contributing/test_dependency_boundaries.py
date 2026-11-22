@@ -90,10 +90,10 @@ def test_routing_never_imports_the_service() -> None:
 
 
 def test_scenario_domain_does_not_depend_on_recipes() -> None:
-    module = importlib.import_module("reef.scenario.scenario")
+    module = importlib.import_module("reef.control.scenario.scenario")
     tree = ast.parse(inspect.getsource(module))
 
-    imported = _imported_modules(tree, package="reef.scenario")
+    imported = _imported_modules(tree, package="reef.control.scenario")
     for method in METHOD_PACKAGES:
         assert _imports_of(imported, f"reef.{method}") == []
 
@@ -126,7 +126,7 @@ def test_snapshot_chain_does_not_depend_on_scenario_or_trainer() -> None:
     tree = ast.parse(inspect.getsource(module))
 
     imported = _imported_modules(tree, package="reef.artifact")
-    assert _imports_of(imported, "reef.scenario") == []
+    assert _imports_of(imported, "reef.control.scenario") == []
     assert _imports_of(imported, "reef.train") == []
 
 
@@ -136,7 +136,7 @@ def test_record_contracts_and_retention_policy_do_not_import_database_adapters()
 
     imported = _imported_modules(tree, package="reef.storage")
     for dependency in (
-        "reef.scenario",
+        "reef.control.scenario",
         "reef.train",
         "reef.storage",
         "reef.artifact",
@@ -166,7 +166,7 @@ def test_sql_record_implementations_do_not_depend_on_scenario_or_training() -> N
         tree = ast.parse(inspect.getsource(module))
 
         imported = _imported_modules(tree, package="reef.storage")
-        assert _imports_of(imported, "reef.scenario") == [], module_name
+        assert _imports_of(imported, "reef.control.scenario") == [], module_name
         assert _imports_of(imported, "reef.train") == [], module_name
 
 
@@ -178,11 +178,15 @@ def test_shared_sql_record_operations_do_not_select_sqlite() -> None:
 
 
 def test_dispatcher_does_not_select_a_record_backend() -> None:
-    module = importlib.import_module("reef.dispatcher")
+    module = importlib.import_module("reef.control.dispatcher")
+    control = REPO_ROOT / "reef/control"
+    # The dispatcher and its workers; ``reef/control/scenario`` has its own storage rules below.
     imported = [
         target
-        for path in sorted((REPO_ROOT / "reef/dispatcher").rglob("*.py"))
-        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.dispatcher")
+        for path in sorted([*control.glob("*.py"), *(control / "workers").glob("*.py")])
+        for target in _imported_modules(
+            ast.parse(path.read_text(encoding="utf-8")), package=".".join(path.parent.relative_to(REPO_ROOT).parts)
+        )
     ]
     assert all(
         any(
@@ -221,7 +225,7 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
         target == "reef.storage.records" or target.startswith("reef.storage.records.")
         for target in _imports_of(imported, "reef.storage")
     )
-    assert _imports_of(imported, "reef.dispatcher.build_default_dispatcher") == []
+    assert _imports_of(imported, "reef.control.dispatcher.build_default_dispatcher") == []
     assert _imports_of(imported, "reef.service.assembly") == []
     assert inspect.signature(module.create_app).parameters["dispatcher"].default is inspect.Parameter.empty
 
@@ -265,7 +269,7 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
 
 
 def test_scenario_state_enters_only_through_injected_storage() -> None:
-    for path in sorted((REPO_ROOT / "reef/scenario").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "reef/control/scenario").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         # Scenario state and served routes enter through injected storage readers. The data store of the job data
@@ -293,9 +297,8 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     # of the method's objective without importing it.
     core_packages = (
         "reef/core",
-        "reef/dispatcher",
+        "reef/control",
         "reef/service",
-        "reef/scenario",
         "reef/storage",
         "reef/artifact",
         "reef/recipe",
@@ -344,8 +347,8 @@ def test_importing_reef_does_not_load_cookbook_or_slime_packages() -> None:
 def test_scenario_factory_imports_without_a_cycle() -> None:
     # The factory bridges the scenario aggregate and the deployment recipe; a fresh
     # interpreter import in either direction must not deadlock on a cycle.
-    _assert_isolated_import("from reef.scenario.factory import ScenarioFactory; assert ScenarioFactory")
-    _assert_isolated_import("import reef; from reef.scenario.factory import ScenarioFactory")
+    _assert_isolated_import("from reef.control.scenario.factory import ScenarioFactory; assert ScenarioFactory")
+    _assert_isolated_import("import reef; from reef.control.scenario.factory import ScenarioFactory")
 
 
 def test_checkpoint_storage_import_does_not_require_ray() -> None:
@@ -467,8 +470,12 @@ def test_core_storage_and_sandbox_only_depend_on_lower_layers() -> None:
 
 
 def test_package_scan_includes_relative_local_and_facade_imports() -> None:
-    tree = ast.parse("from ..storage import commits\ndef load():\n    import reef\n    from reef import Scenario\n")
-    assert _imported_modules(tree, package="reef.scenario") == ["reef.storage.commits", "reef", "reef.Scenario"]
+    tree = ast.parse("from ...storage import commits\ndef load():\n    import reef\n    from reef import Scenario\n")
+    assert _imported_modules(tree, package="reef.control.scenario") == [
+        "reef.storage.commits",
+        "reef",
+        "reef.Scenario",
+    ]
 
 
 def test_training_jobs_and_serving_import_require_no_model_framework() -> None:
@@ -678,7 +685,7 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
 
 
 #: The methods that built a trainer or a pipeline on a recipe before RFC #1390 moved that work to the scenario
-#: factory (``reef.scenario.factory.read_trainer_specs``) and ``reef.train.trainer_builder``.
+#: factory (``reef.control.scenario.factory.read_trainer_specs``) and ``reef.train.trainer_builder``.
 TRAINER_CONSTRUCTION_METHODS = frozenset({"build", "build_trainers", "build_pipeline", "_build_trainer"})
 
 #: ``(file, class, method)`` of each such method that a later step of RFC #1390 still has to remove; none is left.
@@ -832,7 +839,7 @@ KEPT_LIVE_OBJECT_ANNOTATIONS: dict[tuple[str, str, str], str] = {
 }
 
 #: The methods that held, swapped or asked a live object on a recipe before RFC #1390 gave the live objects to
-#: ``reef.scenario.live_objects.LiveObjects``, and the three methods that a recipe may only define as a pure
+#: ``reef.control.scenario.live_objects.LiveObjects``, and the three methods that a recipe may only define as a pure
 #: function of its configuration.
 LIVE_OBJECT_METHODS = frozenset(
     {
@@ -848,7 +855,7 @@ LIVE_OBJECT_METHODS = frozenset(
 )
 
 #: ``(file, class, method)`` of each such method that is kept on purpose, with the reason. Each one reads the
-#: recipe's configuration fields alone; ``reef.scenario.live_objects`` adds what a live object knows.
+#: recipe's configuration fields alone; ``reef.control.scenario.live_objects`` adds what a live object knows.
 KEPT_LIVE_OBJECT_METHODS: dict[tuple[str, str, str], str] = {
     ("reef/recipe/base.py", "Recipe", "build_components"): (
         "pure configuration: declares no component; a record or tree recipe overrides it with its own components"
@@ -872,7 +879,7 @@ KEPT_LIVE_OBJECT_METHODS: dict[tuple[str, str, str], str] = {
 
 def test_a_recipe_class_holds_and_returns_no_live_object() -> None:
     # A recipe is configuration (RFC #1390): the process holds the runtime, the training components, the stores and
-    # the served endpoint in ``reef.scenario.live_objects.LiveObjects``. No class of the recipe packages has a field
+    # the served endpoint in ``reef.control.scenario.live_objects.LiveObjects``. No class of the recipe packages has a field
     # annotation or a method return annotation that names a live object type, and none defines a method that held
     # or asked one, apart from the kept ones.
     def live_names(annotation: ast.expr | None) -> set[str]:

@@ -19,7 +19,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports

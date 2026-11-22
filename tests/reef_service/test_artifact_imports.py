@@ -26,9 +26,9 @@ from reef.artifact import (
     read_reference,
 )
 from reef.artifact.artifact import training_starts_of
+from reef.control.dispatcher import Dispatcher
 from reef.core.errors import CommitPendingError, ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
-from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.storage.sql_coordination import memory_coordination

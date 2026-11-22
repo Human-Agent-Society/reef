@@ -17,12 +17,12 @@ from typing import Any
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
+from reef.control.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.evaluation.rollout_worker import ON_STOP_CHOICES, check_finish_timeout
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings, routing_deployment_settings
-from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES

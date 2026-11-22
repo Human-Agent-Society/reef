@@ -23,10 +23,10 @@ from tests.support.serving import wait_for_serving
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.sources import DirectorySource
+from reef.control.dispatcher import Dispatcher
+from reef.control.workers.serving import ServingWorker
 from reef.core.errors import ReefError
 from reef.core.served_models import ScheduledStop, ServedArtifact
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients
 from reef.service.app import create_app
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app

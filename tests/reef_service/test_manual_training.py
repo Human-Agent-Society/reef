@@ -46,10 +46,11 @@ from tests.train.test_harness_evolve_processor import harness_stages, records_pi
 
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.memory import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
 from reef.core.trajectories import source_record_id
-from reef.dispatcher import Dispatcher
 from reef.harness.tree import TreePatch
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
@@ -57,7 +58,6 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples
 from reef.sample2job import Sample2Job
-from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_coordination import memory_coordination
@@ -706,7 +706,7 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     # deployment, with an artifact store of its own.
     REPOSITORIES.pop(tmp_path)
     without_requests = open_dispatcher(Recipe())
-    with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
+    with caplog.at_level(logging.WARNING, logger="reef.control.scenario.registry"):
         assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
     assert "keeps its default training mode" in caplog.text
 

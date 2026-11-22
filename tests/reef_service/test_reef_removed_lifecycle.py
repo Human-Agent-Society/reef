@@ -130,8 +130,8 @@ def test_readme_names_are_exported() -> None:
 def test_dead_accessors_and_symbols_are_removed() -> None:
     import reef.core
     import reef.core.errors
-    from reef.dispatcher import Dispatcher
-    from reef.scenario.scenario import Scenario
+    from reef.control.dispatcher import Dispatcher
+    from reef.control.scenario.scenario import Scenario
     from reef.service.request_service import RequestService
 
     # Removed dead code (no production callers).
@@ -148,8 +148,8 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
 @pytest.mark.unit
 def test_naming_unification_renames_are_complete() -> None:
     """One concept, one name: the renamed-away spellings must stay gone."""
+    from reef.control.scenario.scenario import Scenario
     from reef.recipe.base import WeightTrainingRecipe
-    from reef.scenario.scenario import Scenario
     from reef.train.trainer import Trainer
 
     # The objective id is no longer called "algorithm".

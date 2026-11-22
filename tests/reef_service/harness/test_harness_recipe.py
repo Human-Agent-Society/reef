@@ -55,6 +55,8 @@ from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact import Artifact
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects, ServedEndpoint, harness_models, harness_served_model
 from reef.core.activation import MadeArtifact
 from reef.core.errors import ConfigError
 from reef.core.evaluation import RolloutScore
@@ -62,7 +64,6 @@ from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.prompts import untrusted_text
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.harness import (
     ComparePolicy,
@@ -89,7 +90,6 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.scenario.live_objects import LiveObjects, ServedEndpoint, harness_models, harness_served_model
 from reef.service.app import create_app
 from reef.service.assembly import with_harness_components
 from reef.storage.data import NewItem

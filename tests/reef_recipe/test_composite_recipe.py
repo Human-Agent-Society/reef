@@ -27,11 +27,20 @@ from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.composite import compose_snapshot
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.factory import read_trainer_specs, scenario_report_type, with_record2sample_configs
+from reef.control.scenario.live_objects import (
+    LiveObjects,
+    ServedEndpoint,
+    check_root_start,
+    declared_components,
+    default_start,
+    harness_served_model,
+)
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.core.snapshot import RootSource
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.harness import EvaluationSettings
 from reef.execution.workers import ServiceSet
@@ -45,15 +54,6 @@ from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import weight_training_selection
-from reef.scenario.factory import read_trainer_specs, scenario_report_type, with_record2sample_configs
-from reef.scenario.live_objects import (
-    LiveObjects,
-    ServedEndpoint,
-    check_root_start,
-    declared_components,
-    default_start,
-    harness_served_model,
-)
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id, stage_item_id

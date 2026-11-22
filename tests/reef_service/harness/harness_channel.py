@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import changed_rules, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import EchoInference, harness_dispatcher
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.recipe.harness import HarnessEvolutionRecipe

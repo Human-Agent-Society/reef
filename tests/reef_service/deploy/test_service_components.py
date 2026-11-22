@@ -28,15 +28,16 @@ from tests.support.trajectories import policy_trajectory
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.sources import ArtifactSources, DirectorySource
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects, check_recipe_objects, scenario_components
+from reef.control.workers.data_sync_worker import DataSyncWorker
+from reef.control.workers.samples import LocalSampleProducers
+from reef.control.workers.scenario_deletes import DeletedScenarioFollower
+from reef.control.workers.served import ServedModelsPublisher
+from reef.control.workers.store_changes import StoreChanges, StoreChangesWatcher
+from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.data_sync_worker import DataSyncWorker
-from reef.dispatcher.samples import LocalSampleProducers
-from reef.dispatcher.scenario_deletes import DeletedScenarioFollower
-from reef.dispatcher.served import ServedModelsPublisher
-from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
-from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, TaskTemplateWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.inference.serving import AdapterServingRuntime
@@ -51,7 +52,6 @@ from reef.record2sample.service import (
     Selection,
     request_selection,
 )
-from reef.scenario.live_objects import LiveObjects, check_recipe_objects, scenario_components
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app, get_dispatcher
@@ -80,8 +80,8 @@ import signal
 
 from tests.support.job_data import job_data_ref
 
+from reef.control.dispatcher import build_default_dispatcher
 from reef.core.errors import ReefError
-from reef.dispatcher.dispatcher import build_default_dispatcher
 
 
 def settings(tmp_path: Path) -> ServiceSettings:

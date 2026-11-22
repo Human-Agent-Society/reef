@@ -27,19 +27,19 @@ from reef.artifact.artifact import ArtifactValidator, SnapshotRef
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import StoredFiles
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.binding import activate_snapshot
+from reef.control.scenario.factory import ScenarioFactory
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import activation_reference
 from reef.observability import NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.scenario.binding import activate_snapshot
-from reef.scenario.factory import ScenarioFactory
-from reef.scenario.live_objects import LiveObjects
 from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

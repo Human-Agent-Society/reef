@@ -13,8 +13,8 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.records import memory_records
 
+from reef.control.dispatcher import build_default_dispatcher
 from reef.core import AgentRecord, RequestType
-from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
 from reef.storage.records import RecordConflictError
 from reef.storage.sql_coordination import memory_coordination

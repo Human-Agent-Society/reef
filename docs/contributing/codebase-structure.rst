@@ -19,7 +19,7 @@ Reef is organized around an application kernel and three capability domains, not
        Entry("<b>Entrypoints</b><br/>HTTP · CLI")
        Policy("<b>Policy</b><br/><code>reef/recipe</code>")
        Service("<b>Delivery &amp; composition</b><br/><code>reef/service</code>")
-       Kernel(["<b>Application kernel</b><br/><code>reef/dispatcher</code> · <code>reef/scenario</code>"])
+       Kernel(["<b>Application kernel</b><br/><code>reef/control</code>"])
 
        subgraph Domains["Capability domains"]
            direction LR
@@ -60,12 +60,9 @@ Reef is organized around an application kernel and three capability domains, not
    * - ``reef/service/``
      - HTTP routes, auth, streaming, the app of each service, deployment and process lifecycle
      - Training methods, domain logic tied to aiohttp
-   * - ``reef/dispatcher/``
-     - Coordination of the loaded scenarios, and control's background workers
-     - A concrete record backend, HTTP
-   * - ``reef/scenario/``
-     - Scenario binding, commit ordering, recovery and lifecycle; ``LiveObjects``, the runtime, training components and data store that one process builds for the recipe
-     - Training algorithms, repository implementations
+   * - ``reef/control/``
+     - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers.
+     - A concrete record backend, HTTP, training algorithms, repository implementations
    * - ``reef/recipe/``
      - The contract that a method implements, dotted resolution, the recipe loader, the base harness evolution recipe, the built-in SFT and generated-task recipes. A recipe is configuration only.
      - Cookbook methods, runtimes, training components, stores
@@ -132,12 +129,12 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - Writes
    * - ``control``
      - ``ControlApp``
-     - ``reef/service/routes/`` (all but the data routes), ``reef/dispatcher/``, ``reef/scenario/``; the trainers' job loops (``reef/train/jobs.py``)
+     - ``reef/service/routes/`` (all but the data routes), ``reef/control/``; the trainers' job loops (``reef/train/jobs.py``)
      - The control lease; the ``data_sync``, ``harness_sync``, ``scenario_deletes`` and ``training_requests`` queues; the results of every other queue
      - Commits and settings; items of the ``serving``, ``training_checks``, ``jobs``, ``samples``, ``evaluations`` and ``data`` queues
    * - ``inference``
      - ``InferenceApp``
-     - ``reef/service/inference_service.py``, ``ServingWorker`` in ``reef/dispatcher/serving.py``, the runtime in ``reef/inference/``
+     - ``reef/service/inference_service.py``, ``ServingWorker`` in ``reef/control/workers/serving.py``, the runtime in ``reef/inference/``
      - The ``serving`` queue; the ``inference-owner`` lease; ``served_models``
      - ``served_models`` routes and stops; records
    * - ``samples``
@@ -188,7 +185,7 @@ The shared store has four parts. Each row names the module that defines its cont
      - ``reef/artifact/``
      - The snapshots of each scenario, and the stored content of checkpoints
 
-A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/record2sample/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/service/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/dispatcher/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
+A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/record2sample/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/service/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
 
 Choose a destination
 --------------------
@@ -202,7 +199,7 @@ Choose a destination
    * - A value or error that unrelated layers need, without behavior
      - ``reef/core/``
    * - Scenario state, commit ordering, recovery, activation, training starts
-     - ``reef/scenario/``. The persisted ``CommitRecord`` is in ``reef/storage/commits.py``.
+     - ``reef/control/scenario/``. The persisted ``CommitRecord`` is in ``reef/storage/commits.py``.
    * - A record, task, sample or data store contract, or its implementation
      - ``reef/storage/``. Implementations depend on the contracts, never the reverse.
    * - Persisting or materializing versioned bytes, or declaring a snapshot component

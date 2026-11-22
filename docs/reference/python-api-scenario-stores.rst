@@ -35,7 +35,7 @@ An existing ``EvaluationStore`` supports unkeyed evaluations. To support start I
 
    from pathlib import Path
 
-   from reef.dispatcher import Dispatcher
+   from reef.control.dispatcher import Dispatcher
    from reef.storage.sql_coordination import memory_coordination
    from reef.storage.sqlite import SQLiteScenarioStorage
 

@@ -7,7 +7,7 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import live_objects
 
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceHandler
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

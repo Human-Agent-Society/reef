@@ -28,6 +28,9 @@ from tests.support.trajectory_uploads import dispatcher_for
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
+from reef.control.scenario.snapshots import ScenarioSnapshots
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
 from reef.core.evaluation import (
@@ -42,7 +45,6 @@ from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import CONVERSATION_FIELDS
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -64,8 +66,6 @@ from reef.harness.tree import HarnessTree
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.composite import CompositeRecipe
-from reef.scenario.live_objects import LiveObjects
-from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
     CANCELLED_ERROR,
@@ -2977,7 +2977,7 @@ def test_a_scenario_under_a_deployment_evaluated_rule_without_artifact_evaluatio
         WeightRecipe(activation=evaluated),
         live=LiveObjects(runtime=ArtifactRuntime()),
     )
-    with caplog.at_level("WARNING", logger="reef.scenario.registry"):
+    with caplog.at_level("WARNING", logger="reef.control.scenario.registry"):
         dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
     assert "activates no new artifact" in caplog.text
     with pytest.raises(ValueError, match="set artifact_evaluation"):

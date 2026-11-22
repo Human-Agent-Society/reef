@@ -26,7 +26,7 @@ TEST_DIRECTORIES = {
     "reef_service",
     "routing",
     "sandbox",
-    "scenario",
+    "control",
     "slime_backend",
     "smoke",
     "storage",

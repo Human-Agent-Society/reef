@@ -11,7 +11,7 @@ from typing import Any
 
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.files import DirectoryFiles
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.service.auth import MAX_DOWNLOAD_URL_SECONDS
 
 

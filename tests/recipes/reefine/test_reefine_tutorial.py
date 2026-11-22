@@ -23,11 +23,11 @@ from recipes.beta.reefine import AnswerScorer, ReefineMethod, ReefineRecipe
 from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import grade_text
-from reef.dispatcher.ingest import training_request_refusal
+from reef.control.ingest import training_request_refusal
+from reef.control.scenario.live_objects import LiveObjects, harness_models
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.scenario.live_objects import LiveObjects, harness_models
 from reef.service.deploy.service_config import service_config_from_mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef.dispatcher.manager_worker import ManagedTraining, TrainingManagerWorker
+from reef.control.workers.manager_worker import ManagedTraining, TrainingManagerWorker
 from reef.train.manager import Cancel, ManagedJob, ManagerView, Train, TrainFrom, TrainingManager
 
 

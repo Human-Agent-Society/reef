@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe

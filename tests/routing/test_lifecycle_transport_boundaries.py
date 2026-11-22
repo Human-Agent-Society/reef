@@ -27,7 +27,7 @@ from tests.routing.routing_fakes import (
     running_router,
 )
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.lifecycle import LifecycleSettings

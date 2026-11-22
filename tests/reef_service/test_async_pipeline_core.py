@@ -13,9 +13,9 @@ from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingCompon
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
-from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceHandler
 from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.service.app import create_app
@@ -138,7 +138,7 @@ def wait_for_operational_sample(
 @pytest.fixture
 def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Stub jobs finish immediately; polling must not consume the assertion timeout.
-    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
     opened = []
 
     def start(backend_type=None, *, experiment_tracker=None, max_artifact_lag=0, **component_options):

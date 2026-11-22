@@ -12,9 +12,8 @@ import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
+from reef.control.dispatcher import Dispatcher
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.dispatcher import Dispatcher
 from reef.storage.tasks import task_limit_errors
 
 #: The most tasks in one upload.

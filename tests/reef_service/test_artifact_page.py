@@ -25,8 +25,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, report_records, wait_for_rows
 
+from reef.control.dispatcher import Dispatcher
 from reef.core.plugins import PluginReference
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch

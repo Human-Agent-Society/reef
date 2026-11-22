@@ -20,15 +20,15 @@ from reef.artifact import (
     GitLFSRepositoryBackendFactory,
     InMemoryRepositoryBackend,
 )
+from reef.control.dispatcher import Dispatcher, build_default_dispatcher
+from reef.control.scenario.admission import ScenarioLimits
+from reef.control.scenario.live_objects import LiveObjects, RecipeChecks
+from reef.control.workers.scenario_deletes import DELETES_QUEUE, request_cleanup
+from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core import ScenarioNotFoundError
 from reef.core.errors import ScenarioDeletedError
-from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.dispatcher.scenario_deletes import DELETES_QUEUE, request_cleanup
-from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.recipe import Recipe
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.scenario.admission import ScenarioLimits
-from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -524,7 +524,7 @@ def test_a_mark_that_lands_after_another_instances_sweep_ended_the_first_item_st
 ) -> None:
     """At a lease takeover, the new control instance sweeps between the old one's first cleanup item and its mark:
     it finds no mark and ends the item. The delete adds the item again after the mark, so the next sweep cleans."""
-    import reef.dispatcher.dispatcher as dispatcher_module
+    import reef.control.dispatcher as dispatcher_module
 
     value = durable_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts"))
     assert value.get_or_create_scenario("delivery") is not None

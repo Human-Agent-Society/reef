@@ -38,6 +38,8 @@ from typing import Any, Literal, cast, overload
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.scenario import Scenario
 from reef.core.errors import CommitPendingError, InternalError, ReefError, ScenarioNotFoundError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
@@ -60,7 +62,6 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import TrajectoryBuilder
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.core.values import deep_merge
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import EvaluatedActivation
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -77,7 +78,6 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.adapters.parts import PLACEHOLDER
 from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tree import HarnessTree, validate_tree
-from reef.scenario.scenario import Scenario
 from reef.service.collections import collection_tasks
 from reef.service.data import DataAccess, DataStoreUnavailableError
 from reef.storage.commits import CommitRecord

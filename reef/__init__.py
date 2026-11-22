@@ -26,12 +26,12 @@ from reef.evaluation import (
     UpdateCandidate,
 )
 from reef.storage.commits import SCENARIO_METADATA_KEY
-from reef.scenario import Scenario
+from reef.control.scenario import Scenario
 from reef.recipe import (
     RecipeConfigError,
     Recipe,
 )
-from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import Sample2Job, Trainer, TrainingPipeline
 from reef.inference.interfaces import InferenceRuntime
 from reef.train.component import TrainingComponent, TrainingJob

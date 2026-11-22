@@ -14,6 +14,7 @@ import yaml
 from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.training_deployment import LocalFacts
 
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.core.errors import RuntimeConfigError
 from reef.execution.executor.config import executor_settings
@@ -22,7 +23,6 @@ from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.loading import load_recipe
-from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment

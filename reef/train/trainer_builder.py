@@ -39,7 +39,7 @@ class TrainerSpec:
     records. ``data_store`` keeps the data directory of each job; None keeps them in a temporary directory
     (``JobLoop``).
 
-    Purpose: the scenario factory reads one from a recipe (``reef.scenario.factory.read_trainer_specs``), and
+    Purpose: the scenario factory reads one from a recipe (``reef.control.scenario.factory.read_trainer_specs``), and
     ``build_trainer`` builds the trainer.
     """
 
@@ -168,7 +168,7 @@ def build_trainers(
     Raise ``ValueError`` when one ``TrainerSpec`` is given for a scenario that serves several components.
 
     Purpose: the scenario factory calls it once for each scenario that it recovers, with the specs that it reads
-    from the deployment's recipe (``reef.scenario.factory.read_trainer_specs``).
+    from the deployment's recipe (``reef.control.scenario.factory.read_trainer_specs``).
     """
     if isinstance(specs, ComponentTrainerSpecs):
         trainers = []

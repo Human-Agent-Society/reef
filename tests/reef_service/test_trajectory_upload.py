@@ -21,7 +21,7 @@ from tests.support.trajectory_uploads import (
 )
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.train.types import TrajectorySample
 

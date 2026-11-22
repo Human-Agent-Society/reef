@@ -26,13 +26,14 @@ from reef.artifact import (
 )
 from reef.artifact.components import ComponentChecks
 from reef.artifact.repository import StoredFiles
+from reef.control.scenario.live_objects import RecipeChecks
+from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import RootSource, SnapshotRef
 from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ArtifactFormat
-from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.observability.base import (
     ExperimentRun,
     ExperimentTracker,
@@ -40,7 +41,6 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.recipe import Recipe
-from reef.scenario.live_objects import RecipeChecks
 from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.tasks import LocalTaskFileStore
