@@ -25,6 +25,7 @@ from tests.support.trajectory_uploads import (
     upload_trajectories,
 )
 
+from reef.api.app import create_app
 from reef.artifact.artifact import SnapshotRef
 from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
@@ -36,7 +37,6 @@ from reef.control.operations import data_transfer
 from reef.control.operations.data_service import DataImport
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
-from reef.service.app import create_app
 from reef.storage.data_queue import DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.component import TrainingJob

@@ -8,11 +8,11 @@ import hashlib
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.service.auth import page_key_for_digest, page_query
+from reef.api.auth import page_key_for_digest, page_query
 
 
 def _make_client(tokens, evaluation_tokens=None) -> TestClient:
-    from reef.service.auth import create_authentication_middleware
+    from reef.api.auth import create_authentication_middleware
 
     app = web.Application(middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens)])
 

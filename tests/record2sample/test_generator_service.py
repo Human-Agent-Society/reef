@@ -25,6 +25,7 @@ from tests.support.task_service_stubs import generator_state
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, read_harbor_task
+from reef.deploy.generator import GeneratorSettings
 from reef.execution.sandbox.task_environment import (
     HARBOR_E2B_ENVIRONMENT,
     HARBOR_E2B_NAMES,
@@ -65,7 +66,6 @@ from reef.record2sample.generator.wire import (
     task_document,
     task_from_document,
 )
-from reef.service.deploy.generator import GeneratorSettings
 
 pytestmark = pytest.mark.unit
 

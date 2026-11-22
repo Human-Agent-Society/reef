@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 import pytest
 from aiohttp import web
 
-from reef.service.assembly import default_served_url
+from reef.api.assembly import default_served_url
 from reef.storage.sql_coordination import memory_coordination
 
 
@@ -66,8 +66,8 @@ def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_
 ) -> None:
     """The recipe's evaluation calls run candidate code: the service hands them a token of their own, which the app
     accepts on the evaluation routes alone, never a service token. With auth off there is none."""
-    from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceSettings
+    from reef.api import assembly
+    from reef.api.settings import ServiceSettings
 
     seen: dict[str, object] = {}
 

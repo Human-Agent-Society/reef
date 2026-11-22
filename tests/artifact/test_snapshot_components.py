@@ -15,6 +15,7 @@ import pytest
 from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.serving import wait_for_serving
 
+from reef.api.request_service import RequestService
 from reef.artifact import (
     Artifact,
     ArtifactNotFoundError,
@@ -40,7 +41,6 @@ from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.types import TrainingCommit

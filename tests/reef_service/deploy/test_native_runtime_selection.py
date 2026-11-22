@@ -6,10 +6,10 @@ import pytest
 from tests.support.config_helpers import connect_training_objects
 from tests.support.runtime_stubs import StubTrainingComponent
 
+from reef.api.settings import ServiceSettings
 from reef.core.errors import RuntimeConfigError
 from reef.inference.null import NullInferenceRuntime
 from reef.inference.registry import BUILTIN_FACTORIES, RuntimeFactory
-from reef.service.deploy.service_config import ServiceSettings
 
 # The Slime component module imports Ray; the base installation has none.
 slime_component = pytest.importorskip("reef.train.slime_backend.component", exc_type=ImportError)

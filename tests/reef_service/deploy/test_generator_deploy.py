@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+from reef.deploy import generator_process as generator_main
+from reef.deploy.config_utils import DeployConfigError
+from reef.deploy.execution import service_executor_selection, validate_services
+from reef.deploy.generator import GeneratorSettings, attach_generator_service, generator_service
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.execution.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.record2sample.generator import HarborChecks, ReefGeneratorRollouts
-from reef.service.deploy import generator_process as generator_main
-from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.execution import service_executor_selection, validate_services
-from reef.service.deploy.generator import GeneratorSettings, attach_generator_service, generator_service
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
 
 pytestmark = pytest.mark.unit
 
@@ -25,7 +25,11 @@ def config(**generator: object) -> dict[str, object]:
         "reef": {"host": "0.0.0.0", "port": 8900, "tokens": ["t"]},
         "generator": {"tasks-root": "/tmp/tasks", **generator},
         "services": [
-            {"name": "reef", "command": ["python", "-m", "reef.service"], "endpoint": "http://127.0.0.1:8900"}
+            {
+                "name": "reef",
+                "command": ["python", "-m", "reef.deploy.service_process"],
+                "endpoint": "http://127.0.0.1:8900",
+            }
         ],
     }
 
@@ -37,7 +41,7 @@ def test_the_generator_is_started_before_the_http_service_which_depends_on_it() 
     assert generator == {
         "name": "generator",
         "role": "generator",
-        "command": [sys.executable, "-m", "reef.service.deploy.generator_process"],
+        "command": [sys.executable, "-m", "reef.deploy.generator_process"],
         "endpoint": "http://{host}:8911",
         "ready": generator["ready"],
         "ready_timeout": 90,
@@ -68,7 +72,9 @@ def test_the_generator_runs_under_reefs_interpreter_and_probes_its_bind_host(mon
     generator = stack["services"][0]
     assert generator["command"][0] == sys.executable and generator["ready"][-1] == "http://10.0.0.5:8910/healthz"
     monkeypatch.setenv("REEF_PYTHON", "/opt/serve/bin/python")
-    assert generator_service(config())["command"][0] == "/opt/serve/bin/python", "the same interpreter as reef.service"
+    assert (
+        generator_service(config())["command"][0] == "/opt/serve/bin/python"
+    ), "the same interpreter as the service process"
     with pytest.raises(DeployConfigError, match="unknown config fields: python"):
         attach_generator_service(config(python="/opt/py312/bin/python"))
 

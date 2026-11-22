@@ -11,7 +11,7 @@ to a scenario, or removes one, follows the same order:
    ``SYNC_WAIT_SECONDS`` for the syncs to end. The response says whether they ended (``synced``); a sync that did
    not end runs when control takes it, or when the scenario opens.
 
-No aiohttp types appear here. ``reef.service.routes.data`` adapts it to HTTP.
+No aiohttp types appear here. ``reef.api.routes.data`` adapts it to HTTP.
 """
 
 from __future__ import annotations

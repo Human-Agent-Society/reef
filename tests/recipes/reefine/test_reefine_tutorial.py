@@ -25,10 +25,10 @@ from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import grade_text
 from reef.control.ingest import training_request_refusal
 from reef.control.scenario.live_objects import LiveObjects, harness_models
+from reef.deploy.service_config import service_config_from_mapping
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.service.deploy.service_config import service_config_from_mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TUTORIAL = REPO_ROOT / "recipes" / "beta" / "reefine" / "examples"
@@ -65,7 +65,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     """The demos use the built-in recipe with tutorial-local state, no agent, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
     so a change publishes when the tree still works and an extension still waits."""
-    from reef.service.assembly import _upstream_runtime, load_named_recipe
+    from reef.api.assembly import _upstream_runtime, load_named_recipe
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")

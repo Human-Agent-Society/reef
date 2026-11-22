@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from tests.support.sse_streams import OPENAI_SSE, FakeStream
 
-from reef.inference.provider_protocol import SSEFrameDecoder
-from reef.service.streaming import (
+from reef.api.streaming import (
     aggregate_sse_text,
     chat_completion_chunk_identity,
     is_terminal_sse_event,
     receipt_sse_events,
     stream_record,
 )
+from reef.inference.provider_protocol import SSEFrameDecoder
 
 ANTHROPIC_SSE = (
     'data: {"type":"message_start","message":{}}\n\n'

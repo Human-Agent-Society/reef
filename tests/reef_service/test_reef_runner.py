@@ -7,7 +7,7 @@ import urllib.request
 import pytest
 
 from reef_client import ReefClient
-from reef.service.deploy import build_parser
+from reef.deploy import build_parser
 
 
 class Response:

@@ -20,6 +20,7 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.live_objects import LiveObjects, harness_models
 from reef.control.scenario.scenario import Scenario
 from reef.control.scenario.snapshot_files import component_files
+from reef.deploy.config_utils import load_config
 from reef.evaluation.harness import History
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
@@ -27,7 +28,6 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
-from reef.service.deploy.config_utils import load_config
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.component import HISTORY_DIR, HarnessTrainingComponent

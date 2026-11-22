@@ -6,11 +6,11 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from reef.api import assembly
+from reef.api.auth import create_authentication_middleware
+from reef.api.cors import configure_browser_access
 from reef.control.dispatcher import build_default_dispatcher
-from reef.service import assembly
-from reef.service.auth import create_authentication_middleware
-from reef.service.cors import configure_browser_access
-from reef.service.deploy.service_config import service_config_from_mapping
+from reef.deploy.service_config import service_config_from_mapping
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

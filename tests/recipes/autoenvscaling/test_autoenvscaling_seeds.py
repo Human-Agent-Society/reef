@@ -72,12 +72,12 @@ from recipes.beta.autoenvscaling.sources import Repository
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, extend_split_by_source
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.execution.sandbox.process import ProcessOutcome
 from reef.recipe.generated_tasks.generator import HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import split_source_ids
 from reef.record2sample.generator import OracleResult, WrittenTask
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
 
 # The session rules and prompts, rendered before seed tasks existed: a seeded run must not change them.
 SESSION_RULES_SHA256 = "98840322e47c9f267ef5fe41b23439225ed2565f58b58e46979881f20aed4047"

@@ -1,7 +1,7 @@
 """The error-to-status table is the service's whole error contract.
 
 Every route raises domain errors and lets ``translate_errors`` answer, so the
-table in ``reef/service/errors.py`` decides what a client sees. Two properties
+table in ``reef/api/errors.py`` decides what a client sees. Two properties
 carry the contract and neither is visible from a single route test: the table's
 most-specific-first ordering (a subclass must not inherit its base's status),
 and the upstream relay, which passes a provider's own 4xx through so an agent
@@ -16,6 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from reef.api.errors import translate_error, translate_errors
 from reef.artifact.artifact import ArtifactConflictError, ArtifactNotFoundError, ArtifactSourceError
 from reef.artifact.snapshot_chain import SnapshotNotRestorableError
 from reef.core.errors import (
@@ -27,7 +28,6 @@ from reef.core.errors import (
     TrainingStartRefusedError,
     UpstreamStatusError,
 )
-from reef.service.errors import translate_error, translate_errors
 from reef.storage.records import RecordConflictError
 
 
@@ -142,7 +142,7 @@ def test_middleware_answers_mapped_errors_and_lets_the_rest_become_a_500(caplog:
             crashed = await client.get("/internal")
             assert crashed.status == 500
             assert "the engine went down" not in await crashed.text()
-            assert not [record for record in caplog.records if record.name == "reef.service.errors"]
+            assert not [record for record in caplog.records if record.name == "reef.api.errors"]
         finally:
             await client.close()
 

@@ -83,7 +83,7 @@ storage:
   task_file_dir: '\${OPD_ROUTING_RUN_DIR:?}/task-files'
 YAML
 outer_env=(env -u REEF_TOKEN -u OPD_TEACHER_API_KEY)
-"${outer_env[@]}" "$python" -m reef.service.deploy.routing.cli validate --config "$run_dir/reef.yaml"
+"${outer_env[@]}" "$python" -m reef.deploy.routing.cli validate --config "$run_dir/reef.yaml"
 
 bridge_pid= reef_pid= driver_pid=
 cleanup() {
@@ -97,7 +97,7 @@ cleanup() {
         fi
     done
     if [[ -d $XDG_STATE_HOME/reef/routing/$deployment_id ]]; then
-        "${outer_env[@]}" "$python" -m reef.service.deploy.routing.cli cleanup --deployment-id "$deployment_id" \
+        "${outer_env[@]}" "$python" -m reef.deploy.routing.cli cleanup --deployment-id "$deployment_id" \
             >"$run_dir/cleanup.log" 2>&1 || { echo "See $run_dir/cleanup.log" >&2; status=1; }
     fi
     exit "$status"

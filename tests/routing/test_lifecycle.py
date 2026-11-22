@@ -38,20 +38,9 @@ from tests.routing.routing_fakes import (
 )
 from yarl import URL
 
-from reef.core import AgentRecord
-from reef.routing.deployment_controller import RoutingDeploymentController
-from reef.routing.manifest import RoutingAdapter, RoutingDecision, RoutingSnapshot
-from reef.routing.reef_lifecycle_client import (
-    CANDIDATE_CHECK_PATH,
-    LifecycleStatus,
-    ReefLifecycleClient,
-    RoutingControlError,
-)
-from reef.routing.settings import RoutingDeploymentSettings
-from reef.service.app import CONTROL_APPLICATION, create_app
-from reef.service.auth import create_authentication_middleware
-from reef.service.deploy.service_config import ServiceSettings
-from reef.service.lifecycle import (
+from reef.api.app import CONTROL_APPLICATION, create_app
+from reef.api.auth import create_authentication_middleware
+from reef.api.lifecycle import (
     INFERENCE_FINALIZATION,
     REQUEST_ACCEPTANCE,
     LifecycleSettings,
@@ -64,8 +53,19 @@ from reef.service.lifecycle import (
     register_admission,
     serve_managed,
 )
-from reef.service.request_service import RequestService
-from reef.service.routes.payload import read_object
+from reef.api.request_service import RequestService
+from reef.api.routes.payload import read_object
+from reef.api.settings import ServiceSettings
+from reef.core import AgentRecord
+from reef.routing.deployment_controller import RoutingDeploymentController
+from reef.routing.manifest import RoutingAdapter, RoutingDecision, RoutingSnapshot
+from reef.routing.reef_lifecycle_client import (
+    CANDIDATE_CHECK_PATH,
+    LifecycleStatus,
+    ReefLifecycleClient,
+    RoutingControlError,
+)
+from reef.routing.settings import RoutingDeploymentSettings
 from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import AppendResult, RecordConflictError
 
@@ -940,7 +940,7 @@ import concurrent.futures
 import sys
 import threading
 from aiohttp import web
-from reef.service.lifecycle import LifecycleSettings, PendingWrites, RequestAcceptance, configure_owner_watch
+from reef.api.lifecycle import LifecycleSettings, PendingWrites, RequestAcceptance, configure_owner_watch
 app = web.Application()
 state = RequestAcceptance(LifecycleSettings('test', 'generation', 'control', finalization_timeout_seconds=0.1), PendingWrites())
 configure_owner_watch(app, state, int(sys.argv[1]))
@@ -1347,7 +1347,7 @@ def test_an_open_whose_deadline_passes_during_readiness_stays_closed(
         lifecycle_timers.append(timer)
         return timer
 
-    monkeypatch.setattr("reef.service.lifecycle.asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": kept_timer}))
+    monkeypatch.setattr("reef.api.lifecycle.asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": kept_timer}))
 
     async def run() -> None:
         # The provider check or the preview waits for this event.

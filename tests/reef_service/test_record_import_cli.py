@@ -9,8 +9,8 @@ from aiohttp.test_utils import TestServer
 from reef_client.record_import import import_records_file
 from tests.reef_service.test_record_import import dispatcher_for, imported
 
+from reef.api.request_service import RequestService
 from reef.recipe import Recipe
-from reef.service.request_service import RequestService
 
 
 def write_records(path, count):

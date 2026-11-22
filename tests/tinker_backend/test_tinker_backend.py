@@ -28,10 +28,10 @@ from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
+from reef.deploy import orchestrator
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.training import local_model_required
 from reef.inference.tinker import TINKER_URL, TinkerInferenceRuntime
-from reef.service.deploy import orchestrator
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.training import local_model_required
 from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
@@ -1105,9 +1105,9 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     from aiohttp.test_utils import TestClient, TestServer
 
     from recipes.tttd.recipe import TTTDRecipe
+    from reef.api.app import create_app
     from reef.artifact import InMemoryRepositoryBackend
     from reef.control.dispatcher import Dispatcher
-    from reef.service.app import create_app
     from reef.storage.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSettings
 

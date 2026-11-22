@@ -18,7 +18,7 @@ and the recipe and the generator drive it over HTTP:
   reads.
 - ``service``: the HTTP API and its job runner; ``client``: the same steps as asynchronous calls; ``wire``:
   the JSON forms. The ``generator`` section that starts the service is parsed in
-  ``reef.service.deploy.generator``, and ``reef.service.deploy.generator_process`` runs the process.
+  ``reef.deploy.generator``, and ``reef.deploy.generator_process`` runs the process.
 
 What is method policy, the prompt's experience section, the measurement arms a task asks for and the score a
 proposal earns, stays with the method's task generator (``recipes/beta/spade`` is the first).

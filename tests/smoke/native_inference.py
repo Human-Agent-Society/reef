@@ -71,6 +71,13 @@ from tests.smoke.inference_features import (
 from tests.smoke.inference_lifecycle import NoTraining, SeededWeights
 from tests.smoke.inference_recovery import ObservedEngines, ServingLog, ended_checks, first_check, serving_log
 
+from reef.api.inference_service import (
+    ARTIFACT_HEADER,
+    RECORD_HEADER,
+    SESSION_KEY_HEADER,
+    build_inference_app,
+    conversation_bucket,
+)
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core.records_types import ROLLOUT_HEADER, SCENARIO_HEADER, AgentRecord
@@ -110,13 +117,6 @@ from reef.routing.manifest import (
     scenario_entrypoint,
 )
 from reef.routing.preview import PreviewSettings
-from reef.service.inference_service import (
-    ARTIFACT_HEADER,
-    RECORD_HEADER,
-    SESSION_KEY_HEADER,
-    build_inference_app,
-    conversation_bucket,
-)
 from reef.storage.coordination import Coordination
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -2597,8 +2597,8 @@ async def public_app(
     the runtime of ``live`` and closes the record store.
     """
     # The dispatcher and the public app load only for the lifecycle profile.
+    from reef.api.app import create_app
     from reef.control.dispatcher import Dispatcher
-    from reef.service.app import create_app
 
     coordination = memory_coordination()
     dispatcher = Dispatcher(
@@ -2883,6 +2883,7 @@ def routing_policy(run: Run, engines: Engines) -> tuple[dict[str, Any], str, str
 
 async def qualify_routing(run: Run) -> None:
     # The routed one-process app, its dispatcher and the router's deployment code load only for this profile.
+    from reef.api.app import create_app
     from reef.control.dispatcher import build_default_dispatcher
     from reef.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime
     from reef.routing.renderer import (
@@ -2892,7 +2893,6 @@ async def qualify_routing(run: Run) -> None:
         write_private_document,
     )
     from reef.routing.settings import RoutingDeploymentSettings
-    from reef.service.app import create_app
 
     inputs = run.inputs
     binary = inputs.router_binary

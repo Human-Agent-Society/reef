@@ -11,12 +11,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_backend_plugin import MemoryArtifactBackend
 from tests.support.inference import wait_for_inference
 
+from reef.api import assembly
+from reef.api.app import get_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext, git_lfs
+from reef.deploy.deployment_config import translate_layout
+from reef.deploy.service_config import service_config_from_mapping
 from reef.inference.interfaces import InferenceHandler
-from reef.service import assembly
-from reef.service.app import get_dispatcher
-from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"

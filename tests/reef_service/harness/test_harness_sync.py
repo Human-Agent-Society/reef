@@ -26,9 +26,9 @@ from tests.support.harness_jobs import PI_SEED
 from tests.support.harness_service import EchoInference
 from tests.support.serving import wait_for_serving
 
+from reef.api.app import create_app
 from reef.harness.sync import TOKEN_PLACEHOLDER
 from reef.harness.tree import HarnessTree
-from reef.service.app import create_app
 
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"
 MINE = {"plugin/rules.md": "Mine.\n", "plugin/skills/fix/SKILL.md": SKILL, "pi-agent/auth.json": "{}\n"}

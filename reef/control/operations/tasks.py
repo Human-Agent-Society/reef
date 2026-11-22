@@ -3,7 +3,7 @@
 A client creates task items from a gzip-compressed tar archive whose top-level entries are Harbor task
 directories, one for each task, named by the task (``reef.control.operations.data``). ``unpack_task_archive`` unpacks and
 checks such an archive. ``list_imported_tasks`` lists the tasks that a scenario uses. No aiohttp types appear
-here. ``reef.service.routes.tasks`` adapts the listing to HTTP.
+here. ``reef.api.routes.tasks`` adapts the listing to HTTP.
 """
 
 from __future__ import annotations

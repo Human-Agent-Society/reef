@@ -37,6 +37,7 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import VERSION_FILE, StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
 
+from reef.api.request_service import RequestService
 from reef.artifact import Artifact, ArtifactValidator, GitLFSRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
@@ -53,7 +54,6 @@ from reef.recipe import Recipe
 from reef.recipe.base import WEIGHTS_COMPONENT
 from reef.recipe.composite import CompositeRecipe
 from reef.record2sample.service.worker import SAMPLES_QUEUE
-from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import open_coordination
 from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.job_queue import (

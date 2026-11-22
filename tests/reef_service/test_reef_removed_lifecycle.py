@@ -72,7 +72,7 @@ def test_recipe_symbols_are_removed_in_favor_of_processors_and_trainer() -> None
         # Alternate module spellings stay absent: the entity is AgentRecord and
         # its store is RecordStore, both exported from their canonical modules.
         "reef.core.agent_record",
-        "reef.service.routes.agent_record",
+        "reef.api.routes.agent_record",
     ],
 )
 def test_old_naming_modules_are_removed(module: str) -> None:
@@ -130,9 +130,9 @@ def test_readme_names_are_exported() -> None:
 def test_dead_accessors_and_symbols_are_removed() -> None:
     import reef.core
     import reef.core.errors
+    from reef.api.request_service import RequestService
     from reef.control.dispatcher import Dispatcher
     from reef.control.scenario.scenario import Scenario
-    from reef.service.request_service import RequestService
 
     # Removed dead code (no production callers).
     assert not hasattr(reef.core, "ReferenceStatus")
@@ -160,7 +160,7 @@ def test_naming_unification_renames_are_complete() -> None:
     assert not hasattr(Scenario, "algorithm")
     assert not hasattr(Scenario, "objective")
     # Route registration follows the records vocabulary.
-    import reef.service.routes as routes
+    import reef.api.routes as routes
 
     assert not hasattr(routes, "register_agent_record_routes")
     assert hasattr(routes, "register_record_routes")

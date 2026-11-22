@@ -13,6 +13,7 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
+from reef.api.app import create_app
 from reef.artifact import (
     BASE_FILE,
     REFERENCE_FILE,
@@ -30,7 +31,6 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.operations.artifact_imports import ArtifactImports
 from reef.core.errors import CommitPendingError, ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
-from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import SnapshotStart

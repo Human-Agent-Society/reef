@@ -522,7 +522,7 @@ def test_a_record_that_lands_after_the_archive_makes_no_new_store_of_the_deleted
     is refused: no new database and no new data-store generation of the deleted ID (review of the soft delete)."""
     from tests.support.samples import data_storage
 
-    from reef.service.routed_replica import ReplicaRecords
+    from reef.api.routed_replica import ReplicaRecords
 
     directory = tmp_path if on_disk else None
     storage = data_storage(directory)

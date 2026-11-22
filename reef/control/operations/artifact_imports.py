@@ -8,7 +8,7 @@ stores a copy, or a reference to a revision that cannot change, in a temporary d
 ``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). A new scenario can also start
 from an artifact item (RFC #1062, RFC #1070): ``ArtifactImports.create_from_item`` reads the item, and the scenario
 factory checks it and writes it as the new scenario's root snapshot. No aiohttp types appear here.
-``reef.service.routes.artifact_imports`` and the create route of ``reef.service.routes.scenarios`` adapt it to HTTP.
+``reef.api.routes.artifact_imports`` and the create route of ``reef.api.routes.scenarios`` adapt it to HTTP.
 """
 
 from __future__ import annotations

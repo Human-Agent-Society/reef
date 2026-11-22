@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from reef.service.deploy import orchestrator
-from reef.service.deploy.config_utils import recipe_source_root
-from reef.service.deploy.execution import service_executor_config
-from reef.service.deploy.orchestrator import _run_orchestrator
-from reef.service.deploy.process import ProcessWorker
+from reef.deploy import orchestrator
+from reef.deploy.config_utils import recipe_source_root
+from reef.deploy.execution import service_executor_config
+from reef.deploy.orchestrator import _run_orchestrator
+from reef.deploy.process import ProcessWorker
 
 
 def _checkout(tmp_path: Path, package: str = "recipes") -> tuple[Path, Path]:

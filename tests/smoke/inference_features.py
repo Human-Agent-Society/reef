@@ -25,9 +25,9 @@ from typing import Any
 
 from aiohttp import ClientSession
 
+from reef.api.inference_service import BUCKET_COUNT, RECORD_HEADER
 from reef.core.records_types import AgentRecord
 from reef.core.values import JsonValue
-from reef.service.inference_service import BUCKET_COUNT, RECORD_HEADER
 
 #: The largest accepted difference between an engine's log probability and the Hugging Face float32 score.
 LOGPROB_TOLERANCE = 1e-3

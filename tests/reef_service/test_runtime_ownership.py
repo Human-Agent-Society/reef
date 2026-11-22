@@ -8,15 +8,15 @@ import pytest
 from aiohttp import web
 from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 
+from reef.api import assembly
+from reef.api.assembly import load_named_recipe
+from reef.api.settings import ServiceSettings
 from reef.artifact import GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.live_objects import LiveObjects
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
-from reef.service import assembly
-from reef.service.assembly import load_named_recipe
-from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

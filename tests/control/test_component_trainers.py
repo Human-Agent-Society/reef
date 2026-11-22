@@ -49,6 +49,8 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.trajectories import policy_trajectory
 
+from reef.api.app import create_app
+from reef.api.request_service import RequestService
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.repository import Repository
@@ -72,8 +74,6 @@ from reef.record2sample.service import SAMPLES_QUEUE
 from reef.record2sample.staleness import ServedArtifacts, lags_behind
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData
-from reef.service.app import create_app
-from reef.service.request_service import RequestService
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitHistoryError,

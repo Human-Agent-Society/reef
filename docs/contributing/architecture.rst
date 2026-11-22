@@ -227,12 +227,8 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
 
    * - Today
      - Target
-   * - ``reef/service/request_service.py`` and ``reef/service/harness_imports.py``
+   * - ``reef/api/request_service.py`` and ``reef/api/harness_imports.py``
      - ``control/operations/``
-   * - ``reef/service/deploy/``
-     - ``deploy``
-   * - The rest of ``reef/service/``
-     - ``api``
    * - ``reef/record2sample/``, ``reef/pipeline_context.py``, and the part of ``TrainingPipeline`` that makes samples
      - ``samples``
    * - ``reef/sample2job/`` and the part of ``TrainingPipeline`` that builds job data
@@ -242,9 +238,6 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
    * - The modules of ``reef/storage/``, in one directory
      - Subpackages of ``storage``: the scenario stores, the data store, the coordination store, and the SQL backends
 
-Two groups of imports point upward today, and they change before the files move:
+The request service moves after its imports change. ``reef/api/request_service.py`` imports the harness pages, the wire shapes, the pending writes and the routed inference of ``reef/api/``, and ``reef/api/harness_imports.py`` imports the request service.
 
-- ``reef/service/request_service.py`` imports the harness pages, the wire shapes, the pending writes and the routed inference of ``reef/service/``. ``reef/service/harness_imports.py`` imports the request service.
-- ``reef/service/deploy/`` and the HTTP modules of ``reef/service/`` import each other. After the move, ``deploy`` imports ``api``, and ``api`` does not import ``deploy``.
-
-``routing`` is in place (`RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__). Its commands stay in ``reef/service/deploy/routing/cli.py`` until ``deploy`` moves.
+``routing`` is in place (`RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__). Its commands are in ``reef/deploy/routing/cli.py``.

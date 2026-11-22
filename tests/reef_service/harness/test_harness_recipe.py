@@ -54,6 +54,8 @@ from tests.support.strategies import resolve_task_scorer
 from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import recorded_trajectory
 
+from reef.api.app import create_app
+from reef.api.assembly import with_harness_components
 from reef.artifact import Artifact
 from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.live_objects import LiveObjects, ServedEndpoint, harness_models, harness_served_model
@@ -90,8 +92,6 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.service.app import create_app
-from reef.service.assembly import with_harness_components
 from reef.storage.data import NewItem
 from reef.storage.samples import StoredSample
 from reef.storage.sql_coordination import memory_coordination

@@ -15,6 +15,7 @@ from tests.support.polling import wait_until
 from tests.support.runtime_stubs import live_objects
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
+from reef.api.app import create_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
@@ -24,7 +25,6 @@ from reef.control.operations.artifact_imports import ArtifactImports
 from reef.control.operations.data_service import DataWorker, copy_scenario_artifacts, data_jobs
 from reef.control.operations.data_transfer import ArchiveWriters
 from reef.recipe import Recipe
-from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage

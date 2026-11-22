@@ -13,6 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import StubInferenceRuntime, live_objects
 
+from reef.api.app import RequestService, create_app
 from reef.artifact import (
     Artifact,
     ArtifactError,
@@ -33,7 +34,6 @@ from reef.inference.interfaces import InferenceArtifact, InferenceHandler, Infer
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit
@@ -1218,7 +1218,7 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
     The streaming path builds its own record and carries the tags as well: a streaming agent-loop call is exactly
     the one a correlating processor needs.
     """
-    from reef.service.wire import parse_request_headers, with_request_tags
+    from reef.api.wire import parse_request_headers, with_request_tags
 
     headers = {
         "x-reef-scenario": "math",

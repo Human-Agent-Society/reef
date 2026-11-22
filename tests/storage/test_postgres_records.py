@@ -7,13 +7,14 @@ from threading import Barrier
 
 import pytest
 
+from reef.api.assembly import _recipe_owned_settings, build_dispatcher
+from reef.api.settings import ServiceSettings, service_config_arguments
 from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.snapshot import SnapshotRef
-from reef.service.assembly import _recipe_owned_settings, build_dispatcher
-from reef.service.deploy.config_utils import load_config
-from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceSettings, service_config_arguments, service_config_from_mapping
+from reef.deploy.config_utils import load_config
+from reef.deploy.deployment_config import translate_layout
+from reef.deploy.service_config import service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
 from reef.storage.record_items import ItemRecordStore

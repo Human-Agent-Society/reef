@@ -11,12 +11,12 @@ import urllib.request
 
 import pytest
 
+from reef.deploy.execution import validate_services
+from reef.deploy.orchestrator import _Stack
+from reef.deploy.process import RayProcessWorker
 from reef.execution.executor import Executor, ExecutorFailedError, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.orchestrator import _Stack
-from reef.service.deploy.process import RayProcessWorker
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 

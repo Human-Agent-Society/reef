@@ -17,6 +17,7 @@ from tests.support.records import memory_records
 from tests.support.samples_service import make_samples
 from tests.support.trainers import recipe_trainer
 
+from reef.api.app import create_app
 from reef.control.scenario import Scenario
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core.plugins import PluginReference
@@ -25,7 +26,6 @@ from reef.core.training_request import TrainingRequest
 from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.service.app import create_app
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState

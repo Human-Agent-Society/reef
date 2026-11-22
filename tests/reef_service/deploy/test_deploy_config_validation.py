@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-import reef.service.deploy.orchestrator as orchestrator
+import reef.deploy.orchestrator as orchestrator
 from reef.cli import main as cli_main
-from reef.service.deploy.config_utils import DeployConfigError, load_config
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.process import _command_argv
+from reef.deploy.config_utils import DeployConfigError, load_config
+from reef.deploy.execution import validate_services
+from reef.deploy.process import _command_argv
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -26,7 +26,7 @@ def test_relative_config_uses_working_directory_not_installation(tmp_path: Path,
     installed.mkdir()
     _write(installed, "reef: {recipe: wrong}\n")
     _write(tmp_path, "reef: {recipe: selected}\n")
-    monkeypatch.setattr("reef.service.deploy.config_utils.PROJECT_ROOT", installed)
+    monkeypatch.setattr("reef.deploy.config_utils.PROJECT_ROOT", installed)
     monkeypatch.chdir(tmp_path)
 
     assert load_config("stack.yaml")["reef"]["recipe"] == "selected"
@@ -231,8 +231,8 @@ def test_command_argv_supports_exact_lists_and_legacy_strings() -> None:
 
     assert _command_argv(
         config,
-        ["/opt/reef env/bin/python", "-m", "reef.service", "--port=${reef.port}", ""],
-    ) == ["/opt/reef env/bin/python", "-m", "reef.service", "--port=9123", ""]
+        ["/opt/reef env/bin/python", "-m", "reef.deploy.service_process", "--port=${reef.port}", ""],
+    ) == ["/opt/reef env/bin/python", "-m", "reef.deploy.service_process", "--port=9123", ""]
     assert _command_argv(config, "python -m worker --port=${reef.port}") == [
         "python",
         "-m",

@@ -21,6 +21,7 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from reef.api.settings import ServiceSettings
 from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.routing.containers import (
     ContainerCommandError,
@@ -37,7 +38,6 @@ from reef.routing.preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_
 from reef.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
 from reef.routing.registry import DeploymentOwnership
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

@@ -13,7 +13,7 @@ keep the same limit. With
 evaluation is final, ``EvaluationResults`` reads the scores, stores their ``PolicyEvaluation``, and gives it to the
 scenario's activation rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No aiohttp types
 appear here.
-``reef.service.routes.evaluations`` adapts it to HTTP.
+``reef.api.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
 artifact on request (``InferenceRuntime.serves_any_artifact``), on the Harbor tasks of the eval split of the

@@ -435,7 +435,7 @@ uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 
 ```bash
-python -m reef.service.deploy.routing.cli validate --config /path/to/candidate-reef.yaml
+python -m reef.deploy.routing.cli validate --config /path/to/candidate-reef.yaml
 ```
 
 For a manifest that names no image it prints `"snapshot_version": null` and
@@ -451,8 +451,8 @@ killed, the SR container can remain until the next start or an explicit
 cleanup:
 
 ```bash
-python -m reef.service.deploy.routing.cli status --deployment-id opd-routing
-python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing
+python -m reef.deploy.routing.cli status --deployment-id opd-routing
+python -m reef.deploy.routing.cli cleanup --deployment-id opd-routing
 ```
 
 Both use the same per-user ownership registry as `reef serve`
@@ -466,7 +466,7 @@ the image as usual. Only after checking that Docker has finished a recorded
 operation, acknowledge it:
 
 ```bash
-python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing \
+python -m reef.deploy.routing.cli cleanup --deployment-id opd-routing \
   --acknowledge-unknown "<operation-id-from-status>"
 ```
 

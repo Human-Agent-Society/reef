@@ -23,6 +23,8 @@ from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
+from reef.api.app import create_app
+from reef.api.request_service import RequestService
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
@@ -54,8 +56,6 @@ from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import weight_training_selection
-from reef.service.app import create_app
-from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -396,8 +396,9 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
 def test_service_connects_the_training_component_of_a_composite_weight_component(tmp_path) -> None:
     from tests.support.training_deployment import LocalRuntime
 
-    from reef.service.assembly import _load_deployment
-    from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
+    from reef.api.assembly import _load_deployment
+    from reef.api.settings import ServiceSettings
+    from reef.deploy.service_config import service_config_from_mapping
 
     def composite_service(activation: Mapping[str, Any] | None = None, **reef: Any) -> ServiceSettings:
         settings = {
@@ -436,9 +437,9 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
 
 @pytest.mark.unit
 def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy.deployment_config import selected_weight_training
-    from reef.service.deploy.execution import validate_services
-    from reef.service.deploy.orchestrator import resolve_deployment_config
+    from reef.deploy.deployment_config import selected_weight_training
+    from reef.deploy.execution import validate_services
+    from reef.deploy.orchestrator import resolve_deployment_config
 
     raw = {
         "recipe": {
@@ -883,8 +884,8 @@ def test_only_a_composite_evaluates_through_the_service(
 ) -> None:
     """A composite's evaluation calls come back to the service and hold its local cycles until it answers. A recipe of
     one component keeps calling its runtime's endpoint directly: it gets no served endpoint and runs at once."""
-    from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceSettings
+    from reef.api import assembly
+    from reef.api.settings import ServiceSettings
 
     flat = _TreeRecipe()
     recipe = CompositeRecipe(components={"harness": flat, "tools": _TreeRecipe()}) if composite else flat

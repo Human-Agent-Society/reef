@@ -16,6 +16,7 @@ from tests.support.runtime_stubs import STUB_ROOT, live_objects
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.trainers import recipe_trainer
 
+from reef.api.training import training_recipe_config
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import AlwaysActivate
@@ -23,7 +24,6 @@ from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.loading import load_recipe
-from reef.service.deploy.training import training_recipe_config
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 

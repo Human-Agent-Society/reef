@@ -10,7 +10,7 @@
 #
 # One image serves every role (pick by command):
 #   sglang         python -m sglang.launch_server --model-path <M> ...
-#   reef           python -m reef.service (internal config-driven child;
+#   reef           python -m reef.deploy.service_process (internal config-driven child;
 #                  Slime trains in this process)
 #   inference      python -m reef.inference.remote (the serving engines)
 #   ray-head       ray start --head --block ...

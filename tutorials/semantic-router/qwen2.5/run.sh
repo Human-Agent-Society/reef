@@ -56,7 +56,7 @@ cleanup() {
     for id in $children; do kill -TERM "$id" 2>/dev/null; done
     for id in $children; do wait "$id" 2>/dev/null; done
     if [[ -d "$XDG_STATE_HOME/reef/routing/$deployment_id" ]]; then
-        if ! "$python" -m reef.service.deploy.routing.cli cleanup --deployment-id "$deployment_id" >"$run_dir/cleanup.log" 2>&1; then
+        if ! "$python" -m reef.deploy.routing.cli cleanup --deployment-id "$deployment_id" >"$run_dir/cleanup.log" 2>&1; then
             echo "Reef cleanup failed. Inspect $run_dir/cleanup.log." >&2
             result=1
         fi
@@ -180,7 +180,7 @@ storage:
   agent_record_dir: '\${QWEN_RUN_DIR:?}/records'
   task_file_dir: '\${QWEN_RUN_DIR:?}/task-files'
 YAML
-"$python" -m reef.service.deploy.routing.cli validate --config "$run_dir/reef.yaml"
+"$python" -m reef.deploy.routing.cli validate --config "$run_dir/reef.yaml"
 "$python" -m reef.cli serve -c "$run_dir/reef.yaml" >"$run_dir/reef.log" 2>&1 &
 reef_pid=$!
 # The first start without SR_IMAGE builds the router image, for up to image_build_timeout_seconds (3600).

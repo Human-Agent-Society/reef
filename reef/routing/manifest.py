@@ -56,7 +56,7 @@ KEYWORD_MATCHES = ("any", "all")
 DOMAIN_CLASSIFIER_FILES = frozenset({"config.json", "tokenizer.json", "model.safetensors", "category_mapping.json"})
 #: An environment variable name that may hold a target's credential.
 ENVIRONMENT_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-#: Every status a ``RoutingRequestError`` reports; ``reef.service.errors`` translates each one.
+#: Every status a ``RoutingRequestError`` reports; ``reef.api.errors`` translates each one.
 ROUTING_ERROR_STATUSES = frozenset({400, 403, 409, 413, 429, 502, 503, 504})
 #: Each provider model-list check during readiness waits at most this long, or the inference timeout if shorter.
 #: The managed owner budgets an ``open`` with the same limit.
@@ -101,7 +101,7 @@ class RoutingRequestError(ReefError):
     429 means the router is at its preview capacity; 502 is a router reply Reef cannot use, 503 a router or
     target that is unavailable, and 504 a router that did not answer in time.
     Purpose: request checks, the routing preview and readiness raise it before any provider call;
-    ``reef.service.errors.translate_error`` turns it into the response ``"<code>: <message>"``.
+    ``reef.api.errors.translate_error`` turns it into the response ``"<code>: <message>"``.
     """
 
     def __init__(self, message: str, *, code: str = "invalid_route", status: int = 400) -> None:

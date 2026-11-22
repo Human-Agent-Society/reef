@@ -9,8 +9,8 @@ import pytest
 from sqlalchemy import func, select
 from tests.support.conversations import conversation
 
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceSettings
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.storage import sql_data
 from reef.storage.data import NewItem
 from reef.storage.record_items import record_item

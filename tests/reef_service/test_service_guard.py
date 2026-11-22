@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.service.deploy import guard
+from reef.deploy import guard
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")

@@ -20,11 +20,11 @@ import pytest
 
 import reef
 from reef.cli import main
-from reef.service.deploy import orchestrator
-from reef.service.deploy.config_utils import DeployConfigError, load_config
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.inference import assemble_provider_services
-from reef.service.deploy.service_config import service_config_from_mapping
+from reef.deploy import orchestrator
+from reef.deploy.config_utils import DeployConfigError, load_config
+from reef.deploy.execution import validate_services
+from reef.deploy.inference import assemble_provider_services
+from reef.deploy.service_config import service_config_from_mapping
 
 
 @pytest.fixture

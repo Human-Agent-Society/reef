@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from reef.cli import main as cli_main
-from reef.service.deploy import orchestrator
+from reef.deploy import orchestrator
 
 
 def _write_stack(path: Path, run_dir: Path) -> None:
@@ -97,7 +97,7 @@ def test_sigterm_during_startup_stops_the_service_process(tmp_path: Path) -> Non
     script = tmp_path / "serve.py"
     script.write_text(
         "from reef.cli import main\n"
-        "from reef.service.deploy import orchestrator\n"
+        "from reef.deploy import orchestrator\n"
         f"orchestrator.validate_services = lambda config, path: {services!r}\n"
         "main(['serve', '-c', 'stack.yaml'])\n"
     )

@@ -19,6 +19,7 @@ from tests.support.chat_templates import CharTemplate
 from recipes.sdft import SDFTRecipe
 from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
 from recipes.sdft.slime import SdftObjective, SdftSettings
+from reef.api.training import training_recipe_config
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.plugins import PluginConfigError
@@ -29,7 +30,6 @@ from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.record2sample.distill import student_call
 from reef.sample2job import DistillJobData
-from reef.service.deploy.training import training_recipe_config
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data

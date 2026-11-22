@@ -18,14 +18,14 @@ from sqlalchemy import func, select
 from tests.support.conversations import conversation
 from tests.support.trajectories import policy_trajectory
 
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceSettings
 from reef.storage import data as data_module
 from reef.storage.data import (
     DeletedItem,

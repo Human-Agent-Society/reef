@@ -10,13 +10,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
+from reef.api.app import create_app
+from reef.api.inference_service import build_inference_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.control.workers.serving import ServingWorker
 from reef.core.values import JsonValue
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
-from reef.service.app import create_app
-from reef.service.inference_service import build_inference_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

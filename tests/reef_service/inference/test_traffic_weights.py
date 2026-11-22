@@ -13,13 +13,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.reef_service.inference.served_artifacts import ArtifactEcho, two_artifacts
 from tests.support.serving import wait_for_serving
 
-from reef.control.dispatcher import Dispatcher
-from reef.core.records_types import AgentRecord
-from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.inference.engine_clients import DeploymentEngineClients
-from reef.inference.interfaces import FixedEngineClients, full_weight_name
-from reef.service.app import create_app
-from reef.service.inference_service import (
+from reef.api.app import create_app
+from reef.api.inference_service import (
     ARTIFACT_HEADER,
     BUCKET_COUNT,
     RECORD_HEADER,
@@ -27,6 +22,11 @@ from reef.service.inference_service import (
     build_inference_app,
     conversation_bucket,
 )
+from reef.control.dispatcher import Dispatcher
+from reef.core.records_types import AgentRecord
+from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.inference.engine_clients import DeploymentEngineClients
+from reef.inference.interfaces import FixedEngineClients, full_weight_name
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 from tests.support.harness_jobs import configured_live, evolution_config
 
+from reef.api.app import RequestService
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents
 from reef.control.dispatcher import Dispatcher
@@ -16,7 +17,6 @@ from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.deployment import harness_adapter
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.service.app import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.settings import EvolutionSettings

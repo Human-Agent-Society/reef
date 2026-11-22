@@ -4,7 +4,7 @@ A collection names benchmarks and other collections of one owner (``reef.storage
 stores, lists, reads and deletes the collections of an owner. A scenario holds sets of items: benchmarks, each in one
 split, and trajectory sets. It then uses the items of the set, and no item changes (``DataStore.hold``). A client
 holds and releases a set, lists a scenario's holds, and holds each benchmark of a collection in one call. No aiohttp
-types appear here. ``reef.service.routes.data`` adapts it to HTTP.
+types appear here. ``reef.api.routes.data`` adapts it to HTTP.
 """
 
 from __future__ import annotations

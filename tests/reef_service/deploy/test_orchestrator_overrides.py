@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from reef.service.deploy.cli import InvalidOverrideError, _apply_overrides, _parse_overrides
-from reef.service.deploy.orchestrator import main
+from reef.deploy.cli import InvalidOverrideError, _apply_overrides, _parse_overrides
+from reef.deploy.orchestrator import main
 
 
 def test_key_value_pair() -> None:

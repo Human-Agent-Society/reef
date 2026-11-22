@@ -13,6 +13,7 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.trajectory_uploads import dispatcher_for
 
+from reef.api.app import create_app
 from reef.artifact import (
     ArtifactNotFoundError,
     ArtifactPublicationError,
@@ -29,7 +30,6 @@ from reef.core import ScenarioNotFoundError
 from reef.core.errors import ScenarioDeletedError
 from reef.recipe import Recipe
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork

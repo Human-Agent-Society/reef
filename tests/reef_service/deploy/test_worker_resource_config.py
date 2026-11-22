@@ -5,6 +5,7 @@ from tests.support.harness_jobs import configured_component, evolution_config
 from tests.support.strategies import resolve_task_scorer
 
 from reef.control.scenario.live_objects import LiveObjects
+from reef.deploy.execution import service_executor_config
 from reef.evaluation.harness import evaluation_selection
 from reef.evaluation.harness.runner import evaluation_executor_config
 from reef.execution.executor import WorkerSpec
@@ -13,7 +14,6 @@ from reef.execution.executor.requirements import ExecutionRequirements
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.service.deploy.execution import service_executor_config
 
 
 def scorer(task, result):

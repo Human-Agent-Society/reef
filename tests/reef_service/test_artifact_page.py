@@ -25,17 +25,17 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, report_records, wait_for_rows
 
+from reef.api.app import create_app
+from reef.api.artifact_page import before_artifact_id, build_artifact_page, result_of, served_step
+from reef.api.page_layout import status_label
 from reef.control.dispatcher import Dispatcher
 from reef.core.plugins import PluginReference
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.service.app import create_app
-from reef.service.artifact_page import before_artifact_id, build_artifact_page, result_of, served_step
-from reef.service.page_layout import status_label
 
-MODULE = Path(__file__).parents[2] / "reef" / "service" / "artifact_page.py"
-LAYOUT = Path(__file__).parents[2] / "reef" / "service" / "page_layout.py"
+MODULE = Path(__file__).parents[2] / "reef" / "api" / "artifact_page.py"
+LAYOUT = Path(__file__).parents[2] / "reef" / "api" / "page_layout.py"
 
 OLD_CODE = "export default function hello(pi) {\n  if (1 < 2) return;\n}\n"
 NEW_CODE = 'export default function hello(pi) {\n  if (1 < 2) return;\n  pi.on("session_start", () => {});\n}\n'

@@ -29,7 +29,7 @@ Implementation
   import from ``reef/__init__.py``. The contract it implements is
   ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
-  settings again in ``reef/service/``. Do not add a loading method to the
+  settings again in ``reef/api/``. Do not add a loading method to the
   recipe class: ``reef.recipe.loading.load_recipe`` builds the recipe from its
   declarations.
 - Put the method's record-to-sample and sample-to-job stages in
@@ -323,19 +323,19 @@ snapshot chain in the `State model <../advanced_topics/state-model.rst#the-snaps
 Add a service route
 -------------------
 
-Routes adapt HTTP to transport-independent behavior. The ``reef/service``
+Routes adapt HTTP to transport-independent behavior. The ``reef/api``
 package docstring and `HTTP API <../reference/http-api.rst>`__ define the
 current request contract.
 
-- Add or extend a module in ``reef/service/routes/`` with a
+- Add or extend a module in ``reef/api/routes/`` with a
   ``register_*_routes`` function.
-- Import and call it from ``reef/service/routes/__init__.py`` in
+- Import and call it from ``reef/api/routes/__init__.py`` in
   ``register_routes``.
 - Keep parsing and response adaptation in the route. Put reusable request or
-  domain behavior in ``reef/service/request_service.py`` or the package that
+  domain behavior in ``reef/api/request_service.py`` or the package that
   owns the concept.
 - Raise domain errors. If a new error needs a non-default HTTP status, add it
-  to ``ERROR_STATUS_TABLE`` in ``reef/service/errors.py`` instead of adding a
+  to ``ERROR_STATUS_TABLE`` in ``reef/api/errors.py`` instead of adding a
   route-local exception table.
 - Add route and service tests under ``tests/reef_service/``. Update the wire
   guide for a public endpoint; the docs contract check requires the guide to
