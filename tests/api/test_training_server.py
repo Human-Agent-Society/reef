@@ -923,7 +923,7 @@ def hangup_deployment(tmp_path: Path, phase: str, before_serve: str) -> list[str
     program = "\n".join(
         [
             "import signal, sys",
-            "from reef.service.deploy import orchestrator",
+            "from reef.deploy import orchestrator",
             before_serve,
             f"orchestrator.validate_services = lambda config, path: [{service!r}]",
             f"sys.exit(orchestrator._run_orchestrator({str(config_path)!r}))",
