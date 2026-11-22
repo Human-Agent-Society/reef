@@ -25,16 +25,16 @@ from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, CachedRepositoryBackendFactory, InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
+from reef.control.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.snapshot import RootSource
-from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ComparePolicy
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.scenario.live_objects import LiveObjects
-from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.storage.sql_coordination import memory_coordination
 from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
@@ -42,7 +42,6 @@ from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.manager import TrainingManager
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainingCommit
-
 
 #: The repository of each test directory, so that a dispatcher that a test opens again finds its snapshots, as a
 #: restarted service finds its artifact store.

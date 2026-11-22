@@ -90,7 +90,7 @@ Live objects
 
 .. code:: python
 
-   from reef.scenario.live_objects import LiveObjects, ServedEndpoint
+   from reef.control.scenario.live_objects import LiveObjects, ServedEndpoint
 
 The process that runs a service builds the objects that run the recipe, and holds them in one frozen ``LiveObjects`` value. ``reef.service.assembly.load_deployment(settings, env, runs_training=...)`` returns the recipe and the value, and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it.
 

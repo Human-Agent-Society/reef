@@ -31,9 +31,9 @@ from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import DefaultStart, FileDownload
 from reef.artifact.sources import ArtifactSources
+from reef.control.dispatcher import Dispatcher
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
-from reef.dispatcher import Dispatcher
 from reef.service import data_transfer
 from reef.service.app import create_app
 from reef.service.data_service import DataImport

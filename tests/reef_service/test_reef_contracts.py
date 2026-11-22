@@ -22,9 +22,10 @@ from reef.artifact import (
     Repository,
 )
 from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.control.dispatcher import Dispatcher, build_default_dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core import ReefError, RequestType
 from reef.core.records_types import ROLLOUT_HEADER
-from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
@@ -32,7 +33,6 @@ from reef.inference.interfaces import InferenceArtifact, InferenceHandler, Infer
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

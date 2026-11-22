@@ -3,7 +3,7 @@
 The data service needs no control lease: it writes the data store and the items of
 the ``data`` queue, and no table that control alone writes. A ``DataWorker`` takes the ``data`` queue items of the
 data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` items are control's
-(``reef.dispatcher.data_sync_worker``).
+(``reef.control.workers.data_sync_worker``).
 
 - ``artifact_copy``: make the artifact items of one scenario's artifacts (``copy_scenario_artifacts``).
 - ``data_import`` and ``data_export``: the transfers of ``reef.service.data_transfer``.
@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.execution.workers import QueueWorker
 from reef.recipe.deployment import harness_adapter
 from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, DataStoreUnavailableError

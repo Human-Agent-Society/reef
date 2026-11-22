@@ -13,10 +13,10 @@ from typing import Any, TypeVar
 
 from aiohttp import ClientError
 
+from reef.control.dispatcher import Dispatcher
 from reef.core.errors import ReefError, ScenarioNotFoundError, UpstreamStatusError, inference_aborted
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.values import JsonValue
-from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import stream_events

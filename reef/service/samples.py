@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 
 #: The most samples that one listing returns.
 MAX_SAMPLES_PER_PAGE = 1000

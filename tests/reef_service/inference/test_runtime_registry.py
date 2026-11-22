@@ -7,14 +7,14 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.errors import RuntimeConfigError
 from reef.core.served_models import ServedArtifact
-from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
-from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.assembly import load_named_recipe
 from reef.storage.sql_coordination import memory_coordination

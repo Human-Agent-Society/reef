@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.record2sample.service import SAMPLES_QUEUE, selection_triggers
 from reef.storage.records import RecordStore
 from reef.storage.work_queue import HELD_STATES, JsonValue, WorkItem

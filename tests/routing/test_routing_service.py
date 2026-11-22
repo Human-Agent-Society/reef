@@ -30,10 +30,10 @@ from tests.routing.routing_fakes import (
 )
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
 from reef.core import RequestType
 from reef.core.records_types import AgentRecord
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceStream
 from reef.observability.operations import OperationMetrics

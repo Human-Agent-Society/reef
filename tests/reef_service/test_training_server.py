@@ -20,8 +20,8 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
+from reef.control.dispatcher import Dispatcher
 from reef.core.plugins import PluginConfigError
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
@@ -518,7 +518,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     tmp_path, monkeypatch, per_scenario_adapters
 ) -> None:
     synchronization_timeout_seconds = 30
-    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
     dispatcher = Dispatcher(

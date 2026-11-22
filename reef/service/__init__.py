@@ -4,7 +4,7 @@
 the dispatcher and the app. It loads the recipe, which is configuration only,
 and connects the selected integration's training component and inference
 runtime. The process holds those objects in one
-``reef.scenario.live_objects.LiveObjects`` value, which assembly gives to the
+``reef.control.scenario.live_objects.LiveObjects`` value, which assembly gives to the
 dispatcher; a recipe has no runtime and no training component. Assembly
 imports no concrete training framework.
 

@@ -14,6 +14,7 @@ from tests.support.trajectories import policy_trajectory
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.sao import SAOJobData, SAORecipe
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe
+from reef.control.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
@@ -24,7 +25,6 @@ from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.loading import build_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.sample2job import NoJobData
-from reef.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.service.assembly import load_named_recipe
 from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.slime_backend.objectives import resolve_objective

@@ -31,17 +31,16 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import pytest
-
 from tests.support.config_helpers import connect_training_objects
 from tests.support.stub_engine import adapter_weights_id
 
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.errors import UpstreamStatusError
 from reef.core.served_models import ScenarioModel, ServedArtifact
-from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceArtifact, InferenceOwnerLostError, RuntimeLoadId, full_weight_name
 from reef.inference.residency import adapter_name
 from reef.inference.serving import AdapterServingRuntime
-from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.jobs import JobLoopState
@@ -248,7 +247,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     ``repository`` is the artifact backend factory; a restart passes the same one, which holds the snapshots.
     """
     from recipes.tttd.recipe import TTTDRecipe
-    from reef.dispatcher import Dispatcher
+    from reef.control.dispatcher import Dispatcher
     from reef.storage.sql_coordination import open_coordination
     from reef.storage.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSettings

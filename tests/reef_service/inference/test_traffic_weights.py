@@ -13,9 +13,9 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.reef_service.inference.served_artifacts import ArtifactEcho, two_artifacts
 from tests.support.serving import wait_for_serving
 
+from reef.control.dispatcher import Dispatcher
 from reef.core.records_types import AgentRecord
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
-from reef.dispatcher import Dispatcher
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, full_weight_name
 from reef.service.app import create_app

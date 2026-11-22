@@ -496,7 +496,7 @@ A scenario is idle when all of these conditions are true:
 
 Reef never unloads a weight-training scenario: it holds the deployment's training component and its running job, which only a delete releases.
 
-**Write your own policy.** Subclass ``reef.scenario.admission.ScenarioAdmission``. Name it as ``package.module:ClassName``, or as a mapping with ``module`` and ``config``. Reef makes the plugin with ``from_config(config)`` and calls it before it creates a scenario and before it loads one. Reef makes these calls one at a time, so both methods must return quickly:
+**Write your own policy.** Subclass ``reef.control.scenario.admission.ScenarioAdmission``. Name it as ``package.module:ClassName``, or as a mapping with ``module`` and ``config``. Reef makes the plugin with ``from_config(config)`` and calls it before it creates a scenario and before it loads one. Reef makes these calls one at a time, so both methods must return quickly:
 
 - ``check_creation(scenario, registered_count=...)``: to refuse a new scenario, raise ``reef.core.errors.ScenarioLimitReachedError`` (HTTP 409).
 - ``admit_load(scenario, loaded=...)``: return a ``LoadAdmission``. Its ``unload_count`` is the number of loaded scenarios that Reef must unload first, and its ``candidates`` are the scenarios that Reef tries, in that order. Reef unloads only idle candidates. If too few candidates are idle, Reef refuses the load with ``reef.core.errors.ScenarioCapacityFullError`` (HTTP 503). The plugin can also raise that error itself.

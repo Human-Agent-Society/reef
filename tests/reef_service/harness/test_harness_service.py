@@ -16,7 +16,7 @@ from tests.support.harness_jobs import PI_SEED, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import harness_repository
 
 import reef.service.harness_imports as harness_imports
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.service.app import create_harness_app
 from reef.service.harness_imports import HarnessSyncWorker

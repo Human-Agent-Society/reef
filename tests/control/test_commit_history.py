@@ -1,0 +1,1225 @@
+"""Durability protocol tests for the per-scenario commit history (issue #78, phase 3).
+
+One append-only log per scenario is the single commit point: record-store
+compaction, the checkpoint head, and the trainer's algorithm
+state + read progress are all derived from it at recovery. These tests walk
+the crash windows around the commit point and assert each is recoverable.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from contextlib import closing
+from dataclasses import dataclass, replace
+from functools import partial
+from pathlib import Path
+from threading import Event, Thread
+
+import pytest
+from tests.support.component_trainers import checked_commit
+from tests.support.harness_jobs import harness_recipe
+from tests.support.harness_service import harness_repository
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
+from tests.support.records import report, token_inference
+from tests.support.runtime_stubs import StubTrainingComponent, live_objects
+from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+
+from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario import Scenario
+from reef.control.workers import local_workers
+from reef.core import AgentRecord, RequestType
+from reef.core.errors import ReefError
+from reef.core.trajectories import source_record_id
+from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
+from reef.storage.commits import CommitRecord, active_snapshot
+from reef.storage.samples import consumed_sample_id, stage_item_id
+from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
+from reef.train import TrainingCommit
+from reef.train.component import SavedCheckpoint, SnapshotStart, TrainingJob
+from reef.train.jobs import JobLoopState
+from reef.train.pipeline import PipelineSpec
+
+
+def sample_record(
+    *,
+    commit_number: int = 1,
+    snapshot_label: str = "w1",
+    checkpoint: bool = False,
+    training_job_id: str | None = None,
+    metrics: dict | None = None,
+) -> CommitRecord:
+    return CommitRecord(
+        scenario="math",
+        commit_number=commit_number,
+        snapshot=SnapshotRef(revision=f"snapshot:{snapshot_label}:{commit_number}", parent_revision="base"),
+        checkpoint=checkpoint,
+        algorithm_state={"steps": commit_number},
+        high_water_sequence=commit_number * 2,
+        high_water_offset=commit_number * 2,
+        consumed_ids=frozenset({f"i{commit_number}"}),
+        recorded_at=1000.0 + commit_number,
+        training_job_id=training_job_id,
+        metrics=metrics,
+    )
+
+
+@pytest.fixture
+def open_history(tmp_path):
+    """Open commit histories over one SQLite database file; the fixture closes them."""
+    stores: list[SQLiteScenarioDatabase] = []
+
+    def open_one():
+        stores.append(SQLiteScenarioDatabase(tmp_path / "records.sqlite3"))
+        return stores[-1].commit_history()
+
+    yield open_one
+    for store in stores:
+        store.close()
+
+
+@pytest.mark.unit
+def test_commit_record_round_trips_through_the_history(open_history) -> None:
+    log = open_history()
+    log.append(sample_record(commit_number=1))
+    metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
+    log.append(sample_record(commit_number=2, snapshot_label="w2", metrics=metrics, training_job_id="job-1"))
+
+    records = log.records()
+    assert [record.commit_number for record in records] == [1, 2]
+    first, second = records
+    assert first.scenario == "math"
+    assert first.snapshot == SnapshotRef("snapshot:w1:1", "base")
+    assert first.checkpoint is False
+    assert first.algorithm_state == {"steps": 1}
+    assert first.high_water_sequence == 2
+    assert first.high_water_offset == 2
+    assert first.consumed_ids == frozenset({"i1"})
+    assert first.recorded_at == 1001.0
+    assert first.metrics is None  # pre-metrics records stay readable
+    assert first.training_job_id is None
+    assert second.metrics == metrics
+    assert second.training_job_id == "job-1"
+    assert second.to_dict()["training_job_id"] == "job-1"
+    # The stored record names the commit number "commit_number".
+    encoded = second.to_dict()
+    assert encoded["commit_number"] == 2 and "step" not in encoded
+    assert CommitRecord.from_dict(encoded) == second
+    # A fresh reader over the same database sees the same history.
+    assert open_history().records() == records
+
+
+@pytest.mark.unit
+def test_commit_record_detaches_nested_metrics() -> None:
+    metrics = {"selection": {"selected": True}}
+    record = sample_record(metrics=metrics)
+
+    metrics["selection"]["selected"] = False
+    encoded = record.to_dict()
+    encoded["metrics"]["selection"]["selected"] = False
+
+    assert record.metrics == {"selection": {"selected": True}}
+
+
+@pytest.mark.unit
+def test_commit_history_tracks_the_current_training_run_position(open_history) -> None:
+    log = open_history()
+    log.append(sample_record(commit_number=1))
+    log.append(sample_record(commit_number=2, snapshot_label="w2"))
+    assert log.training_run_position() == (0, 2)
+
+    start = CommitRecord(
+        scenario="math",
+        commit_number=3,
+        snapshot=SnapshotRef("checkpoint:1", None),
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation="train_from",
+    )
+    log.append(start)
+    assert log.training_run_position() == (3, 0)
+
+    log.append(sample_record(commit_number=4, snapshot_label="w4"))
+    assert log.training_run_position() == (3, 1)
+    # An activation changes what serves, not the training run.
+    log.append(
+        CommitRecord(
+            scenario="math",
+            commit_number=5,
+            snapshot=SnapshotRef("checkpoint:1", None),
+            checkpoint=False,
+            algorithm_state=None,
+            high_water_sequence=0,
+            high_water_offset=0,
+            operation="activate",
+        )
+    )
+    assert log.training_run_position() == (3, 1)
+
+
+def operation_record(operation: str, commit_number: int, revision: str, **changes) -> CommitRecord:
+    """An activation or a new training start at ``commit_number`` naming ``revision``, with ``changes`` applied."""
+    values = {
+        "scenario": "math",
+        "commit_number": commit_number,
+        "snapshot": SnapshotRef(revision, None),
+        "checkpoint": False,
+        "algorithm_state": None,
+        "high_water_sequence": 0,
+        "high_water_offset": 0,
+        "operation": operation,
+    }
+    return CommitRecord(**{**values, **changes})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["activate", "train_from", "serve", "stop_serving"])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"activated": True},
+        {"algorithm_state": {"steps": 1}},
+        {"metrics": {"loss": 1.0}},
+        {"training_job_id": "job-1"},
+        {"high_water_sequence": 3},
+        {"high_water_offset": 3},
+        {"consumed_ids": frozenset({"i1"})},
+    ],
+)
+def test_activations_and_training_starts_carry_no_trainer_state(operation, changes) -> None:
+    assert CommitRecord.from_dict(operation_record(operation, 1, "r1").to_dict()).operation == operation
+    with pytest.raises(CommitHistoryError, match=r"must not carry|made an artifact is activated"):
+        operation_record(operation, 1, "r1", **changes)
+
+
+@pytest.mark.unit
+def test_each_operation_names_its_artifact_exactly() -> None:
+    # A one-component activation names the snapshot that made the artifact; a composed one names the snapshot it
+    # published, with the component and the manifest.
+    # A serve and its stop name the snapshot that serves the artifact in the same way.
+    for operation in ("activate", "serve", "stop_serving"):
+        operation_record(operation, 1, "r1")
+        operation_record(operation, 1, "r1", component="harness", components={"harness": "c", "weights": "w"})
+        for changes in (
+            {"component": "harness"},
+            {"components": {"harness": "c"}},
+            {"component": "config", "components": {"harness": "c"}},
+        ):
+            with pytest.raises(CommitHistoryError, match=f"operation '{operation}' names a component"):
+                operation_record(operation, 1, "r1", **changes)
+    for operation in ("activate", "train_from", "serve", "stop_serving"):
+        with pytest.raises(CommitHistoryError, match="makes no artifact"):
+            operation_record(operation, 1, "r1", checkpoint=True)
+    # A new start names a trainer's component and publishes nothing.
+    operation_record("train_from", 1, "r1", component="weights")
+    with pytest.raises(CommitHistoryError, match="publishes no snapshot"):
+        operation_record("train_from", 1, "r1", components={"weights": "c"})
+    for operation in ("rollback", "promote", "creation"):
+        with pytest.raises(CommitHistoryError, match="operation must be"):
+            operation_record(operation, 1, "r1")
+    with pytest.raises(CommitHistoryError, match="scenario must be a non-empty string"):
+        operation_record("activate", 1, "r1", scenario="")
+    with pytest.raises(CommitHistoryError, match="only a training commit that made an artifact is activated"):
+        replace(sample_record(), activated=True)
+
+
+@pytest.mark.unit
+def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
+    creation = SnapshotRef("base", None)
+    made = replace(sample_record(commit_number=1, checkpoint=True), activated=True)
+    held = sample_record(commit_number=2, checkpoint=True, snapshot_label="w2")
+    nothing = replace(sample_record(commit_number=3), snapshot=made.snapshot)
+    assert active_snapshot((), creation) == creation
+    assert active_snapshot((made,), creation) == made.snapshot
+    assert made.to_dict()["activated"] is True and "activated" not in held.to_dict()
+    assert CommitRecord.from_dict(made.to_dict()) == made
+    # An artifact the rule did not activate, a step that made nothing and a new training start activate nothing.
+    start = operation_record("train_from", 4, "base")
+    assert active_snapshot((made, held, nothing, start), creation) == made.snapshot
+    activation = operation_record("activate", 5, held.snapshot.revision, snapshot=held.snapshot)
+    assert active_snapshot((made, held, nothing, start, activation), creation) == held.snapshot
+    back = operation_record("activate", 6, "base", snapshot=creation)
+    assert active_snapshot((made, held, nothing, start, activation, back), creation) == creation
+    # A training step that makes and activates an artifact afterwards is the newest activation.
+    newest = replace(sample_record(commit_number=7, checkpoint=True, snapshot_label="w7"), activated=True)
+    assert active_snapshot((made, held, activation, back, newest), creation) == newest.snapshot
+
+
+@pytest.mark.unit
+def test_commit_history_retry_is_idempotent_but_conflicting_step_is_rejected(open_history) -> None:
+    log = open_history()
+    original = sample_record(commit_number=1)
+    retry = CommitRecord.from_dict({**original.to_dict(), "recorded_at": original.recorded_at + 1})
+
+    log.append(original)
+    log.append(retry)
+    second = sample_record(commit_number=2, snapshot_label="w2")
+    log.append(second)
+    log.append(retry)
+
+    assert log.records() == (original, second)
+    with pytest.raises(CommitHistoryError, match="conflicts"):
+        log.append(sample_record(commit_number=1, snapshot_label="different"))
+
+
+@pytest.mark.unit
+def test_commit_history_reads_the_appends_of_another_writer(open_history) -> None:
+    first = open_history()
+    second = open_history()
+    first.append(sample_record(commit_number=1))
+    assert len(first.records()) == 1
+
+    second.append(sample_record(commit_number=2, snapshot_label="w2"))
+    # The first writer's cache stops at commit 1, but the append still sees commit 2.
+    with pytest.raises(CommitHistoryError, match="conflicts"):
+        first.append(sample_record(commit_number=2, snapshot_label="other"))
+    first.append(sample_record(commit_number=3, snapshot_label="w3"))
+
+    assert [record.commit_number for record in first.records()] == [1, 2, 3]
+    assert second.records() == first.records()
+
+
+@pytest.mark.unit
+def test_commit_record_serializes_its_storage_snapshot() -> None:
+    durable = CommitRecord(
+        scenario="math",
+        commit_number=1,
+        snapshot=SnapshotRef("checkpoint:1", None),
+        checkpoint=True,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+    )
+    assert durable.to_dict()["snapshot"] == {
+        "kind": "snapshot",
+        "revision": "checkpoint:1",
+        "parent_revision": None,
+    }
+    assert "artifact_ref" not in durable.to_dict()
+
+
+@pytest.mark.unit
+def test_commit_record_holds_json_values() -> None:
+    record = replace(sample_record(), algorithm_state={"path": ("a",)}, metrics={1: {"set": ()}})
+    assert record.algorithm_state == {"path": ["a"]}
+    assert record.metrics == {"1": {"set": []}}
+    assert CommitRecord.from_dict(record.to_dict()) == record
+    with pytest.raises(CommitHistoryError, match="JSON values"):
+        replace(sample_record(), metrics={"ids": {"a"}})
+
+
+@pytest.mark.unit
+def test_commit_record_validates_its_schema() -> None:
+    with pytest.raises(CommitHistoryError, match="commit_number"):
+        replace(sample_record(), commit_number=0)
+    with pytest.raises(CommitHistoryError, match="high_water_sequence"):
+        replace(sample_record(), high_water_sequence=-1)
+    with pytest.raises(CommitHistoryError, match="record kind"):
+        CommitRecord.from_dict({"record": "something-else"})
+    encoded = sample_record().to_dict()
+    encoded["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "consumed_ids": [1]}
+    with pytest.raises(CommitHistoryError, match="consumed_ids"):
+        CommitRecord.from_dict(encoded)
+
+
+class SourceRecordingComponent(StubTrainingComponent):
+    """A training component that records the source records of each batch it trained."""
+
+    def __init__(self, checkpoint_root: Path | None = None) -> None:
+        super().__init__(checkpoint_root)
+        self.trained_data: list[list[str]] = []
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.trained_data.append([source_record_id(sample) for sample in job.read_data().samples])
+        return super().train(job)
+
+
+def build_training_dispatcher(
+    component,
+    tmp_path,
+    backend_factory,
+    *,
+    agent_record_dir=None,
+    hold_local_cycles=False,
+):
+    return Dispatcher(
+        TestPolicyRecipe(),
+        backend_factory,
+        live=live_objects(component),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        hold_local_cycles=hold_local_cycles,
+        coordination=memory_coordination(),
+    )
+
+
+def served_artifact_id(dispatcher: Dispatcher, scenario: str = "math") -> str:
+    """The artifact that serves the scenario now: fresh inference records name it, so they pass the staleness
+    check."""
+    return dispatcher.get_or_create_scenario(scenario).serving_artifact_id()
+
+
+def scenario_database(agent_record_dir, scenario: str = "math"):
+    key = hashlib.sha256(scenario.encode("utf-8")).hexdigest()
+    return agent_record_dir / f"{key}.sqlite3"
+
+
+def committed_records(agent_record_dir, scenario: str = "math") -> tuple[CommitRecord, ...]:
+    with SQLiteScenarioDatabase(scenario_database(agent_record_dir, scenario)) as records:
+        return records.commit_history().records()
+
+
+def delete_commits(agent_record_dir, *steps: int) -> None:
+    """Remove commits behind the store's back, as a lost write or a damaged file would."""
+    with closing(sqlite3.connect(scenario_database(agent_record_dir))) as connection, connection:
+        deleted = connection.executemany(
+            "DELETE FROM scenario_commit WHERE commit_number = ?", [(step,) for step in steps]
+        )
+        assert deleted.rowcount == len(steps)
+
+
+def repository_factory(tmp_path):
+    """The in-memory repository factory over an empty test base."""
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+
+
+def wait_for_commit(dispatcher: Dispatcher, commit_number: int, *, scenario: str = "math") -> None:
+    wait_until(
+        lambda: dispatcher.get_or_create_scenario(scenario).commit_number >= commit_number,
+        message="async training did not commit",
+    )
+
+
+def wait_for_jobs(dispatcher: Dispatcher, count: int, *, scenario: str = "math") -> None:
+    """Wait until the scenario's trainer committed the end of ``count`` training jobs."""
+    wait_until(
+        lambda: dispatcher.get_or_create_scenario(scenario).trainer.state["finished_jobs"] >= count,
+        message="the training job did not finish",
+    )
+
+
+def train_pair(dispatcher: Dispatcher, index: int, artifact_id: str | None = None) -> None:
+    """Send inference ``i<index>`` (answered by ``artifact_id``, else by the served artifact) and its report
+    ``r<index>``, then wait until ``index`` training jobs ended."""
+    answered = served_artifact_id(dispatcher) if artifact_id is None else artifact_id
+    dispatcher.accept_record(token_inference(f"i{index}", artifact_id=answered))
+    dispatcher.accept_record(report(f"r{index}", f"i{index}"))
+    wait_for_jobs(dispatcher, index)
+
+
+class _SavedArtifactJobs(StubTrainingComponent):
+    """A training component whose every job saves the checkpoint ``artifact_path``."""
+
+    def __init__(self, artifact_path: Path) -> None:
+        super().__init__(name="saved", shares_scenarios=True)
+        self.artifact_path = artifact_path
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        return (SavedCheckpoint(0, str(self.artifact_path), str(self.artifact_path)),)
+
+
+def build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
+    artifact_path = tmp_path / "candidate"
+    artifact_path.mkdir()
+    (artifact_path / "model.txt").write_text("trained")
+    backend = _SavedArtifactJobs(artifact_path)
+    dispatcher = build_training_dispatcher(
+        backend,
+        tmp_path,
+        repository_factory(tmp_path),
+        agent_record_dir=agent_record_dir,
+        # The tests drive the steps themselves; a local cycle would race them for the batch.
+        hold_local_cycles=True,
+    )
+    return dispatcher, backend
+
+
+def checkpoint_commit(scenario: Scenario) -> TrainingCommit:
+    """The commit of the running job's checkpoint, once the training worker ran the job and reported it."""
+    results: list[TrainingCommit] = []
+
+    def reported() -> bool:
+        result = scenario.next_commit()
+        if result is not None:
+            results.append(result)
+        return bool(results)
+
+    wait_until(reported, message="the training worker did not report the job's checkpoint")
+    assert results[0].artifact is not None
+    return results[0]
+
+
+@pytest.mark.unit
+def test_each_commit_appends_one_atomic_record_and_a_restart_recovers_from_the_log(tmp_path) -> None:
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
+    component = SourceRecordingComponent(tmp_path / "exported")
+    dispatcher = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    train_pair(dispatcher, 1)
+    train_pair(dispatcher, 2)
+
+    # Each job commits its submission, its checkpoint decision and its end, one record each.
+    records = committed_records(agent_record_dir)
+    assert [record.commit_number for record in records] == [1, 2, 3, 4, 5, 6]
+    assert [record.checkpoint for record in records] == [False, True, False, False, True, False]
+    first_job, second_job = (job.job_id for job in component.submitted)
+    assert [record.training_job_id for record in records] == [first_job] * 3 + [second_job] * 3
+    submitted, _, finished = records[:3]
+    # The submission consumes the batch's records; the later commits of the job consume none.
+    assert submitted.algorithm_state["jobs"] == [
+        {
+            "job_id": first_job,
+            "start": submitted.algorithm_state["start"],
+            "checkpoints_handled": 0,
+            "train_from": None,
+        }
+    ]
+    # Control named the root snapshot; the component got its own start of it.
+    assert SnapshotStart.from_text(submitted.algorithm_state["start"]) is not None
+    assert SnapshotStart.from_text(component.submitted[0].start) is None
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})
+    assert submitted.high_water_sequence == 2
+    assert finished.algorithm_state["finished_jobs"] == 1
+    assert finished.consumed_ids == frozenset()
+    assert records[3].consumed_ids == frozenset({"i2", "r2", consumed_sample_id(stage_item_id("math", "r2:0"))})
+    assert records[3].high_water_sequence == 4
+    # The record's ref is exactly the serving head the scenario advanced to.
+    scenario = dispatcher.get_or_create_scenario("math")
+    committed_head = scenario.repository.require_current_artifact()
+    located = scenario.store.history()
+    assert committed_head == located[4].snapshot == located[5].snapshot
+    # A stored record names artifacts, not a storage location.
+    assert "snapshot" not in records[4].to_dict() and records[4].selection is not None
+    committed_state = scenario.trainer.state
+    assert committed_state["last_job"]["job_id"] == second_job
+    # The checkpoint's metadata carries its commit record; the checkpoint commit consumes nothing.
+    metadata = scenario.repository.backend.metadata()["scenario_commit_record"]
+    assert metadata["commit_number"] == 5
+    assert metadata["algorithm_state"] == records[4].algorithm_state
+    assert metadata["training_job_id"] == second_job
+    assert metadata["record_progress"] == {"high_water_sequence": 4, "high_water_offset": 4, "consumed_ids": []}
+
+    # A fresh dispatcher over the same dirs is a process restart: nothing is
+    # durable except the snapshot chain, the record store, and the commit history.
+    second = build_training_dispatcher(
+        SourceRecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
+    )
+    recovered = second.get_or_create_scenario("math")
+    assert recovered.commit_number == 6
+    assert recovered.repository.require_current_artifact() == committed_head
+    assert recovered.trainer.state == committed_state
+    # The next job starts from the second job's checkpoint.
+    assert recovered.trainer.state["finished_jobs"] == 2
+    assert recovered.trainer.state["start"] == str(tmp_path / "exported" / "2")
+
+
+class ProtectAllSamples(ThresholdSamples):
+    """Pairs like SFT but never releases a row: no record is releasable."""
+
+    def releasable_record_ids(self) -> frozenset[str]:
+        return frozenset()
+
+
+@dataclass(frozen=True)
+class ProtectAllRecipe(TestPolicyRecipe):
+    """The test policy recipe over ``ProtectAllSamples``."""
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(ProtectAllSamples, ThresholdJobData)
+
+
+@pytest.mark.unit
+def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
+    """Consumed rows must never be trained twice, even when they survive compaction.
+
+    The protect-all stage keeps every row physically present, and recovery
+    reads from sequence 0, so it must skip the consumed pair that the history
+    names, or the pair would train again.
+    """
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
+
+    def build(component):
+        return Dispatcher(
+            ProtectAllRecipe(),
+            backend_factory,
+            live=live_objects(component),
+            local_artifact_dir=tmp_path / "staged",
+            scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+            coordination=memory_coordination(),
+        )
+
+    first_component = SourceRecordingComponent(tmp_path / "first")
+    first = build(first_component)
+    train_pair(first, 1)
+    assert first_component.trained_data == [["i1"]]
+    # Nothing was compacted: the consumed pair is still visible to training reads.
+    assert first.get_or_create_scenario("math").records.read("math", "i1") is not None
+    first.close()
+
+    second_component = SourceRecordingComponent(tmp_path / "second")
+    second = build(second_component)
+    recovered = second.get_or_create_scenario("math")
+
+    train_pair(second, 2)
+    # The only newly trained batch is the genuinely new pair; i1 never retrains.
+    assert second_component.trained_data == [["i2"]]
+    wait_for_commit(second, 6)
+    assert recovered.commit_number == 6
+    second.close()
+
+
+@pytest.mark.unit
+def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
+    """Issue #344: the consumption cursor passes rows whose batches have not trained.
+
+    The drain that readies the first batch also consumes the next batch's
+    inference, so the committed high-water mark covers it while retention
+    keeps it stored. Recovery must feed that row back to the rebuilt
+    processor; otherwise the second report waits forever on a reference that
+    can never be pushed again and training stalls silently. The consumed
+    first pair, compacted and so absent from replay, still never trains twice.
+    """
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
+    # The components save no checkpoint, so the root snapshot serves both inferences and neither is stale.
+    first_component = SourceRecordingComponent()
+    first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    base_artifact_id = served_artifact_id(first)
+    first.accept_record(token_inference("i1", artifact_id=base_artifact_id))
+    first.accept_record(token_inference("i2", artifact_id=base_artifact_id))
+    first.accept_record(report("r1", "i1"))
+    wait_for_jobs(first, 1)
+    assert first_component.trained_data == [["i1"]]
+    # The second inference sits below the committed watermark yet survives
+    # compaction: it is protected, and only processor memory knew about it.
+    assert committed_records(agent_record_dir)[-1].high_water_sequence == 3
+    assert first.get_or_create_scenario("math").records.read("math", "i2") is not None
+    first.close()
+
+    second_component = SourceRecordingComponent()
+    second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    second.get_or_create_scenario("math")
+    assert served_artifact_id(second) == base_artifact_id
+
+    second.accept_record(report("r2", "i2"))
+    wait_for_jobs(second, 2)
+    # The replayed inference pairs with the late report; i1 never retrains.
+    assert second_component.trained_data == [["i2"]]
+
+
+@pytest.mark.unit
+def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, monkeypatch) -> None:
+    """A committed batch cannot train twice even if processor cleanup fails."""
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
+    first_component = SourceRecordingComponent(tmp_path / "first")
+    first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    scenario = first.get_or_create_scenario("math")
+
+    original_release = scenario.trainer.pipeline.release_requests
+    crash = {"armed": True}
+
+    def exploding_release(*args, **kwargs) -> None:
+        if crash["armed"]:
+            crash["armed"] = False
+            raise RuntimeError("simulated crash between record append and buffer release")
+        original_release(*args, **kwargs)
+
+    monkeypatch.setattr(scenario.trainer.pipeline, "release_requests", exploding_release)
+    # The failed cycle does not wake its worker again; the worker polls the recovered running job.
+    monkeypatch.setattr(local_workers, "POLL_SECONDS", 0.01)
+    train_pair(first, 1)
+    assert first_component.trained_data == [["i1"]]
+    assert crash["armed"] is False
+    first.close()
+
+    second_component = SourceRecordingComponent(tmp_path / "second")
+    second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    recovered = second.get_or_create_scenario("math")
+    # Recovery uses committed consumption while leaving bodies readable.
+    assert recovered.records.read("math", "i1") is not None
+    assert recovered.commit_number == 3
+
+    train_pair(second, 2)
+    assert second_component.trained_data == [["i2"]]
+    # The job's three commits land on the scenario that serves now; a failed cycle can replace the instance.
+    wait_until(
+        lambda: second.get_or_create_scenario("math").commit_number == 6, message="the job's commits did not all land"
+    )
+    second.close()
+
+
+@pytest.mark.unit
+def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
+    """Crash window: checkpoint published to the snapshot chain, record never appended.
+
+    The checkpoint head is then ahead of the commit history. Its metadata carries
+    the same record fields, so recovery adopts it and heals the history.
+    """
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
+    component = SourceRecordingComponent(tmp_path / "exported")
+    first = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    train_pair(first, 1)
+    submitted, checkpoint, _ = committed_records(agent_record_dir)
+    assert checkpoint.checkpoint is True
+    assert checkpoint.activated is True
+
+    # Simulate the crash after the checkpoint's publication: the history loses its checkpoint record and the
+    # job's end, which a crashed process would never have committed.
+    delete_commits(agent_record_dir, 2, 3)
+
+    # The training component keeps its jobs across the restart; cycles stay held until the history is checked.
+    second = build_training_dispatcher(
+        component, tmp_path, backend_factory, agent_record_dir=agent_record_dir, hold_local_cycles=True
+    )
+    recovered = second.get_or_create_scenario("math")
+    assert recovered.commit_number == 2
+    assert recovered.trainer.state == checkpoint.algorithm_state
+    # The healed history carries the adopted checkpoint record, with the record
+    # high-water mark taken from the checkpoint's metadata.
+    records = committed_records(agent_record_dir)
+    assert records[0] == submitted
+    adopted = records[1]
+    assert len(records) == 2
+    assert adopted.commit_number == 2
+    assert adopted.checkpoint is True
+    assert adopted.snapshot == recovered.repository.require_current_artifact()
+    assert adopted.high_water_sequence == 2
+    assert adopted.training_job_id == component.submitted[0].job_id
+    assert adopted.operation == "training"
+    assert adopted.operation_verified is True
+    assert adopted.metrics == checkpoint.metrics
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert recovered_status["commit_number"] == 2
+    assert recovered_status["metrics"] == checkpoint.metrics
+
+    # The recovered trainer polls the job on, commits its end, and trains nothing again.
+    second.open_local_cycles()
+    wait_for_jobs(second, 1)
+    assert [record.commit_number for record in committed_records(agent_record_dir)] == [1, 2, 3]
+    assert component.trained_data == [["i1"]]
+
+
+@pytest.mark.unit
+def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = repository_factory(tmp_path)
+    # The component saves no checkpoint, so every commit lies after the checkpointed commit number 0.
+    first = build_training_dispatcher(
+        SourceRecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
+    )
+    base_artifact_id = served_artifact_id(first)
+    for index in (1, 2, 3):
+        train_pair(first, index, base_artifact_id)
+    assert [record.commit_number for record in committed_records(agent_record_dir)] == [1, 2, 3, 4, 5, 6]
+
+    delete_commits(agent_record_dir, 3)
+
+    second = build_training_dispatcher(
+        SourceRecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
+    )
+    with pytest.raises(ReefError, match="corrupt"):
+        second.get_or_create_scenario("math")
+
+
+@pytest.mark.unit
+def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
+    """In-memory deployments keep pre-log semantics: version-chain-only recovery."""
+    backend_factory = repository_factory(tmp_path)
+    component = SourceRecordingComponent()
+    first = build_training_dispatcher(component, tmp_path, backend_factory)
+    train_pair(first, 1)
+
+    store = first.get_or_create_scenario("math").store
+    assert not store.durable
+    assert [record.commit_number for record in store.history()] == [1, 2]
+    committed = first.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert committed["commit_number"] == 2
+    # The component saved no checkpoint, so the job failed and published no snapshot.
+    assert component.submitted[0].parameters == {"objective": "sft"}
+    assert committed["metrics"]["training_job"]["event"] == "failed"
+    assert not list(tmp_path.rglob("*.sqlite3"))
+
+    # Recovery still works from the snapshot chain, as before the commit history
+    # existed: the step reverts to the checkpointed 0.
+    second = build_training_dispatcher(SourceRecordingComponent(), tmp_path, backend_factory)
+    recovered = second.get_or_create_scenario("math")
+    assert recovered.commit_number == 0
+    assert recovered.store.history() == ()
+    assert second.build_training_status()["scenarios"]["math"]["last_training_commit"] is None
+
+
+@pytest.mark.unit
+def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> None:
+    backend_factory = repository_factory(tmp_path)
+    first = build_training_dispatcher(SourceRecordingComponent(tmp_path / "exported"), tmp_path, backend_factory)
+    train_pair(first, 1)
+    checkpoint = first.get_or_create_scenario("math").store.history()[1]
+    assert checkpoint.checkpoint is True
+
+    first.close()
+    # Inspect checkpoint recovery before the worker can commit the missing job's failure.
+    second = build_training_dispatcher(SourceRecordingComponent(), tmp_path, backend_factory, hold_local_cycles=True)
+    recovered = second.get_or_create_scenario("math")
+
+    # The snapshot chain ends at the checkpoint, so recovery returns to its step and metrics.
+    assert recovered.commit_number == 2
+    assert not recovered.store.durable
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert recovered_status["commit_number"] == 2
+    assert recovered_status["metrics"] == checkpoint.metrics
+    assert not list(tmp_path.rglob("*.sqlite3"))
+
+    second.close()
+
+
+def build_harness_evolve_dispatcher(
+    tmp_path, backend_factory, *, method=lambda workspace, services: None, agent_record_dir=None
+):
+    """A dispatcher over a pi harness recipe; these tests need an artifact-producing recipe, not its semantics."""
+    recipe, live = harness_recipe(tmp_path, method)
+    return Dispatcher(
+        recipe,
+        backend_factory,
+        live=live,
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
+    )
+
+
+def trace_inference(
+    agent_record_id: str,
+    system_text: str = "skill v0",
+    *,
+    scenario: str = "skills",
+) -> AgentRecord:
+    return AgentRecord.create(
+        scenario=scenario,
+        request_type=RequestType.INFERENCE,
+        payload={"messages": [{"role": "system", "content": system_text}, {"role": "user", "content": "q"}]},
+        agent_record_id=agent_record_id,
+    )
+
+
+trace_report = partial(report, scenario="skills", score=0.0)
+
+
+@pytest.mark.unit
+def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -> None:
+    started = Event()
+    release = Event()
+
+    def blocking_method(workspace, services):
+        if workspace.traces()[0].record != "a-i1":
+            return
+        started.set()
+        assert release.wait(10)
+
+    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path), method=blocking_method)
+    dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
+
+    returned = Event()
+    errors: list[Exception] = []
+
+    def accept_report() -> None:
+        try:
+            dispatcher.accept_record(
+                trace_report("a-r1", "a-i1", scenario="skills-a"),
+            )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    request = Thread(target=accept_report)
+    request.start()
+    assert started.wait(5), "harness growth did not start in time"
+    status_values = []
+    status_returned = Event()
+
+    def read_status() -> None:
+        try:
+            status_values.append(dispatcher.build_training_status())
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            status_returned.set()
+
+    status_request = Thread(target=read_status)
+    status_request.start()
+    try:
+        # The proposer holds until ``release``, which only this block's end sets.
+        assert returned.wait(5), "report acceptance waited for harness growth"
+        assert status_returned.wait(5), "status waited for harness growth"
+        status = status_values[0]["scenarios"]["skills-a"]
+        # The step's job is submitted, and runs while the scenario takes reports.
+        assert status["commit_number"] == 1
+        assert status["last_training_commit"]["metrics"]["training_job"]["event"] == "submitted"
+        dispatcher.accept_record(trace_inference("b-i1", scenario="skills-b"))
+        dispatcher.accept_record(
+            trace_report("b-r1", "b-i1", scenario="skills-b"),
+        )
+        wait_for_commit(dispatcher, 1, scenario="skills-b")
+    finally:
+        release.set()
+        request.join()
+        status_request.join()
+
+    assert errors == []
+    scenario = dispatcher.get_or_create_scenario("skills-a")
+    wait_for_commit(dispatcher, 2, scenario="skills-a")
+    assert scenario.commit_number == 2
+    dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_path) -> None:
+    calls = 0
+    should_fail = True
+
+    def method(workspace, services):
+        nonlocal calls
+        calls += 1
+        if should_fail:
+            raise RuntimeError("the method failed")
+
+    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path), method=method)
+    dispatcher.accept_record(trace_inference("i1"))
+    dispatcher.accept_record(trace_report("r1", "i1"))
+
+    # The step's job fails, and its end names the error: the job consumed the batch, and no step runs it again.
+    wait_for_commit(dispatcher, 2, scenario="skills")
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_training_commit"]
+    assert committed["metrics"]["skipped"] == "step failed"
+    assert committed["metrics"]["error"] == "RuntimeError: the method failed"
+    assert committed["metrics"]["training_job"]["event"] == "failed"
+    assert calls == 1
+
+    should_fail = False
+    dispatcher.accept_record(trace_inference("i2"))
+    dispatcher.accept_record(trace_report("r2", "i2"))
+    wait_for_commit(dispatcher, 4, scenario="skills")
+    assert calls == 2
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_training_commit"]
+    assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
+    assert dispatcher.build_training_status()["error"] is None
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["stage", "publish", "commit_history"])
+def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, monkeypatch, failure_point) -> None:
+    agent_record_dir = tmp_path / "records" if failure_point == "commit_history" else None
+    dispatcher, backend = build_saved_artifact_dispatcher(
+        tmp_path,
+        agent_record_dir=agent_record_dir,
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
+    scenario.records.append(token_inference("i1", artifact_id=scenario.serving_artifact_id()))
+    scenario.records.append(report("r1", "i1"))
+    make_samples(scenario)
+    # The job's submission consumes the batch; its checkpoint is the commit that publishes the artifact.
+    submitted = checked_commit(scenario)
+    assert submitted is not None
+    pending = scenario.trainer.pending_job_data
+    assert pending is not None
+    scenario.commit(submitted)
+    submitted_state = dict(scenario.trainer.state)
+    result = checkpoint_commit(scenario)
+    committer = scenario._committer
+
+    if failure_point == "commit_history":
+        assert isinstance(scenario.store, CommitHistoryScenarioStore)
+        target = scenario.store.commit_history
+        method_name = "append"
+        assert target is not None
+    else:
+        target = committer._artifacts
+        method_name = failure_point
+    original = getattr(target, method_name)
+    calls_before_failure = 1
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls_before_failure
+        calls_before_failure -= 1
+        if calls_before_failure == 0:
+            raise RuntimeError(f"injected {failure_point} failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, method_name, fail_once)
+    active = scenario.current_snapshot()
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    # The active selection moves only after the runtime serves the new one and its record lands.
+    assert scenario.current_snapshot() == active
+    assert scenario.commit_number == 1
+    assert scenario.trainer.state == submitted_state
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
+
+    scenario.records.append(token_inference("i2"))
+    scenario.commit(result)
+
+    # The component ran the one job of the pending batch, once.
+    assert [job.job_id for job in backend.submitted] == [submitted.training_job_id]
+    assert scenario.trainer.state == result.state
+    assert scenario.current_snapshot() != active
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
+    assert len(scenario.store.history()) == 2
+    dispatcher.close()
+
+
+@pytest.mark.unit
+def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp_path, monkeypatch) -> None:
+    dispatcher, backend = build_saved_artifact_dispatcher(
+        tmp_path,
+        agent_record_dir=tmp_path / "records",
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
+    scenario.records.append(token_inference("i1", artifact_id=scenario.serving_artifact_id()))
+    scenario.records.append(report("r1", "i1"))
+    make_samples(scenario)
+    result = checked_commit(scenario)
+    assert result is not None
+    pending = scenario.trainer.pending_job_data
+    assert pending is not None
+    pipeline = scenario.trainer.pipeline
+    original = pipeline.release_requests
+    should_fail = True
+
+    def fail_after_effect(*args, **kwargs):
+        nonlocal should_fail
+        outcome = original(*args, **kwargs)
+        if should_fail:
+            should_fail = False
+            raise RuntimeError("injected release_requests failure")
+        return outcome
+
+    monkeypatch.setattr(pipeline, "release_requests", fail_after_effect)
+    initial_state = dict(scenario.trainer.state)
+
+    # The job's submission consumes the batch, so its commit releases the batch's records.
+    with pytest.raises(RuntimeError, match="injected release_requests failure"):
+        scenario.commit(result)
+
+    assert scenario.commit_number == 0
+    assert scenario.trainer.state == initial_state
+    assert scenario.trainer.pending_job_data is pending
+    assert scenario.store.durable
+    [record] = scenario.store.history()
+    recorded_snapshot = record.snapshot.revision
+    with pytest.raises(RuntimeError, match="does not match the pending commit"):
+        scenario.commit(replace(result, state={"steps": 999}))
+
+    scenario.commit(result)
+
+    assert scenario.commit_number == 1
+    assert scenario.trainer.state == result.state
+    assert scenario.trainer.pending_job_data is None
+    assert len(scenario.store.history()) == 1
+    assert scenario.repository.require_current_artifact().revision == recorded_snapshot
+    # The training worker hands the queued job to the component on its own thread.
+    wait_until(lambda: bool(backend.submitted), message="the training worker did not run the job")
+    assert [job.job_id for job in backend.submitted] == [result.training_job_id]
+    dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch) -> None:
+    agent_record_dir = tmp_path / "records"
+    component = SourceRecordingComponent(tmp_path / "exported")
+    dispatcher = build_training_dispatcher(
+        component,
+        tmp_path,
+        repository_factory(tmp_path),
+        agent_record_dir=agent_record_dir,
+        hold_local_cycles=True,
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
+    scenario.records.append(token_inference("i1", artifact_id=scenario.serving_artifact_id()))
+    scenario.records.append(report("r1", "i1"))
+    make_samples(scenario)
+    # The job's submission is the step that consumes the batch.
+    result = checked_commit(scenario)
+    assert result is not None
+    pending = scenario.trainer.pending_job_data
+    assert pending is not None
+    started = dict(scenario.trainer.state)
+
+    # The step is stored, but the caller sees an error.
+    original = scenario.store.append_commit
+    should_fail = True
+
+    def fail_once(*args, **kwargs):
+        nonlocal should_fail
+        if should_fail:
+            should_fail = False
+            original(*args, **kwargs)
+            raise RuntimeError("injected append_commit failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(scenario.store, "append_commit", fail_once)
+
+    with pytest.raises(RuntimeError, match="injected append_commit failure"):
+        scenario.commit(result)
+
+    assert scenario.commit_number == 0
+    assert scenario.trainer.state == started
+    assert scenario.trainer.pending_job_data is pending
+    assert scenario.store.durable
+    assert len(scenario.store.history()) == 1
+
+    scenario.commit(result)
+
+    assert scenario.commit_number == 1
+    assert scenario.trainer.state == result.state
+    # The training worker hands the queued job to the component on its own thread.
+    wait_until(lambda: bool(component.trained_data), message="the training worker did not run the job")
+    assert [job["job_id"] for job in scenario.trainer.state["jobs"]] == [component.submitted[0].job_id]
+    assert scenario.trainer.pending_job_data is None
+    assert scenario.store.training_run_position() == (0, 1)
+    assert len(scenario.store.history()) == 1
+    assert component.trained_data == [["i1"]]
+    dispatcher.close()
+
+
+@pytest.mark.unit
+def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
+    synchronization_timeout_seconds = 10
+    agent_record_dir = tmp_path / "agent-record"
+    dispatcher = build_harness_evolve_dispatcher(
+        tmp_path, harness_repository(tmp_path), agent_record_dir=agent_record_dir
+    )
+    original = dispatcher.get_or_create_scenario("skills")
+    assert original is not None
+    # The creation's artifact is the scenario's root snapshot.
+    activation_target = original.repository.resolve(original.repository.start_artifact).artifact_id
+    release_failed = Event()
+    reload_started = Event()
+    allow_reload = Event()
+    reload_scenario = dispatcher.registry.reload
+
+    def fail_release(self, record_ids) -> None:
+        del self, record_ids
+        release_failed.set()
+        raise RuntimeError("simulated failure after commit record append")
+
+    def blocking_reload(scenario: str):
+        reload_started.set()
+        assert allow_reload.wait(synchronization_timeout_seconds)
+        return reload_scenario(scenario)
+
+    original.trainer.pipeline.release_requests = fail_release.__get__(
+        original.trainer.pipeline, type(original.trainer.pipeline)
+    )
+    dispatcher.registry.reload = blocking_reload
+    dispatcher.accept_record(trace_inference("i1"))
+    dispatcher.accept_record(trace_report("r1", "i1"))
+
+    assert release_failed.wait(synchronization_timeout_seconds)
+    assert reload_started.wait(synchronization_timeout_seconds)
+    activation_started = Event()
+    activation_returned = Event()
+    activation_errors: list[Exception] = []
+
+    def activate() -> None:
+        activation_started.set()
+        try:
+            dispatcher.activate("skills", activation_target)
+        except Exception as exc:
+            activation_errors.append(exc)
+        finally:
+            activation_returned.set()
+
+    activation_thread = Thread(target=activate)
+    activation_thread.start()
+    assert activation_started.wait(synchronization_timeout_seconds)
+    try:
+        assert not activation_returned.wait(0.05), "activation entered before durable recovery"
+    finally:
+        allow_reload.set()
+    activation_thread.join(synchronization_timeout_seconds)
+    assert not activation_thread.is_alive()
+    assert activation_errors == []
+
+    # The step's job committed its submission (step 1) and, after the recovery, its end (step 2).
+    wait_for_commit(dispatcher, 2, scenario="skills")
+    recovered = dispatcher.get_or_create_scenario("skills")
+    assert recovered is not original
+    assert recovered.records.read("skills", "i1") is not None
+    assert recovered.records.read("skills", "r1") is not None
+    status = dispatcher.build_training_status()["scenarios"]["skills"]
+    assert status["commit_number"] == 2
+    assert status["last_training_commit"]["commit_number"] == 2
+    assert status["last_training_commit"]["metrics"]["skipped"] == "the method left the head tree unchanged"
+    records = committed_records(agent_record_dir, scenario="skills")
+    assert [record.commit_number for record in records] == [1, 2]
+    assert records[1].metrics is not None
+    assert records[1].metrics["skipped"] == "the method left the head tree unchanged"
+
+    dispatcher.accept_record(trace_inference("i2"))
+    dispatcher.accept_record(trace_report("r2", "i2"))
+    wait_for_commit(dispatcher, 4, scenario="skills")
+
+    assert [record.commit_number for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2, 3, 4]
+    status = dispatcher.build_training_status()["scenarios"]["skills"]
+    assert status["commit_number"] == 4
+    assert status["last_training_commit"]["commit_number"] == 4
+    dispatcher.close()
+
+
+@pytest.mark.unit
+def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) -> None:
+    """A step that publishes no artifact must still enter the commit history.
+
+    Harness evolution frequently proposes nothing (or a losing candidate);
+    the trainer still consumed records and advanced its algorithm state.
+    Recording that progress keeps the commit history the single durable commit point: a
+    crash loses neither the batch nor the record watermark, and recovery
+    restores the step, the state, and the record progress without re-training compacted rows.
+    """
+    agent_record_dir = tmp_path / "agent-record"
+    backend_factory = harness_repository(tmp_path)
+    first = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    first.accept_record(trace_inference("i1"))
+    first.accept_record(trace_report("r1", "i1"))
+    # The step's job commits its submission, which consumes the batch, and its end.
+    wait_for_commit(first, 2, scenario="skills")
+    scenario = first.get_or_create_scenario("skills")
+    assert scenario.commit_number == 2
+    committed = first.build_training_status()["scenarios"]["skills"]["last_training_commit"]
+    assert committed["commit_number"] == 2
+    assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
+    submitted, ended = committed_records(agent_record_dir, scenario="skills")
+    assert (submitted.commit_number, ended.commit_number) == (1, 2)
+    assert submitted.checkpoint is False and ended.checkpoint is False
+    current = scenario.repository.require_current_artifact()
+    located = scenario.store.history()
+    assert located[0].snapshot == located[1].snapshot == current  # no new artifact published
+    state = JobLoopState.from_dict(ended.algorithm_state)
+    assert state.jobs == () and state.finished_jobs == 1 and state.last_job.event == "finished"
+    assert submitted.high_water_sequence == ended.high_water_sequence == 2
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("skills", "r1:0"))})
+
+    second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    recovered = second.get_or_create_scenario("skills")
+    assert recovered.commit_number == 2
+    assert recovered.trainer.state == ended.algorithm_state
+    assert second.build_training_status()["scenarios"]["skills"]["last_training_commit"] == committed
+    first.close()
+    second.close()

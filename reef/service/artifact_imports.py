@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.sources import ArtifactSources
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.factory import ItemStart
+from reef.control.scenario.scenario import Scenario
 from reef.core.errors import ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
-from reef.dispatcher import Dispatcher
-from reef.scenario.factory import ItemStart
-from reef.scenario.scenario import Scenario
 from reef.service.data import DataAccess
 from reef.storage.data import ItemNotFoundError, StoredItem
 

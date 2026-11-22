@@ -25,11 +25,11 @@ from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
 from recipes.beta.coral.reporter import AttemptReport
 from reef.artifact import InMemoryRepositoryBackend
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
-from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

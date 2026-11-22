@@ -26,11 +26,11 @@ from typing import Any
 
 from harbor.models.task.task import Task as HarborTaskLoader
 
+from reef.control.dispatcher import Dispatcher
 from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.core.trajectories import has_image_content
-from reef.dispatcher import Dispatcher
 from reef.recipe.deployment import refuses_images
 from reef.service.tasks import MAX_TASKS_PER_UPLOAD, unpack_task_archive
 from reef.storage.data import (

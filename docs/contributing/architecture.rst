@@ -229,8 +229,6 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
      - Target
    * - The modules of ``reef/service/`` that contain no HTTP code: requests, data, artifact evaluations, imports
      - ``control/operations/``
-   * - ``reef/dispatcher/`` and ``reef/scenario/``
-     - ``control``
    * - ``reef/service/deploy/``
      - ``deploy``
    * - The rest of ``reef/service/``

@@ -9,12 +9,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher, build_default_dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core import RequestType
-from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
-from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

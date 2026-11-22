@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact, DefaultStart
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import Sample
@@ -17,7 +18,6 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceBackend, InferenceHandler, InferenceRuntime
 from reef.inference.serving import OpenedEngines, ServingEngines
-from reef.scenario.live_objects import LiveObjects
 from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
 from reef.train.component import (

@@ -311,7 +311,7 @@ snapshot chain in the `State model <../advanced_topics/state-model.rst#the-snaps
 - Declare the components in the owning recipe's ``build_components``; do not
   make a component choose a method or evaluate a candidate. A fact that only
   a runtime or a training component knows belongs in
-  ``reef.scenario.live_objects``, whose functions take the recipe and the
+  ``reef.control.scenario.live_objects``, whose functions take the recipe and the
   process's ``LiveObjects``.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
   ``tests/artifact/test_snapshot_components.py``. Test storage backends against

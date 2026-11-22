@@ -363,7 +363,7 @@ class TrainingBackendFacts(ABC):
     ``check_job``, ``changed_parts`` and the jobs themselves.
 
     Purpose: control builds no training component. The scenario factory writes the root snapshot of a new scenario
-    from ``default_start`` and checks an item root with ``check_root_start`` (``reef.scenario.live_objects``).
+    from ``default_start`` and checks an item root with ``check_root_start`` (``reef.control.scenario.live_objects``).
     Control's view of the jobs queue (``reef.train.job_queue.JobQueueComponent``) answers a trainer from the facts
     and asks the training service for the rest. The inference service reads ``artifact_format``.
     """
@@ -597,7 +597,7 @@ class TrainingComponent(ABC):
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
         The training service calls it at its start for a recipe whose jobs train tasks
-        (``reef.scenario.live_objects.check_recipe_objects``), so a deployment that cannot run them fails before
+        (``reef.control.scenario.live_objects.check_recipe_objects``), so a deployment that cannot run them fails before
         any job. ``parameters`` are the recipe's parameters of a task job. The default refuses: the
         component trains trajectories only. ``check_job`` still checks each job.
         """
@@ -702,7 +702,7 @@ class TrainingArtifactLayout(ArtifactLayout):
     ``facts.artifact_format`` is not None: the snapshots then hold weight files, which the serving runtimes read
     through ``ArtifactWeightFiles``.
 
-    Purpose: ``reef.scenario.live_objects.scenario_components`` binds it on the weight component of a weight
+    Purpose: ``reef.control.scenario.live_objects.scenario_components`` binds it on the weight component of a weight
     recipe. In control ``remote`` is the jobs queue's view, which asks the training service. The inference service
     binds it without ``remote``: it loads artifacts that control admitted and stores no import.
     """

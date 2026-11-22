@@ -16,8 +16,10 @@ from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario import Scenario
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core import AgentRecord, RequestType
-from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import activation_reference
 from reef.evaluation.harness import EvaluationSettings
 from reef.execution.jobs import SupportsReceipt
@@ -27,8 +29,6 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample import Record2Sample
 from reef.sample2job import Sample2Job
-from reef.scenario import Scenario
-from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import open_coordination
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.settings import EvolutionSettings

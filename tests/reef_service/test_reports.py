@@ -12,9 +12,9 @@ import pytest
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact.memory import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
-from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

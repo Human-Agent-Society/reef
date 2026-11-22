@@ -16,19 +16,19 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from reef.artifact.artifact import Artifact, ArtifactConflictError, ArtifactError, ArtifactNotFoundError
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import harness_served_model
+from reef.control.scenario.scenario import Scenario
+from reef.control.scenario.snapshot_files import component_files
 from reef.core.errors import ReefError
 from reef.core.records_types import SCENARIO_HEADER, AgentRecord, RequestType
 from reef.core.requirements import required_by
-from reef.dispatcher import Dispatcher
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
 from reef.routing.manifest import RoutingAdapter
 from reef.routing.preview import RoutingPreviewClient
-from reef.scenario.live_objects import harness_served_model
-from reef.scenario.scenario import Scenario
-from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
 from reef.service.lifecycle import PendingWrites
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step

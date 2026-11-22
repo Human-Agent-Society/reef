@@ -3,7 +3,7 @@
 A deployment has one recipe, or one recipe for each component of a ``CompositeRecipe``
 (``reef.recipe.composite.component_recipes``). A caller that holds the deployment's recipe asks these functions,
 so no recipe class answers for another recipe. The questions that also need a live object are in
-``reef.scenario.live_objects``.
+``reef.control.scenario.live_objects``.
 """
 
 from __future__ import annotations

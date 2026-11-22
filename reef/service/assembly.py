@@ -22,8 +22,16 @@ from aiohttp import web
 
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.served import wait_for_control_lease
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.admission import ScenarioAdmission, ScenarioLimits
+from reef.control.scenario.live_objects import (
+    LiveObjects,
+    ServedEndpoint,
+    check_recipe_objects,
+    close_runtimes,
+    harness_models,
+)
+from reef.control.workers.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
@@ -41,14 +49,6 @@ from reef.recipe.loading import build_recipe, load_recipe, named_recipe_config, 
 from reef.recipe.registry import recipe_class_for
 from reef.routing.manifest import RoutingAdapter
 from reef.routing.preview import PreviewSettings
-from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
-from reef.scenario.live_objects import (
-    LiveObjects,
-    ServedEndpoint,
-    check_recipe_objects,
-    close_runtimes,
-    harness_models,
-)
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
@@ -265,7 +265,7 @@ def with_harness_components(
     For a ``HarnessEvolutionRecipe``, alone or as a component of a ``CompositeRecipe``, the result holds the
     ``HarnessFacts`` of the recipe's settings. With ``runs_training``, the process is a training service, and the
     result also holds a new ``HarnessTrainingComponent``, built from the recipe's settings and the models of
-    ``live`` (``HarnessTrainingComponent.from_settings``, ``reef.scenario.live_objects.harness_models``);
+    ``live`` (``HarnessTrainingComponent.from_settings``, ``reef.control.scenario.live_objects.harness_models``);
     ``environ`` holds the variables that its sandbox and its agent's isolation read. No other process builds the
     component. For any other recipe, the result is ``live``.
     The served endpoint must be in ``live`` before the call, because the component reads the models once.

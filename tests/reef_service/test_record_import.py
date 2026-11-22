@@ -18,14 +18,14 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import made_task
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.reports import ScoredRolloutReport
-from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.record2sample import ReportSamples
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sql_coordination import memory_coordination
@@ -190,7 +190,7 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk, monkeypatch):
     # The trainer's worker and the training worker look again soon, so the four jobs end within the waits.
-    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
     recipe = LearningRecipe()
     dispatcher = dispatcher_for(tmp_path, recipe, served_live())
     for worker in dispatcher.workers.workers:

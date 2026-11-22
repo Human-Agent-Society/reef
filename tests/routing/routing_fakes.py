@@ -21,7 +21,7 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.routing.containers import (
     ContainerCommandError,
     ContainerEvent,

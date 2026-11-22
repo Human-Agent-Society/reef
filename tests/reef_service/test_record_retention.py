@@ -10,11 +10,11 @@ from aiohttp import web
 from sqlalchemy.exc import OperationalError
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
+from reef.control.workers.scenario_deletes import DELETES_QUEUE
 from reef.core import AgentRecord, RequestType
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.scenario_deletes import DELETES_QUEUE
 from reef.recipe import Recipe
-from reef.scenario.live_objects import LiveObjects
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.data import DataStore

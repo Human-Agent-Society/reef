@@ -31,13 +31,13 @@ from pathlib import Path
 
 from aiohttp import web
 
-from reef.dispatcher.serving import ServingWorker
+from reef.control.scenario.live_objects import RecipeChecks, ServedEndpoint, close_runtimes
+from reef.control.workers.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.deployment import harness_adapter
-from reef.scenario.live_objects import RecipeChecks, ServedEndpoint, close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,

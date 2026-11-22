@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.dispatcher import build_default_dispatcher
+from reef.control.dispatcher import build_default_dispatcher
 from reef.service import assembly
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access

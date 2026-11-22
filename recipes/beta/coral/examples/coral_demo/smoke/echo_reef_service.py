@@ -16,7 +16,7 @@ import itertools
 
 from aiohttp import web
 
-from reef.dispatcher import build_default_dispatcher
+from reef.control.dispatcher import build_default_dispatcher
 from reef.inference.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination

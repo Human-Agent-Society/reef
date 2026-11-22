@@ -26,6 +26,7 @@ from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
+from reef.control.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
@@ -58,7 +59,6 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_gen
 from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.tasks import TaskStorage
