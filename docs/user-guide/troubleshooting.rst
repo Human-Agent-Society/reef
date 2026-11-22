@@ -16,7 +16,7 @@ Starting Reef
 
 **A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits that service's ``ready_timeout`` before giving up. The default is 30 seconds for the Reef HTTP service and 3600 seconds for a managed engine or a training stack, which download weights. Read that service's log under ``reef.run-dir``. For a training stack, the usual causes are a model that is still downloading, serving engines that fail to start on the inference component (read ``inference.log``), or GPUs already in use.
 
-**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; a harness evolution recipe reads its settings from ``recipe.config.evolution`` (`Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__).
+**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; a harness evolution recipe reads its settings from ``recipe.config.evolution`` (`Harness evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__).
 
 **Boot fails naming a credential in the tree.** A harness evolution seed whose config holds a literal key (``apiKey``, ``token``, and their plural and list forms), or whose other files hold a credential-shaped string, refuses startup: the seed becomes the scenario's first snapshot, and every snapshot stores its tree in git. A proposed patch that holds one is refused the same way. Rotate the key, remove it from the file, and keep credentials in ``inference.upstream-api-key`` or an ``api_key_env``.
 
@@ -26,7 +26,7 @@ Requests
 An inference request reaches Reef on ``/v1/chat/completions``, ``/v1/responses``
 or ``/v1/messages``; all three take the provider's own request body. Reef
 answers it from the scenario's row in ``served_models``, as `Run the services in
-separate processes <operate.rst#run-the-services-in-separate-processes>`__
+separate processes <split-services.rst>`__
 describes.
 
 **401 invalid service token.** The ``Authorization: Bearer`` value (or ``x-api-key``, when no Authorization header is sent) is not one of ``reef.token`` / ``reef.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.
@@ -44,7 +44,7 @@ describes.
 serve no model. This is expected. Serve a published checkpoint from a separate
 deployment, or select an engine with ``inference.backend``. See `Train without
 an inference engine
-<../reference/configuration.rst#train-without-an-inference-engine>`__.
+<../reference/configuration-training.rst#train-without-an-inference-engine>`__.
 
 **504 the engine did not answer in time.** One inference took longer than
 ``inference.timeout-s`` (300 seconds by default). If one valid generation can

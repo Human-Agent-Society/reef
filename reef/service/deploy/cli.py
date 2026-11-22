@@ -268,7 +268,7 @@ def build_serve_parser(
         choices=SERVICE_COMPONENTS,
         help=(
             "Run one service of the deployment in this process, on the shared store: control, inference, samples, "
-            "training, evaluation or data. Without it, one process runs all of them."
+            "training, evaluation, data or harness. Without it, one process runs all of them."
         ),
     )
     parser.add_argument(

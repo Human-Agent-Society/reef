@@ -63,7 +63,7 @@ beta/autoenvscaling/
   examples/tmax_seeds/serve.yaml                 on Slime, the same seed tasks: all weights of the policy train, on one node of 8 GPUs
 ```
 
-AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks).
 
 ## The generator
 
@@ -213,7 +213,7 @@ By default, the band does not decide what trains. The recipe trains each valid t
 
 ## The training pool review
 
-By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration.rst#generated-tasks) explains each key, its default and the reasons a review gives:
+By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks) explains each key, its default and the reasons a review gives:
 
 ```yaml
 pipeline:

@@ -18,6 +18,7 @@ from reef.execution.processes import http_readiness_command
 from reef.inference.http import PROVIDER_APIS
 from reef.inference.remote.config import RemoteInferenceSettings
 from reef.service.deploy.config_utils import DeployConfigError
+from reef.service.deploy.process import log_status
 from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
 
@@ -405,17 +406,11 @@ def resolve_model_paths(config: dict[str, Any]) -> None:
             if isinstance(reef_section.get(name), str):
                 resolved = resolve_hf_snapshot(reef_section[name])
                 if resolved != reef_section[name]:
-                    _log(f"downloaded HF model {reef_section[name]} -> {resolved}")
+                    log_status(f"downloaded HF model {reef_section[name]} -> {resolved}")
                     reef_section[name] = resolved
     training_section = config.get("training")
     if isinstance(training_section, dict) and isinstance(training_section.get("megatron_checkpoint_path"), str):
         resolved = resolve_hf_snapshot(training_section["megatron_checkpoint_path"])
         if resolved != training_section["megatron_checkpoint_path"]:
-            _log(f"downloaded HF model {training_section['megatron_checkpoint_path']} -> {resolved}")
+            log_status(f"downloaded HF model {training_section['megatron_checkpoint_path']} -> {resolved}")
             training_section["megatron_checkpoint_path"] = resolved
-
-
-def _log(msg: str) -> None:
-    import sys
-
-    print(f"[reef] {msg}", file=sys.stderr)
