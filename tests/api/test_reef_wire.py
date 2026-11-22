@@ -130,5 +130,9 @@ def test_the_status_answer_also_holds_each_pipeline_object_under_its_older_key()
 @pytest.mark.unit
 def test_the_contract_answer_also_holds_the_stage_name_under_its_older_key() -> None:
     contract = {"scenario": "one", "sample2job": "NoJobData"}
-    assert contract_with_older_keys(contract) == {"scenario": "one", "sample2job": "NoJobData", "processor": "NoJobData"}
+    assert contract_with_older_keys(contract) == {
+        "scenario": "one",
+        "sample2job": "NoJobData",
+        "processor": "NoJobData",
+    }
     assert "processor" not in contract

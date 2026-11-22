@@ -75,6 +75,10 @@ def test_recipe_symbols_are_removed_in_favor_of_processors_and_trainer() -> None
         "reef.api.routes.agent_record",
         # The package holds the code of one run, not tasks: it is reef.harness.runs.
         "reef.harness.tasks",
+        # A method's stages are in its ``stages`` module.
+        "reef.recipe.dataset.processor",
+        "reef.recipe.generated_tasks.processor",
+        "reef.recipe.sft.processor",
     ],
 )
 def test_old_naming_modules_are_removed(module: str) -> None:
