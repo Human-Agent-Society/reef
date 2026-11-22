@@ -15,8 +15,8 @@ concurrent publication cannot change what gets recorded, and stores each
 exchange as a record; ``routes/`` are thin aiohttp adapters over it and
 the only place aiohttp request/response types appear on the request path.
 
-``task_import`` imports a deployment's Harbor tasks into each scenario's task
-store when the scenario opens; assembly wraps the scenario storage with it.
+Assembly wraps the scenario storage with ``reef.storage.task_import``, which
+imports a deployment's Harbor tasks into each scenario when the scenario opens.
 
 ``ServiceSettings`` is frozen, and recipe-specific config fields are not
 fields on it: they ride in ``recipe_settings`` and each recipe extracts its

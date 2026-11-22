@@ -25,10 +25,10 @@ from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
 from reef.service.data_transfer import ArchiveWriters
-from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.task_import import DataScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
 DATA = "/reef/namespaces/acme/data"

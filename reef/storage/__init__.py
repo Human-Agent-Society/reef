@@ -7,6 +7,8 @@ file store. These modules depend only on shared core values and each other.
 Nothing in this package imports scenario coordination, recipes, runtimes, or training.
 This package initializer also loads no adapters. Record and commit implementations
 depend on ``reef.storage.records`` and ``reef.storage.scenario``.
+``task_import`` wraps a scenario storage, so that each scenario that opens gets
+its owner and the deployment's imported Harbor tasks.
 Application assembly selects a storage service and
 injects it into scenario coordination. Records, commits, samples, generated tasks
 and scenario settings all go through that service.
