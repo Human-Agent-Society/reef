@@ -689,20 +689,31 @@ class ComposeGuest:
 
 
 def compose_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, builds_templates: bool = True, build: str = "aenv"
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    builds_templates: bool = True,
+    build: str = "aenv",
+    compose: str | None = "aenv",
 ) -> object:
-    """Reef's E2B environment of a trial of the task of ``harbor_e2b_environments`` with ``TASK_COMPOSE``, on an
-    AgentENV deployment when ``build`` is ``aenv``. Harbor's factory makes it from ``environment_config``."""
+    """Reef's E2B environment of a trial of the task of ``harbor_e2b_environments`` with ``TASK_COMPOSE``, with
+    ``REEF_E2B_DOCKERFILE_BUILD`` ``build`` and ``REEF_E2B_COMPOSE`` ``compose`` (unset for None). Harbor's factory
+    makes it from ``environment_config``."""
     from harbor.environments.factory import EnvironmentFactory
     from harbor.models.task.task import Task
     from harbor.models.trial.config import EnvironmentConfig
     from harbor.models.trial.paths import TrialPaths
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", build)
+    if compose is None:
+        monkeypatch.delenv("REEF_E2B_COMPOSE", raising=False)
+    else:
+        monkeypatch.setenv("REEF_E2B_COMPOSE", compose)
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
     monkeypatch.setenv("E2B_API_KEY", "key")
-    harbor_e2b_environments(tmp_path)
     task_path = tmp_path / "task"
+    if not task_path.exists():
+        harbor_e2b_environments(tmp_path)
     (task_path / "environment" / "docker-compose.yaml").write_text(TASK_COMPOSE)
     task = Task(task_path)
     config = environment_config("e2b", task_path, builds_templates=builds_templates)
@@ -851,9 +862,18 @@ def test_a_compose_start_that_fails_after_the_sandbox_exists_deletes_it(
 
 
 @pytest.mark.unit
-def test_a_compose_file_changes_nothing_without_agentenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_compose_file_changes_nothing_unless_the_deployment_selects_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pytest.importorskip("e2b")
-    assert compose_environment(tmp_path, monkeypatch, build="e2b").compose_ops is None
+    # The default is off, also on AgentENV: a Compose start writes image records to the deployment's repository.
+    for build in ("aenv", "e2b"):
+        for compose in (None, "off"):
+            assert compose_environment(tmp_path, monkeypatch, build=build, compose=compose).compose_ops is None
+    with pytest.raises(ValueError, match="REEF_E2B_COMPOSE=aenv needs REEF_E2B_DOCKERFILE_BUILD=aenv"):
+        compose_environment(tmp_path, monkeypatch, build="e2b")
+    with pytest.raises(ValueError, match="REEF_E2B_COMPOSE must be one of off, aenv, not 'docker'"):
+        compose_environment(tmp_path, monkeypatch, compose="docker")
 
 
 @pytest.mark.unit
