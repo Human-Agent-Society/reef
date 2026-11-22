@@ -110,7 +110,7 @@ Add a training integration
 --------------------------
 
 Use this playbook for a concrete external training stack. Read `Training
-components <../developer-guide/training-components.rst>`__ first: it gives the
+backends <../developer-guide/training-backends.rst>`__ first: it gives the
 component contract, the backend facts, and how control reaches the component.
 Do not let framework types leak into backend-neutral modules.
 
@@ -150,7 +150,7 @@ Implementation
   backend with its own serving returns its runtime config from
   ``trainer_serving_config``.
 - Implement ``facts(config, model_path, environ)`` on the factory (`Backend
-  facts <../developer-guide/training-components.rst#backend-facts>`__). Only
+  facts <../developer-guide/training-backends.rst#backend-facts>`__). Only
   ``reef serve --component training`` builds the component; every other
   service reads the facts.
 

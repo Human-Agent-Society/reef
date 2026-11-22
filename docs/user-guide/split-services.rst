@@ -158,7 +158,7 @@ The startup status is not a continuous engine health check. The runtime backend 
 Training
 --------
 
-Only the training service builds a training component. Every other service reads what it needs about the backend from the config (`Backend facts <../developer-guide/training-components.rst#backend-facts>`__). Install the training dependencies only where the training service runs:
+Only the training service builds a training component. Every other service reads what it needs about the backend from the config (`Backend facts <../developer-guide/training-backends.rst#backend-facts>`__). Install the training dependencies only where the training service runs:
 
 .. list-table::
    :header-rows: 1

@@ -7,7 +7,7 @@ An executor (``reef.execution.executor.Executor``) launches workers and carries 
 :Before you start: `Configuration <../reference/configuration.rst>`__ for the ``execution`` and ``executors`` keys
 :You will have: the built-in executors, the RPC and failure contracts, and how a whole stack is launched
 
-Related pages: `Training components <training-components.rst>`__, `Serving runtimes <serving-runtimes.rst>`__, and `Sandbox environments <sandboxes.rst>`__ for rollout isolation.
+Related pages: `Training backends <training-backends.rst>`__, `Serving runtimes <serving-runtimes.rst>`__, and `Sandbox environments <sandboxes.rst>`__ for rollout isolation.
 
 Built-in executors
 ------------------

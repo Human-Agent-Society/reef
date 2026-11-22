@@ -55,8 +55,8 @@ component trains the job's data with its own training loop and saves checkpoints
 Each saved checkpoint is a candidate. Serving loads only a snapshot that Reef
 published, and the next job starts from the newest saved checkpoint. A
 harness recipe uses its own backend in place of the training component: the
-backend prepares a candidate tree for each step. See `Training components
-<../developer-guide/training-components.rst>`__ and `Serving saved
+backend prepares a candidate tree for each step. See `Training backends
+<../developer-guide/training-backends.rst>`__ and `Serving saved
 weights <../developer-guide/serving-runtimes.rst#serving-saved-weights>`__.
 
 Learn more
