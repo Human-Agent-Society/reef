@@ -46,7 +46,7 @@ curl -f http://127.0.0.1:8901/reef/train \
 ```
 
 The jobs of the queued requests run one after another. See [Manual
-training](../../docs/reference/http-api.rst#manual-training) for the route.
+training](../../docs/reference/http-api-training.rst#manual-training) for the route.
 
 ## Configuration
 

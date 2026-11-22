@@ -136,7 +136,7 @@ point deployments configured with different recipes at the same repository.
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
 Learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
-`Configuration <../reference/configuration.rst#recipe-configuration>`__
+`Configuration <../reference/configuration-recipe.rst#recipe-configuration>`__
 describes each spelling.
 
 Run the recipe you chose
@@ -179,5 +179,5 @@ do not establish learning performance.
 A task generator is not a recipe of its own. The deployment selects it as
 the generator of the built-in generated-task recipe, which runs the tasks
 and trains on them (see `generated tasks
-<../reference/configuration.rst#generated-tasks>`__ and `Task generators
+<../reference/configuration-generated-tasks.rst#generated-tasks>`__ and `Task generators
 <../developer-guide/task-generators.rst>`__).

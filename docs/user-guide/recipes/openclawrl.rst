@@ -98,7 +98,7 @@ step's start.
 The training component renders the judged turn, and one hint-enhanced teacher
 request for each candidate hint, with the model's chat template. Give the
 component the serving engine's chat template arguments (`Chat template
-arguments <../../reference/configuration.rst#chat-template-arguments>`__). A
+arguments <../../reference/configuration-inference.rst#chat-template-arguments>`__). A
 turn that cannot render, or whose candidates all fail to render, does not
 train, and the job metric ``unrenderable_samples`` counts it.
 

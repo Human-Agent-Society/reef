@@ -84,7 +84,7 @@ Select and configure the stage
 The recipe names its stage class in ``pipeline_spec()``. The deployment's
 ``pipeline.record2sample`` section gives the stage its ``config`` and can
 name another class with ``module`` (see `the pipeline section
-<../reference/configuration.rst#the-pipeline-section>`__). The default
+<../reference/configuration-recipe.rst#the-pipeline-section>`__). The default
 class, ``NoSamples``, makes no sample, so the pipeline makes no job.
 
 A stage declares its keys as a frozen dataclass that inherits
@@ -325,4 +325,4 @@ The built-in generated-task recipe uses both hooks (see `Task generators
 <task-generators.rst>`__). A stage that saves tasks opens a store with
 ``context.task_storage.open(name)``; ``task_storage`` is ``None`` when the
 trainer has no scenario session (see `Task stores
-<../reference/python-api.rst#task-stores>`__).
+<../reference/python-api-data-stores.rst#task-stores>`__).

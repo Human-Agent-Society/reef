@@ -127,7 +127,7 @@ sets the step's traces to GEPA's minibatch:
    ``evolution.evaluation.statistic`` : wins
        set ``mean`` for GEPA's rule. The default, ``wins``, counts task pairings.
 
-`Recipe configuration <../../reference/configuration.rst#recipe-configuration>`__
+`Recipe configuration <../../reference/configuration-recipe.rst#recipe-configuration>`__
 documents the engine's own keys.
 
 Run the example
@@ -157,4 +157,4 @@ Related guides
 --------------
 
 - `Evolve your harness <../evolve-your-harness.rst>`__: the mechanism this method plugs into.
-- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling and pinning a published tree.
+- `HTTP API <../../reference/http-api-harness.rst#harness-artifacts>`__: pulling and pinning a published tree.

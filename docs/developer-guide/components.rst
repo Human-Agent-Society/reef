@@ -109,7 +109,7 @@ A recipe whose scenario serves two components declares both:
 - ``CompositeRecipe`` (``reef.recipe.composite``) builds such a declaration
   from a mapping of component name to recipe, and runs each recipe's trainer
   as its own worker (see `Recipe configuration
-  <../reference/configuration.rst#recipe-configuration>`__).
+  <../reference/configuration-recipe.rst#recipe-configuration>`__).
 
 Admission checks
 ----------------

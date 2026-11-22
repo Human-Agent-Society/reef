@@ -99,7 +99,7 @@ measurement of which requests passed the checks.
    is on it, with the job's summary: the design, how to use the change and
    the review.
    `GET /reef/harness/requests/<id>/progress` gives the same state as
-   JSON. The [manual training API](../../../docs/reference/http-api.rst#manual-training)
+   JSON. The [manual training API](../../../docs/reference/http-api-training.rst#manual-training)
    lists the fields a request carries.
 2. Job. In `training-mode: manual` the service runs one evolve job for
    each accepted request. Where the host can isolate it, a coding agent
@@ -162,7 +162,7 @@ measurement of which requests passed the checks.
 * `training-mode: manual` runs one job for each accepted request on
   `POST /reef/train`. Each job also reads the failing reports in the manual
   buffer, which a client fills
-  ([Choose the samples that train](../../../docs/reference/http-api.rst#choose-the-samples-that-train));
+  ([Choose the samples that train](../../../docs/reference/http-api-samples.rst#choose-the-samples-that-train));
   new reports do not join it by themselves. Use `auto` to learn from failing
   reports without requests.
 * The first tree of a new scenario is the recipe's seed,
@@ -584,7 +584,7 @@ the job page (`GET /reef/harness/artifacts/<step>/page`) shows them:
 
 Every `HarnessEvolutionRecipe` evolution setting remains available,
 including another method, seeds, execution settings, and the evaluation; see
-[Recipe configuration](../../../docs/reference/configuration.rst#recipe-configuration).
+[Recipe configuration](../../../docs/reference/configuration-recipe.rst#recipe-configuration).
 
 `REEF_REEFINE_CALL_TIMEOUT_S` and `REEF_REEFINE_CALL_MAX_TOKENS` override the
 time and reply token budgets of each model call the method makes itself; the

@@ -41,7 +41,7 @@ Every ``InferenceRuntime`` implements three members:
    * - ``served_artifact``
      - Reports the route of a binding that already holds: a verified load, or an immutable revision. It loads nothing. It returns ``None`` for an unknown artifact and for an unavailable or uncertain binding; Reef then publishes no route.
 
-Every other member has a default. Override one only for a capability that the runtime has: engines of its own, takeover of a retained endpoint, several artifacts at the same time, any artifact on request, or snapshots without weights. `Runtime responsibilities <../reference/python-api.rst#runtime-responsibilities>`__ gives each member's signature, default, result and errors.
+Every other member has a default. Override one only for a capability that the runtime has: engines of its own, takeover of a retained endpoint, several artifacts at the same time, any artifact on request, or snapshots without weights. `Runtime responsibilities <../reference/python-api-inference.rst#runtime-responsibilities>`__ gives each member's signature, default, result and errors.
 
 When a binding is in doubt, the runtime must fail safely:
 
@@ -58,7 +58,7 @@ Routes that bind no weights
 Two modes bind no weights and claim no weight identity. The contract and request pinning do not apply to them:
 
 - **A snapshot without a weight component**, such as a record-only or harness snapshot, gets no activation. Its route names the model that ``endpoint_model_name(scenario)`` returns, under the snapshot's own artifact ID. That ID identifies the snapshot, not weights: Reef does not check what the endpoint serves under the name. The built-in ``inference_proxy`` runtime returns its configured model, and it refuses weight snapshots. A scenario with a weight component never uses this mode.
-- **A routed target** of the Semantic Router (``reef.routing_manifest``) is not a Reef artifact: its requests and records name no artifact (`Routed external-model requests <../reference/http-api.rst#routed-external-model-requests>`__). A target must expose an OpenAI chat endpoint, which the component's native receiver (``reef.inference.remote``) is not.
+- **A routed target** of the Semantic Router (``reef.routing_manifest``) is not a Reef artifact: its requests and records name no artifact (`Routed external-model requests <../reference/http-api-routing.rst#routed-external-model-requests>`__). A target must expose an OpenAI chat endpoint, which the component's native receiver (``reef.inference.remote``) is not.
 
 Serving saved weights
 ---------------------
@@ -91,7 +91,7 @@ Each load gets a new runtime load ID, and every engine reports it afterwards. Th
 - A ``FullWeightServingRuntime`` without a verified checkpoint has nothing to restore: before its first successful activation, and after it released its checkpoint. A failed health check then only replaces the engines, which stay paused until the next activation.
 - An ``AdapterServingRuntime`` keeps every scenario's previous adapter as the restore target until the whole restore succeeds. A capacity refusal changes no adapter, and the current adapters keep serving.
 
-**Takeover.** A new serving owner always starts a new engine stack, because the old engines' load IDs cannot prove that the weights are unchanged. The owner changes when the owning inference worker restarts or loses its lease. The new stack ends the requests in flight, and the worker activates each completed selection again, so a takeover needs no operator action. `Startup status <../reference/http-api.rst#startup-status>`__ gives the retries of a failed startup.
+**Takeover.** A new serving owner always starts a new engine stack, because the old engines' load IDs cannot prove that the weights are unchanged. The owner changes when the owning inference worker restarts or loses its lease. The new stack ends the requests in flight, and the worker activates each completed selection again, so a takeover needs no operator action. `Startup status <../reference/http-api-inference.rst#startup-status>`__ gives the retries of a failed startup.
 
 Request pinning
 ~~~~~~~~~~~~~~~
@@ -107,7 +107,7 @@ The component gives these guarantees:
    * - Guarantee
      - Behavior
    * - Admission
-     - Each full-weight load serves under its own model name, which the published route names. An adapter keeps its immutable adapter name. On an adapter stack, the base model serves under the load ID that the owner gave the new stack, for the route of a base root. The component refuses a request for a load that it no longer serves, before any output, and the replica retries once (`Request <../reference/http-api.rst#request>`__).
+     - Each full-weight load serves under its own model name, which the published route names. An adapter keeps its immutable adapter name. On an adapter stack, the base model serves under the load ID that the owner gave the new stack, for the route of a base root. The component refuses a request for a load that it no longer serves, before any output, and the replica retries once (`Request <../reference/http-api-inference.rst#request>`__).
    * - Drain
      - Before it changes weights or adapters, the component stops admitting requests and waits for the admitted ones to finish, for at most ``inference.timeout-s``. A request whose client disconnected keeps its pin until the engine finishes it. A drain that times out interrupts the remaining requests, and the engines then need recovery.
    * - Prefix sharing
@@ -130,7 +130,7 @@ The protection has these limits:
    * - Topology
      - The component starts its own engines and router. Generation and weight changes must go through the component, so the native engine addresses stay private. The component forwards only the engine's generation route, and other inference paths return HTTP 404.
    * - Caches
-     - The component clears only the engine's own prefix cache. It cannot clear KV that an engine keeps outside itself, so engine serving refuses the engine options that select such a store. `Serving of a weight-training deployment <../reference/configuration.rst#serving-of-a-weight-training-deployment>`__ lists them, and what the check does not cover. Prefix sharing needs regular SGLang engines: prefill/decode-disaggregated engines cannot use the clearing pause.
+     - The component clears only the engine's own prefix cache. It cannot clear KV that an engine keeps outside itself, so engine serving refuses the engine options that select such a store. `Serving of a weight-training deployment <../reference/configuration-inference.rst#serving-of-a-weight-training-deployment>`__ lists them, and what the check does not cover. Prefix sharing needs regular SGLang engines: prefill/decode-disaggregated engines cannot use the clearing pause.
    * - Trust
      - The component trusts the engine's acknowledgements of loads and cache clears. It does not inspect the weights or the cache in engine memory, so qualify the engine version that you deploy (`Integration qualification`_).
 

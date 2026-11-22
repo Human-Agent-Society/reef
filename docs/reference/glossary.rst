@@ -11,7 +11,7 @@ One workload: its records, training state and snapshot chain, isolated from
 every other scenario. ``POST /reef/scenarios``, a harness install, or the first
 report or imported record with a new ``x-reef-scenario`` creates it and binds
 its recipe permanently. An inference request never creates a scenario. See
-`Scenarios <http-api.rst#scenarios>`__.
+`Scenarios <http-api-scenarios.rst#http-api-scenarios-and-their-settings>`__.
 
 Agent
 -----
@@ -126,7 +126,7 @@ Activation rule
 The deployment's rule that decides whether a new artifact serves: at once
 (``always``), after an evaluation of it (``evaluated``), or when a person
 activates it (``never``). Training continues from the new artifact either way.
-See `The activation section <configuration.rst#the-activation-section>`__.
+See `The activation section <configuration-recipe.rst#the-activation-section>`__.
 
 Training start
 --------------
@@ -226,7 +226,7 @@ Training objective
 A backend's objective (``SlimeObjective`` or ``TinkerObjective``). It declares
 its loss family and prepares a job's data: advantages, metrics and algorithm
 state. A recipe selects it through the job parameter ``objective``. See
-`Training objective <python-api.rst#training-objective>`__.
+`Training objective <python-api-training.rst#training-objective>`__.
 
 Loss family
 -----------
@@ -357,7 +357,7 @@ Training pool
 The train tasks of the generated-task recipe that train again
 (``pipeline.record2sample.config.pool_capacity`` above 0). A pool review
 retires a task whose recent results fall outside its limits. See `Generated
-tasks <configuration.rst#generated-tasks>`__.
+tasks <configuration-generated-tasks.rst#generated-tasks>`__.
 
 SAO
 ---

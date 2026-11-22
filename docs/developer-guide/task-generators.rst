@@ -7,7 +7,7 @@ in the samples service. This page defines the ``TaskGenerator`` contract and
 what Reef does with the tasks.
 
 :For: authors of a task generator
-:Before you start: the `record-to-sample stage <recipe-samples-service.rst>`__, and the keys in `Generated tasks <../reference/configuration.rst#generated-tasks>`__
+:Before you start: the `record-to-sample stage <recipe-samples-service.rst>`__, and the keys in `Generated tasks <../reference/configuration-generated-tasks.rst#generated-tasks>`__
 :You will have: a generator class, its durable state, and the results that Reef sends back to it
 
 A generator needs no recipe of its own. The deployment selects
@@ -37,7 +37,7 @@ generation runs no rollouts:
 6. When every train task of a generation has a result, the stage calls
    ``record_results``.
 
-`Generated tasks <../reference/configuration.rst#generated-tasks>`__ lists
+`Generated tasks <../reference/configuration-generated-tasks.rst#generated-tasks>`__ lists
 the keys that pace the rounds (``rounds``, ``jobs_per_round``,
 ``refill_tasks``, ``pool_capacity``) and that select source sessions
 (``source_records_per_round``, ``source_tag``).
@@ -149,6 +149,6 @@ Container work
 Operations that need containers run in the generator service
 (``reef.record2sample.generator``), which ``reef serve`` starts from the
 ``generator`` section (see `generator configuration
-<../reference/configuration.rst#the-generator-section>`__). A generator can
+<../reference/configuration-generated-tasks.rst#the-generator-section>`__). A generator can
 run rollouts of a task through that service, as SPADE does. Those rollouts
 are not records and do not train.

@@ -88,7 +88,7 @@ The storage backend keeps the records, commits and settings of each scenario. Th
      coordination-backend: sqlite
      agent-record-dir: .reef/agent-record
 
-Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping and ``agent_record_dir``. A plugin holds no tables of the services, so name where they share them: ``coordination-backend: sqlite`` for processes on one host, or ``postgres`` with ``record-database-url`` for several hosts. The `Python storage contract <../reference/python-api.rst#scenario-stores>`__ gives the necessary behavior. An embedded deployment gives a ``ScenarioStorage`` instance to ``Dispatcher(..., scenario_storage=...)`` instead.
+Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping and ``agent_record_dir``. A plugin holds no tables of the services, so name where they share them: ``coordination-backend: sqlite`` for processes on one host, or ``postgres`` with ``record-database-url`` for several hosts. The `Python storage contract <../reference/python-api-scenario-stores.rst#scenario-stores>`__ gives the necessary behavior. An embedded deployment gives a ``ScenarioStorage`` instance to ``Dispatcher(..., scenario_storage=...)`` instead.
 
 Choose the artifact backend
 ---------------------------
@@ -105,7 +105,7 @@ The artifact backend stores the snapshots of each scenario. The default, ``git_l
        config:
          bucket: reef-snapshots
 
-Reef calls ``from_config(config, context=...)``. The `Python artifact backend contract <../reference/python-api.rst#artifact-backends>`__ gives the necessary behavior. With a plugin backend, Reef needs no Git LFS tools. Do not set ``storage.artifact-repository``: Reef refuses that configuration, because the plugin reads its own config.
+Reef calls ``from_config(config, context=...)``. The `Python artifact backend contract <../reference/python-api-artifacts.rst#artifact-backends>`__ gives the necessary behavior. With a plugin backend, Reef needs no Git LFS tools. Do not set ``storage.artifact-repository``: Reef refuses that configuration, because the plugin reads its own config.
 
 **Git LFS on Hugging Face.** Give the built-in factory with its options. Reef still reads every snapshot from its local clone, and pushes each snapshot to the Hub as it publishes it:
 
@@ -159,12 +159,12 @@ The default, ``local``, keeps the files in ``storage.task-file-dir`` (default: `
          bucket: reef-tasks
      task-file-dir: .reef/task-files
 
-Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping and ``storage.task-file-dir``, which a remote store can use as a local cache. The `Python task file store contract <../reference/python-api.rst#task-file-stores>`__ gives the necessary behavior.
+Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping and ``storage.task-file-dir``, which a remote store can use as a local cache. The `Python task file store contract <../reference/python-api-data-stores.rst#task-file-stores>`__ gives the necessary behavior.
 
 Choose the data store
 ---------------------
 
-The data store keeps the deployment's data items with their metadata: the trajectories and tasks that clients create, and a record item for each inference call and report (`Data items <../reference/http-api.rst#data-items>`__). Each item belongs to an owner, and its metadata names the scenarios that use it. The task file store keeps the files of task items.
+The data store keeps the deployment's data items with their metadata: the trajectories and tasks that clients create, and a record item for each inference call and report (`Data items <../reference/http-api-data-items.rst#http-api-data-items>`__). Each item belongs to an owner, and its metadata names the scenarios that use it. The task file store keeps the files of task items.
 
 The data store grows until clients delete items: archiving a scenario does not delete its items, and record items stay when record retention removes the records from a scenario's record store.
 
@@ -214,7 +214,7 @@ The data store's database grows with each trajectory and each record item. With 
        config:
          bucket: reef-data
 
-Reef calls ``from_config(config, directory=...)`` with ``<agent-record-dir>/segments``, which a remote store can use as a local cache. The `Python segment store contract <../reference/python-api.rst#segment-stores>`__ gives the necessary behavior.
+Reef calls ``from_config(config, directory=...)`` with ``<agent-record-dir>/segments``, which a remote store can use as a local cache. The `Python segment store contract <../reference/python-api-data-stores.rst#segment-stores>`__ gives the necessary behavior.
 
 .. warning::
 

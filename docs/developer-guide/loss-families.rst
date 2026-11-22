@@ -172,7 +172,7 @@ Families to read:
 - ``reef/train/slime_backend/native.py``: the built-in ``slime`` family of
   dataset jobs and task jobs, whose advantages and loss are Slime's (see
   `Dataset jobs on Slime
-  <../reference/configuration.rst#dataset-jobs-on-slime>`__).
+  <../reference/configuration-training.rst#dataset-jobs-on-slime>`__).
 - ``recipes/tttd/slime/``: two hooks and the default row.
 - ``recipes/sao/slime/``: a critic schedule and the pg-primitive lane.
 - ``recipes/openclawrl/slime/``: a custom row, both actor lifecycle hooks
@@ -368,7 +368,7 @@ Requirements
 - **Task jobs on Slime.** A task job trains the ``slime`` family, which
   refuses this term. It uses Slime's own ``--use-score-centering`` instead
   (see `Task jobs on Slime
-  <../reference/configuration.rst#task-jobs-on-slime>`__).
+  <../reference/configuration-training.rst#task-jobs-on-slime>`__).
 - **Checks.** Before each job trains, the component keeps the first
   ``top-k`` entries of every trained position. It refuses a sample with
   missing or short rows, duplicate or negative IDs, non-finite log

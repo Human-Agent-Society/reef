@@ -229,7 +229,7 @@ Each scenario still needs exactly one logical Reef writer. The check of the
 expected commit number provides no distributed lease and does not make external
 training operations atomic. Those operations must be idempotent or
 reconcilable after a crash. See the `Python storage contract
-<../reference/python-api.rst#scenario-stores>`__ for custom adapters.
+<../reference/python-api-scenario-stores.rst#scenario-stores>`__ for custom adapters.
 
 These guarantees require persistent storage. `Configuration
 <../reference/configuration.rst>`__ lists the paths, and `Operate a deployment

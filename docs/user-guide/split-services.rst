@@ -40,7 +40,7 @@ No service calls another. Each one reads and writes the deployment's shared stor
      - Runs the rollouts of artifact evaluations. It asks inference to serve each candidate and sends the rollout's model calls to that engine.
      - Rollout results, the calls of each rollout
    * - ``data``
-     - Serves the `data routes <../reference/http-api.rst#data-items>`__ and the reads of what each scenario stores. Copies new artifacts to artifact items. Runs data imports and exports.
+     - Serves the `data routes <../reference/http-api-data-items.rst#http-api-data-items>`__ and the reads of what each scenario stores. Copies new artifacts to artifact items. Runs data imports and exports.
      - Data items, artifact items, data sync requests
    * - ``harness``
      - Serves the routes that a harness client calls: the active tree, the harness artifacts, the import of a person's files, and the adapters.
@@ -99,7 +99,7 @@ The data and harness services need no control lease, so you can run several repl
 Inference
 ---------
 
-Control queues each selected artifact for inference. The inference service opens the serving runtime, loads the artifact and publishes its route in ``served_models``. Scenario creation and activation do not wait for this work. ``GET /reef/scenarios/{scenario}/inference/status`` reports ``pending``, ``starting``, ``ready`` or ``failed`` with the artifact ID (`Startup status <../reference/http-api.rst#startup-status>`__).
+Control queues each selected artifact for inference. The inference service opens the serving runtime, loads the artifact and publishes its route in ``served_models``. Scenario creation and activation do not wait for this work. ``GET /reef/scenarios/{scenario}/inference/status`` reports ``pending``, ``starting``, ``ready`` or ``failed`` with the artifact ID (`Startup status <../reference/http-api-inference.rst#startup-status>`__).
 
 Send model requests to the inference service with the scenario in ``x-reef-scenario``. For each request, the service:
 
@@ -135,7 +135,7 @@ The inference service never creates a scenario. Create it first with ``POST /ree
    * - ``503``
      - The service cannot read ``served_models`` and has no earlier read from the last 300 seconds, or the record store does not take the record.
 
-The service never returns a buffered answer without its record. A stream goes out as the engine sends it, and its record is appended when it ends. A stream that fails after its headers gets no receipt. `Request <../reference/http-api.rst#request>`__ gives the stream cases and the retry rules.
+The service never returns a buffered answer without its record. A stream goes out as the engine sends it, and its record is appended when it ends. A stream that fails after its headers gets no receipt. `Request <../reference/http-api-inference.rst#request>`__ gives the stream cases and the retry rules.
 
 **Startup retries.** A failed startup does not stay failed, because the selection still states what the scenario serves. Control queues the startup again 60 seconds after it failed, and doubles the wait after each automatic retry that fails, up to one hour. To retry at once, send the scenario's ``served`` mapping again (``POST /reef/scenarios/{scenario}/update``). This also sets the wait back to 60 seconds. The service that fails a work item writes one warning to its log, with the queue, the item ID, the scenario and the error.
 

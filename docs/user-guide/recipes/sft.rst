@@ -50,7 +50,7 @@ SFT has two pipeline stages
 
 The training component renders each sample with the model's chat template
 (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__). It leaves out
+<../../reference/configuration-inference.rst#chat-template-arguments>`__). It leaves out
 a sample that cannot render or that is longer than ``max_tokens``, and counts
 it in the job metric ``unrenderable_samples``.
 
@@ -88,7 +88,7 @@ one envelope on each line of a JSONL file:
    {"agent_record_id": "sft-0001-report", "request_type": "report", "payload": {"references": ["sft-0001"]}}
 
 Import the file with ``reef-client`` (`Import records for cold-start learning
-<../../reference/http-api.rst#import-records-for-cold-start-learning>`__):
+<../../reference/http-api-records.rst#import-records-for-cold-start-learning>`__):
 
 .. code:: bash
 
@@ -105,7 +105,7 @@ Train on whole conversations
 
 A complete conversation, such as an agent rollout with tool calls, can train
 every agent turn at once. Create it as a trajectory item that the scenario uses
-(`Create trajectory items <../../reference/http-api.rst#create-trajectory-items>`__).
+(`Create trajectory items <../../reference/http-api-data-upload.rst#create-trajectory-items>`__).
 Each uploaded trajectory is one sample. The training component renders it:
 
 - The steps become chat messages: an ``agent`` step is an assistant turn with
@@ -285,10 +285,10 @@ recipe gives parameters to trajectory jobs only, so a task job trains in
 The training component must run both kinds of job, as Tinker does. One Slime
 deployment cannot: a task job needs the ``slime`` loss family, which refuses
 trajectory jobs (`Task jobs on Slime
-<../../reference/configuration.rst#task-jobs-on-slime>`__). See
-`Manual training <../../reference/http-api.rst#manual-training>`__ for the
+<../../reference/configuration-training.rst#task-jobs-on-slime>`__). See
+`Manual training <../../reference/http-api-training.rst#manual-training>`__ for the
 request and `Choose the samples that train
-<../../reference/http-api.rst#choose-the-samples-that-train>`__ for ``samples``.
+<../../reference/http-api-samples.rst#choose-the-samples-that-train>`__ for ``samples``.
 
 Limitations
 -----------

@@ -149,7 +149,7 @@ Slime takes ``--loss-type custom_loss`` and
 ``--disable-compute-advantages-and-returns``, and refuses
 ``--use-rollout-logprobs``. Set ``--apply-chat-template-kwargs`` to the
 serving engine's chat template arguments (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__). The family
+<../../reference/configuration-inference.rst#chat-template-arguments>`__). The family
 adds its own flags:
 
 .. container:: config

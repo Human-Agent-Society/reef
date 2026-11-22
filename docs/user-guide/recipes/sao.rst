@@ -59,7 +59,7 @@ attempt gets its own score.
   exact for ``max_artifact_lag: 0``. Above 0 it measures the drift within the
   job, not the gap to the weights that sampled the rollout. Give the
   component the serving engine's chat template arguments (`Chat template
-  arguments <../../reference/configuration.rst#chat-template-arguments>`__).
+  arguments <../../reference/configuration-inference.rst#chat-template-arguments>`__).
 - **Value model.** The critic trains at its own, higher learning rate
   (``--critic-lr``). The first ``--num-critic-only-steps`` optimizer steps fit
   the zero-initialized value head before any policy update. These warmup

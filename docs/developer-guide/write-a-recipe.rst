@@ -160,7 +160,7 @@ something other than ``weights`` or ``harness``. Read `Training backends
 Tinker. A scenario that evolves weights and a harness together uses
 ``CompositeRecipe``, which maps each component name to one of the two kinds
 (see `Recipe configuration
-<../reference/configuration.rst#recipe-configuration>`__).
+<../reference/configuration-recipe.rst#recipe-configuration>`__).
 
 A minimal weight recipe
 -----------------------
@@ -340,7 +340,7 @@ The ``recipe`` section selects the method. A deployment config also needs:
 - ``storage``: the record store, the artifact repository and the work
   directories.
 
-`Configuration <../reference/configuration.rst#configuration-file-layout>`__
+`Configuration <../reference/configuration-files.rst#configuration-file-layout>`__
 lists every section and key. `Evolve your model
 <../user-guide/evolve-your-model.rst>`__ and `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ give complete configs to copy.

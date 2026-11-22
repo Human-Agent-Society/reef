@@ -347,7 +347,7 @@ The example disables W&B in ``serve.yaml``. Set ``observability.wandb.enabled``
 to ``true`` before you start the stack, and give a project and an optional
 entity. Export ``WANDB_API_KEY`` or log in through the cluster's credential
 store; do not put the key in YAML, tags, run names, or Slime flags.
-`Experiment tracking <../../reference/configuration.rst#experiment-tracking>`__
+`Experiment tracking <../../reference/configuration-observability.rst#experiment-tracking>`__
 describes every key, run identity, and the metric names.
 
 When ``TTTDJobData`` receives a complete grid, it records these metrics in the

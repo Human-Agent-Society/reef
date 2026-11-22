@@ -50,7 +50,7 @@ Teacher and student see identical token sequences. The record-to-sample stage,
 renders the student's sequence with the model's chat template and gives the
 teacher that same sequence. Give the component the serving engine's chat
 template arguments (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__), so that the
+<../../reference/configuration-inference.rst#chat-template-arguments>`__), so that the
 rendered sequence keeps the thinking switches of serving.
 
 The stage is on-policy: a response of an artifact that no longer serves does

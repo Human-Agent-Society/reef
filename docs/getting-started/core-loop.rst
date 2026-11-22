@@ -71,11 +71,11 @@ Each step is specified in full on its own page:
    * - Topic
      - Page
    * - Inference
-     - `Inference HTTP API <../reference/http-api.rst#inference>`__
+     - `Inference HTTP API <../reference/http-api-inference.rst#http-api-inference-and-feedback>`__
    * - Feedback report
-     - `Report HTTP API <../reference/http-api.rst#report>`__
+     - `Report HTTP API <../reference/http-api-inference.rst#report>`__
    * - Scenario
-     - `Scenarios <../reference/http-api.rst#scenarios>`__
+     - `Scenarios <../reference/http-api-scenarios.rst#http-api-scenarios-and-their-settings>`__
    * - Learning / training in general
      - `Write a recipe <../developer-guide/write-a-recipe.rst>`__
    * - Record eligibility

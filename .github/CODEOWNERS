@@ -61,6 +61,6 @@
 /docs/user-guide/evolve-your-model.rst @hanfeiyu @MikeZheng777
 /docs/developer-guide/loss-families.rst @hanfeiyu @MikeZheng777
 /docs/reference/cli.rst @BobbyZhouZijian @quao627
-# python-api.rst merges the former recipe/surface and batch/processor/preparer
-# pages, so it keeps both prior owners.
-/docs/reference/python-api.rst @Benjamin-eecs @hanfeiyu
+# The python-api pages merge the former recipe/surface and batch/processor/preparer
+# pages, so they keep both prior owners.
+/docs/reference/python-api*.rst @Benjamin-eecs @hanfeiyu

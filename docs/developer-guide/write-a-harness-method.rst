@@ -367,7 +367,7 @@ Configure a deployment
 
 Start ``reef serve -c`` where Reef can import ``methods``.
 ``tutorials/evolve-your-harness/configs/`` has working examples, and `Harness
-evolution keys <../reference/configuration.rst#harness-evolution-keys>`__
+evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__
 lists every key.
 
 Method settings
@@ -429,7 +429,7 @@ Untrusted input
 - Client text can shape code parts (``extension``, ``native_tool``,
   ``native_hook``). Name them in the ``always`` activation rule's
   ``review_kinds`` (`Configuration
-  <../reference/configuration.rst#the-activation-section>`__). A
+  <../reference/configuration-recipe.rst#the-activation-section>`__). A
   ``native_loop`` change always waits for a person.
 
 .. warning::

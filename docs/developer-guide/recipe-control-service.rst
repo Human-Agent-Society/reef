@@ -131,7 +131,7 @@ A minimal stage:
 
 The recipe names the class in ``pipeline_spec()``. The deployment configures
 it in ``pipeline.sample2job`` (see `the pipeline section
-<../reference/configuration.rst#the-pipeline-section>`__).
+<../reference/configuration-recipe.rst#the-pipeline-section>`__).
 
 Job size
 ~~~~~~~~
@@ -222,7 +222,7 @@ Uploaded trajectories
 ~~~~~~~~~~~~~~~~~~~~~
 
 A client can give a scenario complete ATIF trajectories as data items (see
-the `HTTP API <../reference/http-api.rst#data-items>`__). A trajectory item
+the `HTTP API <../reference/http-api-data-items.rst#http-api-data-items>`__). A trajectory item
 is not a record: no stage forms a record set of it.
 
 - A recipe takes uploads when its ``Sample2Job`` sets
@@ -317,5 +317,5 @@ A harness job's own evaluation (``evolution.evaluation``) decides only
 which candidate tree the job keeps (see `Evaluation
 <write-a-harness-method.rst#evaluation>`__). The activation rule then
 decides whether the kept tree serves. `Configuration
-<../reference/configuration.rst#the-activation-section>`__ lists the rule
+<../reference/configuration-recipe.rst#the-activation-section>`__ lists the rule
 settings.

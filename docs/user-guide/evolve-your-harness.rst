@@ -268,7 +268,7 @@ A step starts when ``pipeline.sample2job.config.job_samples`` traces wait
 In ``manual`` mode (``recipe.config.training_mode: manual``), a training
 request starts each step instead: ``POST /reef/train`` with a ``text`` that
 the method reads as an instruction (`Manual training
-<../reference/http-api.rst#manual-training>`__). The step needs no trace.
+<../reference/http-api-training.rst#manual-training>`__). The step needs no trace.
 To learn from inference traffic without reports, name the inference stage;
 each call is then one unscored trace:
 
@@ -292,7 +292,7 @@ split of the scenario's imported tasks:
   and task directories (see `Task directories`_).
 
 Upload the tasks as in `Offline: learn from uploaded tasks`_ (`Create task
-items <../reference/http-api.rst#create-task-items>`__), or import them with
+items <../reference/http-api-data-upload.rst#create-task-items>`__), or import them with
 the deployment's ``task-import`` section.
 
 Evaluation: the publication policy
@@ -329,7 +329,7 @@ could not run, counts for neither tree: ``wins`` drops its pair and ``mean``
 leaves it out. A tie publishes nothing. Reef keeps every scored run and
 reuses it for the same tree, task and repeat, so a step usually runs only the
 candidate's runs.
-`Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__
+`Harness evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__
 lists every key.
 
 Running runs
@@ -459,14 +459,14 @@ as your rules and the names of your skills.
 
 A client of your own reads a snapshot with ``GET /reef/harness`` and commits a
 sync with ``POST /reef/harness/import`` (see `HTTP API
-<../reference/http-api.rst#importing-a-harness>`__).
+<../reference/http-api-harness.rst#importing-a-harness>`__).
 
 Activate an inactive artifact
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tree code runs with your privileges. To make a person approve a change, set
 the deployment's top-level ``activation`` section (`Configuration
-<../reference/configuration.rst#the-activation-section>`__):
+<../reference/configuration-recipe.rst#the-activation-section>`__):
 
 - ``module: never`` leaves every win inactive.
 - ``module: always`` with ``config: {review_kinds: [extension]}`` leaves

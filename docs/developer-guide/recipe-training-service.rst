@@ -103,7 +103,7 @@ A job continues the objective state of the previous job only when it trains
 the same objective. A job of another objective starts with an empty state.
 
 `Train with Tinker <../user-guide/tinker.rst>`__ and `Task jobs on Slime
-<../reference/configuration.rst#task-jobs-on-slime>`__ list the other
+<../reference/configuration-training.rst#task-jobs-on-slime>`__ list the other
 parameters of each backend.
 
 Failure behavior
@@ -277,7 +277,7 @@ Behavior that an objective must handle:
 
 The component must render as the serving engine did. Give it the engine's
 chat template arguments (see `Chat template arguments
-<../reference/configuration.rst#chat-template-arguments>`__).
+<../reference/configuration-inference.rst#chat-template-arguments>`__).
 
 Checkpoints
 -----------

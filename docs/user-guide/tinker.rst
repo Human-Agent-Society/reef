@@ -189,7 +189,7 @@ Task jobs
 ~~~~~~~~~
 
 A job's data can be Harbor tasks, as the `generated-task recipe
-<../reference/configuration.rst#generated-tasks>`__ makes. Before it trains,
+<../reference/configuration-generated-tasks.rst#generated-tasks>`__ makes. Before it trains,
 the component runs ``rollout.rollouts_per_task`` rollouts of each task on
 Tinker's sampler at the job's start weights. The agent's model calls go to a
 sampler endpoint on this host, and the task's verifier scores each rollout.
@@ -352,7 +352,7 @@ section with the component's URL:
 
 ``reef serve`` then starts no local component. The GPU host downloads
 ``model-path``; the Reef host keeps it as a remote identifier. `The inference
-section <../reference/configuration.rst#the-inference-section>`__ lists the
+section <../reference/configuration-inference.rst#the-inference-section>`__ lists the
 ``inference.remote`` settings.
 
 Behavior to rely on:

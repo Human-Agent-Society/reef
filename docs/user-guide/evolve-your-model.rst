@@ -203,7 +203,7 @@ By default Reef activates every saved checkpoint, so the newest one serves.
 To serve a checkpoint only after an evaluation of it passes, or only when a
 person activates it, add an ``activation`` section. The rules and their
 settings are in `Configuration
-<../reference/configuration.rst#the-activation-section>`__. Training continues
+<../reference/configuration-recipe.rst#the-activation-section>`__. Training continues
 from the newest checkpoint either way.
 
 Train a LoRA adapter
