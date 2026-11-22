@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, FakeRuntime, write_domain_classifier
+from tests.routing.routing_fakes import DOMAIN_LABELS, FakeRuntime, write_domain_classifier
 
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate, render_external
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.routing.deployment_controller import RoutingDeploymentController
+from reef.routing.manifest import RoutingSnapshot
+from reef.routing.renderer import ManagedRoutingRender, generate, render_external
+from reef.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
-from reef.service.routing import RoutingSnapshot
 
 pytestmark = pytest.mark.unit
 LABELS = {
@@ -260,7 +260,7 @@ def test_a_generation_runs_the_named_image_or_the_one_resolved_for_a_source_with
     )
 
 
-QWEN_EXAMPLE = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/qwen2.5"
+QWEN_EXAMPLE = Path(__file__).resolve().parents[2] / "tutorials/semantic-router/qwen2.5"
 NAMED_IMAGE = "example/router@sha256:" + "a" * 64
 
 

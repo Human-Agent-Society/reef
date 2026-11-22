@@ -21,9 +21,9 @@ from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import stream_events
 from reef.observability.operations import OperationMeasurement, OperationMetrics
+from reef.routing.manifest import RoutingAdapter, RoutingDecision, RoutingScenario
+from reef.routing.preview import RoutingPreviewClient
 from reef.service.lifecycle import PendingWrites
-from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingScenario
-from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import RequestHeaders, parse_request_headers, with_request_tags
 
 WriteResult = TypeVar("WriteResult")

@@ -29,13 +29,9 @@ from pathlib import Path
 import yaml
 
 from reef.core.errors import InternalError
-from reef.service.deploy.routing.containers import (
-    ContainerCommandError,
-    ContainerEventStream,
-    ContainerInventory,
-    ContainerRuntime,
-)
-from reef.service.deploy.routing.policy import (
+from reef.routing.containers import ContainerCommandError, ContainerEventStream, ContainerInventory, ContainerRuntime
+from reef.routing.manifest import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
+from reef.routing.policy import (
     CommittedPolicy,
     PendingPolicy,
     PolicyState,
@@ -45,15 +41,16 @@ from reef.service.deploy.routing.policy import (
     RouterRuntime,
     document_etag,
 )
-from reef.service.deploy.routing.reef_lifecycle_client import (
+from reef.routing.preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
+from reef.routing.reef_lifecycle_client import (
     MAX_SOCKET_PATH_BYTES,
     LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,
     RoutingControlTimeoutError,
 )
-from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry
-from reef.service.deploy.routing.renderer import (
+from reef.routing.registry import DeploymentOwnership, DeploymentRegistry
+from reef.routing.renderer import (
     MANAGEMENT_TOKEN_ENV,
     SELECTION_TOKEN_ENV,
     ManagedRoutingRender,
@@ -62,9 +59,7 @@ from reef.service.deploy.routing.renderer import (
     router_configuration,
     write_private_document,
 )
-from reef.service.deploy.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
-from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
-from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
+from reef.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
 
 logger = logging.getLogger(__name__)
 #: Consecutive failed router readiness checks before the router counts as failed.

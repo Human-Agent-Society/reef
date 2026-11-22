@@ -23,7 +23,7 @@ Reef is organized around an application kernel and three capability domains, not
 
        subgraph Domains["Capability domains"]
            direction LR
-           Serving("<b>Serving</b><br/><code>inference</code>")
+           Serving("<b>Serving</b><br/><code>inference</code> · <code>routing</code>")
            Evolution("<b>Evolution</b><br/><code>train</code> · <code>evaluation</code> · <code>harness</code>")
            State("<b>State</b><br/><code>artifact</code> · <code>storage</code>")
        end
@@ -84,6 +84,9 @@ Reef is organized around an application kernel and three capability domains, not
    * - ``reef/inference/``
      - Inference contracts, serving runtimes and their selection, saved-weight serving, concrete inference backends, native engine control, request adaptation
      - Training algorithms, publication decisions
+   * - ``reef/routing/``
+     - The Semantic Router integration: the routing manifest and its checks of a request, the routing preview, and the router container of a managed deployment
+     - HTTP routes, the recording of a routed request, the ``reef serve`` process
    * - ``reef/tinker/``
      - The Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share
      - Either side's own logic

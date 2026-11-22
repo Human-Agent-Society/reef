@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     OPEN_DEADLINE,
     ROUTER_HASH,
     SELECTION_TOKEN,

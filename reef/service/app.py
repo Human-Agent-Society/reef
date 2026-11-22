@@ -17,6 +17,8 @@ from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
+from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
+from reef.routing.preview import PreviewSettings, RoutingPreviewClient
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import normalize_tokens
@@ -38,8 +40,6 @@ from reef.service.routes import register_data_service_routes, register_routes
 from reef.service.routes.harness import register_harness_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.routed_chat import register_routed_chat
-from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
-from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
 from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.service.web import service_application
 from reef.storage.records import RecordRetention

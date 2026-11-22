@@ -21,7 +21,7 @@ from typing import NoReturn
 
 import pytest
 import yaml
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     RUNTIME_HASH,
     SELECTION_TOKEN,
     ControllerCase,
@@ -31,29 +31,20 @@ from tests.reef_service.routing.routing_fakes import (
     routing_manifest,
 )
 
-from reef.service.deploy.routing.containers import (
-    ContainerCommandError,
-    ContainerEvent,
-    ContainerInventory,
-    ContainerState,
-)
-from reef.service.deploy.routing.deployment_controller import (
+from reef.routing.containers import ContainerCommandError, ContainerEvent, ContainerInventory, ContainerState
+from reef.routing.deployment_controller import (
     IMAGE_BUILD_LOG,
     RoutingDeploymentController,
     RoutingDeploymentError,
     RoutingReadinessTimeoutError,
 )
-from reef.service.deploy.routing.policy import PolicyState
-from reef.service.deploy.routing.reef_lifecycle_client import (
-    LifecycleStatus,
-    RoutingControlError,
-    RoutingControlTimeoutError,
-)
-from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+from reef.routing.manifest import RoutingAdapter, RoutingSnapshot
+from reef.routing.policy import PolicyState
+from reef.routing.preview import PreviewSettings
+from reef.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError, RoutingControlTimeoutError
+from reef.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
+from reef.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceSettings
-from reef.service.routing import RoutingAdapter, RoutingSnapshot
-from reef.service.routing_preview import PreviewSettings
 
 pytestmark = pytest.mark.unit
 
@@ -446,7 +437,7 @@ class SteppingClock:
 def test_reconnect_readiness_keeps_the_configured_deadline(
     case: ControllerCase, monkeypatch: pytest.MonkeyPatch, ready_timeout_seconds: float
 ) -> None:
-    import reef.service.deploy.routing.deployment_controller as controller_module
+    import reef.routing.deployment_controller as controller_module
 
     opened(case)
     clock = SteppingClock()
@@ -489,7 +480,7 @@ def test_reconnect_readiness_keeps_the_configured_deadline(
 def test_a_late_open_reply_is_drained_again_before_the_next_recovery_removes_sr(
     case: ControllerCase, monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:
-    import reef.service.deploy.routing.deployment_controller as controller_module
+    import reef.routing.deployment_controller as controller_module
 
     opened(case)
     clock = SteppingClock()
@@ -645,7 +636,7 @@ def test_a_periodic_status_timeout_does_not_hide_a_router_failure(
 def test_a_diagnostic_write_failure_leaves_a_healthy_deployment_serving(
     case: ControllerCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
 ) -> None:
-    import reef.service.deploy.routing.deployment_controller as controller_module
+    import reef.routing.deployment_controller as controller_module
 
     opened(case)
     diagnostic = case.controller.directory / "lifecycle-events.jsonl"
@@ -765,7 +756,7 @@ def test_failed_write_diagnostic_does_not_stickily_disable_completed_requests(ca
 def test_partial_prepare_failure_keeps_lock_until_safe_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import reef.service.deploy.routing.deployment_controller as controller_module
+    import reef.routing.deployment_controller as controller_module
 
     def broken_renderer(*args: object, **kwargs: object) -> None:
         raise ValueError("invalid renderer input")
@@ -806,7 +797,7 @@ def preparing_controller(
 
     A previous generation of the deployment is on record, so ``prepare`` removes its resources.
     """
-    import reef.service.deploy.routing.deployment_controller as controller_module
+    import reef.routing.deployment_controller as controller_module
 
     monkeypatch.setattr(controller_module.sys, "platform", "linux")
     manifest = tmp_path / "manifest.yaml"
@@ -1050,7 +1041,7 @@ def test_control_directory_release_removes_only_its_socket(case: ControllerCase,
 def test_invalid_candidate_cannot_touch_an_existing_generation(
     case: ControllerCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import reef.service.deploy.routing.deployment_controller as controller_module
+    import reef.routing.deployment_controller as controller_module
 
     def invalid_candidate() -> str:
         raise ValueError("invalid routing candidate")

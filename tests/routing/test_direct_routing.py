@@ -24,7 +24,7 @@ import pytest
 from aiohttp import ClientResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     OPEN_DEADLINE,
     ROUTER_HASH,
     SELECTION_TOKEN,
@@ -35,16 +35,16 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
+import reef.routing.preview as routing_preview
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher
-from reef.service import routing_preview
+from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
+from reef.routing.preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.assembly import build_app
 from reef.service.deploy.service_config import ServiceSettings
 from reef.service.errors import translate_error
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
-from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
-from reef.service.routing_preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
 from reef.service.web import MAX_REQUEST_BYTES
 
 pytestmark = pytest.mark.unit
@@ -984,7 +984,7 @@ def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
 
 @pytest.fixture
 def domain_smoke() -> ModuleType:
-    script = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/domain_smoke.py"
+    script = Path(__file__).resolve().parents[2] / "tutorials/semantic-router/domain_smoke.py"
     spec = importlib.util.spec_from_file_location("reef_tutorial_domain_smoke", script)
     if spec is None or spec.loader is None:
         raise RuntimeError("the tutorial domain smoke is missing")
@@ -1047,7 +1047,7 @@ def test_the_tutorial_domain_smoke_writes_manifests_that_differ_only_in_a_reload
 
 def test_the_tutorial_fake_provider_serves_auto_pin_json_sse_and_feedback(tmp_path: Path) -> None:
     """The provider the tutorial starts passes Reef's provider check and answers both response modes."""
-    script = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/fake_provider.py"
+    script = Path(__file__).resolve().parents[2] / "tutorials/semantic-router/fake_provider.py"
     spec = importlib.util.spec_from_file_location("reef_tutorial_fake_provider", script)
     if spec is None or spec.loader is None:
         raise RuntimeError("the tutorial fake provider is missing")

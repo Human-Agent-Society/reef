@@ -24,7 +24,7 @@ import pytest
 import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     OPEN_DEADLINE,
     SELECTION_TOKEN,
     SERVICE_TOKEN,
@@ -36,15 +36,15 @@ from tests.reef_service.routing.routing_fakes import (
     write_domain_classifier,
 )
 
-import reef.service.routing as routing_module
+import reef.routing.manifest as routing_module
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPublication, create_app
-from reef.service.deploy.routing.deployment_controller import (
+from reef.routing.deployment_controller import (
     RoutingDeploymentController,
     RoutingDeploymentError,
     RoutingReadinessTimeoutError,
 )
-from reef.service.deploy.routing.policy import (
+from reef.routing.manifest import RoutingAdapter, RoutingSnapshot
+from reef.routing.policy import (
     PolicyState,
     PolicyStateStore,
     RouterManagementClient,
@@ -52,17 +52,13 @@ from reef.service.deploy.routing.policy import (
     RouterRuntime,
     document_etag,
 )
-from reef.service.deploy.routing.reef_lifecycle_client import (
-    LifecycleStatus,
-    RoutingControlError,
-    RoutingControlTimeoutError,
-)
-from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+from reef.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError, RoutingControlTimeoutError
+from reef.routing.renderer import ManagedRoutingRender, generate
+from reef.routing.settings import RoutingDeploymentSettings
+from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPublication, create_app
 from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.request_service import RequestService
-from reef.service.routing import RoutingAdapter, RoutingSnapshot
 
 pytestmark = pytest.mark.unit
 
@@ -856,7 +852,7 @@ def test_a_trickling_management_reply_ends_at_its_deadline(case: PolicyCase, tri
 def test_time_spent_encoding_or_decoding_counts_against_the_call_deadline(
     case: PolicyCase, monkeypatch: pytest.MonkeyPatch, slow_step: str
 ) -> None:
-    import reef.service.deploy.routing.policy as policy_module
+    import reef.routing.policy as policy_module
 
     management = case.controller.management
     assert management is not None

@@ -55,6 +55,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/recipe/`, `reef/train/` | Recipe contracts, built-in recipes, the training pipeline, training, and backend integrations |
 | `reef/evaluation/` | Candidate evaluation: running and scoring evaluation runs, deciding whether a candidate is published, and plugin configuration |
 | `reef/inference/` | Inference contracts, serving runtimes, and concrete inference integrations, engine control, and weight reception |
+| `reef/routing/` | The Semantic Router integration: the routing manifest, the routing preview, and the router container of a managed deployment |
 | `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
 | `reef/artifact/` | Versioned artifacts, repositories, and the components a recipe declares |
 | `reef/storage/` | Record storage contracts, persistence, and retention |

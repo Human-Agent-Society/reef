@@ -21,8 +21,7 @@ from pathlib import Path
 
 import yaml
 
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.routing import (
+from reef.routing.manifest import (
     DEFAULT_RULE,
     SEMANTIC_ROUTER_IMAGE,
     DomainClassifier,
@@ -31,6 +30,7 @@ from reef.service.routing import (
     RoutingTarget,
     scenario_entrypoint,
 )
+from reef.routing.settings import RoutingDeploymentSettings
 
 #: Container variables holding the router's bearer tokens; Compose passes the values from the owner's environment.
 MANAGEMENT_TOKEN_ENV = "REEF_SR_MANAGEMENT_TOKEN"

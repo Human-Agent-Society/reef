@@ -20,16 +20,16 @@ from reef.core.records_types import SCENARIO_HEADER, AgentRecord
 from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
+from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, is_router_config_hash
+from reef.routing.policy import RouterManagementClient, RouterPolicyError
+from reef.routing.preview import PreviewSettings, RoutingPreviewClient
+from reef.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.scenario.live_objects import LiveObjects
-from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError
-from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.service.deploy.service_config import ServiceSettings
 from reef.service.inference_service import ServedModelsCache
 from reef.service.lifecycle import PendingWrites
 from reef.service.routed_inference import InferenceRetryPolicy, RoutedInference, RoutedRecords, RoutedScenario
 from reef.service.routes.routed_chat import serve_routed_chat
-from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, is_router_config_hash
-from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
 from reef.storage.scenario import ScenarioStorage
 
 logger = logging.getLogger(__name__)

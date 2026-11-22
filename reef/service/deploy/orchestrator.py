@@ -33,6 +33,11 @@ from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
+from reef.routing.containers import ContainerCommandError, DockerComposeRuntime
+from reef.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.routing.policy import RouterPolicyError
+from reef.routing.reef_lifecycle_client import RoutingControlError
+from reef.routing.registry import RoutingOwnershipError
 from reef.service.deploy.cli import (
     InvalidOverrideError,
     _apply_overrides,
@@ -63,11 +68,6 @@ from reef.service.deploy.execution import service_executor_config, service_execu
 from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
 from reef.service.deploy.process import DEFAULT_GRACE_TIMEOUT_SECONDS, log_status
-from reef.service.deploy.routing.containers import ContainerCommandError, DockerComposeRuntime
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.policy import RouterPolicyError
-from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
-from reef.service.deploy.routing.registry import RoutingOwnershipError
 from reef.service.deploy.service_config import (
     normalize_service_config,
     service_config_arguments,

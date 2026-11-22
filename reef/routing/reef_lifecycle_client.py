@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reef.core.errors import InternalError
-from reef.service.routing import is_router_config_hash
+from reef.routing.manifest import is_router_config_hash
 
 #: AF_UNIX paths are limited to 108 bytes on Linux, including the terminating NUL; keep a margin.
 MAX_SOCKET_PATH_BYTES = 103

@@ -20,9 +20,15 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.service import routing_preview
-from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingRequestError, RoutingScenario, RoutingSnapshot
-from reef.service.routing_preview import (
+import reef.routing.preview as routing_preview
+from reef.routing.manifest import (
+    RoutingAdapter,
+    RoutingDecision,
+    RoutingRequestError,
+    RoutingScenario,
+    RoutingSnapshot,
+)
+from reef.routing.preview import (
     EXPECTED_HASH_HEADER,
     PREVIEW_BODY_LIMIT_BYTES,
     PREVIEW_PATH,

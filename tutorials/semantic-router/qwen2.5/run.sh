@@ -23,7 +23,7 @@ image_arguments=()
 if [[ -n $sr_image ]]; then
     [[ $sr_image =~ ^([^[:space:]@]+@)?sha256:[[:xdigit:]]{64}$ ]] ||
         { echo "SR_IMAGE requires repository@sha256:<digest> or sha256:<image ID>" >&2; exit 1; }
-    expected_revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+    expected_revision=$("$python" -c 'from reef.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
     image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sr_image")
     [[ $image_revision == "$expected_revision" ]] || { echo "SR_IMAGE must have revision $expected_revision" >&2; exit 1; }
     image_arguments=(--image "$sr_image")

@@ -17,6 +17,7 @@ on:
       - "reef/**/*.md"
       - "recipes/basic/local-sglang.yaml"
       - "reef/service/deploy/**"
+      - "reef/routing/**"
       - "reef/service/app.py"
       - ".github/workflows/docs-build.yml"
   workflow_dispatch:
@@ -52,7 +53,7 @@ jobs:
           docs=false
           while IFS= read -r file; do
             case "$file" in
-              *.md|*.rst|docs/*|recipes/basic/local-sglang.yaml|reef/service/deploy/*|reef/service/app.py|.github/workflows/docs-build.yml)
+              *.md|*.rst|docs/*|recipes/basic/local-sglang.yaml|reef/service/deploy/*|reef/routing/*|reef/service/app.py|.github/workflows/docs-build.yml)
                 docs=true ;;
             esac
           done <<< "$files"

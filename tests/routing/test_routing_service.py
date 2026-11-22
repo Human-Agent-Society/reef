@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientConnectionError, ClientError, ClientPayloadError, ServerTimeoutError, web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     ROUTER_HASH,
     SELECTION_TOKEN,
     SERVICE_TOKEN,
@@ -38,11 +38,11 @@ from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceStream
 from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
+from reef.routing.manifest import RoutingDecision
+from reef.routing.preview import PreviewSettings
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.request_service import RequestService
 from reef.service.routed_inference import RoutedAttempt
-from reef.service.routing import RoutingDecision
-from reef.service.routing_preview import PreviewSettings
 from reef.service.streaming import stream_record
 from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import AppendResult

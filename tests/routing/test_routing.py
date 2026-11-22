@@ -12,11 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.reef_service.routing.routing_fakes import preview_reply
+from tests.routing.routing_fakes import preview_reply
 
 from reef.inference.http import HttpInferenceHandler
-from reef.service.errors import ROUTING_ERRORS
-from reef.service.routing import (
+from reef.routing.manifest import (
     ROUTING_ERROR_STATUSES,
     DomainClassifier,
     RoutingAdapter,
@@ -28,7 +27,8 @@ from reef.service.routing import (
     RoutingTarget,
     check_policy_change,
 )
-from reef.service.routing_preview import checked_selection
+from reef.routing.preview import checked_selection
+from reef.service.errors import ROUTING_ERRORS
 
 pytestmark = pytest.mark.unit
 ROUTER_HASH = "3" * 64

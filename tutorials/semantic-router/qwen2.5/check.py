@@ -15,7 +15,7 @@ import aiohttp
 import yaml
 from hot_update import CHAT, observe_update, owner_events
 
-from reef.service.routing import RoutingSnapshot
+from reef.routing.manifest import RoutingSnapshot
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 SCENARIO = "qwen-demo"

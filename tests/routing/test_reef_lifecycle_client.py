@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import reef.service.deploy.routing.reef_lifecycle_client as client_module
-from reef.service.deploy.routing.reef_lifecycle_client import (
+import reef.routing.reef_lifecycle_client as client_module
+from reef.routing.reef_lifecycle_client import (
     LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,

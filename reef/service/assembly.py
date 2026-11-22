@@ -39,6 +39,8 @@ from reef.recipe.deployment import harness_adapter, harness_recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe, named_recipe_config, weight_training_selection
 from reef.recipe.registry import recipe_class_for
+from reef.routing.manifest import RoutingAdapter
+from reef.routing.preview import PreviewSettings
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.scenario.live_objects import (
     LiveObjects,
@@ -60,8 +62,6 @@ from reef.service.harness_imports import HarnessSyncWorker
 from reef.service.lifecycle import LifecycleSettings
 from reef.service.request_service import RequestService
 from reef.service.routed_inference import InferenceRetryPolicy
-from reef.service.routing import RoutingAdapter
-from reef.service.routing_preview import PreviewSettings
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind

@@ -13,10 +13,10 @@ from typing import NoReturn
 import pytest
 import yaml
 
+from reef.routing.containers import ContainerRuntime
+from reef.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
 from reef.service.components import COMPONENT_APPS, build_component_app
 from reef.service.deploy import orchestrator
-from reef.service.deploy.routing.containers import ContainerRuntime
-from reef.service.deploy.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceSettings
 
 pytestmark = pytest.mark.unit

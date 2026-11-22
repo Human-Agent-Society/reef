@@ -77,6 +77,18 @@ def test_infra_never_imports_a_method_package() -> None:
     assert offenders == []
 
 
+def test_routing_never_imports_the_service() -> None:
+    # The service imports the Semantic Router integration, never the reverse (RFC #1570).
+    offenders: list[str] = []
+    for path in sorted((REPO_ROOT / "reef" / "routing").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        offenders.extend(
+            f"{path.relative_to(REPO_ROOT)} -> {target}" for target in _imports_of(imported, "reef.service")
+        )
+    assert offenders == []
+
+
 def test_scenario_domain_does_not_depend_on_recipes() -> None:
     module = importlib.import_module("reef.scenario.scenario")
     tree = ast.parse(inspect.getsource(module))

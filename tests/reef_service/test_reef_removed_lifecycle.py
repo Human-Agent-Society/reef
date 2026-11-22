@@ -54,7 +54,6 @@ def test_recipe_symbols_are_removed_in_favor_of_processors_and_trainer() -> None
 @pytest.mark.parametrize(
     "module",
     [
-        "reef.routing",
         "reef.core.records",
         "reef.scenarios.records",
         "reef.trainer.managers",

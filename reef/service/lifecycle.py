@@ -37,12 +37,8 @@ from typing import TypeVar, cast
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
-from reef.service.deploy.routing.reef_lifecycle_client import (
-    CANDIDATE_CHECK_PATH,
-    MAX_SOCKET_PATH_BYTES,
-    LifecycleStatus,
-)
-from reef.service.routing import RoutingAdapter, RoutingRequestError, finite_positive_seconds, is_router_config_hash
+from reef.routing.manifest import RoutingAdapter, RoutingRequestError, finite_positive_seconds, is_router_config_hash
+from reef.routing.reef_lifecycle_client import CANDIDATE_CHECK_PATH, MAX_SOCKET_PATH_BYTES, LifecycleStatus
 
 WriteResult = TypeVar("WriteResult")
 logger = logging.getLogger(__name__)

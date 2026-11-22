@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.reef_service.routing.routing_fakes import routing_manifest
+from tests.routing.routing_fakes import routing_manifest
 
-from reef.service.deploy.routing.containers import (
+from reef.routing.containers import (
     BUILD_RECIPE_LABEL,
     IMAGE_BUILD_RECIPE,
     IMAGE_CACHE_TAG,
@@ -37,14 +37,9 @@ from reef.service.deploy.routing.containers import (
     GuardedCommand,
     image_build_arguments,
 )
-from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
-from reef.service.deploy.routing.renderer import (
-    MANAGEMENT_TOKEN_ENV,
-    SELECTION_TOKEN_ENV,
-    ManagedRoutingRender,
-    generate,
-)
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+from reef.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
+from reef.routing.renderer import MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV, ManagedRoutingRender, generate
+from reef.routing.settings import RoutingDeploymentSettings
 
 pytestmark = pytest.mark.unit
 
@@ -791,8 +786,8 @@ def test_owner_sigkill_closes_lease_without_inheriting_lock(tmp_path: Path) -> N
     controller_pid = tmp_path / "controller.pid"
     program = f"""
 import os, sys, time
-from reef.service.deploy.routing.containers import GuardedCommand
-from reef.service.deploy.routing.registry import DeploymentRegistry
+from reef.routing.containers import GuardedCommand
+from reef.routing.registry import DeploymentRegistry
 from pathlib import Path
 registry = DeploymentRegistry("killed", root=Path({str(tmp_path)!r}))
 registry.acquire()
@@ -896,8 +891,8 @@ def test_sigkill_during_mutation_blocks_immediate_replacement(ownership: Deploym
     program = f"""
 import sys
 from pathlib import Path
-from reef.service.deploy.routing.containers import DockerComposeRuntime
-from reef.service.deploy.routing.registry import DeploymentOwnership
+from reef.routing.containers import DockerComposeRuntime
+from reef.routing.registry import DeploymentOwnership
 ownership =DeploymentOwnership({ownership.deployment_id!r}, {ownership.owner_id!r}, {ownership.generation!r}, Path({str(ownership.configuration_directory)!r}))
 DockerComposeRuntime(sys.executable).mutate(["-c", "import os,time; open({str(command_pid)!r}, 'w').write(str(os.getpid())); time.sleep(30)"], ownership, 30)
 """

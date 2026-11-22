@@ -11,12 +11,12 @@ from reef.core.errors import INFERENCE_ABORT_ERROR, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.inference.interfaces import InferenceStream
 from reef.recipe.deployment import harness_adapter
+from reef.routing.manifest import RoutingAdapter, RoutingRequestError
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, SSERelay
 from reef.service.lifecycle import ADMITTED_ROUTING, REQUEST_ACCEPTANCE
 from reef.service.request_service import RequestService
 from reef.service.routed_inference import RoutedAttempt, RoutedInference
 from reef.service.routes.payload import read_object
-from reef.service.routing import RoutingAdapter, RoutingRequestError
 from reef.service.streaming import receipt_sse_events, stream_record
 
 logger = logging.getLogger(__name__)
