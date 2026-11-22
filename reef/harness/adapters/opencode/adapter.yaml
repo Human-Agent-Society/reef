@@ -93,6 +93,9 @@ run:
     argv: ["run", "--format", "json", "--auto", "--", "{task}"]
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
+      # The Reef binding supplies the only enabled provider and its model metadata.
+      OPENCODE_MODELS_PATH: "{root}/opencode/models.json"
+      OPENCODE_DISABLE_MODELS_FETCH: "1"
     # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
     skills: opencode/skills
     # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the

@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from reef.execution.sandbox import relay as relay_module
 from reef.execution.sandbox.e2b import TRAFFIC_ACCESS_TOKEN_HEADER, E2BExecutor, E2BSession, template_alias
 from reef.execution.sandbox.process import (
     ProcessOutcome,
@@ -315,6 +316,32 @@ def test_an_interrupted_upstream_stream_is_not_reported_as_complete(tunnel) -> N
         pytest.raises(http.client.IncompleteRead),
     ):
         response.read()
+
+
+@pytest.mark.unit
+def test_a_request_that_expires_before_polling_releases_its_body(monkeypatch) -> None:
+    monkeypatch.setattr(relay_module, "ANSWER_SECONDS", 0.05)
+    monkeypatch.setattr(relay_module, "POLL_SECONDS", 0.05)
+    relay = Relay("test-secret")
+    local_server = serve(relay.local_handler())
+    tunnel_server = serve(relay.tunnel_handler())
+    try:
+        request = post(f"http://127.0.0.1:{local_server.server_port}/model", {"prompt": "x" * 65536})
+        with pytest.raises(urllib.error.HTTPError) as expired:
+            urllib.request.urlopen(request, timeout=5)
+        assert expired.value.code == 504
+        assert not relay.open
+        assert not relay.waiting
+
+        poll = urllib.request.Request(
+            f"http://127.0.0.1:{tunnel_server.server_port}/next", headers={"x-relay-secret": "test-secret"}
+        )
+        with urllib.request.urlopen(poll, timeout=5) as response:
+            assert response.status == 204
+    finally:
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
 
 
 @pytest.mark.unit

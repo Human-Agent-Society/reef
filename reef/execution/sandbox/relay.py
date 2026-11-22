@@ -21,6 +21,7 @@ import json
 import queue
 import threading
 import uuid
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -49,9 +50,10 @@ class Pending:
 class Relay:
     def __init__(self, secret: str) -> None:
         self.secret = secret
-        self.waiting: queue.Queue[Pending] = queue.Queue()
+        self.waiting: OrderedDict[str, None] = OrderedDict()
         self.open: dict[str, Pending] = {}
         self.lock = threading.Lock()
+        self.request_ready = threading.Condition(self.lock)
 
     def local_handler(self) -> type[BaseHTTPRequestHandler]:
         relay = self
@@ -62,18 +64,15 @@ class Relay:
 
             def relay_request(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b""
                 headers = {name: value for name, value in self.headers.items() if name.lower() != "host"}
-                pending = Pending(self.command, self.path, headers, body)
-                with relay.lock:
+                pending = Pending(self.command, self.path, headers, self.rfile.read(length) if length else b"")
+                with relay.request_ready:
                     relay.open[pending.id] = pending
-                relay.waiting.put(pending)
+                    relay.waiting[pending.id] = None
+                    relay.request_ready.notify()
+                first = None
                 try:
                     first = pending.pieces.get(timeout=ANSWER_SECONDS)
-                except queue.Empty:
-                    self.send_error(504, "Reef did not answer through the tunnel")
-                    return
-                try:
                     status = int(first.get("status") or 502)
                     self.send_response(status)
                     for name, value in (first.get("headers") or {}).items():
@@ -99,10 +98,12 @@ class Relay:
                         piece = pending.pieces.get(timeout=ANSWER_SECONDS)
                 except (BrokenPipeError, ConnectionResetError, queue.Empty):
                     self.close_connection = True
-                    return
                 finally:
                     with relay.lock:
+                        relay.waiting.pop(pending.id, None)
                         relay.open.pop(pending.id, None)
+                if first is None:
+                    self.send_error(504, "Reef did not answer through the tunnel")
 
             def do_GET(self) -> None:
                 self.relay_request()
@@ -143,9 +144,12 @@ class Relay:
                 if self.path != "/next":
                     self.answer(404)
                     return
-                try:
-                    pending = relay.waiting.get(timeout=POLL_SECONDS)
-                except queue.Empty:
+                with relay.request_ready:
+                    pending = None
+                    if relay.request_ready.wait_for(lambda: bool(relay.waiting), timeout=POLL_SECONDS):
+                        request_id, _ = relay.waiting.popitem(last=False)
+                        pending = relay.open[request_id]
+                if pending is None:
                     self.answer(204)
                     return
                 self.answer(200, json.dumps(pending.request).encode())
