@@ -39,5 +39,7 @@ def test_every_grid_table_line_has_its_bars_in_the_same_columns() -> None:
             assert len(columns) >= 2, f"docs/reference/{name}:{start} does not open a grid table"
             for offset, line in enumerate(block):
                 where = f"docs/reference/{name}:{start + offset}"
-                assert len(line) == len(block[0]), f"{where} is {len(line)} characters wide; the table is {len(block[0])}"
+                assert len(line) == len(
+                    block[0]
+                ), f"{where} is {len(line)} characters wide; the table is {len(block[0])}"
                 assert all(line[column] in "+|" for column in columns), f"{where} has a bar off the table's columns"
