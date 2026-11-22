@@ -32,17 +32,10 @@ ANSWER_SECONDS = 3600.0
 
 
 class Pending:
-    """One request a process made, waiting for Reef's answer in pieces."""
+    """The ID and ordered answer pieces of one request waiting for Reef."""
 
-    def __init__(self, method: str, path: str, headers: dict[str, str], body: bytes) -> None:
+    def __init__(self) -> None:
         self.id = uuid.uuid4().hex
-        self.request = {
-            "id": self.id,
-            "method": method,
-            "path": path,
-            "headers": headers,
-            "body": base64.b64encode(body).decode(),
-        }
         self.pieces: queue.Queue[dict] = queue.Queue()
         self.sequence = 0
 
@@ -50,10 +43,26 @@ class Pending:
 class Relay:
     def __init__(self, secret: str) -> None:
         self.secret = secret
-        self.waiting: OrderedDict[str, None] = OrderedDict()
+        self.waiting: OrderedDict[str, dict[str, str | dict[str, str]]] = OrderedDict()
         self.open: dict[str, Pending] = {}
         self.lock = threading.Lock()
         self.request_ready = threading.Condition(self.lock)
+
+    def enqueue(self, method: str, path: str, headers: dict[str, str], body: bytes) -> Pending:
+        """Queue a request and return the state that receives its answer."""
+        pending = Pending()
+        request: dict[str, str | dict[str, str]] = {
+            "id": pending.id,
+            "method": method,
+            "path": path,
+            "headers": headers,
+            "body": base64.b64encode(body).decode(),
+        }
+        with self.request_ready:
+            self.open[pending.id] = pending
+            self.waiting[pending.id] = request
+            self.request_ready.notify()
+        return pending
 
     def local_handler(self) -> type[BaseHTTPRequestHandler]:
         relay = self
@@ -65,11 +74,7 @@ class Relay:
             def relay_request(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 headers = {name: value for name, value in self.headers.items() if name.lower() != "host"}
-                pending = Pending(self.command, self.path, headers, self.rfile.read(length) if length else b"")
-                with relay.request_ready:
-                    relay.open[pending.id] = pending
-                    relay.waiting[pending.id] = None
-                    relay.request_ready.notify()
+                pending = relay.enqueue(self.command, self.path, headers, self.rfile.read(length) if length else b"")
                 first = None
                 try:
                     first = pending.pieces.get(timeout=ANSWER_SECONDS)
@@ -145,14 +150,13 @@ class Relay:
                     self.answer(404)
                     return
                 with relay.request_ready:
-                    pending = None
+                    request = None
                     if relay.request_ready.wait_for(lambda: bool(relay.waiting), timeout=POLL_SECONDS):
-                        request_id, _ = relay.waiting.popitem(last=False)
-                        pending = relay.open[request_id]
-                if pending is None:
+                        _, request = relay.waiting.popitem(last=False)
+                if request is None:
                     self.answer(204)
                     return
-                self.answer(200, json.dumps(pending.request).encode())
+                self.answer(200, json.dumps(request).encode())
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
