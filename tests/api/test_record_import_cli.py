@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestServer
 from reef_client.record_import import import_records_file
 from tests.api.test_record_import import dispatcher_for, imported
 
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.recipe import Recipe
 
 
@@ -19,7 +19,7 @@ def write_records(path, count):
 
 def test_file_import_resumes_after_a_lost_reply_and_partial_upload(tmp_path):
     dispatcher = dispatcher_for(tmp_path, Recipe())
-    service = RequestService(dispatcher)
+    service = RequestHandling(dispatcher)
     source = tmp_path / "records.jsonl"
     progress = tmp_path / "progress.json"
     write_records(source, 7)

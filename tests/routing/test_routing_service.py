@@ -30,7 +30,7 @@ from tests.routing.routing_fakes import (
 )
 
 from reef.api.app import InferenceRetryPolicy, create_app
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routed_inference import RoutedAttempt
 from reef.api.streaming import stream_record
 from reef.artifact import InMemoryRepositoryBackend
@@ -779,7 +779,7 @@ def test_a_routed_stream_whose_headers_name_another_scenario_never_reaches_the_p
 
             monkeypatch.setattr(handler, "post_stream", keep_opened)
             dispatcher = routing_dispatcher(tmp_path)
-            service = RequestService(dispatcher)
+            service = RequestHandling(dispatcher)
             payload = {"model": "student-v1", "messages": [{"role": "user", "content": "hi"}], "stream": True}
             try:
                 with pytest.raises(ValueError, match="Scenario"):

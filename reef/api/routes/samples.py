@@ -4,14 +4,14 @@ import asyncio
 
 from aiohttp import web
 
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.control.operations.sample_processing import get_processing, list_processing, read_processing_log
 from reef.control.operations.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_job
 
 
-def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:
+def register_sample_reads(app: web.Application, *, request_handling: RequestHandling) -> None:
     """The list of a scenario's samples."""
-    dispatcher = request_service.dispatcher
+    dispatcher = request_handling.dispatcher
 
     async def samples(request: web.Request) -> web.Response:
         try:
@@ -78,9 +78,9 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
     app.router.add_get("/reef/scenarios/{scenario}/sample-processing/{task_id}/logs", processing_log)
 
 
-def register_next_job_route(app: web.Application, *, request_service: RequestService) -> None:
+def register_next_job_route(app: web.Application, *, request_handling: RequestHandling) -> None:
     """The read of a trainer's next automatic job, which is the trainer's state that control holds."""
-    dispatcher = request_service.dispatcher
+    dispatcher = request_handling.dispatcher
 
     async def next_job(request: web.Request) -> web.Response:
         listing = await asyncio.to_thread(

@@ -130,7 +130,7 @@ def test_readme_names_are_exported() -> None:
 def test_dead_accessors_and_symbols_are_removed() -> None:
     import reef.core
     import reef.core.errors
-    from reef.api.request_service import RequestService
+    from reef.api.request_handling import RequestHandling
     from reef.control.dispatcher import Dispatcher
     from reef.control.scenario.scenario import Scenario
 
@@ -138,7 +138,7 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
     assert not hasattr(reef.core, "ReferenceStatus")
     assert not hasattr(reef.core.errors, "ConfigurationError")
     assert not hasattr(Scenario, "advance_to")
-    assert not hasattr(RequestService, "current_files")
+    assert not hasattr(RequestHandling, "current_files")
     # Test-only accessors migrated to canonical paths.
     assert not hasattr(Dispatcher, "recipes")
     assert not hasattr(Scenario, "checkpoint_strategy")
@@ -164,6 +164,12 @@ def test_naming_unification_renames_are_complete() -> None:
 
     assert not hasattr(routes, "register_agent_record_routes")
     assert hasattr(routes, "register_record_routes")
+    # "Service" names a service of a deployment; the request handling of an app is not one.
+    import reef.api.app as api_app
+
+    assert importlib.util.find_spec("reef.api.request_service") is None
+    assert not hasattr(api_app, "RequestService")
+    assert hasattr(api_app, "RequestHandling")
 
 
 @pytest.mark.unit
