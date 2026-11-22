@@ -332,7 +332,7 @@ current request contract.
 - Import and call it from ``reef/api/routes/__init__.py`` in
   ``register_routes``.
 - Keep parsing and response adaptation in the route. Put reusable request or
-  domain behavior in ``reef/api/request_service.py`` or the package that
+  domain behavior in ``reef/api/request_handling.py`` or the package that
   owns the concept.
 - Raise domain errors. If a new error needs a non-default HTTP status, add it
   to ``ERROR_STATUS_TABLE`` in ``reef/api/errors.py`` instead of adding a

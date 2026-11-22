@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-
 from collections.abc import Mapping
 
 from aiohttp import web
 
 from reef.api.artifact_page import harness_artifact_page
+from reef.api.request_handling import RequestHandling
 from reef.api.request_page import harness_request_page
-from reef.api.request_service import RequestService
 from reef.api.wire import scenario_header
 from reef.control.operations.harness import harness_request_progress, harness_step_records
 from reef.core.records_types import SCENARIO_HEADER
@@ -28,10 +27,10 @@ def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[s
     return merged
 
 
-def register_system_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_system_routes(app: web.Application, *, request_handling: RequestHandling) -> None:
     """Control's own harness routes, the pages and the step records, and ``/reef/status``."""
 
-    dispatcher = request_service.dispatcher
+    dispatcher = request_handling.dispatcher
 
     async def artifact_page(request: web.Request) -> web.Response:
         step = int(request.match_info["step"])

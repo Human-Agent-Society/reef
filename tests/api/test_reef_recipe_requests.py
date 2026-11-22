@@ -8,7 +8,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
-from reef.api.app import RequestService, create_app
+from reef.api.app import RequestHandling, create_app
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.control.scenario.live_objects import LiveObjects
@@ -45,7 +45,7 @@ def test_a_report_creates_or_reuses_the_scenario(registered: bool, headers: dict
             scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
         )
         if registered:
-            RequestService(dispatcher).accept(
+            RequestHandling(dispatcher).accept(
                 {"x-reef-scenario": "scenario"}, {"score": 1.0}, request_type=RequestType.REPORT
             )
         client = TestClient(TestServer(create_app(dispatcher)))
@@ -110,7 +110,7 @@ def test_request_recovers_durable_scenario_without_resubmission(
         cache_dir=tmp_path / "first-cache",
     )
 
-    first = RequestService(
+    first = RequestHandling(
         build_default_dispatcher(
             backend_factory=first_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
         )
@@ -125,7 +125,7 @@ def test_request_recovers_durable_scenario_without_resubmission(
     restarted_dispatcher = build_default_dispatcher(
         backend_factory=restarted_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
-    restarted = RequestService(restarted_dispatcher)
+    restarted = RequestHandling(restarted_dispatcher)
     restarted.accept(
         {"x-reef-scenario": "durable"},
         {"score": 0.5},
