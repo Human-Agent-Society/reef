@@ -268,6 +268,35 @@ def test_a_request_inside_the_sandbox_reaches_the_reef_port_and_its_answer_strea
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("target_form", ["@127.0.0.1:{port}/collect", "http://127.0.0.1:{port}/collect", "*"])
+def test_a_request_target_that_is_not_a_path_never_leaves_the_reef_port(tunnel, target_form: str) -> None:
+    """The sandbox chooses the request target. ``@host/`` after the Reef port's address would name another host, so
+    the pump answers 400 and sends nothing."""
+    _, local_port, _ = tunnel
+    reached: list[str] = []
+
+    class Other(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            reached.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    other = serve(Other)
+    connection = http.client.HTTPConnection("127.0.0.1", local_port, timeout=10)
+    connection.putrequest("GET", target_form.format(port=other.server_port))
+    connection.endheaders()
+    response = connection.getresponse()
+    assert response.status == 400 and b"is not a path of the Reef host's port" in response.read()
+    connection.close()
+    other.shutdown()
+    assert reached == []
+
+
+@pytest.mark.unit
 def test_the_tunnel_answers_no_one_without_the_secret(tunnel) -> None:
     _, _, tunnel_port = tunnel
     for secret in (None, "wrong"):

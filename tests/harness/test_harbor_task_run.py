@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
+from aiohttp import ClientSession, web
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import MCPServerConfig
 
@@ -598,6 +598,39 @@ def test_a_bridged_agent_answers_the_relayed_calls_from_the_proxy_port_while_its
     assert json.loads(base64.b64decode(piece["data"])) == {"answer": "42?"}
     assert piece["headers"]["X-Model"] == "m"
     assert any(command.endswith("c1 /tmp/reef-relay/replies/c1.json") for command in container.exchanges)
+
+
+def test_a_bridged_agent_refuses_a_relayed_target_that_is_not_a_path_of_the_proxy_port(tmp_path: Path) -> None:
+    """The container chooses the request target. ``@host/`` after the proxy port's address would name another host, so
+    the agent answers 400 and sends nothing."""
+    reached: list[str] = []
+
+    async def other(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.Response()
+
+    async def run() -> dict[str, object]:
+        app = web.Application()
+        app.router.add_get("/collect", other)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        await web.SockSite(runner, listener).start()
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=1, **kwargs)
+        call = {"id": "c1", "method": "GET", "path": f"@127.0.0.1:{listener.getsockname()[1]}/collect"}
+        async with ClientSession() as local:
+            piece = await agent.answer(local, call)
+        await runner.cleanup()
+        return piece
+
+    (tmp_path / "logs").mkdir()
+    piece = asyncio.run(run())
+    assert (piece["status"], piece["end"], piece["sequence"]) == (400, True, 0)
+    assert b"is not a path of the Reef host's port" in base64.b64decode(str(piece["data"]))
+    assert reached == []
 
 
 def test_a_tree_agent_bridges_the_port_of_its_loopback_binding(tmp_path: Path) -> None:
