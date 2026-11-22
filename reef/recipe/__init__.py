@@ -41,7 +41,7 @@ The recipe decides; it does not execute or deliver. A recipe is configuration
 (RFC #1390): it has no runtime, no training component and no store, and it
 builds none. The process that runs a service builds those objects and holds
 them in ``reef.control.scenario.live_objects.LiveObjects``; the service assembly
-(``reef.service.assembly``) makes that value. The scenario factory builds each
+(``reef.api.assembly``) makes that value. The scenario factory builds each
 scenario's trainers from the recipe's values and those objects
 (``reef.control.scenario.factory.read_trainer_specs``). ``build_components`` declares
 the snapshot's components with their kinds, admission checks and client file

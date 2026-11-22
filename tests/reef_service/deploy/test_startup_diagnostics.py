@@ -13,10 +13,10 @@ import yaml
 
 import reef
 from reef.cli import main as cli_main
-from reef.service.deploy import orchestrator
-from reef.service.deploy.diagnostics import mask_secrets, startup_report
-from reef.service.deploy.inference import command_line_config
-from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.deploy import orchestrator
+from reef.deploy.diagnostics import mask_secrets, startup_report
+from reef.deploy.inference import command_line_config
+from reef.deploy.orchestrator import resolve_deployment_config
 
 
 @pytest.fixture

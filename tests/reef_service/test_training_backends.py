@@ -19,14 +19,15 @@ from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.trainers import recipe_trainer
 from tests.support.training_deployment import LocalDeployment
 
+from reef.api.assembly import _training_recipe
+from reef.api.settings import ServiceSettings
 from reef.core import plugins
 from reef.core.errors import RuntimeConfigError
-from reef.service.assembly import _training_recipe
-from reef.service.deploy import training
-from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.inference import command_line_config
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
+from reef.deploy import training
+from reef.deploy.config_utils import DeployConfigError
+from reef.deploy.inference import command_line_config
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 
 BACKEND = "tests.support.training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -155,7 +156,7 @@ def test_a_failed_recipe_build_closes_the_component_and_shuts_down_its_runtime(t
     def refuse(*args, **kwargs):
         raise ValueError("bad recipe config")
 
-    monkeypatch.setattr("reef.service.assembly.load_recipe", refuse)
+    monkeypatch.setattr("reef.api.assembly.load_recipe", refuse)
     with pytest.raises(ValueError, match="bad recipe config"):
         _training_recipe(SAORecipe, service_config_from_mapping(config), {}, runs_training=True)
     assert Path(f"{marker}.closed").exists()
@@ -251,9 +252,9 @@ class NoTrainingStack:
         if fullname.split('.')[0] in BLOCKED:
             raise RuntimeError('unexpected training dependency: ' + fullname)
 sys.meta_path.insert(0, NoTrainingStack())
-from reef.service.components import build_component_app
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
+from reef.api.components import build_component_app
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 directory = Path(sys.argv[1])
 raw = {
     'recipe': {'implementation': 'recipes.sao.recipe:SAORecipe'},

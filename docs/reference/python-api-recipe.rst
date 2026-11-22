@@ -92,7 +92,7 @@ Live objects
 
    from reef.control.scenario.live_objects import LiveObjects, ServedEndpoint
 
-The process that runs a service builds the objects that run the recipe, and holds them in one frozen ``LiveObjects`` value. ``reef.service.assembly.load_deployment(settings, env, runs_training=...)`` returns the recipe and the value, and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it.
+The process that runs a service builds the objects that run the recipe, and holds them in one frozen ``LiveObjects`` value. ``reef.api.assembly.load_deployment(settings, env, runs_training=...)`` returns the recipe and the value, and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it.
 
 .. list-table::
    :header-rows: 1
@@ -142,7 +142,7 @@ A recipe class does not load itself. ``reef.recipe.loading.load_recipe(recipe_cl
 - ``section_defaults``, the class's defaults for its sections, under the deployment's keys;
 - ``refused_sections``, the config sections that the class refuses, each with its error message.
 
-For a weight-training deployment, ``reef.service.deploy.training.training_recipe_config`` forwards the declared fields from the service configuration and refuses a key that the class does not declare. A setting that a pipeline stage reads belongs in the stage's settings, under the deployment's ``pipeline`` section, not in a recipe field. Never read deployment YAML from inside a stage.
+For a weight-training deployment, ``reef.api.training.training_recipe_config`` forwards the declared fields from the service configuration and refuses a key that the class does not declare. A setting that a pipeline stage reads belongs in the stage's settings, under the deployment's ``pipeline`` section, not in a recipe field. Never read deployment YAML from inside a stage.
 
 Report
 ------
@@ -214,14 +214,14 @@ The built-in rules are ``AlwaysActivate``, ``NeverActivate`` and ``EvaluatedActi
 Embed the service
 -----------------
 
-An application can run the complete Reef service in its own process. ``reef.service.assembly.build_app`` makes the dispatcher and the HTTP app from a ``ServiceSettings``. The app includes record retention, the inference routes, the evaluation token, readiness of local cycles, and cleanup.
+An application can run the complete Reef service in its own process. ``reef.api.assembly.build_app`` makes the dispatcher and the HTTP app from a ``ServiceSettings``. The app includes record retention, the inference routes, the evaluation token, readiness of local cycles, and cleanup.
 
 .. code:: python
 
    from aiohttp import web
 
-   from reef.service.app import get_dispatcher
-   from reef.service.assembly import build_app
+   from reef.api.app import get_dispatcher
+   from reef.api.assembly import build_app
 
    app = build_app(settings, inference_handler=handler)
 

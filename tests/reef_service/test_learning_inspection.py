@@ -7,12 +7,12 @@ from dataclasses import replace
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from reef.api.app import create_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core import AgentRecord, RequestType
 from reef.recipe import Recipe
-from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention

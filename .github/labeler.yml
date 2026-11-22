@@ -49,7 +49,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "reef/cli.py"
-          - "reef/service/**"
+          - "reef/api/**"
           - "tests/reef_service/**"
 
 "area: training":

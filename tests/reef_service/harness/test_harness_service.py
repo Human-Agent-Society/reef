@@ -15,12 +15,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import PI_SEED, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import harness_repository
 
-import reef.service.harness_imports as harness_imports
+import reef.api.harness_imports as harness_imports
+from reef.api.app import create_harness_app
+from reef.api.harness_imports import HarnessSyncWorker
+from reef.api.request_service import RequestService
 from reef.control.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.service.app import create_harness_app
-from reef.service.harness_imports import HarnessSyncWorker
-from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

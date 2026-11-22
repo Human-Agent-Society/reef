@@ -61,4 +61,4 @@ The controller's side:
 - ``close`` and ``stop`` accept ``cancel_active: true`` to cancel accepted inference requests after their drain deadline.
 - ``POST /reef/lifecycle/check`` checks a candidate manifest and changes nothing. It returns 200 with ``{"snapshot_version": ...}``, 409 with the fixed text ``routing candidate rejected`` for a candidate that the child would not publish, 503 when a provider fails or the deadline passes, and 400 for a malformed body.
 
-``reef/service/lifecycle.py`` defines the fields and the drain accounting of each command.
+``reef/api/lifecycle.py`` defines the fields and the drain accounting of each command.

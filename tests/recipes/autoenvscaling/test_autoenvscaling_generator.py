@@ -60,6 +60,8 @@ from recipes.beta.autoenvscaling.tinker import AutoEnvScalingTinkerObjective
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
@@ -72,8 +74,6 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_resul
 from reef.record2sample.generator import DuplicateTaskError, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.tinker_backend.objectives import resolve_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"

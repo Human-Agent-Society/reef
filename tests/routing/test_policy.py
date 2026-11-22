@@ -37,6 +37,10 @@ from tests.routing.routing_fakes import (
 )
 
 import reef.routing.manifest as routing_module
+from reef.api.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPublication, create_app
+from reef.api.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
+from reef.api.request_service import RequestService
+from reef.api.settings import ServiceSettings
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.routing.deployment_controller import (
     RoutingDeploymentController,
@@ -55,10 +59,6 @@ from reef.routing.policy import (
 from reef.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError, RoutingControlTimeoutError
 from reef.routing.renderer import ManagedRoutingRender, generate
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPublication, create_app
-from reef.service.deploy.service_config import ServiceSettings
-from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
-from reef.service.request_service import RequestService
 
 pytestmark = pytest.mark.unit
 

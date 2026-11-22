@@ -13,11 +13,11 @@ from typing import NoReturn
 import pytest
 import yaml
 
+from reef.api.components import COMPONENT_APPS, build_component_app
+from reef.api.settings import ServiceSettings
+from reef.deploy import orchestrator
 from reef.routing.containers import ContainerRuntime
 from reef.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
-from reef.service.components import COMPONENT_APPS, build_component_app
-from reef.service.deploy import orchestrator
-from reef.service.deploy.service_config import ServiceSettings
 
 pytestmark = pytest.mark.unit
 
@@ -31,7 +31,7 @@ MANAGED_OWNER_PROGRAM = textwrap.dedent(
     import sys
     from pathlib import Path
 
-    from reef.service.deploy import orchestrator
+    from reef.deploy import orchestrator
 
     phase, config, previous_handler = sys.argv[1], sys.argv[2], sys.argv[3]
     root = Path(config).parent
@@ -336,7 +336,7 @@ def test_invalid_routing_settings_stop_before_any_process_starts(
 def test_managed_child_existing_runtime_config_becomes_private(tmp_path: Path) -> None:
     import stat
 
-    from reef.service.deploy.process import ProcessWorker
+    from reef.deploy.process import ProcessWorker
 
     directory = tmp_path / "worker"
     directory.mkdir(mode=0o755)

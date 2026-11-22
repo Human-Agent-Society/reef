@@ -29,6 +29,10 @@ from tests.routing.routing_fakes import (
     running_router,
 )
 
+from reef.api.app import InferenceRetryPolicy, create_app
+from reef.api.request_service import RequestService
+from reef.api.routed_inference import RoutedAttempt
+from reef.api.streaming import stream_record
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.core import RequestType
@@ -40,10 +44,6 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.routing.manifest import RoutingDecision
 from reef.routing.preview import PreviewSettings
-from reef.service.app import InferenceRetryPolicy, create_app
-from reef.service.request_service import RequestService
-from reef.service.routed_inference import RoutedAttempt
-from reef.service.streaming import stream_record
 from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import AppendResult
 from reef.storage.sql_coordination import memory_coordination

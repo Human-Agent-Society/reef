@@ -11,7 +11,7 @@ function read(path) {
 }
 
 const configSource = read("recipes/basic/local-sglang.yaml");
-const routesDirectory = resolve(repoRoot, "reef/service/routes");
+const routesDirectory = resolve(repoRoot, "reef/api/routes");
 const homeSource = read("docs/site/app/page.tsx");
 const wireGuide = read("docs/reference/http-api.rst");
 const rootReadme = read("README.md");
@@ -55,8 +55,8 @@ function readTerminologyFiles(directory, extensions) {
   });
 }
 
-// The routes of every app, and the routes that every app shares (``reef/service/web.py``: ``/healthz``).
-const routeFiles = [...readRouteFiles(routesDirectory), resolve(repoRoot, "reef/service/web.py")];
+// The routes of every app, and the routes that every app shares (``reef/api/web.py``: ``/healthz``).
+const routeFiles = [...readRouteFiles(routesDirectory), resolve(repoRoot, "reef/api/web.py")];
 const routeSource = routeFiles.map(read).join("\n");
 
 const serviceConfig = configSource.match(/^reef:\s*\n((?:[ \t]+.*\n?)*)/m)?.[1];
@@ -74,7 +74,7 @@ const routes = [
   method: method.toUpperCase(),
   path: path.replace(/\{(\w+):(?:[^{}]|\{[^{}]*\})*\}/g, "{$1}"),
 }));
-if (!routes.length) throw new Error("Could not derive aiohttp routes from reef/service/routes");
+if (!routes.length) throw new Error("Could not derive aiohttp routes from reef/api/routes");
 
 const health = routes.find(({ method, path }) => method === "GET" && path.includes("health"))?.path;
 if (!health) throw new Error("Could not derive the Reef health route");

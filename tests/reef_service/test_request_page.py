@@ -24,21 +24,15 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import harness_dispatcher
 
+from reef.api.app import create_app
+from reef.api.artifact_page import build_artifact_page
+from reef.api.auth import page_key_for_digest
+from reef.api.request_page import MAX_ACTIVITY_SHOWN, REFRESH_SECONDS, STATE_WORDS, build_request_page, settled_step
 from reef.core import AgentRecord, RequestType
 from reef.harness.tree import TreePatch
-from reef.service.app import create_app
-from reef.service.artifact_page import build_artifact_page
-from reef.service.auth import page_key_for_digest
-from reef.service.request_page import (
-    MAX_ACTIVITY_SHOWN,
-    REFRESH_SECONDS,
-    STATE_WORDS,
-    build_request_page,
-    settled_step,
-)
 from reef.train.harness_backend.backend import JobProgress
 
-MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
+MODULE = Path(__file__).parents[2] / "reef" / "api" / "request_page.py"
 REFRESH = f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
 RECORD_ID = "3f1c2a9d0b7e4c5d8e9f0a1b2c3d4e5f"
 TEXT = "text me when the run is blocked"

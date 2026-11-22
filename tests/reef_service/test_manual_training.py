@@ -44,6 +44,7 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 
+from reef.api.app import create_app
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
@@ -58,7 +59,6 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples
 from reef.sample2job import Sample2Job
-from reef.service.app import create_app
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
@@ -765,7 +765,7 @@ def raising_method(calls, *, poison="poison", error="poison method", with_traces
 def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_failed(tmp_path, open_dispatcher):
     """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
     evaluation, and keeps the candidate's change and the method's notes, so the pages show what was tried."""
-    from reef.service.artifact_page import failed_words
+    from reef.api.artifact_page import failed_words
 
     def method(workspace, services):
         workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))

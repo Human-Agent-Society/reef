@@ -12,21 +12,22 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from reef.api.serving import serving_runtime_config
+from reef.api.settings import ServiceSettings
 from reef.cli import main
 from reef.core.weight_layout import ArtifactFormat
-from reef.service.deploy import inference as inference_deploy
-from reef.service.deploy import orchestrator
-from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.inference import (
+from reef.deploy import inference as inference_deploy
+from reef.deploy import orchestrator
+from reef.deploy.config_utils import DeployConfigError, interpolate_config
+from reef.deploy.execution import validate_services
+from reef.deploy.inference import (
     INFERENCE_COMPONENT_SERVICE,
     command_line_config,
     free_loopback_port,
     local_inference_component,
 )
-from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
-from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
-from reef.service.deploy.serving import serving_runtime_config
+from reef.deploy.orchestrator import _Stack, resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.train.slime_backend.launch import SlimeDeployment, global_batch_size, slime_arguments
 
 RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -96,7 +97,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         component, http = validate_services(config, "test")
         assert component["name"] == INFERENCE_COMPONENT_SERVICE
         assert component["command"][1:3] == ["-m", "reef.inference.remote"]
-        assert http["command"] == [sys.executable, "-m", "reef.service"]
+        assert http["command"] == [sys.executable, "-m", "reef.deploy.service_process"]
         assert component["ready_timeout"] == http["ready_timeout"] == 45
         assert http["depends_on"] == [component["name"]]
         assert component["executor"] == http["executor"] == "uni"
@@ -208,8 +209,8 @@ def test_cli_only_training_resolves_public_config_references(tmp_path):
 def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     downloads, configs, paths = [], [], []
-    from reef.service.deploy import config_utils as config_module
-    from reef.service.deploy import inference
+    from reef.deploy import config_utils as config_module
+    from reef.deploy import inference
 
     def download(model):
         downloads.append(model)
@@ -269,7 +270,7 @@ class NoTrainingImports:
         if fullname.split('.')[0] in {'torch', 'slime', 'ray', 'sglang', 'megatron'}:
             raise RuntimeError('unexpected training import: ' + fullname)
 sys.meta_path.insert(0, NoTrainingImports())
-from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.orchestrator import resolve_deployment_config
 import json
 config, _ = resolve_deployment_config(json.loads(sys.argv[1]), None, sys.argv[2])
 assert config['services'][-1]['name'] == 'reef'
@@ -620,7 +621,7 @@ def test_a_deployment_without_an_inference_engine_refuses_a_composite_recipe(tmp
 
 
 def test_slime_serves_on_a_remote_inference_component(tmp_path):
-    from reef.service.deploy.training import local_model_required
+    from reef.deploy.training import local_model_required
 
     raw = training_config()
     raw["inference"]["remote"] = {"url": "https://gpu-host.example"}

@@ -10,7 +10,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.component_trainers import _dispatcher
 
-from reef.service.app import create_app
+from reef.api.app import create_app
 
 
 @pytest.mark.unit

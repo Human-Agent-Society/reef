@@ -30,15 +30,15 @@ from tests.routing.routing_fakes import (
     running_router,
 )
 
+from reef.api import routed_replica
+from reef.api.components import build_component_app
+from reef.api.settings import ServiceSettings
 from reef.core.errors import DeployConfigError
+from reef.deploy import orchestrator
+from reef.deploy.routing.cli import main as routing_cli
 from reef.routing.manifest import RoutingSnapshot
 from reef.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.service import routed_replica
-from reef.service.components import build_component_app
-from reef.service.deploy import orchestrator
-from reef.service.deploy.routing.cli import main as routing_cli
-from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
 

@@ -11,6 +11,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import harness_dispatcher
 
+from reef.api.app import create_app
 from reef.control.scenario.live_objects import LiveObjects
 from reef.control.workers.samples import LocalSampleProducers
 from reef.core import AgentRecord
@@ -21,7 +22,6 @@ from reef.recipe import Recipe
 from reef.record2sample import Record2Sample, SampleResult
 from reef.record2sample.service import Selection
 from reef.record2sample.sets import RecordSet
-from reef.service.app import create_app
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 STAGE = f"{__name__}:WindowSamples"

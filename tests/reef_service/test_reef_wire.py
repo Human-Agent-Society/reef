@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from reef.api.wire import HeaderError, ReportPayload, RequestHeaders, parse_request_headers
 from reef.core import AgentRecord, RequestType
-from reef.service.wire import HeaderError, ReportPayload, RequestHeaders, parse_request_headers
 
 
 @pytest.mark.unit

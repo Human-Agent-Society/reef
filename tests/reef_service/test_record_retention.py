@@ -9,14 +9,15 @@ import pytest
 from aiohttp import web
 from sqlalchemy.exc import OperationalError
 
+from reef.api import assembly
+from reef.api.settings import ServiceSettings
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.live_objects import LiveObjects
 from reef.control.workers.scenario_deletes import DELETES_QUEUE
 from reef.core import AgentRecord, RequestType
+from reef.deploy.service_config import service_config_from_mapping
 from reef.recipe import Recipe
-from reef.service import assembly
-from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.data import DataStore
 from reef.storage.record_items import record_item
 from reef.storage.records import RecordRetention
@@ -64,7 +65,7 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
     data = SQLiteDataStore(tmp_path / "data", task_files)
     dispatcher = retention_dispatcher(tmp_path, data, task_files)
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
-    monkeypatch.setattr("reef.service.app._RECORD_RETENTION_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr("reef.api.app._RECORD_RETENTION_INTERVAL_SECONDS", 0.005)
     original = dispatcher.prune_record_archives
     attempts = []
 

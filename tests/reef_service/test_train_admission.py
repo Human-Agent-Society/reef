@@ -11,8 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import harness_recipe
 from tests.support.harness_service import harness_dispatcher
 
+from reef.api.app import create_app
 from reef.core import AgentRecord, RequestType
-from reef.service.app import create_app
 
 TEXT = "add a skill that runs the tests before it answers"
 

@@ -10,6 +10,7 @@ import pytest
 from tests.support.samples import made_task
 from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
+from reef.api.streaming import stream_record
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import (
@@ -20,7 +21,6 @@ from reef.core.trajectories import (
     trajectory_reward,
 )
 from reef.inference.interfaces import InferenceStream
-from reef.service.streaming import stream_record
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups

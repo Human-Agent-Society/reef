@@ -174,7 +174,7 @@ class WeightTrainingRecipe(Recipe):
     :mod:`reef.recipe.config_fields`) is simultaneously the YAML key, the
     environment fallback, and the type-aware parser. The loader
     (``reef.recipe.loading.load_recipe``) and the training deployment
-    (``reef.service.deploy.training.training_recipe_config``) derive everything from those fields, so a
+    (``reef.api.training.training_recipe_config``) derive everything from those fields, so a
     recipe never repeats a setting's name or type anywhere else.
     """
 

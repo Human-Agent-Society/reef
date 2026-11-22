@@ -38,11 +38,11 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core.errors import UpstreamStatusError
 from reef.core.served_models import ScenarioModel, ServedArtifact
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.inference.interfaces import InferenceArtifact, InferenceOwnerLostError, RuntimeLoadId, full_weight_name
 from reef.inference.residency import adapter_name
 from reef.inference.serving import AdapterServingRuntime
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.jobs import JobLoopState
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

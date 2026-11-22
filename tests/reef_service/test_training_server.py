@@ -19,6 +19,9 @@ from tests.support.harness_jobs import IdleMethod, evolution_config
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
+from reef import deploy
+from reef.api.app import create_app
+from reef.api.settings import ServiceSettings
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
 from reef.control.dispatcher import Dispatcher
 from reef.core.plugins import PluginConfigError
@@ -26,9 +29,6 @@ from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.service import deploy
-from reef.service.app import create_app
-from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobStatus, TrainingJob
@@ -41,7 +41,7 @@ GENERATED_TASK_RECIPE = "reef.recipe.generated_tasks:GeneratedTaskRecipe"
 
 
 def test_configured_handler_rejects_a_function() -> None:
-    from reef.service.deploy.serving import inference_handler_factory_for
+    from reef.api.serving import inference_handler_factory_for
 
     with pytest.raises(ValueError, match="must name a class that inherits InferenceHandler"):
         inference_handler_factory_for("reef.inference.http:provider_request_headers")
@@ -239,7 +239,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     service = next(item for item in config["services"] if item["name"] == "reef")
     args = deploy.service_config_from_mapping(config)
 
-    assert service["command"] == [sys.executable, "-m", "reef.service"]
+    assert service["command"] == [sys.executable, "-m", "reef.deploy.service_process"]
     assert "REEF_TOKEN" not in service.get("env", {})
     assert args.tokens == ("test-token",)
     assert args.recipe == recipe
@@ -428,10 +428,10 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(stub_reposito
 
 @pytest.mark.unit
 def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured_inference_handler() -> None:
+    from reef.api.serving import serving_runtime_config
+    from reef.api.training import training_deployment_for
     from reef.core.weight_layout import ArtifactFormat
     from reef.inference.sglang.chat import SGLangInferenceHandler
-    from reef.service.deploy.serving import serving_runtime_config
-    from reef.service.deploy.training import training_deployment_for
 
     settings = service_settings(
         training_backend="slime",
@@ -603,7 +603,7 @@ def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
     """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
     recipe-owned remainder of the section must still exclude it, or every
     training recipe would reject the cookbook configs as unconsumed settings."""
-    from reef.service.assembly import _recipe_owned_settings
+    from reef.api.assembly import _recipe_owned_settings
 
     config = {"reef": {"recipe": "openclawrl", "token": "secret", "tokens": ["next"], "batch_size": 2}}
     owned = _recipe_owned_settings(deploy.service_config_from_mapping(config))
@@ -612,7 +612,7 @@ def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
 
 @pytest.mark.unit
 def test_stack_service_env_names_the_config_and_interpolates_service_values(tmp_path: Path) -> None:
-    from reef.service.deploy.process import ProcessWorker as _Stack
+    from reef.deploy.process import ProcessWorker as _Stack
 
     config = {"reef": {"port": 8900}}
     stack = _Stack(config, [{"name": "ray-head"}], tmp_path / "stack", 60, tmp_path / "serve.yaml")
@@ -625,7 +625,7 @@ def test_stack_service_env_names_the_config_and_interpolates_service_values(tmp_
 
 @pytest.mark.unit
 def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: Path) -> None:
-    from reef.service.deploy.process import ProcessWorker as _Stack
+    from reef.deploy.process import ProcessWorker as _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     process = _Process()
@@ -639,7 +639,7 @@ def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_terminates_descendants_after_the_service_leader_exits(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy.process import ProcessWorker as _Stack
+    from reef.deploy.process import ProcessWorker as _Stack
 
     run_dir = tmp_path / "stack"
     run_dir.mkdir()
@@ -697,8 +697,8 @@ subprocess.Popen([sys.executable, "-c", {child_code!r}])
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_signals_descendants_after_the_leader_exits(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import process as orchestrator
-    from reef.service.deploy.process import ProcessWorker
+    from reef.deploy import process as orchestrator
+    from reef.deploy.process import ProcessWorker
 
     stack = ProcessWorker({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     stack._procs["service"] = _Process(returncode=0)
@@ -731,8 +731,8 @@ def test_stack_shutdown_signals_descendants_after_the_leader_exits(tmp_path: Pat
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_escalates_surviving_groups_in_reverse_dependency_order(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import process as orchestrator
-    from reef.service.deploy.process import ProcessWorker
+    from reef.deploy import process as orchestrator
+    from reef.deploy.process import ProcessWorker
 
     stack = ProcessWorker(
         {},
@@ -775,8 +775,8 @@ def test_stack_shutdown_escalates_surviving_groups_in_reverse_dependency_order(t
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import process as orchestrator
-    from reef.service.deploy.process import ProcessWorker
+    from reef.deploy import process as orchestrator
+    from reef.deploy.process import ProcessWorker
 
     stack = ProcessWorker({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     stack._procs["service"] = _Process(returncode=0, pid=123)
@@ -806,8 +806,8 @@ def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkey
 def test_the_watchdog_fails_on_an_unexpected_child_exit_only(
     tmp_path: Path, returncode: int, signal_during_poll: bool, exit_code: int
 ) -> None:
+    from reef.deploy.orchestrator import _Stack
     from reef.execution.executor.uniproc import UniProcExecutor
-    from reef.service.deploy.orchestrator import _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
 
@@ -829,7 +829,7 @@ def test_the_watchdog_fails_on_an_unexpected_child_exit_only(
 
 @pytest.mark.unit
 def test_stack_installs_signal_handlers_before_starting_watchdog(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import orchestrator
+    from reef.deploy import orchestrator
 
     stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
     handlers = {}
@@ -862,7 +862,7 @@ def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> Non
         import signal
         import threading
         from pathlib import Path
-        from reef.service.deploy import orchestrator
+        from reef.deploy import orchestrator
 
         class InterruptDuringWait(threading.Event):
             def wait(self, timeout=None):
@@ -894,8 +894,8 @@ def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy import orchestrator
     from reef.execution.executor.uniproc import UniProcExecutor
-    from reef.service.deploy import orchestrator
 
     stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
     handlers = {}

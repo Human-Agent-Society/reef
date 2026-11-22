@@ -446,7 +446,7 @@ jobs:
       - run: |
           python -c "
           import importlib.util, pathlib
-          import reef, reef.service.deploy
+          import reef, reef.deploy
           import reef_client
           import reef.recipe as rp
           from reef.recipe import Recipe

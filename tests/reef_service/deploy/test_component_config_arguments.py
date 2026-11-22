@@ -17,17 +17,17 @@ from tests.support.training_deployment import LocalFacts
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.core.errors import RuntimeConfigError
+from reef.deploy import orchestrator
+from reef.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
+from reef.deploy.config_utils import DeployConfigError, interpolate_environment
+from reef.deploy.deployment_config import component_config_arguments, normalize_component_config
+from reef.deploy.service_config import normalize_service_config, service_config_from_mapping
 from reef.execution.executor.config import executor_settings
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.loading import load_recipe
-from reef.service.deploy import orchestrator
-from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
-from reef.service.deploy.deployment_config import component_config_arguments, normalize_component_config
-from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 
 
 @dataclass(frozen=True)
@@ -261,7 +261,7 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
     path = tmp_path / "stack.yaml"
     path.write_text("recipe:\n  implementation: light_recipe:LightRecipe\n")
     script = (
-        "import sys\nfrom reef.service.deploy.orchestrator import main\n"
+        "import sys\nfrom reef.deploy.orchestrator import main\n"
         "try:\n    main(['-c', sys.argv[1], '--help'])\n"
         "except SystemExit as e:\n    assert e.code == 0\n"
         "assert not {'torch', 'slime', 'sglang', 'light_unselected'} & sys.modules.keys()\n"
@@ -272,8 +272,8 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
 
 
 def test_training_recipe_resolves_fields_once_before_connecting(extension, monkeypatch):
-    from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceSettings
+    from reef.api import assembly
+    from reef.api.settings import ServiceSettings
 
     resolved = []
     original = assembly.resolve_config_field_values
@@ -383,11 +383,7 @@ def test_references_expand_inside_declared_recipe_containers(extension):
 
 
 def test_recipe_layout_uses_selected_schema(extension):
-    from reef.service.deploy.deployment_config import (
-        normalize_component_layout,
-        translate_layout,
-        translate_references,
-    )
+    from reef.deploy.deployment_config import normalize_component_layout, translate_layout, translate_references
 
     config = translate_layout(
         {

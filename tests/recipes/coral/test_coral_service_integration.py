@@ -1,6 +1,6 @@
 """End-to-end: adapter -> real reef service -> receipt -> journal -> report.
 
-The reef service is real (``reef.service.app.create_app`` with a stub
+The reef service is real (``reef.api.app.create_app`` with a stub
 inference backend, exactly as reef's own service tests build it); the
 middleware forwards to it over real HTTP. What LiteLLM would contribute in
 production — an opaque proxy hop — is the pass-through the shim reproduces.
@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-reef_service = pytest.importorskip("reef.service.app", reason="requires a reef checkout")
+reef_service = pytest.importorskip("reef.api.app", reason="requires a reef checkout")
 
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference

@@ -9,17 +9,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+from reef.api.settings import ServiceSettings, service_config_arguments
 from reef.cli import main as cli_main
-from reef.service.deploy import orchestrator
-from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.config_utils import interpolate_environment, load_config
-from reef.service.deploy.service_config import (
-    ServiceSettings,
-    normalize_service_config,
-    parse_service_arguments,
-    service_config_arguments,
-    service_config_from_mapping,
-)
+from reef.deploy import orchestrator
+from reef.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
+from reef.deploy.config_utils import interpolate_environment, load_config
+from reef.deploy.service_config import normalize_service_config, parse_service_arguments, service_config_from_mapping
 
 
 @pytest.mark.parametrize(
@@ -191,7 +186,7 @@ def test_cli_help_exposes_public_fields_without_optional_runtimes():
 
     code = (
         "import sys\n"
-        "from reef.service.deploy.cli import build_serve_parser\n"
+        "from reef.deploy.cli import build_serve_parser\n"
         "print(build_serve_parser().format_help())\n"
         "assert not any(name in sys.modules for name in ('torch', 'slime', 'sglang'))\n"
     )

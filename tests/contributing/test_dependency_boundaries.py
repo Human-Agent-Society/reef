@@ -77,19 +77,21 @@ def test_infra_never_imports_a_method_package() -> None:
     assert offenders == []
 
 
-def test_routing_never_imports_the_service() -> None:
-    # The service imports the Semantic Router integration, never the reverse (RFC #1570).
+def test_routing_never_imports_the_entry_layer() -> None:
+    # ``reef.api`` and ``reef.deploy`` import the Semantic Router integration, never the reverse (RFC #1570).
     offenders: list[str] = []
     for path in sorted((REPO_ROOT / "reef" / "routing").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         offenders.extend(
-            f"{path.relative_to(REPO_ROOT)} -> {target}" for target in _imports_of(imported, "reef.service")
+            f"{path.relative_to(REPO_ROOT)} -> {target}"
+            for layer in ("reef.api", "reef.deploy")
+            for target in _imports_of(imported, layer)
         )
     assert offenders == []
 
 
-def test_control_never_imports_the_service_or_aiohttp() -> None:
+def test_control_never_imports_the_entry_layer_or_aiohttp() -> None:
     # Operations are what a client asks for, without HTTP: a route adapts each one. The dispatcher, the scenario
     # package and the workers do not call operations.
     control = REPO_ROOT / "reef" / "control"
@@ -97,7 +99,8 @@ def test_control_never_imports_the_service_or_aiohttp() -> None:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         name = str(path.relative_to(REPO_ROOT))
-        assert _imports_of(imported, "reef.service") == [], name
+        assert _imports_of(imported, "reef.api") == [], name
+        assert _imports_of(imported, "reef.deploy") == [], name
         assert _imports_of(imported, "aiohttp") == [], name
         if control / "operations" not in path.parents:
             assert _imports_of(imported, "reef.control.operations") == [], name
@@ -233,14 +236,14 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
 
 
 def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
-    module = importlib.import_module("reef.service.app")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.service")
+    module = importlib.import_module("reef.api.app")
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.api")
     assert all(
         target == "reef.storage.records" or target.startswith("reef.storage.records.")
         for target in _imports_of(imported, "reef.storage")
     )
     assert _imports_of(imported, "reef.control.dispatcher.build_default_dispatcher") == []
-    assert _imports_of(imported, "reef.service.assembly") == []
+    assert _imports_of(imported, "reef.api.assembly") == []
     assert inspect.signature(module.create_app).parameters["dispatcher"].default is inspect.Parameter.empty
 
 
@@ -312,7 +315,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     core_packages = (
         "reef/core",
         "reef/control",
-        "reef/service",
+        "reef/api",
         "reef/storage",
         "reef/artifact",
         "reef/recipe",
@@ -579,8 +582,8 @@ def test_only_the_training_service_builds_a_training_component() -> None:
                 and called.value.id == "HarnessTrainingComponent"
             ):
                 built.setdefault(str(path.relative_to(REPO_ROOT)), []).append(called.attr)
-    assert built == {"reef/service/assembly.py": list(builders)}
-    assembly = ast.parse((REPO_ROOT / "reef/service/assembly.py").read_text(encoding="utf-8"))
+    assert built == {"reef/api/assembly.py": list(builders)}
+    assembly = ast.parse((REPO_ROOT / "reef/api/assembly.py").read_text(encoding="utf-8"))
     guarded = [
         ast.unparse(node.test)
         for node in ast.walk(assembly)
@@ -723,7 +726,7 @@ def test_a_recipe_builds_no_trainer_and_no_pipeline() -> None:
 
 
 #: The methods that loaded a recipe, or decided for the launcher and the training service, on a recipe class
-#: before RFC #1390 moved that work to ``reef.recipe.loading`` and ``reef.service.deploy.training``.
+#: before RFC #1390 moved that work to ``reef.recipe.loading`` and ``reef.deploy.training``.
 RECIPE_LOADING_METHODS = frozenset(
     {
         "from_environment",

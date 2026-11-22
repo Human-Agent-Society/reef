@@ -33,8 +33,10 @@ from tests.support.records import memory_records
 from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import recorded_trajectory
 
+from reef.api.assembly import _load_deployment, _upstream_runtime, load_named_recipe
 from reef.control.scenario.live_objects import LiveObjects, harness_models
 from reef.core.snapshot import SnapshotRef
+from reef.deploy.service_config import service_config_from_mapping
 from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
@@ -47,8 +49,6 @@ from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.service.assembly import _load_deployment, _upstream_runtime, load_named_recipe
-from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioDatabase
 from reef.train.backend import ComponentArtifacts

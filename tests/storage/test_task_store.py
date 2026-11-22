@@ -11,12 +11,12 @@ from typing import Any, Self
 
 import pytest
 
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.core.config import config_option
 from reef.core.errors import ScenarioDeletedError
 from reef.core.plugins import PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import (

@@ -11,12 +11,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from reef.deploy import orchestrator
+from reef.deploy.execution import validate_services
+from reef.deploy.orchestrator import _Stack
+from reef.deploy.process import ProcessWorker
 from reef.execution.executor import Executor
 from reef.execution.executor.ray import RayExecutor
-from reef.service.deploy import orchestrator
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.orchestrator import _Stack
-from reef.service.deploy.process import ProcessWorker
 
 
 def service(name, marker, **options):

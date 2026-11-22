@@ -36,16 +36,16 @@ from tests.routing.routing_fakes import (
 )
 
 import reef.routing.preview as routing_preview
+from reef.api.app import CONTROL_APPLICATION, create_app
+from reef.api.assembly import build_app
+from reef.api.errors import translate_error
+from reef.api.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
+from reef.api.settings import ServiceSettings
+from reef.api.web import MAX_REQUEST_BYTES
 from reef.control.dispatcher import Dispatcher
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.routing.preview import EXPECTED_HASH_HEADER, PREVIEW_BODY_LIMIT_BYTES
-from reef.service.app import CONTROL_APPLICATION, create_app
-from reef.service.assembly import build_app
-from reef.service.deploy.service_config import ServiceSettings
-from reef.service.errors import translate_error
-from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
-from reef.service.web import MAX_REQUEST_BYTES
 
 pytestmark = pytest.mark.unit
 NEW_ROUTER_HASH = "2" * 64

@@ -18,7 +18,7 @@ Reef is organized around an application kernel and three capability domains, not
        Methods("<b>Method plug-ins</b><br/><code>recipes/*</code>")
        Entry("<b>Entrypoints</b><br/>HTTP · CLI")
        Policy("<b>Policy</b><br/><code>reef/recipe</code>")
-       Service("<b>Delivery &amp; composition</b><br/><code>reef/service</code>")
+       Service("<b>Delivery &amp; composition</b><br/><code>reef/api</code> · <code>reef/deploy</code>")
        Kernel(["<b>Application kernel</b><br/><code>reef/control</code>"])
 
        subgraph Domains["Capability domains"]
@@ -57,9 +57,12 @@ Reef is organized around an application kernel and three capability domains, not
    * - ``reef/core/``
      - Shared value types, wire shapes, artifact identity, root errors
      - Storage, I/O, runtime behavior
-   * - ``reef/service/``
-     - HTTP routes, auth, streaming, the app of each service, deployment and process lifecycle
+   * - ``reef/api/``
+     - HTTP routes, auth, streaming, the app of each service
      - Training methods, domain logic tied to aiohttp
+   * - ``reef/deploy/``
+     - ``reef serve``: the configuration of a deployment, the startup of its processes, and their lifecycle
+     - HTTP routes, request handling
    * - ``reef/control/``
      - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers. ``operations/`` holds the operations that a client asks for, without HTTP: data items, artifact evaluations, artifact imports, and the reads of a scenario's files and samples.
      - A concrete record backend, HTTP, training algorithms, repository implementations
@@ -116,7 +119,7 @@ Services and the shared store
 
 A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
 
-``reef/service/components.py`` holds one app builder per service (``COMPONENT_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/service/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
+``reef/api/components.py`` holds one app builder per service (``COMPONENT_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/api/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
 
 .. list-table::
    :header-rows: 1
@@ -129,12 +132,12 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - Writes
    * - ``control``
      - ``ControlApp``
-     - ``reef/service/routes/`` (all but the data routes), ``reef/control/``; the trainers' job loops (``reef/train/jobs.py``)
+     - ``reef/api/routes/`` (all but the data routes), ``reef/control/``; the trainers' job loops (``reef/train/jobs.py``)
      - The control lease; the ``data_sync``, ``harness_sync``, ``scenario_deletes`` and ``training_requests`` queues; the results of every other queue
      - Commits and settings; items of the ``serving``, ``training_checks``, ``jobs``, ``samples``, ``evaluations`` and ``data`` queues
    * - ``inference``
      - ``InferenceApp``
-     - ``reef/service/inference_service.py``, ``ServingWorker`` in ``reef/control/workers/serving.py``, the runtime in ``reef/inference/``
+     - ``reef/api/inference_service.py``, ``ServingWorker`` in ``reef/control/workers/serving.py``, the runtime in ``reef/inference/``
      - The ``serving`` queue; the ``inference-owner`` lease; ``served_models``
      - ``served_models`` routes and stops; records
    * - ``samples``
@@ -154,12 +157,12 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - Rollout results; ``serve_artifact`` items of the ``serving`` queue; the calls of each rollout
    * - ``data``
      - ``DataApp``
-     - ``reef/service/routes/data.py``, ``reef/service/routes/scenario_files.py``, ``reef/control/operations/data.py``, ``DataWorker`` in ``reef/control/operations/data_service.py``
+     - ``reef/api/routes/data.py``, ``reef/api/routes/scenario_files.py``, ``reef/control/operations/data.py``, ``DataWorker`` in ``reef/control/operations/data_service.py``
      - The ``data`` queue (artifact copies, imports, exports)
      - Data items and segments; ``data_sync`` items
    * - ``harness``
      - ``HarnessApp``
-     - ``reef/service/routes/harness.py``
+     - ``reef/api/routes/harness.py``
      - The commit history and the artifact backend, read-only
      - ``harness_sync`` items
 
@@ -185,7 +188,7 @@ The shared store has four parts. Each row names the module that defines its cont
      - ``reef/artifact/``
      - The snapshots of each scenario, and the stored content of checkpoints
 
-A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/record2sample/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/service/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
+A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/record2sample/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/api/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
 
 Choose a destination
 --------------------
@@ -221,9 +224,9 @@ Choose a destination
    * - One service telling another what to do
      - A queue item or a table of the shared store, not a call (`Services and the shared store`_)
    * - A data route
-     - ``reef/control/operations/data.py``, with the aiohttp adapter in ``reef/service/routes/data.py``
+     - ``reef/control/operations/data.py``, with the aiohttp adapter in ``reef/api/routes/data.py``
    * - HTTP-specific code
-     - ``reef/service/routes/``. Transport-independent behavior goes in a service or domain object.
+     - ``reef/api/routes/``. Transport-independent behavior goes in a service or domain object.
    * - A benchmark, task, grader or external environment
      - ``recipes/<name>/examples/``, or the external harness
 
@@ -305,7 +308,7 @@ The extension points that the packages expose are in `Python API <../reference/p
 Deployment modules
 ------------------
 
-``reef/service/deploy/`` separates configuration input from process startup:
+``reef/deploy/`` separates configuration input from process startup:
 
 .. list-table::
    :header-rows: 1
@@ -330,7 +333,7 @@ Deployment modules
    * - ``orchestrator.py``
      - Coordinates configuration resolution, launch, readiness, supervision and shutdown.
 
-Shared parsing types come from ``reef.core.config``. Native backend argument encoding comes from ``reef.execution.executor.arguments``. The exports of ``reef.service.deploy`` are the entrypoints for app assembly and launching; internal module names are not a compatibility API.
+Shared parsing types come from ``reef.core.config``. Native backend argument encoding comes from ``reef.execution.executor.arguments``. The exports of ``reef.deploy`` are the entrypoints for app assembly and launching; internal module names are not a compatibility API.
 
 Repository-level homes
 ----------------------

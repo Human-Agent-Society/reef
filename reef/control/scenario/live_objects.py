@@ -1,7 +1,7 @@
 """The live objects of one process, and what a recipe's configuration means with them.
 
 A recipe is configuration (RFC #1390): it holds no runtime, no training component and no store. The process that
-builds those objects holds them in one ``LiveObjects`` value. The service assembly (``reef.service.assembly``) makes
+builds those objects holds them in one ``LiveObjects`` value. The service assembly (``reef.api.assembly``) makes
 the value, and the dispatcher, the scenario registry and the scenario factory get it as an argument. The type is in
 this package because the scenario factory is its lowest reader, and the service package imports this one.
 
@@ -83,7 +83,7 @@ class LiveObjects:
     ``scenario_components``). The two components, when both are set, have different names: a job names its
     component by that name.
 
-    Purpose: the service assembly builds one value for each process (``reef.service.assembly``). The dispatcher
+    Purpose: the service assembly builds one value for each process (``reef.api.assembly``). The dispatcher
     gets it, runs the jobs of its components when the process is a training service, and gives the scenario factory
     a copy whose components are the jobs queue's views. The functions of this module read it together with the
     recipe. It holds exactly these objects; nothing else is looked up in it.

@@ -18,9 +18,9 @@ import pytest
 
 import reef
 from reef.cli import main
-from reef.service.deploy import orchestrator
-from reef.service.deploy.config_utils import load_config
-from reef.service.deploy.process import _command_argv
+from reef.deploy import orchestrator
+from reef.deploy.config_utils import load_config
+from reef.deploy.process import _command_argv
 
 
 @pytest.fixture
@@ -259,8 +259,8 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
 
 
 def test_backend_definition_controls_launch_without_backend_specific_code(monkeypatch):
-    from reef.service.deploy.inference import INFERENCE_COMMANDS, InferenceCommand, prepare_inference
-    from reef.service.deploy.service_config import ServiceSettings
+    from reef.api.settings import ServiceSettings
+    from reef.deploy.inference import INFERENCE_COMMANDS, InferenceCommand, prepare_inference
 
     monkeypatch.setitem(
         INFERENCE_COMMANDS,
@@ -302,8 +302,8 @@ def test_backend_definition_controls_launch_without_backend_specific_code(monkey
 
 
 def test_vllm_backend_launches_the_openai_server_with_native_options():
-    from reef.service.deploy.inference import prepare_inference
-    from reef.service.deploy.service_config import ServiceSettings
+    from reef.api.settings import ServiceSettings
+    from reef.deploy.inference import prepare_inference
 
     config = {"reef": {"model_path": "org/model"}}
     settings = ServiceSettings(

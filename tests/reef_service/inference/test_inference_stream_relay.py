@@ -21,13 +21,13 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
+from reef.api.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
+from reef.api.streaming import frame_for_codex
+from reef.api.wire import parse_request_headers
 from reef.artifact.artifact import Artifact
 from reef.core import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.inference.interfaces import FixedEngineClients, InferenceArtifact, InferenceHandler, InferenceStream
-from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
-from reef.service.streaming import frame_for_codex
-from reef.service.wire import parse_request_headers
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

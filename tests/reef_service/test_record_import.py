@@ -17,6 +17,8 @@ from tests.support.runtime_stubs import (
 )
 from tests.support.samples import made_task
 
+from reef.api.app import create_app
+from reef.api.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.live_objects import LiveObjects
@@ -26,8 +28,6 @@ from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.record2sample import ReportSamples
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.service.app import create_app
-from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData

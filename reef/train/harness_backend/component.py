@@ -120,7 +120,7 @@ class HarnessTrainingComponent(LocalJobComponent):
     templates write it into each evaluation run, so neither the seed nor a kept tree ever carries a provider.
 
     Purpose: the service builds one for each harness recipe of the deployment (``from_settings``, in
-    ``reef.service.assembly.with_harness_components``); the dispatcher queues its jobs, and the training service
+    ``reef.api.assembly.with_harness_components``); the dispatcher queues its jobs, and the training service
     runs them. Code that already holds the method and the scorer as objects calls the constructor.
     """
 

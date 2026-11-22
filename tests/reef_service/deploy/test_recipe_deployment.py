@@ -9,13 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.api.training import training_recipe_config
+from reef.deploy import orchestrator
+from reef.deploy.config_utils import DeployConfigError
+from reef.deploy.execution import validate_services
+from reef.deploy.inference import INFERENCE_COMPONENT_SERVICE, command_line_config
+from reef.deploy.orchestrator import _Stack, resolve_deployment_config
 from reef.recipe.loading import load_recipe
-from reef.service.deploy import orchestrator
-from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE, command_line_config
-from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
-from reef.service.deploy.training import training_recipe_config
 
 OPENCLAW = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 
@@ -57,8 +57,8 @@ def test_cli_cannot_reintroduce_process_configuration(tmp_path, flag, from_file)
 
 def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_path):
     from recipes.openclawrl.recipe import OpenClawRLRecipe
-    from reef.service.assembly import _recipe_owned_settings
-    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.api.assembly import _recipe_owned_settings
+    from reef.deploy.service_config import service_config_from_mapping
 
     raw = method_config()
     config, _ = resolve_deployment_config(
@@ -103,8 +103,8 @@ def test_recipe_rejects_model_service_launch_options(tmp_path, field, cli):
 
 
 def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
-    from reef.service.assembly import _load_deployment
-    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.api.assembly import _load_deployment
+    from reef.deploy.service_config import service_config_from_mapping
 
     raw = {
         "recipe": {

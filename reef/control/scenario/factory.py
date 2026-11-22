@@ -264,7 +264,7 @@ def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
         if live.harness_component is None:
             raise RecipeConfigError(
                 "harness evolution has no training component to run its jobs: the service builds one with "
-                "reef.service.assembly.with_harness_components"
+                "reef.api.assembly.with_harness_components"
             )
         job_component = live.harness_component
     elif isinstance(recipe, WeightTrainingRecipe):

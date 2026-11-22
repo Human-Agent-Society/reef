@@ -1,6 +1,6 @@
 """A scenario's artifact files, which the data service serves.
 
-No aiohttp types appear here. ``reef.service.routes.scenario_files`` and ``reef.service.routes.scenarios`` adapt it
+No aiohttp types appear here. ``reef.api.routes.scenario_files`` and ``reef.api.routes.scenarios`` adapt it
 to HTTP.
 """
 

@@ -14,11 +14,12 @@ import pytest
 import yaml
 from tests.routing.routing_fakes import DOMAIN_LABELS, FakeRuntime, write_domain_classifier
 
+from reef.api.settings import ServiceSettings
+from reef.deploy.service_config import normalize_service_config, service_config_from_mapping
 from reef.routing.deployment_controller import RoutingDeploymentController
 from reef.routing.manifest import RoutingSnapshot
 from reef.routing.renderer import ManagedRoutingRender, generate, render_external
 from reef.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
-from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
 
 pytestmark = pytest.mark.unit
 LABELS = {
@@ -654,7 +655,7 @@ def test_the_documented_validate_command_reads_a_public_configuration_without_do
     capsys: pytest.CaptureFixture[str],
     named: bool,
 ) -> None:
-    from reef.service.deploy.routing import cli
+    from reef.deploy.routing import cli
 
     def no_docker(*args: object, **kwargs: object) -> None:
         pytest.fail("validate must not use Docker")

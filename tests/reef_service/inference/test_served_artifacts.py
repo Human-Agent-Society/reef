@@ -20,6 +20,8 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
+from reef.api.app import create_app
+from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.sources import DirectorySource
@@ -28,8 +30,6 @@ from reef.control.workers.serving import ServingWorker
 from reef.core.errors import ReefError
 from reef.core.served_models import ScheduledStop, ServedArtifact
 from reef.inference.interfaces import FixedEngineClients
-from reef.service.app import create_app
-from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer

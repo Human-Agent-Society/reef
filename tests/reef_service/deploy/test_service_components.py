@@ -25,6 +25,11 @@ from tests.support.runtime_stubs import (
 from tests.support.training_deployment import LocalFacts, LocalServingFactory, facts_component_factory
 from tests.support.trajectories import policy_trajectory
 
+from reef.api import assembly
+from reef.api import components as component_apps
+from reef.api.app import create_data_app, get_dispatcher
+from reef.api.components import build_component_app
+from reef.api.settings import ServiceSettings
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.sources import ArtifactSources, DirectorySource
@@ -41,6 +46,9 @@ from reef.control.workers.store_changes import StoreChanges, StoreChangesWatcher
 from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
+from reef.deploy.cli import build_serve_parser
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, TaskTemplateWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.inference.serving import AdapterServingRuntime
@@ -55,13 +63,6 @@ from reef.record2sample.service import (
     Selection,
     request_selection,
 )
-from reef.service import assembly
-from reef.service import components as component_apps
-from reef.service.app import create_data_app, get_dispatcher
-from reef.service.components import build_component_app
-from reef.service.deploy.cli import build_serve_parser
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

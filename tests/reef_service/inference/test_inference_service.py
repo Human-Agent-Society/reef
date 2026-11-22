@@ -10,12 +10,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import EngineClients, InferenceHandler, StartupStep, StartupSteps
-from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination
@@ -424,8 +424,8 @@ def test_inference_records_do_not_need_snapshot_history(tmp_path):
     storage = SQLiteScenarioStorage(tmp_path / "records")
     coordination = memory_coordination()
     try:
-        from reef.service.inference_service import InferenceReplica, ServedModelsCache
-        from reef.service.wire import RequestHeaders
+        from reef.api.inference_service import InferenceReplica, ServedModelsCache
+        from reef.api.wire import RequestHeaders
 
         replica = InferenceReplica(ServedModelsCache(coordination.served_models), storage, Engines())
         receipt = replica.record(

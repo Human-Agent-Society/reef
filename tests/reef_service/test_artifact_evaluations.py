@@ -25,6 +25,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import dispatcher_for
 
+from reef.api.app import create_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentSpec, ScenarioComponents
@@ -80,7 +81,6 @@ from reef.harness.tree import HarnessTree
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.composite import CompositeRecipe
-from reef.service.app import create_app
 from reef.storage.commits import CommitRecord
 from reef.storage.data import MemoryDataStore, NewItem
 from reef.storage.evaluations import EvaluationStore

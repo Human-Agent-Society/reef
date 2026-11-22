@@ -12,11 +12,11 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import TOKEN, UploadRecipe, dispatcher_for, upload_trajectories
 
+from reef.api.app import create_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.core.tasks import write_harbor_task
 from reef.recipe import Recipe
-from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

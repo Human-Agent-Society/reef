@@ -201,7 +201,7 @@ A sample alone in its group trains with advantage 0 on Slime and counts in ``rol
 The ``generator`` section
 -------------------------
 
-Absent by default. When present, ``reef serve`` starts the generator service (``python -m reef.service.deploy.generator_process``) before the HTTP service and publishes its address as ``${endpoints.generator}``. The generator writes and checks Harbor tasks for the generated-task recipe, and runs the plays of a task generator such as SPADE. It runs under the same interpreter as the Reef service. ``execution.generator`` selects its executor, so a deployment can place it on another host.
+Absent by default. When present, ``reef serve`` starts the generator service (``python -m reef.deploy.generator_process``) before the HTTP service and publishes its address as ``${endpoints.generator}``. The generator writes and checks Harbor tasks for the generated-task recipe, and runs the plays of a task generator such as SPADE. It runs under the same interpreter as the Reef service. ``execution.generator`` selects its executor, so a deployment can place it on another host.
 
 The generator's host needs the ``harbor`` command line and the Harbor environment that ``generator.environment`` selects; the Reef service itself needs neither.
 
@@ -282,7 +282,7 @@ The generator runs its proposals, checks and rollouts at the same time. ``genera
        config:
          generator_url: ${endpoints.generator}
 
-The generator reads the resolved deployment: the Reef address from ``reef.host`` and ``reef.port``, the token from ``reef.token``, and the served model from ``inference.model-path`` or ``inference.upstream-model``. Without ``reef serve``, ``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
+The generator reads the resolved deployment: the Reef address from ``reef.host`` and ``reef.port``, the token from ``reef.token``, and the served model from ``inference.model-path`` or ``inference.upstream-model``. Without ``reef serve``, ``python -m reef.deploy.generator_process -c serve.yaml`` runs it from the same file.
 
 The ``task-import`` section
 ---------------------------

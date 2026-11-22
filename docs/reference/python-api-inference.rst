@@ -202,7 +202,7 @@ Factories and modules
      - Role
    * - ``RuntimeFactory``, ``RuntimeRegistry`` (``reef.inference.registry``)
      - Define and build the ``InferenceRuntime``.
-   * - ``reef.service.deploy.serving.serving_runtime_config``
+   * - ``reef.api.serving.serving_runtime_config``
      - Describes the serving runtime from the ``inference`` settings and the backend's ``artifact_format``.
 
 The inference contracts are the modules at the root of ``reef.inference``. Values that both training and inference read are in ``reef.core.weight_layout`` (``ArtifactFormat``, ``WeightFiles``, ``ArtifactWeights``). See the `codebase map <../contributing/codebase-structure.rst>`__. `Training <python-api-training.rst#factories-and-modules>`__ lists the training component factories and the rule for two training scenarios in one deployment.

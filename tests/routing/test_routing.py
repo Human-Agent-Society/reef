@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from tests.routing.routing_fakes import preview_reply
 
+from reef.api.errors import ROUTING_ERRORS
 from reef.inference.http import HttpInferenceHandler
 from reef.routing.manifest import (
     ROUTING_ERROR_STATUSES,
@@ -28,7 +29,6 @@ from reef.routing.manifest import (
     check_policy_change,
 )
 from reef.routing.preview import checked_selection
-from reef.service.errors import ROUTING_ERRORS
 
 pytestmark = pytest.mark.unit
 ROUTER_HASH = "3" * 64

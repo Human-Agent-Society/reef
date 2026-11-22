@@ -2,7 +2,7 @@
 
 A processor that generates tasks runs inside the Reef service and must not block the trainer; it also
 must not need Docker, the ``harbor`` command line or reef-eval in that process. So the steps that need
-them run here, in a process ``reef serve`` starts beside the HTTP service (see ``reef.service.deploy``):
+them run here, in a process ``reef serve`` starts beside the HTTP service (see ``reef.deploy``):
 
 - ``POST /proposals``: ask the designer's model for one task (a job): the service's designer model when it
   has one, else the model the request names; the reply parsed and held to the task contract, the

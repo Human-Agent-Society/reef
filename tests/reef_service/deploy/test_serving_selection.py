@@ -4,18 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from reef.api.serving import ENGINES, NONE, TRAINER, prepare_engine_serving, serving_mode, serving_runtime_config
+from reef.api.settings import ServiceSettings
 from reef.core.errors import DeployConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.service.deploy.service_config import ServiceSettings
-from reef.service.deploy.serving import (
-    ENGINES,
-    NONE,
-    TRAINER,
-    prepare_engine_serving,
-    serving_mode,
-    serving_runtime_config,
-)
 from reef.train.slime_backend.launch import SlimeDeployment
 from reef.train.tinker_backend.launch import TinkerDeployment
 

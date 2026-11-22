@@ -41,7 +41,7 @@ Run entry points as modules or scripts:
 
 .. code:: bash
 
-   python -m reef.service.deploy --help
+   python -m reef.deploy --help
    recipes/basic/run.sh
 
 Checks

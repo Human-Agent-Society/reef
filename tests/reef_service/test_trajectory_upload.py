@@ -20,9 +20,9 @@ from tests.support.trajectory_uploads import (
     upload_trajectories,
 )
 
+from reef.api.app import create_app
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
-from reef.service.app import create_app
 from reef.train.types import TrajectorySample
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

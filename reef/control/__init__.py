@@ -15,7 +15,7 @@ hold the dispatcher, the process-wide owner of every scenario:
 
 ``workers`` holds the background workers that the dispatcher runs.
 
-Request handling lives in ``reef.service``; this package is transport-free.
+Request handling lives in ``reef.api``; this package is transport-free.
 
 Lock order: cycle locks, then a scenario's registry lock, then the
 coordination lock of ``workers.local_workers``, then the training errors lock.

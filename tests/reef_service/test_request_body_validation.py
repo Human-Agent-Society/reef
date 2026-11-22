@@ -8,9 +8,9 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from reef.api.app import create_app
+from reef.api.wire import ReportPayload
 from reef.control.dispatcher import build_default_dispatcher
-from reef.service.app import create_app
-from reef.service.wire import ReportPayload
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

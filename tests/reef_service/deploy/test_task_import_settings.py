@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 from tests.support.task_service_stubs import task_for
 
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, write_split_manifest
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
+from reef.deploy.deployment_config import translate_layout
+from reef.deploy.service_config import normalize_service_config, service_config_from_mapping
 
 
 def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> None:

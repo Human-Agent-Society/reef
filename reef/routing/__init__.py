@@ -12,8 +12,8 @@ manage the Semantic Router of a managed deployment:
     policy: The router's management API and the policy-update journal.
     deployment_controller: Startup, observation, recovery, policy updates and shutdown.
 
-Nothing in this package imports ``reef.service``. The service imports this package: its routed chat route, its
-routed inference and ``reef serve`` use these modules, and ``reef.service.deploy.routing.cli`` holds the commands.
+Nothing in this package imports ``reef.api`` or ``reef.deploy``. They import this package: the routed chat route,
+the routed inference and ``reef serve`` use these modules, and ``reef.deploy.routing.cli`` holds the commands.
 
 Import each module directly; this package exports nothing, so importing it never loads the controller.
 """

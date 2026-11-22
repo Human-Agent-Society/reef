@@ -16,15 +16,15 @@ import yaml
 from aiohttp.test_utils import TestClient, TestServer
 from tests.routing.routing_fakes import ControllerCase, FakeControl, FakeRuntime, opened, routing_dispatcher
 
+from reef.api.app import create_app
+from reef.api.lifecycle import REQUEST_ACCEPTANCE
+from reef.api.settings import ServiceSettings
+from reef.deploy import orchestrator
 from reef.routing.containers import ContainerEvent
 from reef.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
 from reef.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError
 from reef.routing.registry import DeploymentOwnership
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.service.app import create_app
-from reef.service.deploy import orchestrator
-from reef.service.deploy.service_config import ServiceSettings
-from reef.service.lifecycle import REQUEST_ACCEPTANCE
 
 pytestmark = pytest.mark.unit
 

@@ -31,6 +31,7 @@ from tests.routing.routing_fakes import (
     routing_manifest,
 )
 
+from reef.api.settings import ServiceSettings
 from reef.routing.containers import ContainerCommandError, ContainerEvent, ContainerInventory, ContainerState
 from reef.routing.deployment_controller import (
     IMAGE_BUILD_LOG,
@@ -44,7 +45,6 @@ from reef.routing.preview import PreviewSettings
 from reef.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError, RoutingControlTimeoutError
 from reef.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceSettings
 
 pytestmark = pytest.mark.unit
 

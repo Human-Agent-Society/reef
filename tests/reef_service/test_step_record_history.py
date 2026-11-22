@@ -11,8 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import changed_rules, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, wait_for_rows
 
+from reef.api.app import create_app
 from reef.harness.tree import TreePatch
-from reef.service.app import create_app
 from reef.train.harness_backend.records import MAX_RECORD_BYTES, read_job_records
 
 SCENARIO = "agents"

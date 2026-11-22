@@ -8,7 +8,7 @@ from dataclasses import replace
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.trajectory_uploads import HEADERS, TOKEN, UploadRecipe, dispatcher_for, upload_trajectories
 
-from reef.service.app import create_app
+from reef.api.app import create_app
 
 AUTH = {"Authorization": HEADERS["Authorization"]}
 

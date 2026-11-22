@@ -179,7 +179,7 @@ class HarnessEvolutionRecipe(Recipe):
     The model under test is that runtime
     (``reef.control.scenario.live_objects.harness_models``), and the service builds
     the training component that runs the jobs
-    (``reef.service.assembly.with_harness_components``).
+    (``reef.api.assembly.with_harness_components``).
     Purpose: a deployment names it as its recipe; the service loads it once
     from the deployment config, and the scenario factory builds each
     scenario's trainer (``reef.train.trainer_builder.build_trainers``), which
