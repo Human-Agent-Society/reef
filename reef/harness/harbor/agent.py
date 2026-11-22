@@ -43,7 +43,7 @@ from reef.core.tasks import HarborTaskError, primary_reward, task_instruction
 from reef.execution.sandbox import relay as sandbox_relay
 from reef.execution.sandbox.environment import run_sync
 from reef.execution.sandbox.process import ProgramLaunchError
-from reef.execution.sandbox.remote import HOP_BY_HOP
+from reef.execution.sandbox.remote import HOP_BY_HOP, loopback_url
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.harness.harbor import bridge_client
@@ -332,8 +332,8 @@ class AdapterAgent(BaseInstalledAgent):
 
         Reef's sandbox relay answers that port in the container and holds each call. ``BRIDGE_POLLERS`` loops here
         take the calls through Harbor's exec, with ``bridge_client``, answer each from this host's port, and give the
-        answer back in the next exchange. Exec works in every Harbor environment, also for a task with several compose
-        services. Raise ``ProgramLaunchError`` when the relay does not answer.
+        answer back in the next exchange. One loop waits for the first call. The others start when it gets a call or
+        fails. Exec works in every Harbor environment. Raise ``ProgramLaunchError`` when the relay does not answer.
         """
         if self.bridge_port is None:
             yield
@@ -361,9 +361,13 @@ class AdapterAgent(BaseInstalledAgent):
                 raise ProgramLaunchError(f"the bridge's relay did not answer in {RELAY_READY_SECONDS:.0f} s")
             await asyncio.sleep(0.5)
         async with aiohttp.ClientSession(auto_decompress=False) as local:
+            # An idle exchange uses a Python process in the agent's container.
+            concurrent_polls = asyncio.Event()
             pollers = [
-                asyncio.create_task(self.relay_calls(environment, client, local)) for _ in range(BRIDGE_POLLERS)
+                asyncio.create_task(self.relay_calls(environment, client, local, concurrent_polls, primary=index == 0))
+                for index in range(BRIDGE_POLLERS)
             ]
+            pollers[0].add_done_callback(lambda _: concurrent_polls.set())
             try:
                 yield
             finally:
@@ -371,18 +375,30 @@ class AdapterAgent(BaseInstalledAgent):
                     poller.cancel()
                 await asyncio.gather(*pollers, return_exceptions=True)
 
-    async def relay_calls(self, environment: BaseEnvironment, client: str, local: aiohttp.ClientSession) -> None:
+    async def relay_calls(
+        self,
+        environment: BaseEnvironment,
+        client: str,
+        local: aiohttp.ClientSession,
+        concurrent_polls: asyncio.Event,
+        *,
+        primary: bool,
+    ) -> None:
         """Answer the relay's calls one at a time, until cancelled: each exchange gives the last answer back and
         takes the next call. A failed exchange runs again with the same answer, which the relay takes once."""
+        if not primary:
+            await concurrent_polls.wait()
         reply = ""
         while True:
             result = await environment.exec(command=f"{client} {reply}".rstrip(), timeout_sec=120)
             if result.return_code != 0:
+                concurrent_polls.set()
                 await asyncio.sleep(1)
                 continue
             reply = ""
             if not (result.stdout or "").strip():
                 continue
+            concurrent_polls.set()
             request = json.loads(result.stdout)
             piece = await self.answer(local, request)
             path = f"{RELAY_DIR}/replies/{request['id']}.json"
@@ -393,15 +409,30 @@ class AdapterAgent(BaseInstalledAgent):
             reply = f"{request['id']} {path}"
 
     async def answer(self, local: aiohttp.ClientSession, request: Mapping[str, Any]) -> dict[str, Any]:
-        """The relay's one piece that answers ``request`` from this host's ``bridge_port``: the whole answer."""
+        """The relay's one piece that answers ``request`` from this host's ``bridge_port``: the whole answer. A
+        request whose target is not a path of that port gets the status 400, and no request leaves this host
+        (``loopback_url``)."""
         headers = {
             name: value for name, value in (request.get("headers") or {}).items() if name.lower() not in HOP_BY_HOP
         }
         body = base64.b64decode(request.get("body") or "")
+        if self.bridge_port is None:
+            raise ProgramLaunchError("an agent without a bridge port answers no relayed call")
+        try:
+            url = loopback_url(self.bridge_port, request.get("path") or "/")
+        except ValueError as refused:
+            data = str(refused).encode()
+            return {
+                "status": 400,
+                "headers": {"Content-Type": "text/plain"},
+                "data": base64.b64encode(data).decode(),
+                "end": True,
+                "sequence": 0,
+            }
         try:
             async with local.request(
                 str(request.get("method") or "GET"),
-                f"http://127.0.0.1:{self.bridge_port}{request.get('path') or '/'}",
+                url,
                 headers=headers,
                 data=body or None,
                 timeout=aiohttp.ClientTimeout(total=None, sock_read=3600),

@@ -136,7 +136,7 @@ and what the quickstart serves:
 
 Each is complete and runnable: a flat `reef:` section (translated into the
 frozen `ServiceSettings` by
-[`reef/service/deploy/service_config.py`](../reef/service/deploy/service_config.py)) plus
+[`reef/deploy/service_config.py`](../reef/deploy/service_config.py)) plus
 a `services:` list the orchestrator starts in dependency order, with `${VAR}`
 environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`
 defaults to the interpreter running `reef serve`, so Python services that use
@@ -150,7 +150,7 @@ lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the
 smallest weight-training one is
 [`recipes/sao/examples/imo_answerbench/serve.yaml`](sao/examples/imo_answerbench/serve.yaml)).
 Two contracts hold the set honest:
-[`test_training_server.py`](../tests/reef_service/test_training_server.py)
+[`test_training_server.py`](../tests/api/test_training_server.py)
 boots the internal service from every cookbook stack, and
 [`docs/site/scripts/check-doc-contracts.mjs`](../docs/site/scripts/check-doc-contracts.mjs)
 derives the documented port and health route from `local-sglang.yaml`.
@@ -192,7 +192,7 @@ instruction, a container, a verifier and a reference solution, a task any
 Harbor agent can run. SPADE is a task generator. The deployment selects it as
 the generator of the generated-task stages in its `pipeline` section, and the
 built-in generated-task recipe runs the tasks and trains on them. Writing, checking and running tasks is Reef's
-(`reef.record2sample.generator`, the generator service `reef serve` starts beside the
+(`reef.samples.generator`, the generator service `reef serve` starts beside the
 HTTP service). The package holds the method: the Designer's adversarial
 experience section, the hint arm each task asks for, and the hint based regret
 reported against the Designer's receipt. The Designer's own training follows.

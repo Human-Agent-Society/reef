@@ -243,6 +243,6 @@ CPU tests cover custom service and inference executors, resource selection, depe
 
 .. code:: bash
 
-   REEF_TEST_RAY=1 python -m pytest tests/reef_service/deploy/test_service_executor_ray.py
+   REEF_TEST_RAY=1 python -m pytest tests/deploy/test_service_executor_ray.py
 
 These are control-plane tests, not a GPU SGLang or Megatron validation, and not a multi-machine networking benchmark.

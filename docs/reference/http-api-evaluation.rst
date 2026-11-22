@@ -20,13 +20,16 @@ First create the tasks as task items in the scenario's ``eval`` split (`Create t
 Body fields:
 
 - ``artifact_id`` (required): one of the scenario's artifacts, as ``GET /reef/scenarios/{scenario}/artifacts`` lists it.
+- ``start_id``: a client ID for safely repeating a start request in this scenario. Use a non-blank string of at most 256 characters without NUL or surrogate code points.
 - ``component``: the component to evaluate. Leave it out when the artifacts hold one component with a kind.
 - ``harness``: the agent that runs a model artifact (`The harness field`_).
 - ``model``: the model binding that a harness artifact runs on. A request sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run, every eval task by default. The stored request names the tasks that the evaluation runs.
 - ``collection``: a collection of the scenario's owner (`Benchmarks and collections <http-api-data-sets.rst#benchmarks-and-collections>`__). Reef runs the collection's eval tasks, each one once. A request sets ``collection`` or ``task_names``, not both. An unknown collection, or one with no eval task, returns 400.
-- ``num_samples``: the most tasks to run, a positive integer, or null (the default) to run every task that ``task_names`` or ``collection`` selects. When more tasks are selected, Reef runs the ``num_samples`` tasks whose names have the smallest SHA-256 digests, so the choice depends on the task names only. The stored ``task_names`` names the chosen tasks, and a stored ``collection`` leaves out a benchmark with no chosen task.
-- ``sample_seed``: an integer, or null (the default). With a seed, Reef runs the tasks in a random order that the seed fixes: the order of the SHA-256 digests of ``"<sample_seed>:<task name>"``. With ``num_samples``, the evaluation runs the first ``num_samples`` tasks of that order, else every task in that order. The stored ``task_names`` are in run order.
+- ``num_samples``: the most tasks to run, a positive integer, or null (the default) to run every task that ``task_names`` or ``collection`` selects. Reef ranks tasks by the SHA-256 digests of their names unless you set ``sample_seed``. For a benchmark or a collection with the ``task`` average, Reef takes the first ``num_samples`` in rank order. The stored ``task_names`` names the chosen tasks, and a stored ``collection`` leaves out a benchmark with no chosen task.
+
+  For the ``benchmark`` average, Reef first selects the highest-ranked eval task of each benchmark. A shared task counts once toward ``num_samples`` and covers every benchmark it belongs to. If those choices exceed the budget, Reef starts over and chooses tasks that cover the most uncovered benchmarks first. It uses rank to break ties. Reef returns 400 if this selection cannot cover all benchmarks with eval tasks within the budget. After it covers the benchmarks, Reef fills the remaining places by rank.
+- ``sample_seed``: an integer, or null (the default). With a seed, Reef runs the tasks in a random order that the seed fixes: the order of the SHA-256 digests of ``"<sample_seed>:<task name>"``. With ``num_samples``, the seed sets the rank for selection, including benchmark coverage. Without ``num_samples``, Reef runs every task in rank order. With the same tasks, membership and settings, each run selects the same tasks in the same order. The stored ``task_names`` are in run order.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
 - ``max_concurrent_rollouts``: the most rollouts of this evaluation that run at once, or null (the default) for no limit. Reef adds the next rollouts to the queue as earlier ones end. On ``e2b``, Reef adds a task's rollouts only after it built the task's sandbox templates, and a build holds no place of this limit.
@@ -35,9 +38,14 @@ Body fields:
 
 Reef returns:
 
-- 202 with the stored evaluation, whose ``state`` is ``running``;
+- 202 with the stored evaluation, whose initial ``state`` is ``running``;
+- 409 for a ``start_id`` already in use with other inputs;
 - 400, and runs nothing, for a request that the scenario cannot run: an unknown field or task, the wrong side configured, a component that is no side of a policy, an artifact or a runtime that Reef refuses, or no eval task;
 - 404 for an unknown scenario, artifact or evaluation.
+
+Repeat the request with the same ``start_id`` to get the same evaluation in its current state, including after a restart. JSON object key order and whitespace can differ. Changing a value or adding or removing a field returns 409 for a start ID already in use. If the request omits ``start_id``, each successful POST creates an evaluation. If an interrupted start has no initial work after the queue retention period, Reef marks the evaluation failed. A replay still returns its original ID.
+
+``GET /reef/scenarios/{scenario}/evaluation-capabilities`` on control returns ``{"evaluation_start_id": true}`` when the scenario store supports keyed starts. An unsupported store returns false and rejects requests with ``start_id`` with HTTP 501.
 
 Reef sets no limit on the evaluations that run at once: the evaluations queue holds the rollouts that wait. An evaluation process runs at most ``evaluation.max_sandboxes`` rollouts at once, across all evaluations (`Configuration <configuration.rst>`__).
 
@@ -100,7 +108,7 @@ Read an evaluation
 
 ``GET /reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first, at most ``limit`` (50 by default).
 
-For an evaluation on a collection, the stored ``collection`` is ``{"name", "average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark", "task_names"}`` for each benchmark that has a task in the evaluation. ``benchmark_scores`` gives ``{"benchmark", "task_count", "mean_score"}`` for each of them: the number of its tasks in the evaluation, and the mean of their rollouts that have a score. A task in two benchmarks counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts that have a score. With ``benchmark``, it is the mean of the benchmark means. ``benchmark_scores`` is empty for another evaluation.
+For an evaluation on a collection, the stored ``collection`` is ``{"name", "average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark", "task_names"}`` for each benchmark that has a task in the evaluation. ``benchmark_scores`` gives ``{"benchmark", "task_count", "mean_score"}`` for each of them: the number of its tasks in the evaluation, and the mean of their rollouts that have a score. A task in two benchmarks counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts that have a score. With ``benchmark``, it is the mean of the benchmark scores. Reef skips benchmarks without a score. The built-in ``evaluated`` activation rule compares this mean score with ``min_mean_score``. ``benchmark_scores`` is empty for another evaluation.
 
 ``progress`` counts the rollouts of the evaluation, also while it runs. It is null when the evaluations queue no longer holds them:
 
@@ -108,9 +116,11 @@ For an evaluation on a collection, the stored ``collection`` is ``{"name", "aver
 - ``ended`` counts the rollouts that finished or failed. ``scored`` counts the ended rollouts with a score, and ``failed`` the others.
 - ``cancelled`` counts the rollouts that a cancel or a stop for failed rollouts ended. They are not in ``ended``.
 - ``running`` counts the rollouts that a worker holds now.
-- ``mean_score`` is the mean of the scores so far, or null.
+- ``mean_score`` applies the evaluation's weighting to the scores so far. It is null when there are no scores.
 - ``eta_seconds`` estimates the seconds until every rollout ends: the rollouts left at the rate at which rollouts ended in the last 20 minutes. It is null when no rollout ended in that time, or when the evaluation ended.
 - ``benchmarks`` gives the progress of each benchmark of an evaluation on a collection, in the collection's order: ``{"benchmark", "total", "ended", "scored", "failed", "cancelled", "running", "mean_score"}``, with the same meaning for the rollouts of the benchmark's tasks. A task in two benchmarks counts in both. It is empty for another evaluation.
+
+Use ``score_levels=true`` when reading one evaluation to add ``score_levels`` to its progress and the progress of each benchmark. It counts rollouts with scores of at least one (``full``), between zero and one (``part``), and zero or below (``zero``). ``failed`` counts failed rollouts. ``pending`` counts rollouts that have yet to end. The separate ``cancelled`` progress count covers cancellations and early stops.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts`` answers ``{scenario, evaluation_id, rollouts}``, also while the evaluation runs: each rollout in task and repeat order, as ``{task, task_index, repeat, state, attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``.
 
@@ -122,6 +132,8 @@ For an evaluation on a collection, the stored ``collection`` is ``{"name", "aver
 - ``error`` is why a failed rollout failed, else null.
 - ``calls`` holds the totals of the agent's model calls over all attempts of the rollout: ``{count, failed, prompt_tokens, completion_tokens}``. ``failed`` counts the calls whose status is not 200. The token totals add the known counts only. It is null when Reef kept no call of the rollout.
 - ``verifier_calls`` holds the same totals of the calls that the rollout's verifier wrote (`Calls that a verifier writes <http-api-evaluation-calls.rst#calls-that-a-verifier-writes>`__), or null.
+
+Add ``limit`` to get 1 to 500 rollouts. ``offset`` skips that many rollouts and defaults to zero. The response also includes ``offset`` and ``total``, the number of rollouts that match the filters. ``state`` defaults to ``all``. It can also be ``running`` (assigned or running) or ``failed``. The Failed filter includes rollouts with a failed score and excludes cancellations and early stops. ``benchmark`` selects the tasks of one recorded collection benchmark. It matches no task if the evaluation has no mapping for that benchmark. ``sort=score`` orders tasks by their mean score, with unscored tasks last. The default, ``sort=task``, keeps task order. Each task's rollouts keep repeat order. Filtered pages and pages sorted by score include ``task_means``. It gives the mean of all scored repeats for each task on the page, by task index. For each page, call totals use only the rollouts it returns. The default page reads only the selected rollout rows. A state filter or score sort reads all rollout rows. A benchmark filter alone reads all repeats for the tasks on the page to compute their means. Without ``limit``, the route gives the original full response.
 
 For the totals, Reef reads every kept call of the evaluation. The query ``calls=false`` leaves out ``calls`` and ``verifier_calls``, which keeps the read fast. The query value is ``true`` (the default) or ``false``. Another value returns 400. An unknown evaluation returns 404.
 

@@ -232,6 +232,42 @@ a proxy's HTTP 500, and connection timeouts until the build timeout. The
 AgentENV API's own HTTP 500, for example for a full disk, fails the build at
 once. An AgentENV worker answers 429 when it has no free build slot.
 
+Tasks with Compose services on AgentENV
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A task can name more services next to ``main`` in
+``environment/docker-compose.yaml``, for example the server of a CTF
+challenge. By default, an ``e2b`` trial starts only the task's image, and the
+agent reaches no other service. With ``REEF_E2B_COMPOSE=aenv``, which needs
+``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class runs the project in one sandbox
+with ``aenv compose up`` (``reef.execution.sandbox.agentenv_compose``). The
+agent's commands and files go to ``main``, and the services reach one another
+by name, as under Docker Compose.
+
+Before you set ``REEF_E2B_COMPOSE=aenv``, check the tools that manage the
+repository of the AgentENV deployment. ``aenv build --image`` and
+``aenv compose up`` write image tags and image descriptions there
+(``images/tags`` and ``images/descriptions`` in a file repository). A tool
+that removes unused layers must read these records.
+
+- ``main`` runs the image that ``aenv build --image`` builds from the task's
+  Dockerfile, or the task's ``docker_image``. Every other service needs an
+  ``image``: the class refuses a ``build``.
+- All services share the sandbox, which has the task's CPU and memory.
+- The task uses no template. ``build_task_template`` builds the image of
+  ``main`` instead. ``build_task_main_image(task_path)`` builds only that
+  image, for a deployment that makes its templates in another way. A trial
+  that builds no template fails with ``TemplateNotPreparedError`` when the
+  image is missing.
+- AgentENV pauses the sandbox at the end of its lifetime, and does not delete
+  it. A trial deletes its sandbox when it ends.
+- ``aenv`` and its planner ``aenv-compose-plan`` must be in one directory on
+  ``PATH``.
+
+AgentENV accepts 1 to 24 services, bridge networks and named volumes. It
+refuses a project that reads files of the host, such as ``env_file`` or
+``secrets``. It takes no variable for ``${NAME}`` in the Compose file.
+
 Build templates before the trials
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

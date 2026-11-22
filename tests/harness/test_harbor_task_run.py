@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
+from aiohttp import ClientSession, web
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import MCPServerConfig
 
@@ -598,6 +598,85 @@ def test_a_bridged_agent_answers_the_relayed_calls_from_the_proxy_port_while_its
     assert json.loads(base64.b64decode(piece["data"])) == {"answer": "42?"}
     assert piece["headers"]["X-Model"] == "m"
     assert any(command.endswith("c1 /tmp/reef-relay/replies/c1.json") for command in container.exchanges)
+
+
+def test_the_bridge_starts_one_idle_exchange_and_expands_while_the_first_answer_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class IdleBridge(RecordingEnvironment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: asyncio.Queue[str] = asyncio.Queue()
+            self.polling = asyncio.Event()
+            self.exchanges = 0
+
+        async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+            result = await super().exec(command, user=user, env=env, cwd=cwd, timeout_sec=timeout_sec)
+            if "client.py" not in command or command.endswith(" ready"):
+                return result
+            self.exchanges += 1
+            self.polling.set()
+            return SimpleNamespace(return_code=0, stdout=await self.requests.get(), stderr="")
+
+    async def run() -> None:
+        container = IdleBridge()
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=8901, **kwargs)
+        concurrent = asyncio.Event()
+        requests: list[str] = []
+
+        async def answer(local: ClientSession, request: Mapping[str, str]) -> dict[str, object]:
+            requests.append(request["id"])
+            if len(requests) == 4:
+                concurrent.set()
+            await concurrent.wait()
+            return {"status": 200, "end": True, "sequence": 0}
+
+        monkeypatch.setattr(agent, "answer", answer)
+        async with agent.bridged(container):
+            await asyncio.wait_for(container.polling.wait(), 5)
+            assert container.exchanges == 1
+            for index in range(4):
+                container.requests.put_nowait(json.dumps({"id": f"call-{index}"}))
+            await asyncio.wait_for(concurrent.wait(), 5)
+            assert len(set(requests)) == 4
+
+    (tmp_path / "logs").mkdir()
+    asyncio.run(run())
+
+
+def test_a_bridged_agent_refuses_a_relayed_target_that_is_not_a_path_of_the_proxy_port(tmp_path: Path) -> None:
+    """The container chooses the request target. ``@host/`` after the proxy port's address would name another host, so
+    the agent answers 400 and sends nothing."""
+    reached: list[str] = []
+
+    async def other(request: web.Request) -> web.Response:
+        reached.append(request.path)
+        return web.Response()
+
+    async def run() -> dict[str, object]:
+        app = web.Application()
+        app.router.add_get("/collect", other)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        await web.SockSite(runner, listener).start()
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=1, **kwargs)
+        call = {"id": "c1", "method": "GET", "path": f"@127.0.0.1:{listener.getsockname()[1]}/collect"}
+        async with ClientSession() as local:
+            piece = await agent.answer(local, call)
+        await runner.cleanup()
+        return piece
+
+    (tmp_path / "logs").mkdir()
+    piece = asyncio.run(run())
+    assert (piece["status"], piece["end"], piece["sequence"]) == (400, True, 0)
+    assert b"is not a path of the Reef host's port" in base64.b64decode(str(piece["data"]))
+    assert reached == []
 
 
 def test_a_tree_agent_bridges_the_port_of_its_loopback_binding(tmp_path: Path) -> None:

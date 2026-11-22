@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from reef.core.training_request import TrainingRequest
+
+#: The lowercase hex SHA-256 that the task file store uses to identify a directory.
+FILES_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -107,8 +111,8 @@ class TaskFiles:
 
     Values: ``partition`` is the non-empty name of the store's partition that keeps the directory, and ``digest`` the
     non-empty digest of its files. Purpose: the code that takes a task's directory from the store makes the value
-    (``reef.storage.samples``, ``reef.recipe.generated_tasks``). A job data directory names a task by it, and a
-    reader gives it back to the store for the directory (``reef.storage.job_data``).
+    (``reef.storage.scenario.samples``, ``reef.recipe.generated_tasks``). A job data directory names a task by it, and a
+    reader gives it back to the store for the directory (``reef.storage.data.job_data``).
     """
 
     partition: str

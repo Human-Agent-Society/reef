@@ -111,7 +111,7 @@ def _set_test_endpoints(config: dict) -> None:
 
 def _resolved_strings(config: dict, value):
     """Yield every string after applying the orchestrator's config pass."""
-    from reef.service.deploy.config_utils import interpolate_config
+    from reef.deploy.config_utils import interpolate_config
 
     if isinstance(value, dict):
         for item in value.values():
@@ -278,9 +278,9 @@ def _build_slime_parser() -> argparse.ArgumentParser:
 
 def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     """The Slime arguments the HTTP service builds, the recipe reference and its loss family."""
+    from reef.deploy.deployment_config import selected_weight_training
+    from reef.deploy.service_config import service_config_from_mapping
     from reef.recipe.registry import recipe_class_for
-    from reef.service.deploy.deployment_config import selected_weight_training
-    from reef.service.deploy.service_config import service_config_from_mapping
     from reef.train.slime_backend.launch import TEACHER_URL_ENV, SlimeDeployment, slime_arguments
 
     recipe = config["reef"]["recipe"]
@@ -447,13 +447,13 @@ def test_user_facing_example_deployments_are_discovered() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", EXAMPLE_DEPLOYMENTS, ids=_config_id)
 def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
+    from reef.api.assembly import _recipe_owned_settings
+    from reef.api.serving import inference_handler_factory_for
+    from reef.api.training import training_recipe_config
+    from reef.deploy.execution import validate_services
+    from reef.deploy.service_config import service_config_from_mapping
     from reef.recipe import WeightTrainingRecipe, load_recipe_config
     from reef.recipe.registry import recipe_class_for
-    from reef.service.assembly import _recipe_owned_settings
-    from reef.service.deploy.execution import validate_services
-    from reef.service.deploy.service_config import service_config_from_mapping
-    from reef.service.deploy.serving import inference_handler_factory_for
-    from reef.service.deploy.training import training_recipe_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
@@ -498,7 +498,7 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> None:
-    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.deploy.service_config import service_config_from_mapping
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")

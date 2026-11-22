@@ -476,6 +476,20 @@ class RemoteSession(ProgramExecutor):
         self.closed = True
 
 
+def loopback_url(port: int, target: object) -> str:
+    """The URL of the request target ``target`` on this host's loopback port ``port``.
+
+    ``target`` is the request target that a sandbox's relay recorded, so the sandbox chooses it. A target in origin
+    form, text that starts with ``/``, names a path of the port. Any other target changes the URL's host:
+    ``@host/`` makes ``127.0.0.1:<port>`` the user information of a URL of ``host``, and the request would leave this
+    host for an address that only the Reef host reaches. Raise ``ValueError`` for a target that is not text starting
+    with ``/``.
+    """
+    if not isinstance(target, str) or not target.startswith("/"):
+        raise ValueError(f"the relayed request target {target!r} is not a path of the Reef host's port")
+    return f"http://127.0.0.1:{port}{target}"
+
+
 class TunnelPump:
     """Answer the relay's requests from the Reef host: poll ``/next``, send each to the local port, stream the
     answer back as ``/reply`` pieces. Runs its own event loop on a thread.
@@ -628,9 +642,15 @@ class TunnelPump:
         body = base64.b64decode(request.get("body") or "")
         head: dict[str, Any] | None = None
         try:
+            try:
+                url = loopback_url(self.port, request.get("path") or "/")
+            except ValueError as refused:
+                error = base64.b64encode(str(refused).encode()).decode()
+                await send({"status": 400, "headers": {"Content-Type": "text/plain"}, "data": error, "end": True})
+                return
             async with local.request(
                 str(request.get("method") or "GET"),
-                f"http://127.0.0.1:{self.port}{request.get('path') or '/'}",
+                url,
                 headers=headers,
                 data=body or None,
                 timeout=ClientTimeout(total=None, sock_read=3600),
@@ -664,6 +684,7 @@ __all__ = [
     "RemoteSession",
     "TunnelPump",
     "deployment_owner",
+    "loopback_url",
     "pack",
     "probe_command",
     "protected_command",

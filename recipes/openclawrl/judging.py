@@ -1,7 +1,7 @@
 """OpenClaw-RL's judging: every main turn is judged by its next state.
 
 :class:`~recipes.openclawrl.processor.OpenClawRLSamples` is a
-:class:`~reef.record2sample.JudgedSamples` that runs :class:`OpenClawRLJudging`
+:class:`~reef.samples.JudgedSamples` that runs :class:`OpenClawRLJudging`
 on a PRM worker. ``observe`` correlates main turns into sessions and hands each
 completed turn over for judgment; ``judge`` is upstream's combine dispatch. The
 deployment configures it in ``pipeline.record2sample.config``
@@ -33,7 +33,7 @@ from recipes.openclawrl.turns import TurnJob, TurnJudgment, main_turn_message, t
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
-from reef.record2sample import JudgedSamples, RecordJudging
+from reef.samples import JudgedSamples, RecordJudging
 
 logger = logging.getLogger(__name__)
 

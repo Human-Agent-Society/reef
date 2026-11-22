@@ -127,7 +127,7 @@ recorded request is one trace, without a score:
 ```yaml
 pipeline:
   record2sample:
-    module: reef.record2sample.traces:InferenceSamples
+    module: reef.samples.traces:InferenceSamples
 ```
 
 To keep a basic check on each new playbook, use `evaluation.policy: floor` with a scorer and a health task: Reef

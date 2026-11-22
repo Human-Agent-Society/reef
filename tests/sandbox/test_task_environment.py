@@ -9,6 +9,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -388,6 +389,39 @@ def test_reefs_e2b_template_is_harbors_and_keeps_the_modes_of_copy_chmod(
 
 
 @pytest.mark.unit
+def test_a_cancelled_template_build_ends_and_is_not_built_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that stops, such as a process at its shutdown, cancels the build. The build's retry must not take the
+    cancellation as a failed attempt: the build would run again, and its caller would never end."""
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    reef = harbor_e2b_environments(tmp_path)["reef"]
+    builds: list[DockerfileBuild] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        builds.append(build)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+
+    async def cancelled() -> bool:
+        task = asyncio.create_task(reef._create_template())
+        while not builds:
+            await asyncio.sleep(0)
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=5)
+        return bool(done) and task.cancelled()
+
+    assert asyncio.run(cancelled()) and len(builds) == 1
+
+
+@pytest.mark.unit
 def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -656,3 +690,308 @@ def test_on_agentenv_a_trial_that_builds_no_template_starts_only_from_a_ready_te
         with pytest.raises(SandboxCreatedError if starts else reef_e2b.TemplateNotPreparedError):
             asyncio.run(trial_environment.start(force_build=False))
     assert len(read) == 2 and all(alias.endswith(reef_e2b.AENV_TEMPLATE_SUFFIX) for alias in read)
+
+
+#: The Compose file of a task with a second service that the agent reaches by name.
+TASK_COMPOSE = (
+    "services:\n  main:\n    networks: [task]\n  server:\n    image: registry.example/server:1\n"
+    "    networks:\n      task:\n        aliases: [challenge]\nnetworks:\n  task: {}\n"
+)
+
+
+class ComposeGuest:
+    """A stand-in for the E2B SDK's sandbox of a Compose project's guest. It records each command that the
+    environment runs in the guest, and answers each with ``results``, in order; then with success."""
+
+    def __init__(self) -> None:
+        self.sandbox_id = "sandbox-1"
+        self.commands = self
+        self.ran: list[dict[str, object]] = []
+        self.results: list[SimpleNamespace] = []
+        self.killed = False
+
+    async def run(self, **options: object) -> ComposeGuest:
+        self.ran.append(options)
+        return self
+
+    async def wait(self) -> SimpleNamespace:
+        return self.results.pop(0) if self.results else SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    async def kill(self) -> None:
+        self.killed = True
+
+
+def compose_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    builds_templates: bool = True,
+    build: str = "aenv",
+    compose: str | None = "aenv",
+) -> object:
+    """Reef's E2B environment of a trial of the task of ``harbor_e2b_environments`` with ``TASK_COMPOSE``, with
+    ``REEF_E2B_DOCKERFILE_BUILD`` ``build`` and ``REEF_E2B_COMPOSE`` ``compose`` (unset for None). Harbor's factory
+    makes it from ``environment_config``."""
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.task import Task
+    from harbor.models.trial.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", build)
+    if compose is None:
+        monkeypatch.delenv("REEF_E2B_COMPOSE", raising=False)
+    else:
+        monkeypatch.setenv("REEF_E2B_COMPOSE", compose)
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    task_path = tmp_path / "task"
+    if not task_path.exists():
+        harbor_e2b_environments(tmp_path)
+    (task_path / "environment" / "docker-compose.yaml").write_text(TASK_COMPOSE)
+    task = Task(task_path)
+    config = environment_config("e2b", task_path, builds_templates=builds_templates)
+    return EnvironmentFactory.create_environment_from_config(
+        config=EnvironmentConfig.model_validate(config),
+        environment_dir=task.paths.environment_dir,
+        environment_name=task.short_name,
+        session_id="t__env",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=task.config.environment.model_copy(deep=True),
+    )
+
+
+def compose_stand_ins(monkeypatch: pytest.MonkeyPatch, *, image_exists: bool) -> tuple[list[object], ComposeGuest]:
+    """Stand-ins for the AgentENV deployment of a Compose start. Return the calls, in order, and the guest that the
+    E2B SDK connects to. The first ``aenv compose up`` finds no image of ``main`` unless ``image_exists``."""
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv_compose import ComposeSandbox, ImageNotFoundError
+
+    calls: list[object] = []
+    guest = ComposeGuest()
+    missing = [] if image_exists else [ImageNotFoundError("image tag 't:latest' was not found")]
+
+    async def start(sandbox: ComposeSandbox, templates: AgentEnvTemplates) -> str:
+        calls.append(sandbox)
+        if missing:
+            raise missing.pop()
+        return guest.sandbox_id
+
+    async def build_image(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        calls.append(build)
+
+    async def prepare_guest(templates: AgentEnvTemplates, sandbox_id: str) -> None:
+        calls.append(("prepare", sandbox_id))
+
+    async def connect(sandbox_id: str, timeout: int) -> ComposeGuest:
+        calls.append(("connect", sandbox_id, timeout))
+        return guest
+
+    async def delete_sandbox(templates: AgentEnvTemplates, sandbox_id: str) -> None:
+        calls.append(("delete", sandbox_id))
+
+    monkeypatch.setattr(ComposeSandbox, "start", start)
+    monkeypatch.setattr(reef_e2b, "build_image", build_image)
+    monkeypatch.setattr(reef_e2b, "prepare_guest", prepare_guest)
+    monkeypatch.setattr(reef_e2b, "delete_sandbox", delete_sandbox)
+    monkeypatch.setattr(e2b.AsyncSandbox, "connect", staticmethod(connect))
+    return calls, guest
+
+
+@pytest.mark.unit
+def test_on_agentenv_a_task_with_a_compose_file_runs_its_project_and_the_trial_works_in_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox.agentenv_build import DockerfileBuild
+    from reef.execution.sandbox.agentenv_compose import ComposeSandbox, main_image
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    calls, guest = compose_stand_ins(monkeypatch, image_exists=False)
+    name, reference = main_image(environment._template_name)
+    # AgentENV does not tell whether it has the image, so the template part of a start always builds.
+    assert asyncio.run(environment._does_template_exist()) is False
+    asyncio.run(environment.start(force_build=False))
+
+    # The start builds the image only after AgentENV refused the project for it, then starts the project again.
+    first, build, second, *rest = calls
+    assert first == second and isinstance(first, ComposeSandbox)
+    assert (first.cpu_count, first.memory_mb, first.startup_seconds) == (2, 4096, 120)
+    assert first.lifetime_seconds == environment._sandbox_timeout
+    services = first.project["services"]
+    assert services["main"]["image"] == reference and services["main"]["networks"] == ["task"]
+    assert services["main"]["environment"] == {"TASK_SETTING": "from-the-task"}
+    assert services["server"]["networks"] == {"task": {"aliases": ["challenge"]}}
+    environment_dir = tmp_path / "task" / "environment"
+    assert build == DockerfileBuild(
+        context_dir=environment_dir,
+        dockerfile=environment_dir / "Dockerfile",
+        alias=name,
+        cpu_count=None,
+        memory_mb=None,
+        timeout_seconds=120,
+        start_command=True,
+        image=True,
+    )
+    assert build.command()[-1] == "--image"
+    assert rest == [("prepare", "sandbox-1"), ("connect", "sandbox-1", environment._sandbox_timeout)]
+
+    # A command of the trial runs in main, in the Dockerfile's directory, with the trial's variables and user.
+    guest.ran.clear()
+    guest.results.append(SimpleNamespace(stdout="out", stderr="err", exit_code=3))
+    result = asyncio.run(environment.exec("make test", env={"MODE": "a b"}, timeout_sec=30, user="solver"))
+    assert (result.stdout, result.stderr, result.return_code) == ("out", "err", 3)
+    (ran,) = guest.ran
+    assert ran["cmd"] == (
+        "docker compose --project-name aenv exec -T -w /app -e TASK_SETTING=from-the-task -e 'MODE=a b' -u solver "
+        "main bash -c 'make test'"
+    )
+    # The guest runs it as root, outside the task's directory, which only main has.
+    assert (ran["user"], ran["cwd"], ran["envs"], ran["timeout"]) == ("root", None, None, 30)
+
+    asyncio.run(environment.stop(delete=True))
+    assert guest.killed
+
+
+@pytest.mark.unit
+def test_a_compose_trial_that_builds_no_template_needs_the_image_of_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_compose import ComposeSandbox
+
+    environment = compose_environment(tmp_path, monkeypatch, builds_templates=False)
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
+    with pytest.raises(reef_e2b.TemplateNotPreparedError):
+        asyncio.run(environment.start(force_build=False))
+    assert len(calls) == 1 and isinstance(calls[0], ComposeSandbox)
+
+    # With the image, it starts.
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
+    asyncio.run(environment.start(force_build=False))
+    assert [call for call in calls if not isinstance(call, ComposeSandbox)] == [
+        ("prepare", "sandbox-1"),
+        ("connect", "sandbox-1", environment._sandbox_timeout),
+    ]
+
+
+@pytest.mark.unit
+def test_a_compose_start_that_fails_after_the_sandbox_exists_deletes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_compose import ComposeStartError
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
+
+    async def prepare_guest(templates: object, sandbox_id: str) -> None:
+        raise ComposeStartError("could not prepare the guest")
+
+    monkeypatch.setattr(reef_e2b, "prepare_guest", prepare_guest)
+    with pytest.raises(ComposeStartError):
+        asyncio.run(environment.start(force_build=False))
+    assert calls[-1] == ("delete", "sandbox-1") and environment._sandbox is None
+
+
+@pytest.mark.unit
+def test_a_compose_file_changes_nothing_unless_the_deployment_selects_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    # The default is off, also on AgentENV: a Compose start writes image records to the deployment's repository.
+    for build in ("aenv", "e2b"):
+        for compose in (None, "off"):
+            assert compose_environment(tmp_path, monkeypatch, build=build, compose=compose).compose_ops is None
+    with pytest.raises(ValueError, match="REEF_E2B_COMPOSE=aenv needs REEF_E2B_DOCKERFILE_BUILD=aenv"):
+        compose_environment(tmp_path, monkeypatch, build="e2b")
+    with pytest.raises(ValueError, match="REEF_E2B_COMPOSE must be one of off, aenv, not 'docker'"):
+        compose_environment(tmp_path, monkeypatch, compose="docker")
+
+
+@pytest.mark.unit
+def test_the_image_of_main_is_built_before_the_trials_of_a_compose_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox.agentenv_build import DockerfileBuild
+    from reef.execution.sandbox.agentenv_compose import main_image
+    from reef.execution.sandbox.e2b import build_task_main_image, build_task_template
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
+    name, reference = main_image(environment._template_name)
+    assert asyncio.run(build_task_main_image(tmp_path / "task")) == reference
+    # build_task_template builds it too, and returns the alias as for a task with a template.
+    assert asyncio.run(build_task_template(tmp_path / "task")) == environment._template_name
+    assert [call.alias for call in calls if isinstance(call, DockerfileBuild)] == [name, name]
+
+    # A task whose trials run no Compose project has no such image.
+    (tmp_path / "task" / "environment" / "docker-compose.yaml").unlink()
+    assert asyncio.run(build_task_main_image(tmp_path / "task")) is None
+    assert len(calls) == 2
+
+
+#: A fake ``docker`` for the guest: ``compose --project-name aenv cp`` copies between the guest and the directory
+#: FAKE_MAIN_ROOT, which stands in for the filesystem of ``main``.
+FAKE_DOCKER = """#!/bin/sh
+[ "$1 $2 $3 $4" = "compose --project-name aenv cp" ] || exit 64
+main() { case "$1" in main:*) printf '%s' "$FAKE_MAIN_ROOT${1#main:}" ;; *) printf '%s' "$1" ;; esac; }
+source=$(main "$5"); target=$(main "$6")
+mkdir -p "$(dirname "$target")" && cp -R "$source" "$target"
+"""
+
+
+@pytest.mark.unit
+def test_a_compose_trial_moves_files_through_the_guest_to_and_from_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guest is a directory of this test: its commands run here, with its paths under that directory."""
+    import subprocess
+
+    from harbor.environments.base import ExecResult
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    guest_root, main_root, bin_dir = tmp_path / "guest", tmp_path / "main", tmp_path / "bin"
+    for directory in (guest_root / "tmp", main_root, bin_dir):
+        directory.mkdir(parents=True)
+    (bin_dir / "docker").write_text(FAKE_DOCKER)
+    (bin_dir / "docker").chmod(0o755)
+    path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+    async def host_exec(command: str, timeout_sec: int | None = None) -> ExecResult:
+        done = subprocess.run(
+            ["sh", "-c", command.replace("/tmp/harbor_", f"{guest_root}/tmp/harbor_")],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": path, "FAKE_MAIN_ROOT": str(main_root)},
+        )
+        return ExecResult(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode)
+
+    async def host_write(guest_path: str, data: bytes) -> None:
+        (guest_root / guest_path.lstrip("/")).write_bytes(data)
+
+    async def host_read(guest_path: str) -> bytes:
+        return (guest_root / guest_path.lstrip("/")).read_bytes()
+
+    monkeypatch.setattr(environment, "host_exec", host_exec)
+    monkeypatch.setattr(environment, "host_write", host_write)
+    monkeypatch.setattr(environment, "host_read", host_read)
+
+    source = tmp_path / "source"
+    (source / "empty").mkdir(parents=True)
+    (source / "bin").mkdir()
+    (source / "bin" / "run.sh").write_text("#!/bin/sh\n")
+    (source / "bin" / "run.sh").chmod(0o755)
+    asyncio.run(environment.upload_dir(source, "/logs/agent/files"))
+    asyncio.run(environment.upload_file(source / "bin" / "run.sh", "/logs/agent/one.sh"))
+    uploaded = main_root / "logs" / "agent"
+    # An empty directory and a file's mode arrive in main.
+    assert (uploaded / "files" / "empty").is_dir() and (uploaded / "one.sh").read_text() == "#!/bin/sh\n"
+    assert stat.S_IMODE((uploaded / "files" / "bin" / "run.sh").stat().st_mode) == 0o755
+
+    asyncio.run(environment.download_dir("/logs/agent/files", tmp_path / "back"))
+    asyncio.run(environment.download_file("/logs/agent/one.sh", tmp_path / "one.sh"))
+    assert (tmp_path / "back" / "empty").is_dir() and (tmp_path / "one.sh").read_text() == "#!/bin/sh\n"
+    assert stat.S_IMODE((tmp_path / "back" / "bin" / "run.sh").stat().st_mode) == 0o755
+    # Nothing stays in the guest.
+    assert list((guest_root / "tmp").iterdir()) == []

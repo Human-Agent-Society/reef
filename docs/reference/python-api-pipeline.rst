@@ -10,7 +10,7 @@ Pipeline stages
 
 .. code:: python
 
-   from reef.record2sample import (
+   from reef.samples import (
        GroupDecision,
        JudgedSamples,
        RecordJudging,
@@ -19,7 +19,7 @@ Pipeline stages
        ReportSamples,
        SkippedReport,
    )
-   from reef.sample2job import DistillJobData, Sample2Job
+   from reef.train.sample2job import DistillJobData, Sample2Job
 
 A training pipeline (``reef.train.pipeline.TrainingPipeline``) turns durable records into typed job data through two stages. A recipe names a default class for each in ``pipeline_spec()``: ``PipelineSpec(record2sample=..., sample2job=...)``.
 
@@ -28,7 +28,7 @@ Reef owns replay, retention, deduplication, pending job data, and exactly-once c
 The record-to-sample stage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.record2sample.Record2Sample`` decides which records train and which train together. The default stage, ``NoSamples``, makes no sample, so nothing trains.
+``reef.samples.Record2Sample`` decides which records train and which train together. The default stage, ``NoSamples``, makes no sample, so nothing trains.
 
 .. list-table::
    :header-rows: 1
@@ -58,7 +58,7 @@ A ``Record2Sample`` keeps its state in memory and in the store, not in a directo
 The sample-to-job stage
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.sample2job.Sample2Job.make_job_data(samples, data_id) -> JobData`` shapes the samples of the next job, in use order, into one job's data with the ID ``data_id``. The pipeline assigns the ID: ``<scenario>:data:<number>`` for automatic job data and ``<scenario>:request:<request id>`` for a request's data. The number counts the job data of one pipeline. It is not a training step.
+``reef.train.sample2job.Sample2Job.make_job_data(samples, data_id) -> JobData`` shapes the samples of the next job, in use order, into one job's data with the ID ``data_id``. The pipeline assigns the ID: ``<scenario>:data:<number>`` for automatic job data and ``<scenario>:request:<request id>`` for a request's data. The number counts the job data of one pipeline. It is not a training step.
 
 ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)`` sets the most samples that one automatic job takes and the fewest samples of one job (`Job size <../developer-guide/recipe-control-service.rst#job-size>`__):
 
@@ -182,7 +182,7 @@ Task generation
 
    from reef.core.tasks import HarborTask
    from reef.recipe.generated_tasks import TaskGenerator, GeneratedTaskResult, TaskValidationResult
-   from reef.record2sample.generator import TaskGenerationRequest
+   from reef.samples.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in ``pipeline.record2sample.config.generator``. The built-in generated-task recipe, ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls its methods. `Task generators <../developer-guide/task-generators.rst>`__ gives the round, its failure behavior and the meaning of each result.
 

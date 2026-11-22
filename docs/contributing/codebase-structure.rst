@@ -8,44 +8,7 @@ Each package's ``__init__`` docstring states the boundaries that it holds and ho
 Packages
 --------
 
-Reef is organized around an application kernel and three capability domains, not a strict stack of top-level packages. The arrows show the primary composition and use paths; they are not an exhaustive import graph:
-
-.. code:: mermaid
-
-   flowchart TD
-       accTitle: Reef application kernel, capability domains, and adapters
-
-       Methods("<b>Method plug-ins</b><br/><code>recipes/*</code>")
-       Entry("<b>Entrypoints</b><br/>HTTP · CLI")
-       Policy("<b>Policy</b><br/><code>reef/recipe</code>")
-       Service("<b>Delivery &amp; composition</b><br/><code>reef/service</code>")
-       Kernel(["<b>Application kernel</b><br/><code>reef/dispatcher</code> · <code>reef/scenario</code>"])
-
-       subgraph Domains["Capability domains"]
-           direction LR
-           Serving("<b>Serving</b><br/><code>inference</code>")
-           Evolution("<b>Evolution</b><br/><code>train</code> · <code>evaluation</code> · <code>harness</code>")
-           State("<b>State</b><br/><code>artifact</code> · <code>storage</code>")
-       end
-
-       subgraph Adapters["Concrete adapters"]
-           direction LR
-           ServingAdapters("inference backends")
-           EvolutionAdapters("training backends<br/>harness adapters")
-           StateAdapters("Git/LFS repositories<br/>SQLite · PostgreSQL")
-       end
-
-       Observability(["<b>Cross-cutting</b><br/><code>reef/observability</code>"])
-       Core(["<b>Shared kernel</b><br/><code>reef/core</code>"])
-
-       Methods --> Policy --> Kernel
-       Entry --> Service --> Kernel
-       Kernel --> Serving & Evolution & State
-       Serving --> ServingAdapters
-       Evolution --> EvolutionAdapters
-       State --> StateAdapters
-       Kernel -. telemetry .-> Observability
-       ServingAdapters & EvolutionAdapters & StateAdapters --> Core
+`Architecture <architecture.rst>`__ gives the four layers of the packages and what each package is for. The table below says which package owns a change.
 
 .. list-table::
    :header-rows: 1
@@ -57,25 +20,25 @@ Reef is organized around an application kernel and three capability domains, not
    * - ``reef/core/``
      - Shared value types, wire shapes, artifact identity, root errors
      - Storage, I/O, runtime behavior
-   * - ``reef/service/``
-     - HTTP routes, auth, streaming, the app of each service, deployment and process lifecycle
+   * - ``reef/api/``
+     - HTTP routes, auth, streaming, the app of each service
      - Training methods, domain logic tied to aiohttp
-   * - ``reef/dispatcher/``
-     - Coordination of the loaded scenarios, and control's background workers
-     - A concrete record backend, HTTP
-   * - ``reef/scenario/``
-     - Scenario binding, commit ordering, recovery and lifecycle; ``LiveObjects``, the runtime, training components and data store that one process builds for the recipe
-     - Training algorithms, repository implementations
+   * - ``reef/deploy/``
+     - ``reef serve``: the configuration of a deployment, the startup of its processes, and their lifecycle
+     - HTTP routes, request handling
+   * - ``reef/control/``
+     - The loaded scenarios. ``scenario/`` holds scenario binding, commit ordering, recovery and lifecycle, and ``LiveObjects``: the runtime, training components and data store that one process builds for the recipe. The dispatcher coordinates the loaded scenarios, and ``workers/`` holds control's background workers. ``operations/`` holds the operations that a client asks for, without HTTP: data items, artifact evaluations, artifact imports, the harness tree and its sync, and the reads of a scenario's files and samples.
+     - A concrete record backend, HTTP, training algorithms, repository implementations
    * - ``reef/recipe/``
      - The contract that a method implements, dotted resolution, the recipe loader, the base harness evolution recipe, the built-in SFT and generated-task recipes. A recipe is configuration only.
      - Cookbook methods, runtimes, training components, stores
    * - ``reef/train/``
      - The trainer, the training job loop, the training pipeline, job data types, training components and their backends
      - HTTP endpoints, deployment configuration parsing
-   * - ``reef/record2sample/``
-     - Which records Reef uses, which train together, and their samples (``Record2Sample``, ``ReportSamples``, ``JudgedSamples``); the samples service; the generator service that writes, checks and runs Harbor tasks
+   * - ``reef/samples/``
+     - Which records Reef uses, which train together, and their samples (``Record2Sample``, ``ReportSamples``, ``JudgedSamples``); the samples service; the generator service that writes, checks and runs Harbor tasks; the context that the training pipeline and its stages read (``context``)
      - Job data shape, record storage, training loops
-   * - ``reef/sample2job/``
+   * - ``reef/train/sample2job/``
      - Shaping the samples of the next job into one job's data (``Sample2Job``), and the job size
      - Which records train, the training loop, step signals
    * - ``reef/evaluation/``
@@ -84,6 +47,9 @@ Reef is organized around an application kernel and three capability domains, not
    * - ``reef/inference/``
      - Inference contracts, serving runtimes and their selection, saved-weight serving, concrete inference backends, native engine control, request adaptation
      - Training algorithms, publication decisions
+   * - ``reef/routing/``
+     - The Semantic Router integration: the routing manifest and its checks of a request, the routing preview, and the router container of a managed deployment
+     - HTTP routes, the recording of a routed request, the ``reef serve`` process
    * - ``reef/tinker/``
      - The Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share
      - Either side's own logic
@@ -91,7 +57,7 @@ Reef is organized around an application kernel and three capability domains, not
      - Artifact bytes, repositories, materialization, snapshot heads, and the components that a recipe declares
      - Commit policy, weight loading
    * - ``reef/storage/``
-     - Record, commit, task, sample and data store contracts and their SQLite and PostgreSQL implementations; the coordination store (work queues, ``served_models``, the control lease)
+     - The storage contracts and their SQLite and PostgreSQL implementations (``sql/``): the record, commit, sample and evaluation stores of a scenario (``scenario/``), the data store with its tasks (``data/``), and the coordination store with the work queues, ``served_models`` and the control lease (``coordination/``)
      - Scenario coordination, training
    * - ``reef/harness/``
      - Adapters (the parts of each agent's tree and its descriptor), the source tree (patches, validation, rendering), task runs, runners, trajectories, and the loopback gateway of an agent process
@@ -114,9 +80,9 @@ Nothing under ``reef/`` imports a method package. A weight method keeps its obje
 Services and the shared store
 -----------------------------
 
-A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
+A deployment runs seven services (``SERVICE_NAMES`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
 
-``reef/service/components.py`` holds one app builder per service (``COMPONENT_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/service/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
+``reef/api/services.py`` holds one app builder per service (``SERVICE_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/api/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
 
 .. list-table::
    :header-rows: 1
@@ -129,17 +95,17 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - Writes
    * - ``control``
      - ``ControlApp``
-     - ``reef/service/routes/`` (all but the data routes), ``reef/dispatcher/``, ``reef/scenario/``; the trainers' job loops (``reef/train/jobs.py``)
+     - ``reef/api/routes/`` (all but the data routes), ``reef/control/``; the trainers' job loops (``reef/train/jobs.py``)
      - The control lease; the ``data_sync``, ``harness_sync``, ``scenario_deletes`` and ``training_requests`` queues; the results of every other queue
      - Commits and settings; items of the ``serving``, ``training_checks``, ``jobs``, ``samples``, ``evaluations`` and ``data`` queues
    * - ``inference``
      - ``InferenceApp``
-     - ``reef/service/inference_service.py``, ``ServingWorker`` in ``reef/dispatcher/serving.py``, the runtime in ``reef/inference/``
+     - ``reef/api/inference_service.py``, ``ServingWorker`` in ``reef/control/workers/serving.py``, the runtime in ``reef/inference/``
      - The ``serving`` queue; the ``inference-owner`` lease; ``served_models``
      - ``served_models`` routes and stops; records
    * - ``samples``
      - ``QueueServiceApp``
-     - ``SamplesWorker`` in ``reef/record2sample/service/``
+     - ``SamplesWorker`` in ``reef/samples/service/``
      - The ``samples`` queue
      - Samples
    * - ``training``
@@ -154,12 +120,12 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - Rollout results; ``serve_artifact`` items of the ``serving`` queue; the calls of each rollout
    * - ``data``
      - ``DataApp``
-     - ``reef/service/routes/data.py``, ``reef/service/routes/scenario_files.py``, ``reef/service/data.py``, ``DataWorker`` in ``reef/service/data_service.py``
+     - ``reef/api/routes/data.py``, ``reef/api/routes/scenario_files.py``, ``reef/control/operations/data.py``, ``DataWorker`` in ``reef/control/operations/data_service.py``
      - The ``data`` queue (artifact copies, imports, exports)
      - Data items and segments; ``data_sync`` items
    * - ``harness``
      - ``HarnessApp``
-     - ``reef/service/routes/harness.py``
+     - ``reef/api/routes/harness.py``
      - The commit history and the artifact backend, read-only
      - ``harness_sync`` items
 
@@ -173,19 +139,19 @@ The shared store has four parts. Each row names the module that defines its cont
      - Contract
      - Content
    * - Coordination store
-     - ``reef/storage/coordination.py``, with SQL tables in ``reef/storage/sql_coordination.py``
-     - The work queues (``reef/storage/work_queue.py``, table ``work_item``), ``served_models`` (``reef/storage/served_models.py``, tables ``served_model`` and ``scheduled_stop``), and the control lease (``reef/storage/control_lease.py``)
+     - ``reef/storage/coordination/store.py``, with SQL tables in ``reef/storage/sql/coordination.py``
+     - The work queues (``reef/storage/coordination/work_queue.py``, table ``work_item``), ``served_models`` (``reef/storage/coordination/served_models.py``, tables ``served_model`` and ``scheduled_stop``), and the control lease (``reef/storage/coordination/control_lease.py``)
    * - Scenario storage
-     - ``reef/storage/scenario.py``
+     - ``reef/storage/scenario/store.py``
      - The commit history, settings, tasks and evaluations of each scenario
    * - Data store
-     - ``reef/storage/data.py``
+     - ``reef/storage/data/store.py``
      - Data items: records, trajectories, tasks, samples, artifact items, and job data directories
    * - Artifact backend
      - ``reef/artifact/``
      - The snapshots of each scenario, and the stored content of checkpoints
 
-A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/record2sample/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/service/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/dispatcher/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
+A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/samples/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/coordination/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data/queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/control/operations/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
 
 Choose a destination
 --------------------
@@ -199,7 +165,7 @@ Choose a destination
    * - A value or error that unrelated layers need, without behavior
      - ``reef/core/``
    * - Scenario state, commit ordering, recovery, activation, training starts
-     - ``reef/scenario/``. The persisted ``CommitRecord`` is in ``reef/storage/commits.py``.
+     - ``reef/control/scenario/``. The persisted ``CommitRecord`` is in ``reef/storage/scenario/commits.py``.
    * - A record, task, sample or data store contract, or its implementation
      - ``reef/storage/``. Implementations depend on the contracts, never the reverse.
    * - Persisting or materializing versioned bytes, or declaring a snapshot component
@@ -211,19 +177,19 @@ Choose a destination
    * - A value that both training and inference read
      - ``reef/core/``, such as ``reef/core/weight_layout.py``
    * - Which records train, in which groups, and how a record set becomes samples
-     - ``reef/record2sample/``
+     - ``reef/samples/``
    * - Shaping samples into job data
-     - ``reef/sample2job/``. ``reef/train/pipeline.py`` drives both stages; a recipe selects and binds them.
+     - ``reef/train/sample2job/``. ``reef/train/pipeline.py`` drives both stages; a recipe selects and binds them.
    * - Turning job data into a step signal
      - The training backend that trains it: ``reef/train/slime_backend/`` or ``reef/train/tinker_backend/``. The backends share no code.
    * - Writing, checking or running generated Harbor tasks
-     - ``reef/record2sample/generator/``. The built-in recipe that trains on them is ``reef/recipe/generated_tasks/``.
+     - ``reef/samples/generator/``. The built-in recipe that trains on them is ``reef/recipe/generated_tasks/``.
    * - One service telling another what to do
      - A queue item or a table of the shared store, not a call (`Services and the shared store`_)
    * - A data route
-     - ``reef/service/data.py``, with the aiohttp adapter in ``reef/service/routes/data.py``
+     - ``reef/control/operations/data.py``, with the aiohttp adapter in ``reef/api/routes/data.py``
    * - HTTP-specific code
-     - ``reef/service/routes/``. Transport-independent behavior goes in a service or domain object.
+     - ``reef/api/routes/``. Transport-independent behavior goes in a service or domain object.
    * - A benchmark, task, grader or external environment
      - ``recipes/<name>/examples/``, or the external harness
 
@@ -269,30 +235,28 @@ Concrete integrations may depend on shared contracts. Shared contracts never imp
      - ``storage``, ``core``
    * - ``observability``
      - ``artifact``, ``storage``, ``core``
-   * - ``pipeline_context``
-     - ``observability``, ``storage``, ``core``
    * - ``inference``
      - ``tinker``, ``execution``, ``artifact``, ``core``
+   * - ``routing``
+     - ``inference``, ``storage``, ``core``
    * - ``harness``
      - ``inference``, ``execution``, ``artifact``, ``core``
-   * - ``record2sample``
-     - ``harness``, ``pipeline_context``, ``execution``, ``storage``, ``core``
-   * - ``sample2job``
-     - ``record2sample``, ``pipeline_context``, ``observability``, ``storage``, ``core``
+   * - ``samples``
+     - ``harness``, ``observability``, ``execution``, ``storage``, ``core``
    * - ``evaluation``
      - ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``core``
    * - ``train``
-     - ``evaluation``, ``sample2job``, ``record2sample``, ``harness``, ``tinker``, ``pipeline_context``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``samples``, ``harness``, ``tinker``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``sample2job``, ``record2sample``, ``harness``, ``pipeline_context``, ``execution``, ``artifact``, ``storage``, ``core``
-   * - ``scenario``
-     - ``recipe``, ``train``, ``evaluation``, ``sample2job``, ``record2sample``, ``inference``, ``harness``, ``artifact``, ``storage``, ``observability``, ``core``
-   * - ``dispatcher``
-     - ``scenario``, ``recipe``, ``train``, ``evaluation``, ``record2sample``, ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
-   * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``evaluation``, ``record2sample``, ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``samples``, ``harness``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``control``
+     - ``recipe``, ``train``, ``evaluation``, ``samples``, ``inference``, ``harness``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``api``
+     - ``control``, ``recipe``, ``train``, ``evaluation``, ``inference``, ``routing``, ``harness``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``deploy``
+     - ``api``, ``recipe``, ``samples``, ``inference``, ``routing``, ``execution``, ``artifact``, ``core``
    * - ``cli``
-     - ``service``, ``core``
+     - ``deploy``, ``core``
 
 Three rules follow from the graph:
 
@@ -305,7 +269,7 @@ The extension points that the packages expose are in `Python API <../reference/p
 Deployment modules
 ------------------
 
-``reef/service/deploy/`` separates configuration input from process startup:
+``reef/deploy/`` separates configuration input from process startup:
 
 .. list-table::
    :header-rows: 1
@@ -316,13 +280,13 @@ Deployment modules
    * - ``config_utils.py``
      - Reads YAML, expands environment and config references, and locates recipe source packages. It downloads no model and validates no process graph.
    * - ``service_config.py``
-     - Declares the shared HTTP, storage and runtime fields, and converts effective values into ``ServiceSettings`` for app assembly.
+     - Converts the effective values of a deployment into ``ServiceSettings`` for app assembly. ``reef/api/settings.py`` declares the shared HTTP, storage and runtime fields.
    * - ``deployment_config.py``
      - Declares the ``DeploymentSettings`` defaults, loads the selected recipe and runtime declarations, translates the versioned public layout, and validates component values.
    * - ``cli.py``
      - Builds help and applies dotted command-line overrides before the shared type conversion. CLI values take precedence over YAML.
-   * - ``inference.py``, ``training.py``, ``serving.py``
-     - Assemble the inference processes, the training deployment that ``training.backend`` names, and the serving runtime.
+   * - ``inference.py``, ``training.py``
+     - Assemble the inference processes and the training deployment that ``training.backend`` names. They read the serving mode and the training backend from ``reef/api/serving.py`` and ``reef/api/training.py``.
    * - ``execution.py``, ``process.py``, ``guard.py``
      - Validate process definitions and dependency order, select executors, own worker processes, and clean up a remote process group when its Ray owner disappears.
    * - ``diagnostics.py``
@@ -330,7 +294,7 @@ Deployment modules
    * - ``orchestrator.py``
      - Coordinates configuration resolution, launch, readiness, supervision and shutdown.
 
-Shared parsing types come from ``reef.core.config``. Native backend argument encoding comes from ``reef.execution.executor.arguments``. The exports of ``reef.service.deploy`` are the entrypoints for app assembly and launching; internal module names are not a compatibility API.
+Shared parsing types come from ``reef.core.config``. Native backend argument encoding comes from ``reef.execution.executor.arguments``. The exports of ``reef.deploy`` are the entrypoints for app assembly and launching; internal module names are not a compatibility API.
 
 Repository-level homes
 ----------------------
@@ -340,7 +304,7 @@ Code for a concrete integration lives together under its package, but its surrou
 - component and integration tests in ``tests/<owner>/``
 - cookbook method tests in ``tests/recipes/<method>/``
 - import and packaging contracts in ``tests/plugin_contracts/``
-- service-facing contracts in ``tests/reef_service/``
+- service-facing contracts in ``tests/api/``
 - the learn-nothing deployment stacks, and the smallest example around them, in ``recipes/basic/``
 - the configuration of one runnable deployment under ``recipes/<name>/examples/``
 - container and environment setup under ``docker/``

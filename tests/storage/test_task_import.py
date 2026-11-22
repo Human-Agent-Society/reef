@@ -14,11 +14,11 @@ from tests.support.task_service_stubs import task_for
 from reef.core.job_data import TaskSample
 from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitError, write_split_manifest
-from reef.storage.data import ItemConflictError
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.task_import import DataScenarioStorage, TaskImport, TaskImportError
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.store import ItemConflictError
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.task_import import DataScenarioStorage, TaskImport, TaskImportError
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 IMAGE = bytes(range(256))
 

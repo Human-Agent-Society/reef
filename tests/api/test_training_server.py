@@ -1,0 +1,1101 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import dataclasses
+import os
+import select
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+from tests.support.activation_rule_plugin import ComponentRule
+from tests.support.artifact_versions import inference, report
+from tests.support.harness_jobs import IdleMethod, evolution_config
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
+
+from reef import deploy
+from reef.api.app import create_app
+from reef.api.settings import ServiceSettings
+from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
+from reef.control.dispatcher import Dispatcher
+from reef.core.plugins import PluginConfigError
+from reef.evaluation.activation import NeverActivate
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.samples.context import PipelineContext
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
+from reef.train.component import JobStatus, TrainingJob
+from reef.train.harness_backend.component import HarnessTrainingComponent
+from reef.train.job_queue import JobQueueComponent
+
+OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
+SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
+GENERATED_TASK_RECIPE = "reef.recipe.generated_tasks:GeneratedTaskRecipe"
+
+
+def test_configured_handler_rejects_a_function() -> None:
+    from reef.api.serving import inference_handler_factory_for
+
+    with pytest.raises(ValueError, match="must name a class that inherits InferenceHandler"):
+        inference_handler_factory_for("reef.inference.http:provider_request_headers")
+    with pytest.raises(ValueError, match=r"must be 'package\.module:ClassName'"):
+        inference_handler_factory_for("reef.inference.sglang.chat.SGLangInferenceHandler")
+
+
+class _Process:
+    """Small Popen stand-in for orchestrator lifecycle tests."""
+
+    def __init__(self, returncode=None, stop_on_poll=None, *, pid=123):
+        self.pid = pid
+        self.returncode = returncode
+        self._stop_on_poll = stop_on_poll
+
+    def poll(self):
+        if self._stop_on_poll is not None:
+            self._stop_on_poll.set()
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -signal.SIGTERM
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def example_owned(relative_path: str):
+    """An example-owned stack, skipped where the examples do not ship.
+
+    The package job runs this suite against the installed distribution, so
+    PROJECT_ROOT is site-packages and nothing under ``recipes/`` ships with
+    the wheel. Absent there is correct, not broken.
+    """
+    return pytest.param(
+        relative_path,
+        marks=pytest.mark.skipif(
+            not (deploy.PROJECT_ROOT / relative_path).exists(),
+            reason="example-owned stack: shipped with the repo, not with the package",
+        ),
+    )
+
+
+#: The CPU in-process training deployment, whose component records the settings it was built with.
+LOCAL_TRAINING_BACKEND = "tests.support.training_deployment:LocalDeployment"
+
+
+def service_settings(**overrides) -> ServiceSettings:
+    recipe_settings = dict(overrides.pop("recipe_settings", {}))
+    values = {
+        "host": "0.0.0.0",
+        "port": 8900,
+        "tokens": ("token",),
+        "recipe": OPENCLAWRL_RECIPE,
+        "ray_address": "ray-head:6379",
+        "ray_namespace": "reef",
+        "inference_url": "http://ray-head:30000",
+        "model_path": "/models/demo",
+        "training_backend": LOCAL_TRAINING_BACKEND,
+        "training_backend_options": {"batch-size": 4},
+        "inference_timeout_s": 30.0,
+        "inference_handler_factory": None,
+        "inference_handler_config": {},
+        "artifact_repository": "/state/artifacts.git",
+        "artifact_work_dir": "/state/work",
+        "artifact_cache_dir": "/state/cache",
+        "agent_record_dir": "/state/agent-record",
+        "recipe_settings": recipe_settings,
+    }
+    values.update(overrides)
+    return ServiceSettings(**values)
+
+
+@pytest.fixture
+def stub_repository(monkeypatch):
+    """Build no Git LFS repository: every scenario's backend is a placeholder."""
+    monkeypatch.setattr(
+        GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda scenario: object()
+    )
+
+
+def build(tmp_path: Path, **overrides) -> Dispatcher:
+    """``deploy.build_dispatcher`` of ``service_settings(**overrides)``, with its records under ``tmp_path``."""
+    return deploy.build_dispatcher(
+        service_settings(agent_record_dir=str(tmp_path / "agent-record"), **overrides), environ={}
+    )
+
+
+@pytest.mark.unit
+def test_service_config_exposes_shared_batch_controls() -> None:
+    args = deploy.service_config_from_mapping({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
+
+    assert args.recipe == OPENCLAWRL_RECIPE
+    assert not hasattr(args, "default_recipe")
+    # Recipe config fields are not service settings fields: they pass through raw so each
+    # default lives with its recipe.
+    assert not hasattr(args, "batch_size")
+    assert not hasattr(args, "groups_per_step")
+    assert args.recipe_settings["batch_size"] == 4
+    assert "groups_per_step" not in args.recipe_settings
+    assert args.inference_handler_factory is None
+    assert args.inference_handler_config == {}
+
+
+@pytest.mark.unit
+def test_service_config_preserves_inference_handler_config() -> None:
+    args = deploy.service_config_from_mapping(
+        {
+            "reef": {
+                "recipe": OPENCLAWRL_RECIPE,
+                "inference_handler_factory": "example:Factory",
+                "inference_handler_config": {"tool_call_parser": "qwen25"},
+            }
+        }
+    )
+
+    assert args.inference_handler_config == {"tool_call_parser": "qwen25"}
+
+
+@pytest.mark.unit
+def test_service_config_preserves_the_activation_section() -> None:
+    activation = {"module": "evaluated", "config": {"min_mean_score": 0.8}}
+
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": activation})
+
+    assert args.activation_settings == activation
+    with pytest.raises(ValueError, match="activation must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": "never"})
+
+
+@pytest.mark.unit
+def test_service_config_reads_the_pipeline_section() -> None:
+    section = {
+        "record2sample": {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"rounds": 1}}
+    }
+
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "pipeline": section})
+
+    assert args.pipeline_settings == section
+    with pytest.raises(ValueError, match="pipeline must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "pipeline": "generated"})
+
+
+@pytest.mark.unit
+def test_service_config_selects_inference_recipe_and_interpolates_settings() -> None:
+    args = deploy.service_config_from_mapping(
+        {
+            "reef": {
+                "recipe": "recipe",
+                "port": 9000,
+                "inference_url": "http://127.0.0.1:${provider.port}",
+            },
+            "provider": {"port": 30000},
+        }
+    )
+
+    assert args.recipe == "recipe"
+    assert not hasattr(args, "default_recipe")
+    assert args.port == 9000
+    assert args.inference_url == "http://127.0.0.1:30000"
+
+
+@pytest.mark.unit
+def test_service_config_requires_recipe() -> None:
+    with pytest.raises(ValueError, match=r"reef\.recipe"):
+        deploy.service_config_from_mapping({"reef": {}})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("config_name", "recipe"),
+    [
+        ("recipes/basic/local-sglang.yaml", "recipe"),
+        ("recipes/basic/external-provider.yaml", "recipe"),
+        ("recipes/openclawrl/examples/openclawrl/serve.yaml", OPENCLAWRL_RECIPE),
+    ],
+)
+def test_cookbook_configs_launch_internal_service_from_reef_settings(
+    config_name: str,
+    recipe: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = deploy.PROJECT_ROOT / config_name
+    if not config_path.exists():
+        pytest.skip("repo-owned stack: shipped with the repo, not with the package")
+    from tests.support.config_helpers import load_deployment
+
+    # The stacks bind every address, so they refuse to start without a token.
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    with pytest.raises(deploy.DeployConfigError, match=r"reef\.tokens is empty"):
+        load_deployment(config_path)
+
+    monkeypatch.setenv("REEF_TOKEN", "test-token")
+    config = load_deployment(config_path)
+    service = next(item for item in config["services"] if item["name"] == "reef")
+    args = deploy.service_config_from_mapping(config)
+
+    assert service["command"] == [sys.executable, "-m", "reef.deploy.service_process"]
+    assert "REEF_TOKEN" not in service.get("env", {})
+    assert args.tokens == ("test-token",)
+    assert args.recipe == recipe
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "relative_path",
+    # example-owned stacks (the openclawrl config lives with its example, like recipes/tttd/examples/tttd/serve.yaml)
+    (example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
+)
+def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
+    monkeypatch.setenv("REEF_TOKEN", "test-token")
+    from tests.support.config_helpers import load_deployment
+
+    from reef.execution.executor.arguments import native_arguments
+
+    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
+    retention = config["training"]["checkpoint_retention"]
+    command = " ".join(native_arguments(config["reef"]["training_backend_options"]))
+
+    assert retention["max_storage_fraction"] == 0.8
+    assert retention["min_free_space_fraction"] == 0.1
+    assert retention["policy"] == "latest"
+    assert "--reef-checkpoint-max-storage-fraction=0.8" in command
+    assert "--reef-checkpoint-min-free-space-fraction=0.1" in command
+
+
+@pytest.mark.unit
+def test_build_dispatcher_builds_the_training_component_and_injects_selected_recipe(monkeypatch, tmp_path) -> None:
+    backend = {}
+
+    def factory(config, *, context):
+        backend.update(config=config, context=context)
+        return lambda scenario: object()
+
+    monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", factory)
+
+    dispatcher = deploy.build_dispatcher(
+        service_settings(agent_record_dir=str(tmp_path / "agent-record")),
+        environ={},
+    )
+
+    assert dispatcher.recipe.name == "openclawrl"
+    # The recipe's trainers add their jobs to the jobs queue; the training worker runs them on the component.
+    queued = dispatcher.live.training_component
+    assert isinstance(queued, JobQueueComponent)
+    (component,) = dispatcher.job_components
+    assert component.received_model_path == "/models/demo"
+    assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
+    assert component.config["batch_size"] == 4
+    # The backend serves its own snapshots by default (``inference.serving: trainer``).
+    assert isinstance(dispatcher.live.runtime, StubInferenceRuntime)
+    assert backend == {
+        "config": {"repository": "/state/artifacts.git"},
+        "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("recipe", ["recipe", "reef.recipe.base:Recipe"], ids=["preset", "dotted-reference"])
+def test_build_dispatcher_loads_recipe_for_inference_service_under_the_recipe_name(
+    stub_repository, tmp_path, recipe
+) -> None:
+    assert build(tmp_path, recipe=recipe).recipe.name == "recipe"
+
+
+@pytest.mark.unit
+def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repository, tmp_path) -> None:
+    dispatcher = build(
+        tmp_path,
+        recipe="reef.recipe.harness:HarnessEvolutionRecipe",
+        recipe_settings=evolution_config(adapter="pi", state_dir=str(tmp_path / "state")),
+    )
+
+    recipe = dispatcher.recipe
+    assert isinstance(recipe, HarnessEvolutionRecipe) and recipe.evolution.adapter == "pi"
+    # The dispatcher's live objects hold the jobs queue's view; the training workers hold the component that the
+    # service built.
+    assert isinstance(dispatcher.live.harness_component, JobQueueComponent)
+    (harness,) = dispatcher.job_components
+    assert isinstance(harness, HarnessTrainingComponent) and isinstance(harness.method, IdleMethod)
+    assert recipe.configured_tasks() == ("t",)
+
+
+@pytest.mark.unit
+def test_build_dispatcher_applies_common_recipe_controls(stub_repository, tmp_path) -> None:
+    dispatcher = build(
+        tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"buffer_size": 4}}}
+    )
+    assert dispatcher.recipe.stages().build(PipelineContext("s")).buffer_size == 4
+
+
+@pytest.mark.unit
+def test_a_sample2job_batch_size_is_an_unknown_stage_key(stub_repository, tmp_path) -> None:
+    # The training backend owns the batch size; the stage config has no batch_size key and no fallback.
+    dispatcher = build(
+        tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"batch_size": 4}}}
+    )
+    # Stage configs are checked when a scenario builds its pipeline.
+    with pytest.raises(PluginConfigError, match="unknown config fields: batch_size"):
+        dispatcher.recipe.stages().build(PipelineContext("s"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recipe", "activation", "rule_type"),
+    [
+        (
+            OPENCLAWRL_RECIPE,
+            {"module": "tests.support.activation_rule_plugin:ComponentRule", "config": {"component": "weights"}},
+            ComponentRule,
+        ),
+        # A recipe that trains no weights reads the section too.
+        ("reef.recipe.base:Recipe", {"module": "never"}, NeverActivate),
+    ],
+)
+def test_build_dispatcher_hands_the_activation_section_to_the_recipe(
+    stub_repository, tmp_path, recipe, activation, rule_type
+) -> None:
+    assert isinstance(
+        build(tmp_path, recipe=recipe, activation_settings=activation).recipe.activation_rule(), rule_type
+    )
+
+
+@pytest.mark.unit
+def test_build_dispatcher_refuses_an_activation_section_for_a_preset(stub_repository, tmp_path) -> None:
+    with pytest.raises(ValueError, match="set its pipeline and activation sections in the preset file"):
+        build(tmp_path, recipe="recipe", activation_settings={"module": "never"})
+
+
+@pytest.mark.unit
+def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_repository, tmp_path) -> None:
+    generator = {"module": "tests.recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+    pipeline = {
+        "record2sample": {
+            "module": "reef.recipe.generated_tasks:GeneratedTaskSamples",
+            "config": {"generator": generator},
+        },
+    }
+
+    # The recipe trains task jobs, so its jobs carry the training component's rollout settings.
+    recipe_settings = {"job_parameters": {"rollout": {"rollouts_per_task": 2}}}
+    dispatcher = build(
+        tmp_path, recipe=GENERATED_TASK_RECIPE, pipeline_settings=pipeline, recipe_settings=recipe_settings
+    )
+
+    stages = dispatcher.recipe.pipeline_stages
+    # A stage the section leaves out is the recipe's own, with no config.
+    assert stages is not None and stages.sample2job.plugin_class.__name__ == "GeneratedTaskJobData"
+    assert stages.sample2job.config == {}
+    assert stages.record2sample is not None and stages.record2sample.plugin_class.__name__ == "GeneratedTaskSamples"
+    assert stages.record2sample.config == {"generator": generator}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recipe", "error", "message"),
+    [
+        (OPENCLAWRL_RECIPE, RecipeConfigError, "must name a class that inherits Record2Sample"),
+        # A recipe that trains no weights reads the section too, and refuses the same mistake.
+        ("reef.recipe.base:Recipe", RecipeConfigError, "must name a class that inherits Record2Sample"),
+        # A preset sets its pipeline section in its own file.
+        ("recipe", ValueError, "set its pipeline and activation sections in the preset file"),
+    ],
+)
+def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
+    stub_repository, tmp_path, recipe, error, message
+) -> None:
+    pipeline = {"record2sample": {"module": "tests.recipe.test_generated_tasks:ScriptedGenerator"}}
+    with pytest.raises(error, match=message):
+        build(tmp_path, recipe=recipe, pipeline_settings=pipeline)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["groups_per_step", "batch_size"])
+def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(stub_repository, tmp_path, key) -> None:
+    """A recipe-shaped reef.* key no config field consumes must fail the boot loudly: the alternative is a
+    deployment silently running on recipe defaults. A stage setting such as batch_size belongs under its pipeline
+    key, not under reef.*."""
+    with pytest.raises(RecipeConfigError, match=rf"OpenClawRLRecipe does not consume reef\.{key}") as excinfo:
+        build(tmp_path, recipe=OPENCLAWRL_RECIPE, recipe_settings={key: 4})
+    # The error lists what the recipe would consume.
+    assert "reef.training_mode" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured_inference_handler() -> None:
+    from reef.api.serving import serving_runtime_config
+    from reef.api.training import training_deployment_for
+    from reef.core.weight_layout import ArtifactFormat
+    from reef.inference.sglang.chat import SGLangInferenceHandler
+
+    settings = service_settings(
+        training_backend="slime",
+        inference_backend="sglang",
+        inference_num_gpus=1,
+        tensor_parallel_size=1,
+        inference_remote={"url": "http://inference:8000"},
+        inference_handler_factory="reef.inference.sglang.chat:SGLangInferenceHandler",
+        inference_handler_config={"tool_call_parser": "qwen25"},
+    )
+    backend = training_deployment_for("slime")
+
+    config = backend.component_config(dataclasses.asdict(settings), default_parameters={})
+    assert (config["ray_address"], config["namespace"]) == ("ray-head:6379", "reef")
+    assert config["settings"]["model_path"] == "/models/demo"
+    serving = serving_runtime_config(settings, backend, ArtifactFormat("full"))
+    assert serving["inference_handler_factory"] is SGLangInferenceHandler
+    assert serving["inference_handler_config"] == {"tool_call_parser": "qwen25"}
+
+
+@pytest.mark.unit
+def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_path) -> None:
+    # A training recipe must route through the training-backend branch, not
+    # the inference loader; SAORecipe requires an injected TrainingComponent and
+    # would otherwise raise RecipeConfigError at load time.
+    dispatcher = build(tmp_path, recipe=SAO_RECIPE)
+
+    assert dispatcher.recipe.name == "sao"
+    # The training backend built the component (the inference branch builds none).
+    (component,) = dispatcher.job_components
+    assert component.received_model_path == "/models/demo"
+
+
+@pytest.mark.unit
+def test_build_dispatcher_gives_a_stage_key_to_the_record_to_sample_stage_only(stub_repository, tmp_path) -> None:
+    pipeline = {"record2sample": {"config": {"prm_m": 2}}}
+    dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
+
+    # The key belongs to the record-to-sample stage; the training component never receives it.
+    assert "prm_m" not in dispatcher.job_components[0].config
+    assert dispatcher.recipe.stages().record2sample.config == {"prm_m": 2}
+    dispatcher.recipe.stages().build(PipelineContext("s")).close()
+
+
+@pytest.mark.unit
+def test_build_dispatcher_requires_the_model_path(stub_repository, tmp_path) -> None:
+    with pytest.raises(ValueError, match=r"reef\.model_path is required"):
+        build(tmp_path, model_path="")
+
+
+class HeldJobComponent(StubTrainingComponent):
+    """A component whose submitted jobs run until :meth:`finish_jobs` ends them."""
+
+    def submit(self, job: TrainingJob) -> None:
+        if job.job_id not in self.statuses:
+            self.submitted.append(job)
+            self.statuses[job.job_id] = JobStatus(job.job_id, "running")
+
+    def finish_jobs(self) -> None:
+        for job in self.submitted:
+            if self.statuses[job.job_id].state == "running":
+                self.statuses[job.job_id] = JobStatus(job.job_id, "finished", self.train(job))
+
+
+class AdapterInference(StubInferenceRuntime):
+    """Serve each snapshot under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
+
+    def __init__(self, *, per_scenario_adapters: bool) -> None:
+        super().__init__(per_scenario_adapters=per_scenario_adapters)
+
+    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
+        return f"adapter:{scenario}:{self.served}"
+
+    def served_model_name(self, scenario: str) -> str:
+        return f"adapter:{scenario}:{self.served}"
+
+    def serve(self, artifact: Artifact) -> str:
+        return super().serve(artifact.materialize())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("per_scenario_adapters", [False, True], ids=["shared-weights", "per-scenario-adapters"])
+def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter(
+    tmp_path, monkeypatch, per_scenario_adapters
+) -> None:
+    synchronization_timeout_seconds = 30
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
+    component = HeldJobComponent(tmp_path / "checkpoints")
+    runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
+    dispatcher = Dispatcher(
+        TestPolicyRecipe(),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component, runtime),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
+    )
+
+    async def math_status(client: TestClient) -> dict:
+        response = await client.get("/reef/status")
+        assert response.status == 200
+        return (await response.json())["scenarios"]["math"]
+
+    async def wait_for(client: TestClient, finished_jobs: int, running: bool) -> dict:
+        deadline = time.monotonic() + synchronization_timeout_seconds
+        while time.monotonic() < deadline:
+            block = await math_status(client)
+            if (
+                block["finished_jobs"] == finished_jobs
+                and bool(block["training_jobs"]) == running
+                and block["served_artifact_id"]
+                == dispatcher.get_or_create_scenario("math").artifact_status()["weights"]["active"]
+            ):
+                return block
+            await asyncio.sleep(0.01)
+        pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}")
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            dispatcher.get_or_create_scenario("math")
+            idle = await wait_for(client, finished_jobs=0, running=False)
+            assert (idle["training_jobs"], idle["finished_jobs"]) == ([], 0)
+            assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
+            assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
+
+            dispatcher.accept_record(inference(1, idle["served_artifact_id"]))
+            dispatcher.accept_record(report(1))
+            running = await wait_for(client, finished_jobs=0, running=True)
+            # The training service hands the queued job to the component on its own thread.
+            deadline = time.monotonic() + synchronization_timeout_seconds
+            while not component.submitted and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            (job,) = component.submitted
+            assert running["training_jobs"] == [
+                {
+                    "job_id": job.job_id,
+                    # Control's trainer names the root snapshot; the component got its own start of it.
+                    "start": running["training_jobs"][0]["start"],
+                    "checkpoints_handled": 0,
+                    "train_from": None,
+                    "backend": "stub",
+                }
+            ]
+
+            component.finish_jobs()
+            finished = await wait_for(client, finished_jobs=1, running=False)
+            # The status names the artifact that serves the scenario: the job's checkpoint, once it is active.
+            (active,) = [row["artifact_id"] for row in dispatcher.list_artifacts("math") if row["active"]]
+            assert finished["served_artifact_id"] == active != idle["served_artifact_id"]
+            if per_scenario_adapters:
+                assert finished["adapter_runtime_load_id"] == "adapter:math:w1"
+            else:
+                assert "adapter_runtime_load_id" not in finished
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
+    config = {"reef": {"recipe": "openclawrl", "token": "alice", "tokens": ["bob", "", "alice", "  carol  "]}}
+    assert deploy.service_config_from_mapping(config).tokens == ("alice", "bob", "carol")
+    with pytest.raises(ValueError, match=r"reef\.tokens must be a list"):
+        deploy.service_config_from_mapping({"reef": {"recipe": "openclawrl", "tokens": "alice,bob"}})
+
+
+def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
+    """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
+    recipe-owned remainder of the section must still exclude it, or every
+    training recipe would reject the cookbook configs as unconsumed settings."""
+    from reef.api.assembly import _recipe_owned_settings
+
+    config = {"reef": {"recipe": "openclawrl", "token": "secret", "tokens": ["next"], "batch_size": 2}}
+    owned = _recipe_owned_settings(deploy.service_config_from_mapping(config))
+    assert set(owned) == {"batch_size"}
+
+
+@pytest.mark.unit
+def test_stack_service_env_names_the_config_and_interpolates_service_values(tmp_path: Path) -> None:
+    from reef.deploy.process import ProcessWorker as _Stack
+
+    config = {"reef": {"port": 8900}}
+    stack = _Stack(config, [{"name": "ray-head"}], tmp_path / "stack", 60, tmp_path / "serve.yaml")
+
+    env = stack._service_env({"name": "ray-head", "env": {"RAY_ADDRESS": "127.0.0.1:${reef.port}"}})
+
+    assert env["RAY_ADDRESS"] == "127.0.0.1:8900"
+    assert env["REEF_CONFIG"] == str(tmp_path / "serve.yaml")
+
+
+@pytest.mark.unit
+def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: Path) -> None:
+    from reef.deploy.process import ProcessWorker as _Stack
+
+    stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    process = _Process()
+    stack._procs["service"] = process
+
+    stack.shutdown(grace=0)
+
+    assert process.returncode == -signal.SIGTERM
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_terminates_descendants_after_the_service_leader_exits(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy.process import ProcessWorker as _Stack
+
+    run_dir = tmp_path / "stack"
+    run_dir.mkdir()
+    child_ready = tmp_path / "child.ready"
+    child_stopped = tmp_path / "child.stopped"
+    child_code = f"""
+import os
+import signal
+import time
+from pathlib import Path
+
+def stop(signum, frame):
+    Path({str(child_stopped)!r}).write_text(str(signum))
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+Path({str(child_ready)!r}).write_text(str(os.getpid()))
+while True:
+    time.sleep(1)
+"""
+    leader_code = f"""
+import subprocess
+import sys
+
+subprocess.Popen([sys.executable, "-c", {child_code!r}])
+"""
+    service = {
+        "name": "service",
+        "command": [sys.executable, "-c", leader_code],
+    }
+    stack = _Stack({}, [service], run_dir, 60, tmp_path / "serve.yaml")
+    # This test targets lifecycle, not readiness polling.
+
+    try:
+        stack.start()
+        leader = stack._procs["service"]
+        deadline = time.monotonic() + 5
+        while not child_ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child_ready.exists(), "descendant did not start"
+        child_pid = int(child_ready.read_text())
+        assert leader.wait(timeout=5) == 0
+        assert os.getpgid(child_pid) == leader.pid
+
+        stack.shutdown(grace=2)
+
+        assert child_stopped.read_text() == str(int(signal.SIGTERM))
+    finally:
+        group = stack._process_groups.get("service")
+        if group is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(group, signal.SIGKILL)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_signals_descendants_after_the_leader_exits(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy import process as orchestrator
+    from reef.deploy.process import ProcessWorker
+
+    stack = ProcessWorker({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack._procs["service"] = _Process(returncode=0)
+    stack._process_groups["service"] = 123
+    group_alive = True
+    signals = []
+
+    def killpg(pgid, signum):
+        nonlocal group_alive
+        if signum == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
+        signals.append((pgid, signum))
+        group_alive = False
+
+    monkeypatch.setattr(orchestrator.os, "killpg", killpg)
+    monkeypatch.setattr(
+        orchestrator.os,
+        "getpgid",
+        lambda pid: (_ for _ in ()).throw(ProcessLookupError),
+    )
+    monkeypatch.setattr(orchestrator.os, "getpgrp", lambda: 999)
+
+    stack.shutdown(grace=1)
+
+    assert signals == [(123, signal.SIGTERM)]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_escalates_surviving_groups_in_reverse_dependency_order(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy import process as orchestrator
+    from reef.deploy.process import ProcessWorker
+
+    stack = ProcessWorker(
+        {},
+        [{"name": "dependency"}, {"name": "dependent"}],
+        tmp_path,
+        60,
+        tmp_path / "serve.yaml",
+    )
+    stack._procs = {
+        "dependency": _Process(pid=101),
+        "dependent": _Process(pid=202),
+    }
+    stack._process_groups = {"dependency": 101, "dependent": 202}
+    alive_groups = {101, 202}
+    signals = []
+
+    def killpg(pgid, signum):
+        if signum == 0:
+            if pgid not in alive_groups:
+                raise ProcessLookupError
+            return
+        signals.append((pgid, signum))
+        if signum == signal.SIGKILL:
+            alive_groups.remove(pgid)
+
+    monkeypatch.setattr(orchestrator.os, "killpg", killpg)
+    monkeypatch.setattr(orchestrator.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(orchestrator.os, "getpgrp", lambda: 999)
+
+    stack.shutdown(grace=0)
+
+    assert signals == [
+        (202, signal.SIGTERM),
+        (101, signal.SIGTERM),
+        (202, signal.SIGKILL),
+        (101, signal.SIGKILL),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy import process as orchestrator
+    from reef.deploy.process import ProcessWorker
+
+    stack = ProcessWorker({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack._procs["service"] = _Process(returncode=0, pid=123)
+    stack._process_groups["service"] = 123
+    signals = []
+
+    monkeypatch.setattr(orchestrator.os, "getpgid", lambda pid: 123)
+    monkeypatch.setattr(orchestrator.os, "getpgrp", lambda: 999)
+    monkeypatch.setattr(orchestrator.os, "killpg", lambda pgid, signum: signals.append((pgid, signum)))
+
+    stack.shutdown(grace=0)
+
+    assert signals == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("returncode", "signal_during_poll", "exit_code"),
+    [
+        # Any unexpected child exit is a failure.
+        (0, False, 1),
+        (1, False, 1),
+        # A signal that arrives after the watchdog began its polling pass, before shutdown made the child exit.
+        (-signal.SIGTERM, True, 0),
+    ],
+)
+def test_the_watchdog_fails_on_an_unexpected_child_exit_only(
+    tmp_path: Path, returncode: int, signal_during_poll: bool, exit_code: int
+) -> None:
+    from reef.deploy.orchestrator import _Stack
+    from reef.execution.executor.uniproc import UniProcExecutor
+
+    stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+
+    class Worker:
+        def status(self):
+            if signal_during_poll:
+                stack._stopping.set()
+            return {"service": returncode}
+
+        def read_log(self, *args):
+            return "", 0
+
+    stack._executors["service"] = UniProcExecutor.from_workers([Worker()])
+
+    stack._watchdog()
+
+    assert stack.exit_code == exit_code
+
+
+@pytest.mark.unit
+def test_stack_installs_signal_handlers_before_starting_watchdog(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy import orchestrator
+
+    stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
+    handlers = {}
+    started = []
+
+    monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
+
+    class Watcher:
+        def join(self, timeout):
+            pass
+
+        def start(self):
+            assert signal.SIGINT in handlers and signal.SIGTERM in handlers
+            started.append(True)
+            stack._stopping.set()
+
+    monkeypatch.setattr(orchestrator.threading, "Thread", lambda **kwargs: Watcher())
+
+    stack.block()
+
+    assert started == [True]
+
+
+@pytest.mark.unit
+def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> None:
+    # Isolate the real signal and non-reentrant Event lock: a regression must
+    # time out a child process, not leave the pytest runner deadlocked.
+    program = textwrap.dedent(
+        """
+        import signal
+        import threading
+        from pathlib import Path
+        from reef.deploy import orchestrator
+
+        class InterruptDuringWait(threading.Event):
+            def wait(self, timeout=None):
+                with self._cond:
+                    signal.raise_signal(signal.SIGINT)
+                return super().wait(0)
+
+        class Watcher:
+            def __init__(self, **kwargs):
+                pass
+            def start(self):
+                pass
+            def join(self, timeout):
+                pass
+
+        stack = orchestrator._Stack({}, [], Path.cwd(), 60, Path('unused.yaml'))
+        stack._stopping = InterruptDuringWait()
+        orchestrator.threading.Thread = Watcher
+        stack.block()
+        assert stack._stopping.is_set()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program], cwd=tmp_path, capture_output=True, text=True, timeout=15, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("received signal, shutting down") == 1
+
+
+#: A service whose SIGTERM cleanup takes a second: it writes ``service.stopped`` only if the grace period lasts.
+HANGUP_SERVICE = """
+import os, pathlib, signal, sys, time
+directory = pathlib.Path(sys.argv[1])
+
+def stop(signum, frame):
+    time.sleep(1)
+    (directory / "service.stopped").write_text(str(signum))
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+(directory / "service.pid").write_text(str(os.getpid()))
+while True:
+    time.sleep(1)
+"""
+
+
+def hangup_deployment(tmp_path: Path, phase: str, before_serve: str) -> list[str]:
+    """The argv of a `reef serve` with one HANGUP_SERVICE. In phase "startup" its ready probe never passes."""
+    service = {"name": "sleeper", "command": [sys.executable, "-c", HANGUP_SERVICE, str(tmp_path)]}
+    if phase == "startup":
+        service |= {"ready": [sys.executable, "-c", "raise SystemExit(1)"], "ready_timeout": 60}
+    config_path = tmp_path / "serve.yaml"
+    config_path.write_text(
+        f"reef:\n  run-dir: {tmp_path / 'run'}\ninference:\n  upstream-url: http://127.0.0.1:9\n  upstream-model: demo\n"
+    )
+    program = "\n".join(
+        [
+            "import signal, sys",
+            "from reef.service.deploy import orchestrator",
+            before_serve,
+            f"orchestrator.validate_services = lambda config, path: [{service!r}]",
+            f"sys.exit(orchestrator._run_orchestrator({str(config_path)!r}))",
+        ]
+    )
+    return [sys.executable, "-c", program]
+
+
+def wait_for_stack(tmp_path: Path, phase: str, output: Callable[[], str]) -> int:
+    """Wait until the service runs and, in phase "running", the stack is up; return the service's pid."""
+    # The worker logs "stack up" once it has spawned the service. The orchestrator logs it a second time when every
+    # service is ready, just before it blocks; a ready probe that never passes keeps that line away.
+    stack_up_lines = 2 if phase == "running" else 1
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not (
+        (tmp_path / "service.pid").exists() and output().count("stack up") >= stack_up_lines
+    ):
+        time.sleep(0.05)
+    assert (tmp_path / "service.pid").exists(), output()
+    assert output().count("stack up") == stack_up_lines, output()
+    return int((tmp_path / "service.pid").read_text())
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions and SIGHUP")
+@pytest.mark.parametrize("phase", ["startup", "running"])
+def test_a_closed_terminal_stops_the_services_with_their_grace_period(tmp_path: Path, phase: str) -> None:
+    # `reef serve` runs on a terminal that then closes: the kernel hangs up its session, and later writes to the
+    # terminal fail. Each service runs in a session of its own and gets no hangup.
+    import pty  # POSIX only
+
+    terminal, terminal_side = pty.openpty()
+    make_controlling_terminal = "import fcntl, termios; fcntl.ioctl(0, termios.TIOCSCTTY, 0)"
+    serve = subprocess.Popen(
+        hangup_deployment(tmp_path, phase, make_controlling_terminal),
+        cwd=tmp_path,
+        stdin=terminal_side,
+        stdout=terminal_side,
+        stderr=terminal_side,
+        start_new_session=True,
+    )
+    os.close(terminal_side)
+    shown = bytearray()
+
+    def output() -> str:
+        while select.select([terminal], [], [], 0)[0]:
+            try:
+                shown.extend(os.read(terminal, 65536))
+            except OSError:
+                break
+        return shown.decode(errors="replace")
+
+    service_pid = None
+    try:
+        service_pid = wait_for_stack(tmp_path, phase, output)
+
+        os.close(terminal)
+        # The shell of a closed terminal hangs up its jobs once more; one hangup is one graceful stop.
+        serve.send_signal(signal.SIGHUP)
+        serve.wait(timeout=60)
+
+        assert serve.returncode == 0
+        assert (tmp_path / "service.stopped").read_text() == str(int(signal.SIGTERM))
+        with pytest.raises(ProcessLookupError):
+            os.kill(service_pid, 0)
+    finally:
+        if serve.poll() is None:
+            serve.kill()
+            serve.wait()
+        if service_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(service_pid, signal.SIGKILL)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions and SIGHUP")
+def test_reef_serve_keeps_an_ignored_sighup(tmp_path: Path) -> None:
+    # `nohup reef serve` starts with SIGHUP ignored; the stack must outlive the hangup.
+    serve_log = tmp_path / "serve.log"
+    with serve_log.open("w") as serve_stderr:
+        serve = subprocess.Popen(
+            hangup_deployment(tmp_path, "running", "signal.signal(signal.SIGHUP, signal.SIG_IGN)"),
+            cwd=tmp_path,
+            stderr=serve_stderr,
+            start_new_session=True,
+        )
+    service_pid = None
+    try:
+        service_pid = wait_for_stack(tmp_path, "running", serve_log.read_text)
+
+        serve.send_signal(signal.SIGHUP)
+        time.sleep(1)
+        assert serve.poll() is None, serve_log.read_text()
+        os.kill(service_pid, 0)
+
+        serve.send_signal(signal.SIGTERM)
+        serve.wait(timeout=60)
+        assert serve.returncode == 0, serve_log.read_text()
+        assert (tmp_path / "service.stopped").exists()
+    finally:
+        if serve.poll() is None:
+            serve.kill()
+            serve.wait()
+        if service_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(service_pid, signal.SIGKILL)
+
+
+@pytest.mark.unit
+def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -> None:
+    from reef.deploy import orchestrator
+    from reef.execution.executor.uniproc import UniProcExecutor
+
+    stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
+    handlers = {}
+    stopped = []
+    monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
+
+    class Watcher:
+        def start(self):
+            handlers[signal.SIGINT](signal.SIGINT, None)
+
+        def join(self, timeout):
+            pass
+
+    class Worker:
+        def request_stop(self):
+            stopped.append("requested")
+
+        def tree_alive(self):
+            handlers[signal.SIGINT](signal.SIGINT, None)
+            return True
+
+        def shutdown(self, grace):
+            stopped.append(grace)
+
+        def read_log(self, name, offset):
+            return "", offset
+
+    def unexpected_wait(seconds):
+        pytest.fail("the second signal should skip the remaining grace period")
+
+    monkeypatch.setattr(orchestrator.threading, "Thread", lambda **kwargs: Watcher())
+    stack.block()
+    # Restore real threads before the executor creates its RPC worker.
+    monkeypatch.undo()
+    monkeypatch.setattr(orchestrator.time, "sleep", unexpected_wait)
+    stack._executors["service"] = UniProcExecutor.from_workers([Worker()])
+    stack.shutdown(grace=30)
+
+    assert stopped == ["requested", 0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("config_path", [example_owned("recipes/opd/examples/math/serve.yaml")])
+def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
+    from tests.support.config_helpers import load_deployment
+
+    from reef.execution.executor.arguments import native_arguments
+
+    monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen3-8b-sft")
+    monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen3-32b")
+    monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-test")
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    config = load_deployment(deploy.PROJECT_ROOT / config_path)
+    args = deploy.service_config_from_mapping(config)
+    assert args.recipe == "recipes.opd.recipe:OPDRecipe"
+    assert args.teacher_model_path == "/models/qwen3-32b"
+    assert args.teacher_num_gpus == 2
+    flags = native_arguments(config["reef"]["training_backend_options"])
+    assert "--opd-teacher=separate" in flags
+    assert "--opd-top-k=1" in flags
+    assert "--rollout-temperature=1.0" in flags
+    assert "--megatron-lora-rank=128" in flags
+    assert not any(flag.startswith("--opd-teacher-checkpoint") for flag in flags)

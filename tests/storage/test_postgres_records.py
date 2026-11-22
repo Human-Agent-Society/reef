@@ -7,16 +7,17 @@ from threading import Barrier
 
 import pytest
 
+from reef.api.assembly import _recipe_owned_settings, build_dispatcher
+from reef.api.settings import ServiceSettings, service_config_arguments
 from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.snapshot import SnapshotRef
-from reef.service.assembly import _recipe_owned_settings, build_dispatcher
-from reef.service.deploy.config_utils import load_config
-from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceSettings, service_config_arguments, service_config_from_mapping
-from reef.storage.commits import CommitRecord
-from reef.storage.postgres import PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
-from reef.storage.record_items import ItemRecordStore
+from reef.deploy.config_utils import load_config
+from reef.deploy.deployment_config import translate_layout
+from reef.deploy.service_config import service_config_from_mapping
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.sql.postgres import PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
 
 
 def record(record_id="first", scenario="math"):
@@ -105,9 +106,9 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
     "values",
     [
         {"record_backend": "unknown"},
-        {"record_backend": "reef.storage.scenario:ScenarioStorage"},
-        {"record_backend": {"module": "reef.storage.sqlite:SQLiteScenarioDatabase"}},
-        {"record_backend": {"module": "reef.storage.sqlite:SQLiteScenarioStorage", "options": {}}},
+        {"record_backend": "reef.storage.scenario.store:ScenarioStorage"},
+        {"record_backend": {"module": "reef.storage.sql.sqlite:SQLiteScenarioDatabase"}},
+        {"record_backend": {"module": "reef.storage.sql.sqlite:SQLiteScenarioStorage", "options": {}}},
         {"record_backend": "postgres"},
         {"record_database_url": "postgresql:///db"},
         {"record_backend": "postgres", "record_database_url": "sqlite:///local"},
@@ -124,17 +125,20 @@ def test_deployment_file_names_a_storage_plugin_with_its_config(tmp_path):
     path = tmp_path / "deployment.yaml"
     path.write_text(
         "recipe:\n  implementation: recipe\n"
-        "storage:\n  record_backend:\n    module: reef.storage.postgres:PostgresScenarioStorage\n"
+        "storage:\n  record_backend:\n    module: reef.storage.sql.postgres:PostgresScenarioStorage\n"
         "    config:\n      database_url: postgresql://user:secret@example.invalid/db\n"
         "  coordination_backend: postgres\n  record_database_url: postgresql://user:secret@example.invalid/db\n"
     )
     settings = service_config_from_mapping(translate_layout(load_config(path)))
     assert settings.record_backend == {
-        "module": "reef.storage.postgres:PostgresScenarioStorage",
+        "module": "reef.storage.sql.postgres:PostgresScenarioStorage",
         "config": {"database_url": "postgresql://user:secret@example.invalid/db"},
     }
     argument = next(argument for argument in service_config_arguments() if argument.name == "record_backend")
-    assert argument.parse("reef.storage.sqlite:SQLiteScenarioStorage") == "reef.storage.sqlite:SQLiteScenarioStorage"
+    assert (
+        argument.parse("reef.storage.sql.sqlite:SQLiteScenarioStorage")
+        == "reef.storage.sql.sqlite:SQLiteScenarioStorage"
+    )
     assert argument.parse('{"module": "a.b:C"}') == {"module": "a.b:C"}
 
 
@@ -163,11 +167,11 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         url, schema = request.getfixturevalue("postgres_config")
         values = {"record_backend": backend, "record_database_url": url, "record_database_schema": schema}
     elif backend == "sqlite-plugin":
-        values = {"record_backend": "reef.storage.sqlite:SQLiteScenarioStorage", "coordination_backend": "sqlite"}
+        values = {"record_backend": "reef.storage.sql.sqlite:SQLiteScenarioStorage", "coordination_backend": "sqlite"}
     elif backend == "postgres-plugin":
         url, schema = request.getfixturevalue("postgres_config")
         plugin = {
-            "module": "reef.storage.postgres:PostgresScenarioStorage",
+            "module": "reef.storage.sql.postgres:PostgresScenarioStorage",
             "config": {"database_url": url, "schema": schema},
         }
         # The records are record items, so a new host needs the data store in PostgreSQL too.
@@ -175,7 +179,7 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
             "record_backend": plugin,
             "coordination_backend": "postgres",
             "data_store": {
-                "module": "reef.storage.sql_data:PostgresDataStore",
+                "module": "reef.storage.sql.data:PostgresDataStore",
                 "config": {"database_url": url, "schema": f"{schema}_data"},
             },
             "record_database_url": url,

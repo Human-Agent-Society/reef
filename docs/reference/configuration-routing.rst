@@ -135,7 +135,7 @@ Semantic Router image
 
 In both cases, the image's ``org.opencontainers.image.revision`` label must match the pinned commit, or Reef creates no container. Reef removes no image and no build cache. The tutorial's `Semantic Router image <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__ section gives the build's requirements and limits.
 
-Startup reads the manifest once and fixes the image for the generation. Policy updates keep the image, and recovery restarts it without a build. The generation's ``snapshot_version`` covers the image. Without a named image, the same manifest therefore gets another version on another host, or after a rebuild, and ``python -m reef.service.deploy.routing.cli validate`` prints ``"snapshot_version": null``. Name an image when hosts with the same Reef release and settings must get the same version.
+Startup reads the manifest once and fixes the image for the generation. Policy updates keep the image, and recovery restarts it without a build. The generation's ``snapshot_version`` covers the image. Without a named image, the same manifest therefore gets another version on another host, or after a rebuild, and ``python -m reef.deploy.routing.cli validate`` prints ``"snapshot_version": null``. Name an image when hosts with the same Reef release and settings must get the same version.
 
 External router lifecycle
 -------------------------
@@ -163,7 +163,7 @@ To start a replica:
 
    .. code-block:: bash
 
-      python -m reef.service.deploy.routing.cli render \
+      python -m reef.deploy.routing.cli render \
         --config /etc/reef/reef.yaml --output /app/config/config.yaml
 
 3. Run SR with ``/app/config/config.yaml`` as its argument, in the replica's network namespace. SR listens on ``127.0.0.1:<sr_management_port>``. The render step writes the file with mode 0600, so run SR as the user that wrote it.

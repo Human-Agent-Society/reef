@@ -4,11 +4,11 @@ A composite recipe is a mapping from component name to that component's
 recipe, and it computes nothing from the recipes. ``component_recipes`` gives
 the recipes of any deployment, and each owner of a result reads them: the
 scenario's components hold each recipe's component under its name
-(``reef.scenario.live_objects.scenario_components``), the scenario's default
+(``reef.control.scenario.live_objects.scenario_components``), the scenario's default
 start keeps each component's seed under that component's directory
-(``reef.scenario.live_objects.default_start``), and its trainers are
+(``reef.control.scenario.live_objects.default_start``), and its trainers are
 the components' trainers, run as independent workers that meet at the
-scenario's commit boundary (``reef.scenario.factory.read_trainer_specs``; see
+scenario's commit boundary (``reef.control.scenario.factory.read_trainer_specs``; see
 ``docs/advanced_topics/state-model.rst``).
 
 Configured by a dotted ``implementation`` whose config carries a
@@ -90,7 +90,7 @@ class CompositeRecipe(Recipe):
     - Each value's ``training_mode`` equals the composite's.
     - At most one value is a ``WeightTrainingRecipe``: a snapshot loads one component into a runtime.
     - At most one value is a ``HarnessEvolutionRecipe``: a process has one harness training component
-      (``reef.scenario.live_objects.LiveObjects.harness_component``).
+      (``reef.control.scenario.live_objects.LiveObjects.harness_component``).
 
     The other fields are ``Recipe``'s: ``name``, ``training_mode`` and ``activation`` are the deployment's own
     values. The composite computes nothing from its children. ``report_type``, ``build_components``,
@@ -99,8 +99,8 @@ class CompositeRecipe(Recipe):
 
     Purpose: the loader makes it from the ``components`` section (``reef.recipe.loading.load_composite_recipe``).
     Each owner of a result reads the children with ``component_recipes``: the scenario's components, default start
-    and root check (``reef.scenario.live_objects``), the trainers and the report contract
-    (``reef.scenario.factory``), and the harness and state directory questions (``reef.recipe.deployment``).
+    and root check (``reef.control.scenario.live_objects``), the trainers and the report contract
+    (``reef.control.scenario.factory``), and the harness and state directory questions (``reef.recipe.deployment``).
     """
 
     components: Mapping[str, Recipe] = field(default_factory=dict)

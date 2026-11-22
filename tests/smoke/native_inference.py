@@ -71,8 +71,16 @@ from tests.smoke.inference_features import (
 from tests.smoke.inference_lifecycle import NoTraining, SeededWeights
 from tests.smoke.inference_recovery import ObservedEngines, ServingLog, ended_checks, first_check, serving_log
 
+from reef.api.inference_service import (
+    ARTIFACT_HEADER,
+    RECORD_HEADER,
+    SESSION_KEY_HEADER,
+    build_inference_app,
+    conversation_bucket,
+)
 from reef.artifact import Artifact, InMemoryRepositoryBackend
-from reef.core.records_types import ROLLOUT_HEADER, AgentRecord
+from reef.control.scenario.live_objects import LiveObjects
+from reef.core.records_types import ROLLOUT_HEADER, SCENARIO_HEADER, AgentRecord
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
@@ -99,15 +107,7 @@ from reef.inference.remote.service import HEALTH_TIMEOUT_S, RemoteInferenceBacke
 from reef.inference.serving import HEALTH_INTERVAL_S, FullWeightServingRuntime
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.recipe.base import WEIGHTS_COMPONENT, Recipe
-from reef.scenario.live_objects import LiveObjects
-from reef.service.inference_service import (
-    ARTIFACT_HEADER,
-    RECORD_HEADER,
-    SESSION_KEY_HEADER,
-    build_inference_app,
-    conversation_bucket,
-)
-from reef.service.routing import (
+from reef.routing.manifest import (
     DEFAULT_RULE,
     RoutingAdapter,
     RoutingSnapshot,
@@ -116,11 +116,10 @@ from reef.service.routing import (
     parse_target,
     scenario_entrypoint,
 )
-from reef.service.routing_preview import PreviewSettings
-from reef.service.wire import SCENARIO_HEADER
-from reef.storage.coordination import Coordination
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.routing.preview import PreviewSettings
+from reef.storage.coordination.store import Coordination
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 PROFILES = ("features", "routing", "recovery", "lifecycle")
 ENGINES = ("sglang", "vllm")
@@ -2598,8 +2597,8 @@ async def public_app(
     the runtime of ``live`` and closes the record store.
     """
     # The dispatcher and the public app load only for the lifecycle profile.
-    from reef.dispatcher import Dispatcher
-    from reef.service.app import create_app
+    from reef.api.app import create_app
+    from reef.control.dispatcher import Dispatcher
 
     coordination = memory_coordination()
     dispatcher = Dispatcher(
@@ -2884,16 +2883,16 @@ def routing_policy(run: Run, engines: Engines) -> tuple[dict[str, Any], str, str
 
 async def qualify_routing(run: Run) -> None:
     # The routed one-process app, its dispatcher and the router's deployment code load only for this profile.
-    from reef.dispatcher import build_default_dispatcher
-    from reef.service.app import create_app
-    from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime
-    from reef.service.deploy.routing.renderer import (
+    from reef.api.app import create_app
+    from reef.control.dispatcher import build_default_dispatcher
+    from reef.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime
+    from reef.routing.renderer import (
         MANAGEMENT_TOKEN_ENV,
         SELECTION_TOKEN_ENV,
         router_configuration,
         write_private_document,
     )
-    from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+    from reef.routing.settings import RoutingDeploymentSettings
 
     inputs = run.inputs
     binary = inputs.router_binary
