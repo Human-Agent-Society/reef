@@ -16,7 +16,7 @@ from dataclasses import replace
 from aiohttp import web
 from aiohttp.typedefs import Handler
 
-from reef.core.records_types import AgentRecord
+from reef.core.records_types import SCENARIO_HEADER, AgentRecord
 from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
@@ -30,7 +30,6 @@ from reef.service.routed_inference import InferenceRetryPolicy, RoutedInference,
 from reef.service.routes.routed_chat import serve_routed_chat
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, is_router_config_hash
 from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
-from reef.service.wire import SCENARIO_HEADER
 from reef.storage.scenario import ScenarioStorage
 
 logger = logging.getLogger(__name__)

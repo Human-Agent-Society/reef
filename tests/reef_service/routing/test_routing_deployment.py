@@ -712,7 +712,12 @@ def test_validate_checks_a_source_without_an_image_as_fully_as_a_render(tmp_path
         routing_deployment=RoutingDeploymentSettings(deployment_id="validate-test"),
     )
     actions: list[str] = []
-    controller = RoutingDeploymentController(settings, FakeRuntime(actions), registry_root=tmp_path / "registry")
+    controller = RoutingDeploymentController(
+        settings.routing_deployment,
+        settings.routed_service(),
+        FakeRuntime(actions),
+        registry_root=tmp_path / "registry",
+    )
     with pytest.raises(ValueError, match="sha256 digest"):
         controller.validate_candidate()
     assert actions == []

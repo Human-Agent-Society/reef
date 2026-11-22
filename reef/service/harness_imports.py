@@ -20,10 +20,10 @@ from typing import Any, cast
 
 from reef.artifact.artifact import ArtifactConflictError, ArtifactError, ArtifactNotFoundError
 from reef.core.errors import InternalError, ReefError, ScenarioNotFoundError
-from reef.core.records_types import RequestType
+from reef.core.records_types import SCENARIO_HEADER, RequestType
 from reef.execution.workers import QueueWorker
 from reef.service.request_service import RequestService
-from reef.service.wire import SCENARIO_HEADER, parse_request_headers
+from reef.service.wire import parse_request_headers
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkQueue
 
 #: The queue of control's harness syncs, and the kind of its items.

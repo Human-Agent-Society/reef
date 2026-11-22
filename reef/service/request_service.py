@@ -17,7 +17,7 @@ from typing import Any, TypeVar
 
 from reef.artifact.artifact import Artifact, ArtifactConflictError, ArtifactError, ArtifactNotFoundError
 from reef.core.errors import ReefError
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import SCENARIO_HEADER, AgentRecord, RequestType
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -38,14 +38,7 @@ from reef.service.routed_inference import (
 )
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import RoutingPreviewClient
-from reef.service.wire import (
-    SCENARIO_HEADER,
-    ReportPayload,
-    RequestHeaders,
-    parse_request_headers,
-    scenario_header,
-    with_request_tags,
-)
+from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers, scenario_header, with_request_tags
 from reef.train.harness_backend.backend import JobProgress
 from reef.train.harness_backend.records import read_job_records
 from reef.train.job_queue import job_records_content

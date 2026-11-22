@@ -57,7 +57,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             # The same resolution as ``reef serve``: a public configuration file, its environment and defaults.
             path = Path(args.config).expanduser().resolve()
             resolved, _ = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)
-            controller = RoutingDeploymentController(service_config_from_mapping(resolved), runtime)
+            settings = service_config_from_mapping(resolved)
+            controller = RoutingDeploymentController(settings.routing_deployment, settings.routed_service(), runtime)
             version = controller.validate_candidate()
             result: dict[str, object] = {"valid": True, "snapshot_version": version, "docker_mutations": 0}
             if version is None:

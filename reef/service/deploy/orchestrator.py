@@ -571,7 +571,9 @@ def _run_orchestrator(
             raise DeployConfigError("managed routing requires uni execution for every native service")
         if len(services) != 1 or services[0]["name"] != "reef":
             raise DeployConfigError("managed routing requires a record-only REEF service with external providers")
-        routing_controller = RoutingDeploymentController(settings, DockerComposeRuntime())
+        routing_controller = RoutingDeploymentController(
+            settings.routing_deployment, settings.routed_service(), DockerComposeRuntime()
+        )
     preparation_sigterm = signal.getsignal(signal.SIGTERM)
     preparation_sigint = signal.getsignal(signal.SIGINT)
     # Ordinary deployments never touch SIGHUP, which some platforms lack.

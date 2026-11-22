@@ -7,16 +7,14 @@ aiohttp request and that record.
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.errors import ReefError
-from reef.core.records_types import RequestType, parse_references
+from reef.core.records_types import SCENARIO_HEADER, RequestType, parse_references
 
-SCENARIO_HEADER = "x-reef-scenario"
 #: Harness-stamped side-channel context. The
 #: service carries each pair through to the INFERENCE record so a processor
 #: can correlate on it, and reads no value itself. Header-free correlation stays the
@@ -27,39 +25,6 @@ TAG_HEADER_PREFIX = "x-reef-tag-"
 
 class HeaderError(ReefError):
     """Raised when x-reef-* request headers are missing or invalid."""
-
-
-def strict_json_object(data: bytes) -> dict[str, object]:
-    """Decode one JSON object, refusing repeated keys and non-finite numbers.
-
-    Raises:
-        ValueError: The data is not such an object, is not valid text, or nests too deeply to decode.
-    """
-
-    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result = dict(pairs)
-        if len(result) != len(pairs):
-            raise ValueError("JSON object repeats a key")
-        return result
-
-    def finite_number(text: str) -> float:
-        value = float(text)
-        if not math.isfinite(value):
-            raise ValueError("JSON number is not finite")
-        return value
-
-    def no_constant(name: str) -> float:
-        raise ValueError(f"JSON constant {name} is not allowed")
-
-    try:
-        value = json.loads(
-            data, object_pairs_hook=unique_object, parse_float=finite_number, parse_constant=no_constant
-        )
-    except RecursionError as exc:
-        raise ValueError("JSON nests too deeply") from exc
-    if not isinstance(value, dict):
-        raise ValueError("JSON value is not an object")
-    return value
 
 
 @dataclass(frozen=True)

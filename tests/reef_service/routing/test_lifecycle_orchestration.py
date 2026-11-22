@@ -16,6 +16,7 @@ import yaml
 from reef.service.components import COMPONENT_APPS, build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.containers import ContainerRuntime
+from reef.service.deploy.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceSettings
 
 pytestmark = pytest.mark.unit
@@ -45,7 +46,7 @@ MANAGED_OWNER_PROGRAM = textwrap.dedent(
         previous_calls.append(signum)
 
     class Controller:
-        def __init__(self, settings, runtime):
+        def __init__(self, policy, service, runtime):
             self.directory = root / "generation"
             self.stop_requested = False
             self.closed = False
@@ -223,8 +224,10 @@ def test_managed_object_config_prepares_controller_and_private_child(
     class Controller:
         """Stands in for the routing controller: records what the orchestrator passes and calls, nothing else."""
 
-        def __init__(self, settings: ServiceSettings, runtime: ContainerRuntime) -> None:
-            observed["deployment_id"] = settings.routing_deployment.deployment_id
+        def __init__(
+            self, policy: RoutingDeploymentSettings, service: RoutedServiceSettings, runtime: ContainerRuntime
+        ) -> None:
+            observed["deployment_id"] = policy.deployment_id
             self.directory = tmp_path / "generation"
             self.stop_requested = False
             self.closed = False
