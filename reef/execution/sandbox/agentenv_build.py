@@ -217,7 +217,10 @@ class DockerfileBuild:
     alias. ``cpu_count`` and ``memory_mb`` are the template's resources, None for AgentENV's default.
     ``timeout_seconds`` is the build's deadline, from 1 to 86400 seconds as ``aenv build`` takes it.
     ``start_command`` is False when the template starts no command (``dockerfile_sets_start_command``).
-    Purpose: ``ensure_aenv_template`` runs it when the alias names no template.
+    With ``image`` true, the build makes no template: it publishes the image ``aenv/<alias>:latest`` in the
+    deployment's repository, and ``alias`` is an image name. The resources and ``start_command`` are then not read.
+    Purpose: ``ensure_aenv_template`` runs it when the alias names no template. ``KillOnTimeoutE2BEnvironment`` runs
+    an image build for the main service of a task's Compose project (``reef.execution.sandbox.agentenv_compose``).
     """
 
     context_dir: Path
@@ -227,6 +230,7 @@ class DockerfileBuild:
     memory_mb: int | None
     timeout_seconds: int
     start_command: bool
+    image: bool = False
 
     def __post_init__(self) -> None:
         if not self.alias:
@@ -239,6 +243,8 @@ class DockerfileBuild:
         command = ["aenv", "build", str(self.context_dir), "--file", str(self.dockerfile), "--name", self.alias]
         command += ["--progress", "plain"]
         command += ["--timeout", str(self.timeout_seconds)]
+        if self.image:
+            return [*command, "--image"]
         if self.cpu_count is not None:
             command += ["--cpu", str(self.cpu_count)]
         if self.memory_mb is not None:
@@ -380,6 +386,26 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
         await asyncio.sleep(poll_interval())
 
 
+async def build_image(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+    """Run the image build ``build`` on ``templates``' deployment until the image is published. After a temporary
+    API failure, such as a worker with no free build slot, the build runs again until ``build.timeout_seconds`` passed
+    since the call; then its ``TransientBuildError`` is raised. Any other failure raises its ``AgentEnvBuildError``.
+    Two builds of one image name can run together: each publishes the name, and the later one keeps it."""
+    if not build.image:
+        raise ValueError("build_image runs an image build, not a template build")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + build.timeout_seconds
+    while True:
+        try:
+            await build.run(templates)
+            return
+        except TransientBuildError as error:
+            if loop.time() >= deadline:
+                raise
+            logger.warning("could not build the image %s; building it again: %s", build.alias, error)
+        await asyncio.sleep(poll_interval())
+
+
 async def delete_orphan(templates: AgentEnvTemplates, alias: str, template_id: str | None) -> None:
     """Delete the template ``template_id`` that a failed ``aenv build`` of this trial made, when ``alias`` still names
     it and it is ``waiting``: the build leaves it so. Do nothing when the build made no template (None): a ``waiting``
@@ -404,6 +430,7 @@ __all__ = [
     "DockerfileBuild",
     "TemplateState",
     "TransientBuildError",
+    "build_image",
     "dockerfile_build",
     "dockerfile_sets_start_command",
     "ensure_aenv_template",
