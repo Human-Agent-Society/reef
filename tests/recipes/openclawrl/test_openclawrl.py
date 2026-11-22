@@ -15,8 +15,8 @@ from tests.support.trajectories import policy_trajectory
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.prm import PRMJudge
-from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.sessions import SessionIndex
+from recipes.openclawrl.stages import OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.turns import TurnJudgment
 from reef.api.training import training_recipe_config
 from reef.control.scenario.live_objects import scenario_components

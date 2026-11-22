@@ -14,7 +14,7 @@ from reef.train.types import trajectory_groups
 
 reef_types = pytest.importorskip("reef.train.types", reason="requires a reef checkout")
 
-from recipes.beta.coral.processor import ROOT_GROUP, CoralJobData, CoralSamples, CoralSettings
+from recipes.beta.coral.stages import ROOT_GROUP, CoralJobData, CoralSamples, CoralSettings
 from reef.core import AgentRecord, RequestType
 from reef.samples.context import PipelineContext
 from reef.train.pipeline import TrainingPipeline

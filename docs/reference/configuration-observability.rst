@@ -39,7 +39,7 @@ Export ``WANDB_API_KEY`` before starting, or log in once with the credential sto
 - A scenario with several trainers shares the run. Each step's metrics carry the component name as a prefix (``harness/train/loss``) on the same ``train/step`` axis, with ``reef/component`` on the row. Its optimizer step rows land under ``<component>/step/*`` on their own counter. The run config lists each component's backend under ``reef.components`` and ``backend.<component>``, with ``reef.backend`` null.
 - The names ``train``, ``step``, ``reef`` and ``operations`` are these prefixes, so a composite recipe refuses them as component names.
 
-Recipe and processor code logs through the same logger without importing W&B:
+Recipe and stage code logs through the same logger without importing W&B:
 
 .. code:: python
 
@@ -70,7 +70,7 @@ The following names are relative to ``operations/``:
    * - ``ingest/write/*``
      - Record-store append calls, including identical retries that reach the store. ``failed_total`` counts append exceptions, including conflicts; validation rejections before append do not count as write failures.
    * - ``records/unread_count``
-     - Training-visible records after the processor's read cursor. These may still need feedback or filtering; this is not a ready job data count.
+     - Training-visible records after the read cursor of the record-to-sample stage. These may still need feedback or filtering; this is not a ready job data count.
    * - ``records/oldest_unread_age_seconds``
      - Age of the first unread record, measured from its recorded creation time; zero when none remain.
    * - ``processor/waiting_reports``
@@ -117,7 +117,7 @@ How to read the samples:
 - A completed execution call is not necessarily a commit: a poll of a running job that saved no new checkpoint commits nothing.
 - The measurements are not persisted training history. Execution measurements reset when their trainer is rebuilt, including recovery; ``training/started_at_seconds`` identifies that reset. Request and ingestion measurements reset when the scenario is rebuilt; ``operations/started_at_seconds`` identifies that reset.
 - Malformed HTTP payloads and headers, and failures before Reef resolves the scenario, are outside these measurements.
-- Additional finite numeric processor status fields appear under ``operations/processor/``. Sampling does not advance the processor or consume its queue. If ingestion or a commit holds the trainer lock, that sample omits the queue gauges and still reports the execution measurements.
+- Additional finite numeric fields of the ``processor`` object of the status appear under ``operations/processor/``. Sampling does not advance the training pipeline or consume its queue. If ingestion or a commit holds the trainer lock, that sample omits the queue gauges and still reports the execution measurements.
 - Samples contain no request bodies, record IDs, scenario names or error messages. Uploading them configures no alert notifications. The inference engines keep their own high-frequency monitoring.
 
 Commit correlation

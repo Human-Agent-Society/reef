@@ -6,10 +6,10 @@ OpenClaw-RL trains an agent from its ordinary usage: each turn is scored by
 what the user did next, a follow-up that moves on counting as acceptance and
 a complaint as rejection, and the policy updates while it keeps serving. The
 method itself is the `openclawrl` recipe package (`recipes/openclawrl/`). Its
-processor rebuilds sessions from the traffic Reef already records, judges
+record-to-sample stage rebuilds sessions from the traffic Reef already records, judges
 every completed turn through an independently deployed PRM, and turns accepted
 hindsight hints into a training signal. No report call is required. The
-processor prefers a stable, conversation-unique `x-reef-tag-session` value
+record-to-sample stage prefers a stable, conversation-unique `x-reef-tag-session` value
 and otherwise falls back to matching transcripts; this example's header shim
 supplies the tag for the unmodified Hermes agent.
 
@@ -121,7 +121,7 @@ reef-eval starts the task container and the judge service for the next session
   -> hermes runs one turn; its model calls go through the shim to Reef
   -> Reef records the provider exchange and the artifact that answered, without tokens
   -> the harness posts hermes's reply to the student service, and the student reacts
-  -> on the next model call, the processor uses the session tag to bind the preceding call to its following tool result or user reaction
+  -> on the next model call, the record-to-sample stage uses the session tag to bind the preceding call to its following tool result or user reaction
   -> the PRM judges that next state and may propose a hindsight hint
   -> global_batch_size judged turns form one batch; the training component renders each turn and its hint candidates
   -> the actor computes the student's top-K at the step's start; the top-K select loss trains the policy

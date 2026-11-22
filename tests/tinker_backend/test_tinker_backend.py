@@ -979,7 +979,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     from dataclasses import dataclass
 
     from tests.support.runtime_stubs import job_sized_stages
-    from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+    from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.control.dispatcher import Dispatcher

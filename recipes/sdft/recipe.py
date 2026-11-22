@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from recipes.sdft.processor import SDFTSamples
+from recipes.sdft.stages import SDFTSamples
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
 from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind

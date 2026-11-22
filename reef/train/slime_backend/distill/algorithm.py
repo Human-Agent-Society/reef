@@ -5,7 +5,7 @@ itself (``loss_family``), carries its defaults in a :class:`DistillAlgorithmSett
 subclass, and its ``objective.py`` forwards the worker hooks to
 :mod:`.objective`. Everything else, the wire row, the flags, the validation,
 lives here, so SDFT, SDPO and OPD differ only in their prefix, their
-defaults and how their processors build the teacher's prompt.
+defaults and how their stages build the teacher's prompt.
 
 The wire row is the policy row plus the sample's ``teacher_tokens``, the
 teacher's prompt ids followed by the student's response ids verbatim (for

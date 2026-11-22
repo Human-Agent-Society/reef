@@ -1,7 +1,7 @@
 """The CORAL weight-training recipe: what a deployment names in ``serve.yaml``.
 
 Binds the CORAL stages (``CoralSamples`` and ``CoralJobData`` in
-:mod:`recipes.beta.coral.processor`) to the grouped
+:mod:`recipes.beta.coral.stages`) to the grouped
 relative-reward training machinery. CORAL sibling groups have the same shape
 as TTT-Discover steps — comparison sets of scored rollouts from one shared
 starting point — so the recipe reuses the ``tttd`` training objective (grouped
@@ -23,7 +23,7 @@ from typing import Any
 # The tttd training objective lives in the repository cookbook; importing the
 # package registers the objective that this recipe binds, on each backend.
 import recipes.tttd  # noqa: F401  (registration side effect)
-from recipes.beta.coral.processor import CoralJobData, CoralSamples
+from recipes.beta.coral.stages import CoralJobData, CoralSamples
 from reef.recipe.base import WeightTrainingRecipe
 from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec

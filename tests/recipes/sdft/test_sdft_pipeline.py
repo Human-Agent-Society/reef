@@ -1,7 +1,7 @@
 """Reef-side SDFT pipeline: the demonstration composition, the recipe and the Slime wire payload.
 
 Everything here is torch/ray free so it runs in the minimal CI gate; the
-shared processor is covered in ``test_distill_processor.py`` and the tensor
+shared processor is covered in ``test_distill_stage.py`` and the tensor
 kernels in ``test_distill_parity.py``. The record-to-sample stage renders
 nothing; ``CharTemplate`` stands in for the training component's chat template
 to check the teacher sequence the component renders from a sample.
@@ -17,8 +17,8 @@ import pytest
 from tests.support.chat_templates import CharTemplate
 
 from recipes.sdft import SDFTRecipe
-from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
 from recipes.sdft.slime import SdftObjective, SdftSettings
+from recipes.sdft.stages import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
 from reef.api.training import training_recipe_config
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data

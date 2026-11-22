@@ -78,7 +78,7 @@ Scenario updates
 
 ``POST /reef/scenarios/{scenario}/update`` updates an existing scenario. The body holds one or more of these settings, and Reef rejects other fields:
 
-- ``training_mode``: the mode of the data processor, below.
+- ``training_mode``: the mode of the training pipeline, below.
 - ``artifact_evaluation``: the settings that Reef evaluates each new artifact with (`Automatic evaluation <http-api-evaluation.rst#automatic-evaluation>`__).
 - ``activation``: the scenario's activation rule, below.
 - ``serving_config``: the scenario's serving fields (`Serving config`_).
@@ -98,7 +98,7 @@ HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 - The change selects later job data. Job data that is already reserved or running completes in its original mode.
 - After a switch back to ``auto``, automatic jobs train the samples that no job trained, including those collected in ``manual``.
 - Accepted requests wait for ``manual``, including requests not yet read when the mode changes to ``auto``.
-- A processor that does not support the requested mode returns 501 without changing its state.
+- When the sample-to-job stage does not support the requested mode, Reef returns 501 and changes no state.
 
 A Reef process runs at most one scenario that trains full weights, so preparation, remote execution, and commit never interleave. It may run any number of scenarios that produce no updates or that update text artifacts in process. Record acceptance never waits for artifact evolution.
 

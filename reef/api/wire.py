@@ -16,7 +16,7 @@ from reef.core.errors import ReefError
 from reef.core.records_types import SCENARIO_HEADER, RequestType, parse_references
 
 #: Harness-stamped side-channel context. The
-#: service carries each pair through to the INFERENCE record so a processor
+#: service carries each pair through to the INFERENCE record so a record-to-sample stage
 #: can correlate on it, and reads no value itself. Header-free correlation stays the
 #: fallback; a tag is what a harness offers when its agent does not resend
 #: the transcript it is continuing.
@@ -71,7 +71,7 @@ class ReportPayload:
     multi-dimensional scores, or whatever a given recipe cares about) when a recipe
     wants richer content. Reef's core only validates that it is a string or a JSON
     object — never a specific internal shape. Interpretation is left to whichever
-    recipe's processor reads ``report.payload["feedback"]``, the same way ``metadata``,
+    recipe's record-to-sample stage reads ``report.payload["feedback"]``, the same way ``metadata``,
     ``TrainingSignal.metrics`` are opaque payloads
     interpreted by consumers rather than validated centrally.
     """
@@ -120,7 +120,7 @@ def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Map
     """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
 
     Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. This stores
+    stages that read one correlate on the inference side. This stores
     every pair as sent; the service reads no value.
     """
     if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:

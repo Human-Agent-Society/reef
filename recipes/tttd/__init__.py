@@ -4,7 +4,7 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
 
 - ``recipe`` — the TTT-Discover recipe class, its default job parameters, and
   its default pipeline stages.
-- ``processor`` — the pipeline stages: ``TTTDSamples`` owns the step grid and
+- ``stages`` — the pipeline stages: ``TTTDSamples`` owns the step grid and
   its barrier and makes the grouped policy samples, and
   ``TTTDJobData`` makes one batch from one complete step.
 - ``report`` — the method-specific grouped rollout wire contract.
@@ -19,9 +19,9 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
   objective.
 """
 
-from recipes.tttd.processor import TTTDJobData, TTTDSamples, TTTDSettings
 from recipes.tttd.recipe import TTTDRecipe
 from recipes.tttd.report import TTTDGroupedRolloutReport
+from recipes.tttd.stages import TTTDJobData, TTTDSamples, TTTDSettings
 from reef.train.slime_backend.objectives import register_objective as register_slime_objective
 from reef.train.tinker_backend.objectives import register_objective as register_tinker_objective
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.recipe.base import WeightTrainingRecipe
-from reef.recipe.dataset.processor import DatasetJobData
+from reef.recipe.dataset.stages import DatasetJobData
 from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 

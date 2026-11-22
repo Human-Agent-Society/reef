@@ -23,10 +23,10 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import data_storage, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support.threshold_pipeline import ThresholdJobData, threshold_pipeline
 
 from recipes.sao import SAOJobData, SAOSamples
-from recipes.sao.processor import SAOSettings
+from recipes.sao.stages import SAOSettings
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents

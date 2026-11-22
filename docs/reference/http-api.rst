@@ -349,4 +349,4 @@ Headers
 Client artifact tags
 ~~~~~~~~~~~~~~~~~~~~
 
-``x-reef-tag-artifact_id`` names the harness artifact that the native client installed. Reef stores it under ``metadata.tags`` like any other tag, so a processor can read which harness artifact made the call. The tag does not change which artifact serves the call, or the record's ``artifact_id``, which names the artifact that answered. It is separate from ``x-reef-artifact-id``, the response header that names the model artifact.
+``x-reef-tag-artifact_id`` names the harness artifact that the native client installed. Reef stores it under ``metadata.tags`` like any other tag, so a record-to-sample stage can read which harness artifact made the call. The tag does not change which artifact serves the call, or the record's ``artifact_id``, which names the artifact that answered. It is separate from ``x-reef-artifact-id``, the response header that names the model artifact.

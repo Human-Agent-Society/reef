@@ -220,4 +220,4 @@ Serving records the provider exchange only. The training component renders each 
      options:
        apply-chat-template-kwargs: '{"enable_thinking": false}'
 
-A sample that cannot render, or that is longer than a limit of its stage, does not train. The job metric ``unrenderable_samples`` counts these samples. A chat template that drops the reasoning of earlier turns, as Qwen3's does, renders a multi-turn sample as several segments. Each segment trains as one sample (see `Processors <../developer-guide/write-a-recipe.rst>`__).
+A sample that cannot render, or that is longer than a limit of its stage, does not train. The job metric ``unrenderable_samples`` counts these samples. A chat template that drops the reasoning of earlier turns, as Qwen3's does, renders a multi-turn sample as several segments. Each segment trains as one sample (see `Training pipeline <../developer-guide/write-a-recipe.rst>`__).

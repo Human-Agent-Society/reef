@@ -51,7 +51,7 @@ class RecordRetention:
 
 
 class RecordStore(ABC):
-    """Persist records independently of processors.
+    """Persist records independently of the stages that read them.
 
     Reads are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,

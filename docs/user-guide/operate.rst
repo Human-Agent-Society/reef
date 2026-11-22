@@ -27,7 +27,7 @@ Check health and status
 
   - the commit number (``commit_number``) and the outcome of the latest training commit (``last_training_commit``), with the recipe's metrics
   - the artifact that answers its requests (``served_artifact_id``)
-  - whether a job's data is waiting, and the processor's state
+  - whether a job's data is waiting, and the state of the training pipeline
   - whether inference is admitted or paused while a snapshot loads
   - for a weight-training scenario, the running training jobs (``training_jobs``) and the number of ended jobs (``finished_jobs``)
 
@@ -357,7 +357,7 @@ W&B shows one group and one run per scenario, and a new run after each train-fro
 
 - **Training results.** Each result lands on the run's ``train/step`` axis with the monotonic ``reef/commit_number``, which joins it to the commit history. The commit metrics record ``experiment/run_id``, and the run's ``reef/training_job_id`` leads back to the job.
 - **Several trainers.** Each step's metrics carry the component name as a prefix, on the same ``train/step`` axis, with the name in ``reef/component``. The run summary names the last trainer that committed and its job.
-- **Operations.** Every 10 seconds the run receives ``operations/*`` against ``operations/time_seconds``: unread records, processor queues, waiting ages, training execution durations, request counts and latency, admission waits, record acceptance and rejection, and version-mismatch rejections. A pure inference scenario uploads them too. They need neither status polling nor a training commit. Read the `metric definitions <../reference/configuration-observability.rst#operational-metrics>`__ first: reserved job data may be executing, and manual-mode data may wait on purpose.
+- **Operations.** Every 10 seconds the run receives ``operations/*`` against ``operations/time_seconds``: unread records, the queues of the training pipeline, waiting ages, training execution durations, request counts and latency, admission waits, record acceptance and rejection, and version-mismatch rejections. A pure inference scenario uploads them too. They need neither status polling nor a training commit. Read the `metric definitions <../reference/configuration-observability.rst#operational-metrics>`__ first: reserved job data may be executing, and manual-mode data may wait on purpose.
 
 Reef sends each event from a background thread after its commit, in commit order. A slow tracker therefore delays neither serving nor training. A tracking failure is logged and never fails a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
@@ -373,7 +373,7 @@ With persistent storage paths, a restart keeps this state:
    * - State
      - Guarantee
    * - Records
-     - Persisted before the processor sees them. Never trained twice.
+     - Persisted before the training pipeline sees them. Never trained twice.
    * - The commit history
      - Append-only per scenario. The database transaction that adds a step is the commit point.
    * - Published artifacts

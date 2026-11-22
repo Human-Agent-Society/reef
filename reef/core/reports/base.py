@@ -9,7 +9,7 @@ The declaration is shared by every party that touches the wire:
 
 - Producers build the exact report body with :meth:`ReportBase.to_dict`.
 - The service parses a recipe's declared type before durable storage.
-- Processors receive the parsed instance through their report context and
+- Record-to-sample stages receive the parsed instance through their report context and
   rehydrate the same type during durable replay.
 
 The report type is a floor, not a ceiling: parsing validates declared fields
@@ -68,7 +68,7 @@ class ReportBase:
     ``str``, ``bool``, ``Mapping[str, str]``, each optionally ``| None``.
     Parsing is pure, cheap, and payload-only; deployment-relative checks (does
     the announced value match this scenario's configuration?) belong to the
-    processor.
+    record-to-sample stage.
     """
 
     def __post_init__(self) -> None:

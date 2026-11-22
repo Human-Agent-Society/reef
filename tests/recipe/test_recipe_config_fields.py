@@ -13,7 +13,7 @@ import pytest
 import yaml
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, live_objects
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 from tests.support.trainers import recipe_trainer
 
 from reef.api.training import training_recipe_config

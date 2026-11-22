@@ -141,7 +141,7 @@ def request_from_parameters(parameters: Mapping[str, Any]) -> TrainingRequest | 
 class TrainingRequest:
     """A training request, independent of inference batches and feedback.
 
-    ``id`` comes from the enclosing AgentRecord when the processor queues the request.
+    ``id`` is the request ID (``reef.train.training_requests``), or empty when the caller gave none.
     Session and artifact identify the request's source; they do not select an inference batch.
     ``requires`` is what the change needs from the person's machine, at most
     ``MAX_REQUIRES`` ``{name, kind, check}`` items of the shape
@@ -171,7 +171,7 @@ class TrainingRequest:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object], *, request_id: str = "") -> TrainingRequest:
-        """Validate a payload and build a queued request, using its enclosing record's ID when supplied."""
+        """Validate a payload and build the request, with ``request_id`` as its ID when supplied."""
         normalized = normalize_training_request_payload(payload)
         return cls(
             text=normalized["text"],

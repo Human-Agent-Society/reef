@@ -147,7 +147,7 @@ Report
    * - ``references``
      - list of strings
      - no
-     - Unique existing inference receipts in this scenario: the last call of each trajectory that the report scores, usually one. Reef expands each reference to the calls of its trajectory. Reported-feedback processors require at least one reference.
+     - Unique existing inference receipts in this scenario: the last call of each trajectory that the report scores, usually one. Reef expands each reference to the calls of its trajectory. A record-to-sample stage for reported feedback requires at least one reference.
    * - ``metadata``
      - object
      - no

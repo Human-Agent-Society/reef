@@ -19,7 +19,7 @@ from recipes.openclawrl.prm import (
     collect_hint_candidates,
     parse_hint_judgment,
 )
-from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
+from recipes.openclawrl.stages import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.turns import TurnJob
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id

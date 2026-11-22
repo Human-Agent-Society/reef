@@ -213,7 +213,7 @@ class Scenario:
         a local step in a scenario with several trainers; the dispatcher still
         runs one step of the scenario at a time. Reading state that is
         not part of a transaction (objective identity, consumption
-        watermarks, processor schema) is safe here; do not reserve job data
+        watermarks, stage schema) is safe here; do not reserve job data
         or replace results through this handle.
         """
         return self.stepping_trainers()[0].trainer

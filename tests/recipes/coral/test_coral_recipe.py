@@ -36,7 +36,7 @@ def coral_recipe(config):
 def test_the_recipe_binds_processor_and_grouped_machinery():
     recipe_cls = _recipe_cls()
     stages = recipe_cls.pipeline_spec()
-    from recipes.beta.coral.processor import CoralJobData, CoralSamples
+    from recipes.beta.coral.stages import CoralJobData, CoralSamples
 
     assert (stages.record2sample, stages.sample2job) == (CoralSamples, CoralJobData)
     assert recipe_cls.default_parameters()["trajectory"] == {"objective": "tttd"}
@@ -48,7 +48,7 @@ def test_importing_the_recipe_registers_the_reused_objective():
 
 
 def test_example_pipeline_section_builds_the_coral_stages():
-    from recipes.beta.coral.processor import CoralGrouping, CoralJobData, CoralSamples
+    from recipes.beta.coral.stages import CoralGrouping, CoralJobData, CoralSamples
 
     deployment = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     pipeline = coral_recipe({"pipeline": deployment["pipeline"]}).stages().build(PipelineContext("coral-demo"))

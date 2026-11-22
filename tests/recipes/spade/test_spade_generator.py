@@ -23,8 +23,8 @@ from reef.recipe.generated_tasks.generator import (
     RejectedTask,
     RolledOutTask,
 )
-from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult
+from reef.recipe.generated_tasks.stages import GenerationJob
 from reef.samples.context import PipelineContext
 from reef.samples.generator import GeneratorError, TaskNameConflictError
 from reef.samples.generator.inputs import TaskGenerationRequest

@@ -41,8 +41,8 @@ from tests.support.runtime_stubs import (
 )
 from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
-from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples, threshold_pipeline
+from tests.train.test_harness_evolve_stages import harness_stages, records_pipeline, reports_pipeline
 
 from reef.api.app import create_app
 from reef.artifact.artifact import ArtifactNotFoundError

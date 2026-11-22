@@ -1,4 +1,4 @@
-"""ATIF construction and projections shared by record processors and consumers.
+"""ATIF construction and projections shared by record-to-sample stages and consumers.
 
 No I/O or model calls live here. The standard steps hold the conversation. ``extra.reef.records`` holds a summary of
 each captured call (``call_summary``): its ID, its time, its artifact and its settings, without the conversation.

@@ -33,7 +33,7 @@ Implementation
   recipe class: ``reef.recipe.loading.load_recipe`` builds the recipe from its
   declarations.
 - Put the method's record-to-sample and sample-to-job stages in
-  ``<method-package>/processor.py``, subclassing ``ReportSamples`` or
+  ``<method-package>/stages.py``, subclassing ``ReportSamples`` or
   ``JudgedSamples`` (``reef/samples/``) and ``Sample2Job``
   (``reef/train/sample2job/``), and its record stage in the recipe module.
   Extend those contracts only when they do not already express it.

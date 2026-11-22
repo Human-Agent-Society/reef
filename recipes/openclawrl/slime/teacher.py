@@ -6,7 +6,7 @@ the inference-side teacher path "does not produce per-cand top-K". The teacher
 is the FROZEN BASE model: the same weights the actor starts from, backed up at
 init under the ``openclaw_teacher`` tag and swapped in for forward-only passes.
 
-The processor ships candidate token sequences (``teacher_tokens_cand``:
+The record-to-sample stage ships candidate token sequences (``teacher_tokens_cand``:
 hint-enhanced prompt ids + the native response ids, upstream's
 ``teacher_tokens_candidates``), never numbers. This module runs upstream's
 K-loop — one forward-only pass per candidate slot, cyclically reusing a

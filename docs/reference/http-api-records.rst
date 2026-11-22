@@ -35,7 +35,7 @@ The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent", "requ
 
 - The envelope has exactly the three fields shown; Reef rejects other fields. The scenario comes only from the header.
 - ``request_type`` is ``inference`` or ``report``. Send a training request to ``POST /reef/train`` instead.
-- An inference payload follows the selected recipe's recorded-input contract: native provider request fields with an existing ``response``, or another complete example that its processor understands.
+- An inference payload follows the selected recipe's recorded-input contract: native provider request fields with an existing ``response``, or another complete example that its record-to-sample stage understands.
 - A report uses the same schema and reference validation as ``POST /reef/report``. Import the referenced inferences first.
 
 Reef answers these statuses:
@@ -48,14 +48,14 @@ Reef answers these statuses:
 
 Import does not assign the active artifact to externally generated examples. Training reads no token IDs or log probabilities from an imported record: the training component renders the recorded exchange with the model's chat template. To train on complete ATIF trajectories, see `Data items <http-api-data-items.rst>`__.
 
-Imported records enter the same scenario storage and wake the same training worker as live traffic. Keep the same scenario header for later inference calls: their records continue through the same processor, with no processor replacement or end-of-dataset signal. A processor that needs report feedback needs it for imported and live records alike. Submit each example's feedback promptly so that completed jobs can drain:
+Imported records enter the same scenario storage and wake the same training worker as live traffic. Keep the same scenario header for later inference calls: their records continue through the same training pipeline, with no replacement of the pipeline and no end-of-dataset signal. A record-to-sample stage that needs report feedback needs it for imported and live records alike. Submit each example's feedback promptly so that completed jobs can drain:
 
 .. code:: json
 
    {"agent_record_id": "offline-score-0001", "request_type": "report",
     "payload": {"references": ["offline-0001"], "score": 1.0}}
 
-The selected recipe and processor own job size, buffering, retention and training policy. Uploading can overlap training. This API adds no dataset epochs, no cold-start completion barrier and no automatic algorithm switch. Use the recipe's progress and commit status to learn when training has consumed the imported examples.
+The selected recipe and its training pipeline own job size, buffering, retention and training policy. Uploading can overlap training. This API adds no dataset epochs, no cold-start completion barrier and no automatic algorithm switch. Use the recipe's progress and commit status to learn when training has consumed the imported examples.
 
 Batch imports and resume
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -85,7 +85,7 @@ The importer:
 
 The importer supports local JSONL on platforms with POSIX file locking, including Linux and macOS. It does not convert Parquet or Hugging Face schemas, and it runs no server-side S3 import.
 
-The batch limits do not bound processor memory. A processor that waits for reports retains inference records, so place each report close to the inferences that it references.
+The batch limits do not bound the memory of the training pipeline. A record-to-sample stage that waits for reports retains inference records, so place each report close to the inferences that it references.
 
 Record and commit history
 -------------------------

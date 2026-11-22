@@ -21,7 +21,7 @@ from tests.support.runtime_stubs import StubFacts, StubTrainingComponent, job_si
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.api.app import create_app
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend

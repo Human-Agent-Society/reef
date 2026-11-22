@@ -500,7 +500,7 @@ class GuidanceRunController:
                 any(reward != rewards[0] for reward in rewards[1:]) for rewards in grouped_rewards
             )
             valid_rollouts = sum(result.verification.valid for result in results)
-            # The TTTD processor keeps one group on an otherwise fully
+            # The TTTD record-to-sample stage keeps one group on an otherwise fully
             # constant step so the frozen-base KL transaction remains
             # well-defined. Mirror that cardinality in the qualification
             # checks instead of claiming that the trainer consumed no data.

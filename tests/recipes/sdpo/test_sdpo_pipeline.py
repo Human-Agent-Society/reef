@@ -18,8 +18,8 @@ from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
-from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOSettings
 from recipes.sdpo.slime import SdpoAlgorithm, SdpoSettings
+from recipes.sdpo.stages import SDPODemonstrationSettings, SDPOSettings
 from reef.api.training import training_recipe_config
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data

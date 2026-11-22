@@ -159,7 +159,8 @@ minutes. Wait for the inference component and the HTTP service to report ready.
 
 ``/healthz`` says the HTTP service is up. Read ``/reef/status`` when something
 is wrong: it reports asynchronous training and preload failures, current weight
-versions, inference admission, processor state, and the running training job.
+versions, inference admission, the state of the training pipeline, and the
+running training job.
 
 Watch it learn
 --------------
@@ -301,7 +302,7 @@ Each task directory runs one rollout with a Harbor agent (``terminus-2`` unless
 every inference is a record. When the verifier scores the rollout, the command
 sends one report to ``/reef/report``: the reward as the score, the receipts as
 the references, and the task's name, path and digest under ``metadata.task``.
-The recipe's reported processor turns those records into training samples like
+The recipe's record-to-sample stage turns those records into training samples like
 any other report.
 
 Options:

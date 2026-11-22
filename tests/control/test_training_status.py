@@ -22,7 +22,7 @@ import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, live_objects
 from tests.support.samples import made_task
-from tests.support.threshold_processor import ThresholdJobData
+from tests.support.threshold_pipeline import ThresholdJobData
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher

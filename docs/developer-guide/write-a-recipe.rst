@@ -169,7 +169,7 @@ A minimal weight recipe
 
 - ``recipe.py``: the recipe class, with the report type, the stages and the
   default job parameters. Every service loads it.
-- ``processor.py``: the record-to-sample stage ``SDFTSamples``. The samples
+- ``stages.py``: the record-to-sample stage ``SDFTSamples``. The samples
   service runs it.
 - ``slime/__init__.py``: the objective ``SdftObjective`` and the loss family
   ``SdftAlgorithm``. The training service runs them.

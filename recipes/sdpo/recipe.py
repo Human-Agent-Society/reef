@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from recipes.sdpo.processor import SDPOJobData, SDPOSamples
 from recipes.sdpo.report import SDPOReport
+from recipes.sdpo.stages import SDPOJobData, SDPOSamples
 from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe
 from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind

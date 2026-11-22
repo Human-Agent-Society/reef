@@ -15,7 +15,7 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.polling import wait_until
 from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher

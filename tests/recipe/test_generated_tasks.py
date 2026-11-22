@@ -46,7 +46,8 @@ from reef.recipe.generated_tasks.generator import (
     RolledOutTask,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.processor import (
+from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
+from reef.recipe.generated_tasks.stages import (
     DeliveryJob,
     GeneratedTaskSamples,
     GenerationJob,
@@ -54,7 +55,6 @@ from reef.recipe.generated_tasks.processor import (
     StoredGeneratorState,
     train_task_names,
 )
-from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
 from reef.recipe.loading import load_recipe
 from reef.samples import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.samples.context import PipelineContext

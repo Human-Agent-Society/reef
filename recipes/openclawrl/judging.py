@@ -1,6 +1,6 @@
 """OpenClaw-RL's judging: every main turn is judged by its next state.
 
-:class:`~recipes.openclawrl.processor.OpenClawRLSamples` is a
+:class:`~recipes.openclawrl.stages.OpenClawRLSamples` is a
 :class:`~reef.samples.JudgedSamples` that runs :class:`OpenClawRLJudging`
 on a PRM worker. ``observe`` correlates main turns into sessions and hands each
 completed turn over for judgment; ``judge`` is upstream's combine dispatch. The
@@ -136,7 +136,7 @@ class OpenClawRLJudging(RecordJudging):
         self.warned_untagged = False
         self.warned_evicted = False
         self.last_unbound_warning = -UNBOUND_WARN_INTERVAL_S
-        # What the judge actually saw, since the processor last wrote the PRM record file.
+        # What the judge actually saw, since the record-to-sample stage last wrote the PRM record file.
         self.judged: collections.Counter[str] = collections.Counter()
 
     def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:

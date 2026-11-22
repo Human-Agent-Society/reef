@@ -23,7 +23,7 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
+from reef.recipe.generated_tasks.stages import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.samples.context import PipelineContext
 from reef.samples.generator.inputs import TaskGenerationRequest
 from reef.storage.scenario.commits import CommitRecord

@@ -53,7 +53,7 @@ Fields of each scenario:
 - ``commit_number`` is the number of the scenario's newest commit.
 - ``last_training_commit`` holds the commit number of the latest durable training commit, its commit time, and its recipe-owned metrics. It is ``null`` before the first training commit. An activation, a train-from, an import or a sync advances ``commit_number`` without replacing it.
 - ``served_artifact_id`` is the ``artifact_id`` of the artifact that answers the scenario's requests now, the one that ``served_models`` names: the active artifact of the weight trainer's component, or of the only component. It is null before inference publishes a route.
-- ``job_data_ready`` says whether the processor has a job's data waiting.
+- ``job_data_ready`` says whether the training pipeline has a job's data waiting.
 - ``training_mode`` is the selected mode.
 - ``artifacts`` gives two ``artifact_id`` values for each component: its active artifact and its trainer's training start. A value is ``null`` when Reef does not know it. Both values start at the creation artifact.
 - ``processor`` includes ``ready_samples``, the untrained samples that the next automatic job takes, from recorded traffic and uploaded trajectories; ``job_samples``, the samples that automatic job data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most samples that one automatic job takes, beside the rest of a group. A processor that takes requests also reports ``pending_requests``.

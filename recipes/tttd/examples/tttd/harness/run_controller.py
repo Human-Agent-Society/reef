@@ -63,7 +63,7 @@ class ScenarioTrainingStatus:
     non-negative int; one job trains one search step. ``running_job_id`` is
     the running job's ID, or ``None`` while no job runs. ``served_artifact_id``
     is the ID of the artifact that serves the scenario's requests, or ``None``. ``failed_steps`` are the TTTD steps
-    the processor discarded. ``failed_job_error`` is the error of the last
+    the record-to-sample stage discarded. ``failed_job_error`` is the error of the last
     commit's job when that job failed, or ``None``. ``ReefTrainingStatusClient``
     makes the value and ``TTTDRunController`` reads it.
     """

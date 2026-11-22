@@ -1407,8 +1407,8 @@ class Dispatcher(
             self.record_operational_metrics()
         replaced = self.local_workers.take_replaced()
         for scenario in (*replaced, *self.registry.loaded_scenarios()):
-            # Use scenario.close(), not records.close(). The processors must
-            # stop before the store closes, or a processor worker in flight
+            # Use scenario.close(), not records.close(). The stages must
+            # stop before the store closes, or a stage's worker in flight
             # finds a closed store.
             try:
                 scenario.close()

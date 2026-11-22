@@ -147,8 +147,8 @@ const droppedIdentifiers = [
   // Earlier surface-runtime spellings stay removed.
   ["SurfaceRuntime", /\bSurfaceRuntime\b/],
   ["TrainingSurfaceRuntime", /\bTrainingSurfaceRuntime\b/],
-  // The old pairing interlock base's candidate type; the reported-feedback
-  // processor replaced it (recipe processor class names survive as adapters).
+  // The old pairing interlock base's candidate type; the record-to-sample stage
+  // for reported feedback replaced it (the recipes' stage class names survive as adapters).
   ["PairedCandidate", /\bPairedCandidate\b/],
   // The online_grpo example arm is gone. This scan covers reef/**.py only, so the
   // identifier stays mentionable in docs and benchmark history notes.

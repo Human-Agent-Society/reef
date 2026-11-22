@@ -11,7 +11,7 @@ For each newly finalized attempt the watcher resolves the attempt's
 inference references from the call journal and posts one
 :class:`~recipes.beta.coral.reporter.AttemptReport`. What gets reported:
 
-- ``real`` attempts, whatever their score — the processor decides what
+- ``real`` attempts, whatever their score — the record-to-sample stage decides what
   trains; the report is the record of what happened.
 - ``grader_error`` and ``tune`` attempts are skipped: the former is the
   eval machinery failing (no policy signal in it), the latter is a config

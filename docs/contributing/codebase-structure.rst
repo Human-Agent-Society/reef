@@ -66,7 +66,7 @@ Packages
      - Job scheduling, process ownership, worker executors, sandbox isolation, file transfer, and the queue worker loop
      - Harness rendering, evaluation, recipe policy
    * - ``recipes/``
-     - One method per package: the recipe, processor and objective of a weight method, or the ``Method`` of a harness method, with its runnable examples. Beta methods live under ``recipes/beta/``.
+     - One method per package: the recipe, stages and objective of a weight method, or the ``Method`` of a harness method, with its runnable examples. Beta methods live under ``recipes/beta/``.
      - Shared machinery, another method
    * - ``tests/``
      - Repository-level tests grouped by responsibility

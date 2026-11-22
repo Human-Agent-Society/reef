@@ -64,12 +64,12 @@ from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.service_config import service_config_from_mapping
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import (
+from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
+from reef.recipe.generated_tasks.stages import (
     DEFAULT_GENERATION_DEADLINE_SECONDS,
     GenerationJob,
     complete_generation_count,
 )
-from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
 from reef.samples.context import PipelineContext
 from reef.samples.generator import DuplicateTaskError, GeneratorError, WrittenTask
 from reef.samples.generator.harbor import ORACLE_TIMEOUT_S

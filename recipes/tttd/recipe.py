@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from recipes.tttd.processor import TTTDJobData, TTTDSamples
 from recipes.tttd.report import TTTDGroupedRolloutReport
+from recipes.tttd.stages import TTTDJobData, TTTDSamples
 from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe
 from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind

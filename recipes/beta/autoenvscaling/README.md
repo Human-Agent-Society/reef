@@ -495,7 +495,7 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.samples.context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings, StoredGeneratorState
-   from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, GenerationJob, next_generation
+   from reef.recipe.generated_tasks.stages import TASK_STORE_NAME, GenerationJob, next_generation
    from reef.storage.scenario.samples import SampleStore
    from reef.storage.sql.data import SQLiteDataStore
    from reef.storage.sql.sqlite import SQLiteScenarioStorage
