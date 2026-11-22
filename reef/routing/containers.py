@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 from reef.core.errors import InternalError
-from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
+from reef.routing.registry import DeploymentOwnership, RoutingOwnershipError
 from reef.storage.durable_files import fsync_dir
 
 # Supported upstream source revision, shipped in wheels without requiring a Git checkout.

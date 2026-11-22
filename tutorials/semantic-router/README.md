@@ -478,7 +478,7 @@ The routing, preview client, lifecycle and policy-update tests use a fake SR
 preview listener and local providers, so they need neither Docker nor SR:
 
 ```bash
-python -m pytest tests/reef_service/routing -q
+python -m pytest tests/routing -q
 ```
 
 They check what Reef sends and records, not how the real SR answers.

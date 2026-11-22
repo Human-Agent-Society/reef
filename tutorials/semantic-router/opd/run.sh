@@ -19,7 +19,7 @@ python=$("${REEF_PYTHON:-python3}" -c 'import sys; print(sys.executable)')
 export REEF_PYTHON="$python"
 deployment_section="{}"
 if [[ -n $sr_image ]]; then
-    revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+    revision=$("$python" -c 'from reef.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
     installed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sr_image")
     [[ $installed == "$revision" ]] || { echo "SR_IMAGE must have revision $revision." >&2; exit 1; }
     deployment_section="{semantic_router_image: '$sr_image'}"

@@ -205,10 +205,10 @@ function terminologySource(path, source) {
   // Preserve SR's JSON field spelling only at its wire boundary and in its tests.
   // Surrounding text and identifiers still follow the repository's terminology.
   if ([
-    "reef/service/routing_preview.py",
-    "tests/reef_service/routing/routing_fakes.py",
-    "tests/reef_service/routing/test_routing_preview.py",
-    "tests/reef_service/routing/test_routing.py",
+    "reef/routing/preview.py",
+    "tests/routing/routing_fakes.py",
+    "tests/routing/test_routing_preview.py",
+    "tests/routing/test_routing.py",
   ].includes(path)) {
     source = source.replace(/(["'])selection_provenance(?=\1|\.)/g, "$1selection_metadata");
   }

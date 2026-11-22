@@ -22,7 +22,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.service.deploy.routing.containers import (
+from reef.routing.containers import (
     ContainerCommandError,
     ContainerEvent,
     ContainerEventStream,
@@ -30,14 +30,14 @@ from reef.service.deploy.routing.containers import (
     ContainerRuntime,
     ContainerState,
 )
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime, document_etag
-from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
-from reef.service.deploy.routing.registry import DeploymentOwnership
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+from reef.routing.deployment_controller import RoutingDeploymentController
+from reef.routing.manifest import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingRule, RoutingSnapshot
+from reef.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime, document_etag
+from reef.routing.preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_HASH_HEADER, PreviewSettings
+from reef.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
+from reef.routing.registry import DeploymentOwnership
+from reef.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceSettings
-from reef.service.routing import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingRule, RoutingSnapshot
-from reef.service.routing_preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_HASH_HEADER, PreviewSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 

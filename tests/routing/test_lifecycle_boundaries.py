@@ -14,21 +14,15 @@ from typing import NoReturn
 import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing.routing_fakes import (
-    ControllerCase,
-    FakeControl,
-    FakeRuntime,
-    opened,
-    routing_dispatcher,
-)
+from tests.routing.routing_fakes import ControllerCase, FakeControl, FakeRuntime, opened, routing_dispatcher
 
+from reef.routing.containers import ContainerEvent
+from reef.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError
+from reef.routing.registry import DeploymentOwnership
+from reef.routing.settings import RoutingDeploymentSettings
 from reef.service.app import create_app
 from reef.service.deploy import orchestrator
-from reef.service.deploy.routing.containers import ContainerEvent
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError
-from reef.service.deploy.routing.registry import DeploymentOwnership
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import REQUEST_ACCEPTANCE
 

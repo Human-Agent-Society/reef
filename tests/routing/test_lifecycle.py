@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponse, ClientSession, UnixConnector, web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     OPEN_DEADLINE,
     ROUTER_HASH,
     SELECTION_TOKEN,
@@ -39,16 +39,17 @@ from tests.reef_service.routing.routing_fakes import (
 from yarl import URL
 
 from reef.core import AgentRecord
-from reef.service.app import CONTROL_APPLICATION, create_app
-from reef.service.auth import create_authentication_middleware
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.reef_lifecycle_client import (
+from reef.routing.deployment_controller import RoutingDeploymentController
+from reef.routing.manifest import RoutingAdapter, RoutingDecision, RoutingSnapshot
+from reef.routing.reef_lifecycle_client import (
     CANDIDATE_CHECK_PATH,
     LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,
 )
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+from reef.routing.settings import RoutingDeploymentSettings
+from reef.service.app import CONTROL_APPLICATION, create_app
+from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import (
     INFERENCE_FINALIZATION,
@@ -65,7 +66,6 @@ from reef.service.lifecycle import (
 )
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingSnapshot
 from reef.storage.record_items import ItemRecordStore
 from reef.storage.records import AppendResult, RecordConflictError
 

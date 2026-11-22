@@ -3,7 +3,7 @@
 A client names its Scenario in ``x-reef-scenario`` and asks for the automatic
 model or one of that Scenario's targets. The Semantic Router's routing preview
 selects an automatic request through the Scenario's private entrypoint
-(``reef.service.routing_preview``); an explicit target is checked here without
+(``reef.routing.preview``); an explicit target is checked here without
 the router. Both checks use one immutable deployment manifest and the router
 runtime it was published with. External revisions are deployment
 declarations, not Reef artifacts or engine-verified runtime load IDs.

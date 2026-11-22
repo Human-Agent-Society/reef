@@ -24,6 +24,7 @@ TEST_DIRECTORIES = {
     "reef_client",
     "reef_recipe",
     "reef_service",
+    "routing",
     "sandbox",
     "scenario",
     "slime_backend",

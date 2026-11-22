@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from tests.reef_service.routing.routing_fakes import ControllerCase, controller_case
+from tests.routing.routing_fakes import ControllerCase, controller_case
 
 
 @pytest.fixture

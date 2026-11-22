@@ -99,15 +99,7 @@ from reef.inference.remote.service import HEALTH_TIMEOUT_S, RemoteInferenceBacke
 from reef.inference.serving import HEALTH_INTERVAL_S, FullWeightServingRuntime
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.recipe.base import WEIGHTS_COMPONENT, Recipe
-from reef.scenario.live_objects import LiveObjects
-from reef.service.inference_service import (
-    ARTIFACT_HEADER,
-    RECORD_HEADER,
-    SESSION_KEY_HEADER,
-    build_inference_app,
-    conversation_bucket,
-)
-from reef.service.routing import (
+from reef.routing.manifest import (
     DEFAULT_RULE,
     RoutingAdapter,
     RoutingSnapshot,
@@ -116,7 +108,15 @@ from reef.service.routing import (
     parse_target,
     scenario_entrypoint,
 )
-from reef.service.routing_preview import PreviewSettings
+from reef.routing.preview import PreviewSettings
+from reef.scenario.live_objects import LiveObjects
+from reef.service.inference_service import (
+    ARTIFACT_HEADER,
+    RECORD_HEADER,
+    SESSION_KEY_HEADER,
+    build_inference_app,
+    conversation_bucket,
+)
 from reef.storage.coordination import Coordination
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -2884,15 +2884,15 @@ def routing_policy(run: Run, engines: Engines) -> tuple[dict[str, Any], str, str
 async def qualify_routing(run: Run) -> None:
     # The routed one-process app, its dispatcher and the router's deployment code load only for this profile.
     from reef.dispatcher import build_default_dispatcher
-    from reef.service.app import create_app
-    from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime
-    from reef.service.deploy.routing.renderer import (
+    from reef.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime
+    from reef.routing.renderer import (
         MANAGEMENT_TOKEN_ENV,
         SELECTION_TOKEN_ENV,
         router_configuration,
         write_private_document,
     )
-    from reef.service.deploy.routing.settings import RoutingDeploymentSettings
+    from reef.routing.settings import RoutingDeploymentSettings
+    from reef.service.app import create_app
 
     inputs = run.inputs
     binary = inputs.router_binary

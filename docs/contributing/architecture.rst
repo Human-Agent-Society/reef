@@ -227,8 +227,6 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
 
    * - Today
      - Target
-   * - The Semantic Router modules of ``reef/service/`` and ``reef/service/deploy/routing/``
-     - ``routing`` (`RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__)
    * - The modules of ``reef/service/`` that contain no HTTP code: requests, data, artifact evaluations, imports
      - ``control/operations/``
    * - ``reef/dispatcher/`` and ``reef/scenario/``
@@ -246,7 +244,6 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
    * - The modules of ``reef/storage/``, in one directory
      - Subpackages of ``storage``: the scenario stores, the data store, the coordination store, and the SQL backends
 
-Two groups of imports point upward today, and they change before the files move:
+One group of imports points upward today, and it changes before the files move. ``reef/service/deploy/`` and the HTTP modules of ``reef/service/`` import each other. After the move, ``deploy`` imports ``api``, and ``api`` does not import ``deploy``.
 
-- The Semantic Router modules import ``reef.service.wire`` and the deployment settings. RFC #1570 changes these imports first.
-- ``reef/service/deploy/`` and the HTTP modules of ``reef/service/`` import each other. After the move, ``deploy`` imports ``api``, and ``api`` does not import ``deploy``.
+``routing`` is in place (`RFC #1570 <https://github.com/Human-Agent-Society/reef/issues/1570>`__). Its commands stay in ``reef/service/deploy/routing/cli.py`` until ``deploy`` moves.

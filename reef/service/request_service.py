@@ -24,6 +24,8 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
+from reef.routing.manifest import RoutingAdapter
+from reef.routing.preview import RoutingPreviewClient
 from reef.scenario.live_objects import harness_served_model
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
@@ -36,8 +38,6 @@ from reef.service.routed_inference import (
     InferenceRetryTimeoutError,
     RoutedInference,
 )
-from reef.service.routing import RoutingAdapter
-from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers, scenario_header, with_request_tags
 from reef.train.harness_backend.backend import JobProgress
 from reef.train.harness_backend.records import read_job_records

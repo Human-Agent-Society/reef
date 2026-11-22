@@ -18,7 +18,7 @@ import pytest
 import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing.routing_fakes import (
+from tests.routing.routing_fakes import (
     ROUTER_HASH,
     RUNTIME_HASH,
     SELECTION_TOKEN,
@@ -31,14 +31,14 @@ from tests.reef_service.routing.routing_fakes import (
 )
 
 from reef.core.errors import DeployConfigError
+from reef.routing.manifest import RoutingSnapshot
+from reef.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
+from reef.routing.settings import RoutingDeploymentSettings
 from reef.service import routed_replica
 from reef.service.components import build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.cli import main as routing_cli
-from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
-from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceSettings
-from reef.service.routing import RoutingSnapshot
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
 

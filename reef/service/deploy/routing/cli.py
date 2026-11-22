@@ -10,12 +10,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from reef.core.errors import DeployConfigError
+from reef.routing.containers import ContainerCommandError, DockerComposeRuntime
+from reef.routing.deployment_controller import RoutingDeploymentController
+from reef.routing.registry import DeploymentRegistry, RoutingOwnershipError
+from reef.routing.renderer import render_external
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.routing.containers import ContainerCommandError, DockerComposeRuntime
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.registry import DeploymentRegistry, RoutingOwnershipError
-from reef.service.deploy.routing.renderer import render_external
 from reef.service.deploy.service_config import service_config_from_mapping
 
 

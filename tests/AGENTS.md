@@ -17,6 +17,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | `reef_recipe/` | Shared recipe contracts and built-in recipes from `reef/recipe/` |
 | `recipes/<recipe>/` | Cookbook methods and their examples; use the method name for beta recipes too |
 | `reef_service/` | HTTP contracts, deployment, and service workflows across components |
+| `routing/` | The Semantic Router integration: routing policy, lifecycle, and the routing deployment |
 | `cli/`, `reef_client/` | CLI behavior and the separate `reef_client` package |
 | `contributing/` | Repository policy, documentation, and checks across shipped examples |
 | `plugin_contracts/`, `packaging/` | Plugin boundaries and installed-package verification |
@@ -35,7 +36,6 @@ Two suites group related modules in subdirectories:
 | `reef_service/deploy/` | Deployment configuration, service startup, executors, and component selection |
 | `reef_service/harness/` | Harness routes, the evolution recipe, client sync, and vendor installs |
 | `reef_service/inference/` | Inference routes, served artifacts, traffic weights, and streams |
-| `reef_service/routing/` | Routing policy, lifecycle, and the routing deployment |
 
 Keep contracts that all engines share in `inference/`. Keep contracts across
 service components in `reef_service/`.

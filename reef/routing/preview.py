@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from aiohttp import ClientConnectionError, ClientError, ClientResponse, ClientSession, ClientTimeout, DummyCookieJar
 
 from reef.core.values import strict_json_object
-from reef.service.routing import (
+from reef.routing.manifest import (
     DEFAULT_RULE,
     RoutingAdapter,
     RoutingDecision,

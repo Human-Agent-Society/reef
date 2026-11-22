@@ -27,10 +27,10 @@ from reef.core.errors import (
     ScenarioNotFoundError,
     UpstreamStatusError,
 )
+from reef.routing.manifest import RoutingRequestError
+from reef.routing.preview import PREVIEW_BODY_LIMIT_BYTES
 from reef.service.data import DataStoreUnavailableError
 from reef.service.routed_inference import InferenceRetryTimeoutError
-from reef.service.routing import RoutingRequestError
-from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
 from reef.storage.data import ItemConflictError, ItemNotFoundError
 from reef.storage.evaluations import EvaluationStartConflictError, EvaluationStateConflictError
 from reef.storage.records import RecordConflictError
