@@ -13,6 +13,7 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
@@ -20,7 +21,6 @@ from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import normalize_tokens
 from reef.service.cors import configure_browser_access
-from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.harness_imports import QueuedImports
 from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.lifecycle import (

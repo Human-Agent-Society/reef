@@ -89,8 +89,8 @@ class ArtifactImports:
         """Import the artifact item ``item_id`` of the owner of ``scenario`` into ``component``: the files that its
         ``source_uri`` names, as ``import_source`` imports them, with the item's identity (``item_identity``).
 
-        Raise ``ScenarioNotFoundError`` for an unknown scenario; otherwise raise as ``item_source`` and
-        ``import_source``.
+        Raise ``ScenarioNotFoundError`` for an unknown scenario; otherwise raise as ``artifact_item_of``,
+        ``source_uri_of`` and ``import_source``.
         """
         owner = dispatcher.scenario_owner(scenario)
         if owner is None:
@@ -108,19 +108,13 @@ class ArtifactImports:
         ``Dispatcher.create_scenario``), and the scenario serves it exactly when ``serves`` is true.
 
         The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as
-        ``item_source`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
+        ``artifact_item_of``, ``source_uri_of`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
         the component's layout or admission check refuses.
         """
         item = artifact_item_of(dispatcher, owner, item_id)
         uri = source_uri_of(item)
         start = ItemStart(item_identity(dispatcher, item), uri, self.sources.open(uri), component)
         return dispatcher.create_scenario(scenario, start, serves=serves)
-
-
-def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:
-    """The ``source_uri`` of the artifact item ``item_id`` of ``owner``; raise as ``artifact_item_of`` and
-    ``source_uri_of``."""
-    return source_uri_of(artifact_item_of(dispatcher, owner, item_id))
 
 
 def artifact_item_of(dispatcher: Dispatcher, owner: str, item_id: str) -> StoredItem:
@@ -167,4 +161,4 @@ def item_artifact_id(dispatcher: Dispatcher, item: StoredItem) -> str:
     return str(updated.metadata["artifact_id"])
 
 
-__all__ = ["ArtifactImports", "item_source"]
+__all__ = ["ArtifactImports"]

@@ -30,10 +30,10 @@ from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.scenario.live_objects import LiveObjects
 from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
-from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.task_import import DataScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train import JobData
 from reef.train.pipeline import PipelineSpec

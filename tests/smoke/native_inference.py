@@ -78,6 +78,7 @@ from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.checkpoint_slots import CheckpointSlotsRuntime
 from reef.inference.deployment import BUILTIN_ENGINES
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.http import InferenceProxyRuntime, ProviderRequestHeaders
 from reef.inference.interfaces import (
     InferenceHandler,
@@ -99,7 +100,6 @@ from reef.inference.serving import HEALTH_INTERVAL_S, FullWeightServingRuntime
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.recipe.base import WEIGHTS_COMPONENT, Recipe
 from reef.scenario.live_objects import LiveObjects
-from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import (
     ARTIFACT_HEADER,
     RECORD_HEADER,
