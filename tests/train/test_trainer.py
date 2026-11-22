@@ -35,7 +35,7 @@ from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefusedError
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
-from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.core.trajectories import call_summary, source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
 from reef.record2sample.service import ProducedSamples
@@ -238,7 +238,11 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     agent_steps = [step for step in item.trajectory["steps"] if step["source"] == "agent"]
     assert [step.get("is_copied_context", False) for step in agent_steps] == [False, False]
     assert item.artifact_id == "artifact-1"
-    assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
+    # The trajectory keeps each call's summary: its settings, without the conversation that the steps hold.
+    assert item.metadata["records"] == [call_summary(first), call_summary(second)]
+    assert [record["payload"] for record in item.metadata["records"]] == [
+        {"model": "m", "temperature": 0.5, "artifact_id": "artifact-1"}
+    ] * 2
     processor.acknowledge(batch.data_id)
     assert processor.record2sample.releasable_record_ids() == frozenset({"i1", "i2", "r1"})
 

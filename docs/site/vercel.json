@@ -251,6 +251,16 @@
       "permanent": true
     },
     {
+      "source": "/docs/developer-guide/processors",
+      "destination": "/docs/developer-guide/recipe-samples-service",
+      "permanent": true
+    },
+    {
+      "source": "/docs/developer-guide/processors/",
+      "destination": "/docs/developer-guide/recipe-samples-service/",
+      "permanent": true
+    },
+    {
       "source": "/docs/loss-families",
       "destination": "/docs/developer-guide/loss-families",
       "permanent": true

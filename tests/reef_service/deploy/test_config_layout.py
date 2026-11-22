@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 import pytest
 import yaml
@@ -336,6 +337,54 @@ def test_the_evaluation_section_sets_the_sandboxes_that_one_process_holds_at_onc
     assert service_config_from_mapping(resolved).evaluation_max_sandboxes == sandboxes
 
 
+@pytest.mark.parametrize(("on_stop", "valid"), [(None, True), ("requeue", True), ("finish", True), ("drain", False)])
+def test_the_evaluation_section_sets_what_a_stopping_process_does_with_its_rollouts(on_stop, valid) -> None:
+    evaluation = {} if on_stop is None else {"on_stop": on_stop}
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": evaluation})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"evaluation\.on_stop must be one of requeue, finish"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).evaluation_on_stop == (on_stop or "requeue")
+
+
+@pytest.mark.parametrize(
+    ("evaluation", "error"),
+    [
+        ({"on_stop": "finish", "finish_timeout_s": 600}, None),
+        ({"on_stop": "finish", "finish_timeout_s": 0}, r"evaluation\.finish_timeout_s is a number of seconds"),
+        ({"finish_timeout_s": 600}, r"evaluation\.finish_timeout_s needs evaluation\.on_stop: finish"),
+    ],
+)
+def test_the_evaluation_section_limits_how_long_a_stopping_process_finishes_rollouts(evaluation, error) -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": evaluation})
+
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).evaluation_finish_timeout_s == 600.0
+    overrides = _parse_overrides(["--evaluation.on-stop", "finish", "--evaluation.finish-timeout-s", "600"])
+    from_cli = normalize_service_config(_apply_overrides(translate_layout({"reef": {"token": "t"}}), overrides))
+    assert service_config_from_mapping(from_cli).evaluation_finish_timeout_s == 600.0
+    default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
+    assert default.evaluation_finish_timeout_s is None
+
+
+@pytest.mark.parametrize(("archive_bytes", "valid"), [(2 * 1024**3, True), (0, False), (True, False)])
+def test_the_data_section_sets_the_largest_task_archive_body(archive_bytes, valid) -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "data": {"max-task-archive-bytes": archive_bytes}})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"data\.max_task_archive_bytes"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).max_task_archive_bytes == archive_bytes
+    default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
+    assert default.max_task_archive_bytes == 512 * 1024**2
+
+
 @pytest.mark.parametrize(("jobs", "valid"), [(4, True), (0, False), (True, False)])
 def test_the_training_section_sets_the_jobs_that_one_process_runs_at_once(jobs, valid) -> None:
     resolved = translate_layout({"reef": {"token": "t"}, "training": {"max_jobs": jobs}})
@@ -367,3 +416,32 @@ def test_the_evaluation_section_names_a_trial_observer_plugin() -> None:
         ValueError, match=r"evaluation\.trial_observer .* must name a class that inherits TrialObserver"
     ):
         service_config_from_mapping(resolved)
+
+
+def test_the_evaluation_section_names_a_task_template_builder_plugin() -> None:
+    assert (
+        service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).evaluation_task_template_builder
+        is None
+    )
+    builder = "reef.evaluation.task_templates:DockerfileTemplateBuilder"
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"task_template_builder": builder}})
+    assert service_config_from_mapping(resolved).evaluation_task_template_builder == builder
+
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"task_template_builder": "json:loads"}})
+    with pytest.raises(
+        ValueError,
+        match=r"evaluation\.task_template_builder .* must name a class that inherits TaskTemplateBuilder",
+    ):
+        service_config_from_mapping(resolved)
+
+
+def test_the_evaluation_section_requires_prepared_templates_only_when_it_says_so() -> None:
+    default = service_config_from_mapping(translate_layout({"reef": {"token": "t"}}))
+    assert default.evaluation_require_prepared_templates is False
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"require_prepared_templates": True}})
+    assert service_config_from_mapping(resolved).evaluation_require_prepared_templates is True
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"require_prepared_templates": "sometimes"}})
+    with pytest.raises(ValueError, match=r"evaluation\.require_prepared_templates"):
+        service_config_from_mapping(resolved)
+    with pytest.raises(ValueError, match=r"evaluation\.require_prepared_templates must be true or false"):
+        dataclasses.replace(default, evaluation_require_prepared_templates="yes")

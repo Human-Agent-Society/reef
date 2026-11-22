@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 import pytest
 import sqlalchemy.exc
+from tests.reef_recipe.support import (
+    DESCRIPTION,
+    InlineWorker,
+    ScriptedGenerator,
+    generated,
+    handed_out_names,
+    job_data_stage,
+    rounds,
+    scenario_session,
+    stage_settings,
+    train_job,
+)
 from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
-from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
@@ -21,7 +32,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.execution.jobs import SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
@@ -30,17 +41,14 @@ from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecip
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
-    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
-    TaskGenerator,
     TaskValidationResult,
 )
 from reef.recipe.generated_tasks.processor import (
     DeliveryJob,
     GeneratedTaskSamples,
-    GeneratedTaskSettings,
     GenerationJob,
     GenerationOutcome,
     StoredGeneratorState,
@@ -50,17 +58,16 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_gen
 from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sample2job import Sample2JobSettings
 from reef.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.scenario import ScenarioStore
+from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.tasks import TaskStorage
 from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
 MODULE = "tests.reef_recipe.test_generated_tasks"
-DESCRIPTION = "shell tasks with hidden state under /var and /etc"
+#: The module of the scripted generator that a pipeline section names.
+SUPPORT_MODULE = "tests.reef_recipe.support"
 #: The ``rollout`` job parameter of the recipe's task jobs.
 ROLLOUT = {"rollouts_per_task": 2}
 
@@ -105,25 +112,8 @@ def report(
     )
 
 
-def stage_settings(config: Mapping[str, object]) -> tuple[GeneratedTaskSettings, Sample2JobSettings]:
-    """Split one flat config, as a test writes it, into the settings of the two stages."""
-    sample_names = {field.name for field in dataclasses.fields(GeneratedTaskSettings)}
-    batch_names = {field.name for field in dataclasses.fields(Sample2JobSettings)}
-    unknown = sorted(set(config) - sample_names - batch_names)
-    if unknown:
-        raise ValueError(f"unknown stage settings: {', '.join(unknown)}")
-    return (
-        GeneratedTaskSettings(**{key: value for key, value in config.items() if key in sample_names}),
-        Sample2JobSettings(**{key: value for key, value in config.items() if key in batch_names}),
-    )
-
-
 #: The trainer's sample count: the job_samples of ``GeneratedTaskJobData``, one task.
 BATCH_SIZE = 1
-
-
-def job_data_stage(settings: Sample2JobSettings, context: PipelineContext) -> GeneratedTaskJobData:
-    return GeneratedTaskJobData(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
 
 
 def processor(**config: object) -> TrainingPipeline:
@@ -134,16 +124,6 @@ def processor(**config: object) -> TrainingPipeline:
         record2sample=GeneratedTaskSamples(context, sample_settings),
         sample2job=job_data_stage(batch_settings, context),
     )
-
-
-def handed_out_names(p: TrainingPipeline) -> list[str]:
-    """The names of the tasks that the next job's data takes: in ``manual``, the oldest training request's."""
-    if p.training_mode == "auto":
-        entries = p.auto_entries()
-    else:
-        request = next(iter(p.training_requests.values()), None)
-        entries = () if request is None else p.request_entries(request)
-    return [sample.metadata["task"]["name"] for _, sample in entries]
 
 
 # ------------------------------------------------------------------------------------------------- the rounds
@@ -196,55 +176,6 @@ def test_a_rollout_result_reads_back_from_its_document_as_the_generators_result(
         ran.generated(task_for("t-b", "r", 1))
 
 
-class ScriptedGenerator(TaskGenerator):
-    """A task generator that returns scripted tasks, refuses scripted names, and keeps what it was sent."""
-
-    built: list[dict[str, object]] = []
-
-    def __init__(
-        self,
-        rounds: list[tuple[HarborTask, ...]] | None = None,
-        *,
-        invalid: Mapping[str, str] | None = None,
-        failing: str | None = None,
-        failing_results: bool = False,
-    ) -> None:
-        self.rounds = list(rounds) if rounds is not None else []
-        self.invalid = dict(invalid or {})
-        self.failing = failing
-        self.failing_results = failing_results
-        self.requests: list[TaskGenerationRequest] = []
-        self.validated: list[str] = []
-        self.results: list[tuple[GeneratedTaskResult, ...]] = []
-        self.result_generations: list[int] = []
-
-    @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
-    ) -> Self:
-        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ), "state": state})
-        return cls()
-
-    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
-        self.requests.append(request)
-        if not self.rounds:
-            return ()
-        return self.rounds.pop(0)
-
-    async def validate(self, task: HarborTask) -> TaskValidationResult:
-        self.validated.append(task.name)
-        if task.name == self.failing:
-            raise RuntimeError("the checks could not run")
-        error = self.invalid.get(task.name)
-        return TaskValidationResult((error,) if error else ())
-
-    async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
-        self.results.append(results)
-        self.result_generations.append(generation)
-        if self.failing_results:
-            raise RuntimeError("the generator lost its state directory")
-
-
 class SlowGenerator(ScriptedGenerator):
     """A generator whose generate call takes longer than a short deadline."""
 
@@ -253,46 +184,23 @@ class SlowGenerator(ScriptedGenerator):
         return await super().generate(request)
 
 
-def generated(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
-    """Tasks of one round."""
-    return tuple(
-        task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index)
-        for index in indices
-    )
+class OverlapGenerator(ScriptedGenerator):
+    """A generator whose checks take a moment, and that counts the candidates it checks at once."""
 
+    def __init__(self, *args: Any, delay: float = 0.05, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.delay = delay
+        self.in_flight = 0
+        self.most_in_flight = 0
 
-class Unbound(BackgroundJobRunner):
-    """The runner of a test worker that runs rounds itself. The real worker thread never calls it."""
-
-    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
-        raise RuntimeError("no processor bound")
-
-
-class InlineWorker(BackgroundJobWorker):
-    """Runs each round the moment it is submitted, on this thread, so a test reads the outcome right away."""
-
-    def __init__(self) -> None:
-        super().__init__(Unbound(), thread_name="test-rounds", concurrency=1)
-        self.generation: BackgroundJobRunner | None = None
-        self.submitted: list[SupportsReceipt] = []
-        self.outcomes: list[SupportsReceipt] = []
-
-    def submit(self, job: SupportsReceipt) -> bool:
-        self.submitted.append(job)
-        if self.generation is None:
-            return False
+    async def validate(self, task: HarborTask) -> TaskValidationResult:
+        self.in_flight += 1
+        self.most_in_flight = max(self.most_in_flight, self.in_flight)
         try:
-            self.outcomes.append(asyncio.run(self.generation.run(job)))
-        except Exception:
-            self.outcomes.append(Failed(job.receipt))
-        return True
-
-    def poll(self) -> list[SupportsReceipt]:
-        outcomes, self.outcomes = self.outcomes, []
-        return outcomes
-
-    def close(self) -> None:
-        self.generation = None
+            await asyncio.sleep(self.delay)
+            return await super().validate(task)
+        finally:
+            self.in_flight -= 1
 
 
 class DeferredWorker(InlineWorker):
@@ -316,79 +224,9 @@ class DeferredWorker(InlineWorker):
             self.outcomes.append(asyncio.run(self.generation.run(job)))
 
 
-def scenario_session(tmp_path: Path, scenario: str = "tasks") -> tuple[ScenarioStore, SampleStore]:
-    """A scenario session in a SQLite storage under ``tmp_path``, and its sample store in a data store."""
-    return open_sample_store(tmp_path / "records", scenario)
-
-
 def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
     """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
     return scenario_session(tmp_path, scenario)[0].tasks
-
-
-class CommittingPipeline(TrainingPipeline):
-    """A pipeline whose ``acknowledge`` also commits what the job data consumed, as the trainer's commit of a
-    job's submission does: the commit counts the stored samples trained. Each look also makes the samples first,
-    as the samples service does before the trainer reads the sample store."""
-
-    def __init__(self, context: PipelineContext, session: ScenarioStore, **stages: Any) -> None:
-        super().__init__(context, **stages)
-        self.session = session
-
-    def advance(self) -> None:
-        self.produce()
-        super().advance()
-
-    def acknowledge(self, data_id: str) -> frozenset[str]:
-        consumed = super().acknowledge(data_id)
-        step = len(self.session.history())
-        commit = CommitRecord(
-            scenario="tasks",
-            commit_number=step + 1,
-            snapshot=SnapshotRef(f"snapshot:{step + 1}", "base"),
-            checkpoint=True,
-            algorithm_state={},
-            high_water_sequence=step + 1,
-            high_water_offset=step + 1,
-            consumed_ids=consumed,
-            recorded_at=1000.0 + step,
-        )
-        self.session.append_commit(expected_commit_number=step, commit=commit)
-        return consumed
-
-
-def rounds(
-    tmp_path: Path,
-    task_generator: ScriptedGenerator,
-    service: StandInGenerator | None = None,
-    *,
-    worker: InlineWorker | DeferredWorker | None = None,
-    **config: object,
-) -> tuple[TrainingPipeline, StandInGenerator]:
-    """A generated-task pipeline; ``worker`` runs the generation and delivery jobs, inline by default."""
-    service = service if service is not None else StandInGenerator(tmp_path / "tasks")
-    worker = worker if worker is not None else InlineWorker()
-    session, samples = scenario_session(tmp_path)
-    context = PipelineContext(
-        "tasks",
-        task_storage=session.tasks,
-        samples=samples.for_trainer(""),
-        training_mode=str(config.pop("training_mode", "auto")),
-    )
-    sample_settings, batch_settings = stage_settings(
-        {"buffer_size": 2, "rounds": 3, "description": DESCRIPTION, **config}
-    )
-    generation = GeneratedTaskSamples(
-        context, sample_settings, task_generator=task_generator, generator_service=service, worker=worker
-    )
-    built = CommittingPipeline(
-        context,
-        session,
-        record2sample=generation,
-        sample2job=job_data_stage(batch_settings, context),
-    )
-    worker.generation = generation
-    return built, service
 
 
 def looked(p: TrainingPipeline) -> bool:
@@ -396,27 +234,6 @@ def looked(p: TrainingPipeline) -> bool:
     p.ready(BATCH_SIZE)
     p.ready(BATCH_SIZE)
     return p.ready(BATCH_SIZE)
-
-
-def train_job(
-    p: TrainingPipeline, rewards: Mapping[str, Sequence[float]] | None = None, *, error: str | None = None
-) -> list[str]:
-    """Train the handed-out task job as the trainer and the training component do, and return its task names.
-
-    The trainer commits the job's submission, then the job's end. Each task's rollouts earn ``rewards[name]``,
-    1.0 and 0.0 by default. A job with ``error`` failed and reports no metrics.
-    """
-    data = p.build_job_data(BATCH_SIZE)
-    names = [item.metadata["task"]["name"] for item in data.samples]
-    # The submission's commit counts the tasks trained.
-    p.acknowledge(data.data_id)
-    if error is None:
-        rollout_rewards = {name: list((rewards or {}).get(name, (1.0, 0.0))) for name in names}
-        outcome = JobOutcome("job", "tinker", "finished", {"rollout_rewards": rollout_rewards, "rollout_samples": 4})
-    else:
-        outcome = JobOutcome("job", "tinker", "failed", error=error)
-    p.job_ended(outcome)
-    return names
 
 
 def unfinished(p: TrainingPipeline) -> int:
@@ -515,7 +332,7 @@ def test_a_generation_past_its_deadline_is_skipped(tmp_path: Path) -> None:
 
 
 def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> HarborTask:
-    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
+    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the Designer's own record."""
     task = task_for(name, record_ids[0], port)
     metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
     return dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata)
@@ -529,7 +346,7 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
     task_generator = ScriptedGenerator([(follower, bridge, renamed)])
     pipeline, _ = rounds(tmp_path, task_generator)
     store = pipeline.record2sample.task_store
-    # The author's record is a source of a train task too; it must not join the follower to the train split.
+    # The Designer's record is a source of a train task too; it must not join the follower to the train split.
     earlier = (
         sourced("train-task", "designer-1", "train-source", port=9100, designer_record_id="designer-1"),
         sourced("eval-task", "eval-source", port=9101),
@@ -991,7 +808,7 @@ def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str,
 def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_once_for_each_scenario(
     tmp_path: Path,
 ) -> None:
-    generator = {"module": f"{MODULE}:ScriptedGenerator", "config": {"count": 3}}
+    generator = {"module": f"{SUPPORT_MODULE}:ScriptedGenerator", "config": {"count": 3}}
     environ = {"TASKS_KEY": "secret"}
     recipe = generated_pipeline_recipe(
         environ,
@@ -1042,7 +859,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
 
 
 def test_a_generator_without_the_task_storage_of_a_scenario_session_is_refused() -> None:
-    generator = {"module": f"{MODULE}:ScriptedGenerator"}
+    generator = {"module": f"{SUPPORT_MODULE}:ScriptedGenerator"}
     record2sample = {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"generator": generator}}
     recipe = generated_pipeline_recipe({}, {"record2sample": record2sample})
     ScriptedGenerator.built.clear()
@@ -1066,7 +883,7 @@ def test_a_pipeline_section_that_names_no_usable_stage_is_refused(pipeline: Mapp
 @pytest.mark.parametrize(
     ("generator", "message"),
     [
-        (f"{MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2sample.config.generator"),
+        (f"{SUPPORT_MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2sample.config.generator"),
         ("reef.recipe.generated_tasks:GeneratedTaskRecipe", "must name a class that inherits TaskGenerator"),
         ("reef.recipe.generated_tasks:TaskGenerator", "names an abstract class"),
     ],
@@ -1163,6 +980,97 @@ def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_
     assert handed_out_names(p) == ["harbor-00001-002", "harbor-00001-003"]
 
 
+@pytest.mark.unit
+def test_with_no_jobs_per_round_the_next_round_follows_the_last_while_few_tasks_wait(tmp_path: Path) -> None:
+    # Generation runs ahead of training: each round starts when the last one ends, while fewer than refill_tasks
+    # saved tasks wait to train, and no job end has to come first.
+    task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3), generated(2, 4, 5)])
+    p, _ = rounds(tmp_path, task_generator, rounds=3, jobs_per_round=0, refill_tasks=4)
+    looked(p)
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 2, "the second round followed the first with no job"
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 2, "four saved tasks wait, so the third round waits"
+    train_job(p)
+    looked(p)
+    assert p.status()["task_generation"]["completed"] == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("concurrency", "most"), [(None, 1), (2, 2)])
+def test_a_generation_checks_up_to_validation_concurrency_candidates_at_once(
+    tmp_path: Path, concurrency: int | None, most: int
+) -> None:
+    task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)])
+    config = {} if concurrency is None else {"validation_concurrency": concurrency}
+    p, _ = rounds(tmp_path, task_generator, rounds=1, **config)
+    looked(p)
+    assert task_generator.most_in_flight == most
+    assert sorted(task_generator.validated) == [f"harbor-00000-00{index}" for index in range(4)]
+    assert p.status()["task_generation"]["completed"] == 1
+    assert p.status()["task_store"]["train"] == 4
+
+
+@pytest.mark.unit
+def test_a_generation_past_its_deadline_stops_the_checks_that_run(tmp_path: Path) -> None:
+    task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)], delay=0.3)
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, task_generator, worker=worker, validation_concurrency=2, generation_deadline_seconds=0.1)
+    p.ready(BATCH_SIZE)
+    (job,) = worker.waiting
+
+    async def generation_then_wait() -> None:
+        await p.record2sample.run(job)
+        # A check left running would end within this wait.
+        await asyncio.sleep(0.5)
+
+    asyncio.run(generation_then_wait())
+    assert task_generator.validated == [], "no check ran past the deadline"
+    assert task_generator.in_flight == 0
+    assert p.record2sample.task_store.generation(0).pending_indices == (0, 1, 2, 3)
+    p.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("generator_type", [ScriptedGenerator, OverlapGenerator])
+def test_after_a_check_that_raises_no_further_check_starts(
+    tmp_path: Path, generator_type: type[ScriptedGenerator]
+) -> None:
+    task_generator = generator_type([generated(0, 0, 1, 2)], failing="harbor-00000-000")
+    p, _ = rounds(tmp_path, task_generator, rounds=1, generation_attempts=1)
+    assert not looked(p)
+    assert "the checks could not run" in p.status()["task_generation"]["last_error"]
+    assert task_generator.validated == ["harbor-00000-000"]
+    assert p.record2sample.task_store.generation(0).pending_indices == (0, 1, 2)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("generator_type", [ScriptedGenerator, OverlapGenerator])
+def test_one_check_at_a_time_runs_in_candidate_order_with_copies_apart(
+    tmp_path: Path, generator_type: type[ScriptedGenerator]
+) -> None:
+    # The candidates are A, B, A, C; the first A is invalid, so its copy is checked again in its own turn.
+    task_generator = generator_type([generated(0, 0, 1, 0, 3)], invalid={"harbor-00000-000": "no tests"})
+    p, _ = rounds(tmp_path, task_generator, rounds=1)
+    looked(p)
+    assert task_generator.validated == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-000", "harbor-00000-003"]
+
+
+@pytest.mark.unit
+def test_a_check_that_raises_ends_the_attempt_when_the_checks_that_run_with_it_end(tmp_path: Path) -> None:
+    task_generator = OverlapGenerator([generated(0, 0, 1, 2, 3)], failing="harbor-00000-000")
+    p, _ = rounds(tmp_path, task_generator, rounds=1, validation_concurrency=2, generation_attempts=1)
+    assert not looked(p), "a generation whose attempts ran out hands out none of its tasks"
+    assert "the checks could not run" in p.status()["task_generation"]["last_error"]
+    assert sorted(task_generator.validated) == ["harbor-00000-000", "harbor-00000-001"]
+    assert p.record2sample.task_store.generation(0).pending_indices == (
+        0,
+        2,
+        3,
+    ), "the check that ran saved its outcome"
+    assert task_generator.in_flight == 0
+
+
 def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedback(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)
@@ -1252,14 +1160,19 @@ def test_a_round_that_ran_out_of_attempts_is_retried_with_the_same_sessions(tmp_
     assert len(task_generator.requests) == 1
 
 
-def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicate(tmp_path: Path) -> None:
+@pytest.mark.unit
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicate(
+    tmp_path: Path, concurrency: int
+) -> None:
     task = generated(0, 0)
-    task_generator = ScriptedGenerator([task + task])
-    p, _ = rounds(tmp_path, task_generator, rounds=1)
+    task_generator = OverlapGenerator([task + task])
+    p, _ = rounds(tmp_path, task_generator, rounds=1, validation_concurrency=concurrency)
     looked(p)
     state = p.record2sample.task_store.generation(0)
     assert state is not None and train_task_names(state) == ("harbor-00000-000",)
     assert state.candidates is not None and "is already published" in state.candidates[1].error
+    assert task_generator.validated == ["harbor-00000-000"], "the copy is refused without a check"
 
 
 def test_a_task_whose_submission_did_not_commit_is_handed_out_again_after_a_restart(tmp_path: Path) -> None:

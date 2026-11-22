@@ -14,8 +14,15 @@ from urllib.request import Request
 import pytest
 from tests.support.harness_jobs import evolution_config
 
+from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.tasks.model_binding import (
+    DEFAULT_CONTEXT_WINDOW,
+    NO_KEY_PLACEHOLDER,
+    ModelBinding,
+    ModelBindings,
+    token_limits,
+)
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -457,6 +464,50 @@ def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> No
     )
 
 
+def test_opencode_binding_gives_the_model_its_limits_from_metadata_env_or_the_default() -> None:
+    """Without limits opencode never compacts a session, so the binding always writes them: the run's env wins
+    over the endpoint's metadata, and the default stands in for an unknown window."""
+
+    def limit(binding: ModelBinding) -> dict[str, int]:
+        ((_, data),) = binding.config_overlays(get_adapter("opencode"))
+        return data["provider"]["reef"]["models"]["served"]["limit"]
+
+    binding = ModelBinding("http://up", "served", api_key="k")
+    assert limit(binding) == {"context": DEFAULT_CONTEXT_WINDOW, "output": binding.max_output_tokens}
+    known = replace(binding, metadata=ModelMetadata(context_window=262144, reasoning=True))
+    assert limit(known) == {"context": 262144, "output": binding.max_output_tokens}
+    configured = known.with_env_limits({"REEF_CONTEXT_WINDOW": "65536", "REEF_MAX_OUTPUT_TOKENS": "8192"})
+    assert limit(configured) == {"context": 65536, "output": 8192}
+    files = render_tree(HarnessTree({}), get_adapter("opencode"), configured.config_overlays(get_adapter("opencode")))
+    assert (
+        json.loads(files["opencode/opencode.json"])["provider"]["reef"]["models"]["served"]["limit"]["context"]
+        == 65536
+    )
+
+
+def test_pi_and_codex_take_the_context_window_that_a_run_sets() -> None:
+    """pi gets the binding's window always. Codex's catalog gets an entry only for known metadata or an explicit
+    window: a guessed window would replace Codex's own handling of a model it does not know."""
+    binding = ModelBinding("http://up", "served", api_key="k", api="responses")
+    configured = binding.with_env_limits({"REEF_CONTEXT_WINDOW": "65536"})
+    assert models_overlay(configured)["providers"]["reef"]["models"][0]["contextWindow"] == 65536
+
+    def codex_models(binding: ModelBinding) -> object:
+        return dict(binding.config_overlays(get_adapter("codex")))["models"]["models"]
+
+    assert codex_models(binding) == {}
+    assert codex_models(configured) == {"served": {"context_window": 65536, "reasoning": False}}
+    known = replace(configured, metadata=ModelMetadata(context_window=262144, reasoning=True))
+    assert codex_models(known) == {"served": {"context_window": 65536, "reasoning": True}}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1e5", "big", ""])
+def test_a_token_limit_in_the_env_is_a_positive_integer(value: str) -> None:
+    with pytest.raises(ValueError, match="REEF_CONTEXT_WINDOW must be a positive number of tokens"):
+        token_limits({"REEF_CONTEXT_WINDOW": value})
+    assert token_limits({"OTHER": value}) == (None, None)
+
+
 def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:
     runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
     config = {
@@ -577,6 +628,7 @@ def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
     models = models_overlay(binding)
     assert models["providers"]["reef"]["models"][0] == {
         "id": "anthropic/claude-sonnet-5",
+        "contextWindow": DEFAULT_CONTEXT_WINDOW,
         "maxTokens": 32000,
     }
     assert binding.max_output_tokens == 32000

@@ -14,22 +14,21 @@ from tests.support.task_service_stubs import task_for
 from reef.core.job_data import TaskSample
 from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitError, write_split_manifest
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
-from reef.service.task_import import DataScenarioStorage, TaskImport, TaskImportError
 from reef.storage.data import ItemConflictError
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.task_import import DataScenarioStorage, TaskImport, TaskImportError
 from reef.storage.tasks import LocalTaskFileStore
 
 IMAGE = bytes(range(256))
 
 
 def harbor_task(root: Path, name: str, port: int, *, instruction: str = "") -> Path:
-    """A Harbor task directory with a binary file, which Reef's own task reader would refuse."""
+    """A Harbor task directory with a binary file added after Reef wrote it, which Reef's own task reader refuses."""
     task = task_for(name, "record-1", port)
-    directory = write_harbor_task(replace(task, instruction=instruction) if instruction else task, root)
+    if instruction:
+        task = replace(task, files={**task.files, "instruction.md": instruction})
+    directory = write_harbor_task(task, root)
     (directory / "environment" / "image.png").write_bytes(IMAGE)
     return directory
 
@@ -112,38 +111,3 @@ def test_a_task_that_changed_or_cannot_load_stops_the_open(tmp_path: Path) -> No
         path.write_text("{}")
         with pytest.raises(TaskSplitError, match="split manifest"):
             storage.open("math")
-
-
-def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> None:
-    root = tmp_path / "tasks"
-    harbor_task(root, "a-task", 9000)
-    path = manifest(tmp_path / "split.json", (), ("a-task",))
-    config = translate_layout(
-        {
-            "storage": {"agent-record-dir": str(tmp_path / "records")},
-            "task-import": {"manifest": str(path), "tasks-root": str(root)},
-        }
-    )
-    settings = service_config_from_mapping(normalize_service_config(config))
-    assert (settings.task_import_manifest, settings.task_import_tasks_root) == (str(path), str(root))
-    # An in-memory artifact backend: this test checks the task import, not the Git LFS repository.
-    settings = replace(
-        settings,
-        recipe="recipe",
-        artifact_backend={
-            "module": "tests.support.artifact_backend_plugin:MemoryArtifactBackend",
-            "config": {"label": "tasks"},
-        },
-        artifact_work_dir=str(tmp_path / "work"),
-        artifact_cache_dir=str(tmp_path / "cache"),
-        task_file_dir=str(tmp_path / "files"),
-    )
-    dispatcher = build_dispatcher(settings)
-    try:
-        samples = dispatcher.storage.sample_store("math", dispatcher.get_or_create_scenario("math").store)
-        assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [("a-task", "eval")]
-    finally:
-        dispatcher.close()
-
-    with pytest.raises(ValueError, match="task-import needs both manifest and tasks-root"):
-        ServiceSettings(recipe="recipe", task_import_manifest=str(path))

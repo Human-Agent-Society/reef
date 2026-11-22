@@ -62,6 +62,7 @@ from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
+from reef.service.deploy.process import DEFAULT_GRACE_TIMEOUT_SECONDS, log_status
 from reef.service.deploy.routing.containers import ContainerCommandError, DockerComposeRuntime
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
 from reef.service.deploy.routing.policy import RouterPolicyError
@@ -75,14 +76,7 @@ from reef.service.deploy.service_config import (
 )
 from reef.service.deploy.training import assemble_training_services, local_model_required
 
-_DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
-
-
-def _log(msg: str) -> None:
-    # A terminal that hung up fails every write. The stack still has to stop, and the logs stay in the run directory.
-    with suppress(OSError):
-        print(f"[reef] {msg}", file=sys.stderr)
 
 
 def hangup_stops_stack(routing_controller: RoutingDeploymentController | None) -> bool:
@@ -218,7 +212,7 @@ class _Stack:
         for dependency in service.get("depends_on") or []:
             if not self._is_alive(dependency):
                 raise RuntimeError(f"service {name!r} requires healthy dependency {dependency!r}")
-        _log(f"{name}: executor={selection.settings.backend} ({selection.reason})")
+        log_status(f"{name}: executor={selection.settings.backend} ({selection.reason})")
         address = self.config.get("reef", {}).get("ray_address")
         if address:
             service = {**service, "env": {"RAY_ADDRESS": address, **service.get("env", {})}}
@@ -258,7 +252,7 @@ class _Stack:
             json.dump(info, handle)
         self._wait_ready(service, executor, deadline)
         endpoint = config.get("endpoints", {}).get(name)
-        _log(f"{name}: ready" + (f" at {endpoint}" if endpoint else ""))
+        log_status(f"{name}: ready" + (f" at {endpoint}" if endpoint else ""))
 
     def start(self) -> None:
         try:
@@ -299,7 +293,7 @@ class _Stack:
         except BaseException:
             self.shutdown()
             raise
-        _log(f"stack up. logs: {self.run_dir}/*.log")
+        log_status(f"stack up. logs: {self.run_dir}/*.log")
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -308,12 +302,12 @@ class _Stack:
                     alive = self._is_alive(name)
                     self._drain_log(name)
                 except Exception as exc:
-                    _log(f"{name}: execution backend failed: {exc}")
+                    log_status(f"{name}: execution backend failed: {exc}")
                     alive = False
                 if not alive:
                     if self._stopping.is_set():
                         return
-                    _log(f"{name}: exited; bringing down the stack")
+                    log_status(f"{name}: exited; bringing down the stack")
                     self._unexpected_exit.set()
                     self._stopping.set()
                     if self.routing_controller is not None:
@@ -341,7 +335,7 @@ class _Stack:
         watcher.start()
         while not self._stopping.is_set():
             if self.stop_requested:
-                _log("received signal, shutting down (press Ctrl-C again to skip the grace period)")
+                log_status("received signal, shutting down (press Ctrl-C again to skip the grace period)")
                 self._stopping.set()
                 break
             if self.routing_controller is not None:
@@ -359,13 +353,13 @@ class _Stack:
                     ContainerCommandError,
                     OSError,
                 ) as exc:
-                    _log(f"routing deployment failed: {exc}")
+                    log_status(f"routing deployment failed: {exc}")
                     self._unexpected_exit.set()
                     self._stopping.set()
             self._stopping.wait(timeout=0.1)
         watcher.join(timeout=15)
 
-    def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
+    def shutdown(self, grace: float = DEFAULT_GRACE_TIMEOUT_SECONDS) -> None:
         if self._closed:
             return
         self._closed = True
@@ -377,7 +371,7 @@ class _Stack:
                 if self.routing_controller.failed:
                     self._unexpected_exit.set()
             except Exception as exc:
-                _log(f"routing cleanup incomplete: {exc}")
+                log_status(f"routing cleanup incomplete: {exc}")
                 self._unexpected_exit.set()
         ordered = list(reversed(self._executors.items()))
         # Signal every dependent before its dependencies, with one grace window.
@@ -385,7 +379,7 @@ class _Stack:
             try:
                 executor.rpc(0, "request_stop", timeout=10)
             except Exception as exc:
-                _log(f"{name}: stop RPC failed: {exc}")
+                log_status(f"{name}: stop RPC failed: {exc}")
         deadline = time.monotonic() + max(0, grace)
         pending = ordered
         while pending and not self.force_stop_requested and time.monotonic() < deadline:
@@ -400,18 +394,18 @@ class _Stack:
             if pending and not self.force_stop_requested:
                 time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         if pending and self.force_stop_requested:
-            _log("received another signal, forcing process cleanup")
+            log_status("received another signal, forcing process cleanup")
         for name, executor in ordered:
             try:
                 executor.rpc(0, "shutdown", kwargs={"grace": 0}, timeout=15)
                 self._drain_log(name)
             except Exception as exc:
-                _log(f"{name}: process cleanup failed: {exc}")
+                log_status(f"{name}: process cleanup failed: {exc}")
             finally:
                 try:
                     executor.shutdown()
                 except Exception as exc:
-                    _log(f"{name}: executor cleanup failed: {exc}")
+                    log_status(f"{name}: executor cleanup failed: {exc}")
         if self._ray_runtime is not None:
             self._ray_runtime.close()
 
@@ -452,7 +446,7 @@ def resolve_deployment_config(
     config = translate_layout(config)
     selected, source_root = _component_selection(config, overrides or {}, resolved_config_path)
     if source_root is not None:
-        _log(f"recipe package resolves from {source_root}")
+        log_status(f"recipe package resolves from {source_root}")
     try:
         arguments = component_config_arguments(selected)
         recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
@@ -537,7 +531,7 @@ def run_component(config_path: str | None, overrides: dict[str, str] | None, com
     their own. It reads and checks the configuration as ``reef serve`` does (``load_deployment``).
     """
     loaded = load_deployment(config_path, overrides)
-    _log(loaded.source)
+    log_status(loaded.source)
     if local_model_required(loaded.resolved):
         resolve_model_paths(loaded.resolved)
     settings = service_config_from_mapping(loaded.resolved)
@@ -545,7 +539,7 @@ def run_component(config_path: str | None, overrides: dict[str, str] | None, com
 
     from reef.service.components import build_component_app
 
-    _log(f"service: {component}")
+    log_status(f"service: {component}")
     try:
         app = build_component_app(component, settings)
     except (RecipeConfigError, RuntimeConfigError):
@@ -560,7 +554,7 @@ def _run_orchestrator(
     config_path: str | None, overrides: dict[str, str] | None = None, *, print_config: bool = False
 ) -> int:
     loaded = load_deployment(config_path, overrides)
-    _log(loaded.source)
+    log_status(loaded.source)
     report = startup_report(
         loaded.given,
         loaded.resolved,
@@ -575,7 +569,7 @@ def _run_orchestrator(
         print("\n".join([loaded.source, *report]))
         return 0
     for line in report:
-        _log(line)
+        log_status(line)
     config, services, source_root = loaded.resolved, loaded.services, loaded.source_root
     if local_model_required(config):
         resolve_model_paths(config)
@@ -642,7 +636,7 @@ def _run_orchestrator(
                 stack.stop_requested = True
                 routing_controller.request_stop(force=stack.force_stop_requested)
             else:
-                _log("received signal during startup, shutting down")
+                log_status("received signal during startup, shutting down")
                 raise KeyboardInterrupt
 
         started = False
@@ -699,7 +693,7 @@ def _run_orchestrator(
                 try:
                     routing_controller.release_control_directory()
                 except (OSError, RoutingDeploymentError) as exc:
-                    _log(f"routing control directory cleanup incomplete: {exc}")
+                    log_status(f"routing control directory cleanup incomplete: {exc}")
                 finally:
                     # Only after the last routing cleanup do these signals act on the process as before.
                     signal.signal(signal.SIGTERM, preparation_sigterm)

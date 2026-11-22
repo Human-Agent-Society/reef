@@ -33,6 +33,7 @@ from aiohttp import web
 
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.deployment import harness_adapter
@@ -52,7 +53,6 @@ from reef.service.assembly import (
 )
 from reef.service.auth import evaluation_token_for
 from reef.service.deploy.service_config import ServiceSettings
-from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import ServedModelsCache, build_inference_app
 from reef.service.routed_replica import ReplicaRecords, add_replica_routing
 from reef.service.web import service_application
@@ -166,6 +166,7 @@ class DataApp(ComponentApp):
             build_dispatcher(settings, environ=environ, components=frozenset({"data"})),
             tokens=settings.tokens,
             console_origins=settings.console_origins,
+            max_task_archive_bytes=settings.max_task_archive_bytes,
         )
 
 
@@ -315,9 +316,15 @@ class QueueServiceApp(ComponentApp):
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
         app = service_application(settings.tokens)
 
-        async def close_dispatcher(app: web.Application) -> None:
-            dispatcher.close()
+        async def stop_taking_work(app: web.Application) -> None:
+            # Shutdown hooks run right after the signal and before the HTTP drain, so a stop deadline starts here.
+            dispatcher.workers.begin_stop()
 
+        async def close_dispatcher(app: web.Application) -> None:
+            # The workers can take long to stop, so the event loop does not wait on them.
+            await asyncio.to_thread(dispatcher.close)
+
+        app.on_shutdown.append(stop_taking_work)
         app.on_cleanup.append(close_dispatcher)
         return app
 

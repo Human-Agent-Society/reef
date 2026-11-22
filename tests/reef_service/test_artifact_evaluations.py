@@ -41,15 +41,21 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
+from reef.core.trajectories import CONVERSATION_FIELDS
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    TASK_TEMPLATE_KIND,
     EvaluationRollout,
     EvaluationRolloutWorker,
     LocalCandidateEndpoints,
+    TaskTemplateWorker,
+    rollout_item_id,
+    template_item_id,
 )
+from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import TreeAgent
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
@@ -63,6 +69,7 @@ from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
     CANCELLED_ERROR,
+    FAILURE_CHECK_ROLLOUTS,
     FAILURES_ERROR,
     READ_CALLS,
     STOPPED_ERROR,
@@ -222,12 +229,14 @@ async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:
     raise AssertionError("the evaluation did not end")
 
 
-async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
-    """Create the scenario with eval tasks ``names``, and return its active artifact."""
-    await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})
+async def created(client: TestClient, tmp_path: Path, *names: str, owner: str | None = None) -> str:
+    """Create the scenario ``s`` with eval tasks ``names`` in the data of ``owner`` (None: the scenario's own name),
+    and return its active artifact."""
+    scenario: dict[str, str] = {"name": "s"} if owner is None else {"name": "s", "owner": owner}
+    await client.post("/reef/scenarios", headers=AUTH, json=scenario)
     metadata = urlencode({"metadata": json.dumps({"scenarios": {"s": "eval"}})})
     upload = await client.post(
-        f"/reef/namespaces/s/data/tasks?{metadata}",
+        f"/reef/namespaces/{owner or 's'}/data/tasks?{metadata}",
         headers={**AUTH, "Content-Type": "application/gzip"},
         data=archive(tmp_path, *names),
     )
@@ -536,6 +545,396 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
             assert answer["policy_evaluation"]["scores"] == [
                 {"task": "add", "scores": [1.0, 0.0]},
                 {"task": "sort", "scores": [0.0, 1.0]},
+            ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_evaluation_on_e2b_adds_the_rollouts_of_each_task_whose_template_item_is_final(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    def scored(item: WorkItem, value: float) -> None:
+        assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == item.id
+        queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
+
+    async def open_items(kind: str, count: int) -> list[WorkItem]:
+        for _ in range(200):
+            items = [item for item in queue.items(EVALUATIONS_QUEUE, scenario="s", kind=kind) if not item.final]
+            if len(items) == count:
+                return sorted(items, key=lambda item: item.id)
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the queue did not hold {count} {kind} items that are not final")
+
+    async def run() -> None:
+        # No worker runs: the test takes and ends each item itself.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "environment": "e2b",
+                "rollouts_per_task": 2,
+                "max_concurrent_rollouts": 2,
+            }
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
+
+            # Each task has a template item first, and no rollout runs while the templates build.
+            add_template, sort_template = await open_items(TASK_TEMPLATE_KIND, 2)
+            assert [item.payload["task_name"] for item in (add_template, sort_template)] == ["add", "sort"]
+            assert queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND) == ()
+            # A ready template of a later task starts its rollouts while the template of an earlier task builds.
+            assert queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND]).id == add_template.id
+            assert queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND]).id == sort_template.id
+            queue.finish(EVALUATIONS_QUEUE, sort_template.id, "w", {})
+            first, second = await open_items(EVALUATION_ROLLOUT_KIND, 2)
+            assert [(item.payload["task_name"], item.payload["repeat"]) for item in (first, second)] == [
+                ("sort", 0),
+                ("sort", 1),
+            ]
+            listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+            assert [(row["task"], row["repeat"], row["state"]) for row in listed] == [
+                ("add", 0, "waiting"),
+                ("add", 1, "waiting"),
+                ("sort", 0, "queued"),
+                ("sort", 1, "queued"),
+            ]
+            # The rollouts of the earlier task start once its template is ready and the limit lets them.
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
+            await asyncio.sleep(0.3)
+            assert len(await open_items(EVALUATION_ROLLOUT_KIND, 2)) == 2
+            for item in (first, second):
+                scored(item, 0.0)
+            for item in await open_items(EVALUATION_ROLLOUT_KIND, 2):
+                scored(item, 1.0)
+
+            answer = await finished(client, evaluation_id)
+            assert answer["state"] == "finished", answer
+            assert answer["policy_evaluation"]["scores"] == [
+                {"task": "add", "scores": [1.0, 1.0]},
+                {"task": "sort", "scores": [0.0, 0.0]},
+            ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_failed_template_item_still_adds_its_tasks_rollouts_and_a_cancel_ends_the_others(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "environment": "e2b"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            add_template = queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND])
+            assert add_template.payload["task_name"] == "add"
+            # The trial of a task whose build failed builds the template itself, so its failure is the rollout's.
+            queue.fail(EVALUATIONS_QUEUE, add_template.id, "w", "aenv build of add failed", retryable=False)
+            for _ in range(200):
+                rollouts = queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND)
+                if rollouts:
+                    break
+                await asyncio.sleep(0.05)
+            assert [item.payload["task_name"] for item in rollouts] == ["add"]
+
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
+            assert (await client.post(f"{route}/cancel", headers=AUTH)).status == 200
+            sort_template = queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1))
+            assert (sort_template.state, sort_template.error) == ("failed", CANCELLED_ERROR)
+
+            # A resume builds the cancelled template again; the failed build of "add" stays failed.
+            assert (await client.post(f"{route}/resume", headers=AUTH)).status == 202
+            assert queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1)).state == "queued"
+            assert queue.read(EVALUATIONS_QUEUE, add_template.id).state == "failed"
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("rollout_kept", [True, False])
+def test_a_resume_of_an_e2b_evaluation_needs_the_rollouts_of_the_tasks_before_its_first_template_item(
+    tmp_path: Path, rollout_kept: bool
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "environment": "e2b"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
+            add_template = queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND])
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
+            for _ in range(200):
+                if queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND):
+                    break
+                await asyncio.sleep(0.05)
+            assert (await client.post(f"{route}/cancel", headers=AUTH)).status == 200
+            # The template item of "add" goes, as after its retention or in an evaluation that ran "add" before Reef
+            # had template items. Its rollout goes too when the retention deleted it.
+            deleted = {add_template.id} if rollout_kept else {add_template.id, rollout_item_id(evaluation_id, 0, 0)}
+            kept = [item.id for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if item.id not in deleted]
+            queue.delete_final(finished_before=time.time() + 1, keep={EVALUATIONS_QUEUE: kept})
+            resumed = await client.post(f"{route}/resume", headers=AUTH)
+            if rollout_kept:
+                assert resumed.status == 202, await resumed.text()
+                assert queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1)).state == "queued"
+            else:
+                assert resumed.status == 409, await resumed.text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_an_evaluation_on_e2b_builds_the_templates_of_the_next_tasks_ahead(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("reef.service.artifact_evaluations.TEMPLATE_TASKS_AHEAD", 1)
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "environment": "e2b"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            [add_template] = queue.items(EVALUATIONS_QUEUE, scenario="s", kind=TASK_TEMPLATE_KIND)
+            assert queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND]).id == add_template.id
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
+            # The rollout of "add" is added, and the window moves on to the template of "sort".
+            for _ in range(200):
+                if queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1)) is not None:
+                    break
+                await asyncio.sleep(0.05)
+            [rollout] = queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND)
+            assert rollout.payload["task_name"] == "add"
+            assert queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 1)).state == "queued"
+
+    asyncio.run(run())
+
+
+class OwnerTemplates(TaskTemplateBuilder):
+    """A builder that finds a task's image by owner and task name, as a registry builder does: it keeps
+    ``(owner, scenario, task_name)`` of each build in ``builds`` and builds nothing."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str | None, str, str]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_owner")
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        assert (task_directory / "task.toml").is_file()
+        self.builds.append((owner, scenario, task_name))
+
+
+@pytest.mark.integration
+def test_the_template_worker_builds_for_the_owner_of_the_scenarios_record_not_its_name(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    builder = OwnerTemplates()
+    dispatcher.workers.add(
+        TaskTemplateWorker(queue, LocalCandidateEndpoints(dispatcher), builder, worker_id="evaluation-templates")
+    )
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            # The scenario's name says nothing of the owner whose data holds its tasks.
+            artifact_id = await created(client, tmp_path, "add", owner="workspace-7")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "environment": "e2b"}
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            for _ in range(200):
+                if queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND):
+                    break
+                await asyncio.sleep(0.05)
+            template = queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 0))
+            assert (template.state, template.payload["owner"]) == ("finished", "workspace-7")
+            assert builder.builds == [("workspace-7", "s", "add")]
+
+    asyncio.run(run())
+
+
+class EnvironmentCallingLab(ModelCallingLab):
+    """A ``ModelCallingLab`` that keeps the task name and the Harbor environment config of each trial in ``trials``."""
+
+    def __init__(self, rewards: dict[str, float]) -> None:
+        super().__init__(rewards)
+        self.trials: list[tuple[str, Mapping[str, Any]]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.trials.append((task_path.name, overrides["environment"]))
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+
+@pytest.mark.integration
+def test_with_prepared_templates_required_a_failed_template_runs_no_trial_and_a_retry_builds_it_first(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    lab = EnvironmentCallingLab({"add": 1.0, "sort": 0.5})
+    unprepared = "the templates of task 'add' were not prepared: the registry holds no image of task add"
+
+    async def rollouts(client: TestClient, route: str) -> list[dict[str, Any]]:
+        return (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+
+    async def run() -> None:
+        # No template worker runs: the test takes and ends each template item itself.
+        server, _ = evaluating_server(dispatcher, lab, requires_prepared_templates=True)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "environment": "e2b",
+                "rollouts_per_task": 2,
+            }
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
+            add_template = queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND])
+            sort_template = queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND])
+            assert [add_template.payload["task_name"], sort_template.payload["task_name"]] == ["add", "sort"]
+            error = "the registry holds no image of task add"
+            queue.fail(EVALUATIONS_QUEUE, add_template.id, "builder", error, retryable=False)
+            queue.finish(EVALUATIONS_QUEUE, sort_template.id, "builder", {})
+
+            answer = await finished(client, evaluation_id)
+            assert answer["state"] == "finished", answer
+            assert answer["policy_evaluation"]["scores"] == [
+                {"task": "add", "scores": ["failed", "failed"]},
+                {"task": "sort", "scores": [0.5, 0.5]},
+            ]
+            progress = answer["progress"]
+            assert (progress["ended"], progress["scored"], progress["failed"]) == (4, 2, 2)
+            # Each rollout of "add" reports the template's error and ran no trial, so nothing built its template.
+            # Each trial of "sort" tells Reef's e2b class to build no template.
+            add_rollouts = [view for view in await rollouts(client, route) if view["task"] == "add"]
+            assert [(view["state"], view["attempt_count"], view["error"]) for view in add_rollouts] == [
+                ("failed", 1, unprepared)
+            ] * 2
+            assert [task for task, _ in lab.trials] == ["sort", "sort"]
+            assert all(environment["kwargs"]["builds_templates"] is False for _, environment in lab.trials)
+
+            # A retry builds the template of "add" again; its rollouts wait until that build ends.
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            assert queue.read(EVALUATIONS_QUEUE, add_template.id).state == "queued"
+            add_rollouts = [view for view in await rollouts(client, route) if view["task"] == "add"]
+            assert [view["state"] for view in add_rollouts] == ["waiting", "waiting"]
+            await asyncio.sleep(0.3)
+            assert len(lab.trials) == 2
+            assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == add_template.id
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "builder", {})
+
+            answer = await finished(client, evaluation_id)
+            assert answer["state"] == "finished", answer
+            assert answer["policy_evaluation"]["scores"] == [
+                {"task": "add", "scores": [1.0, 1.0]},
+                {"task": "sort", "scores": [0.5, 0.5]},
+            ]
+            assert sorted(task for task, _ in lab.trials) == ["add", "add", "sort", "sort"]
+            assert all(environment["kwargs"]["builds_templates"] is False for _, environment in lab.trials)
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_with_prepared_templates_required_a_retry_that_waits_for_its_template_holds_back_no_ready_task(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def rollout_of(task: str) -> WorkItem:
+        for _ in range(200):
+            found = [
+                item
+                for item in queue.items(EVALUATIONS_QUEUE, scenario="s", kind=EVALUATION_ROLLOUT_KIND)
+                if item.payload["task_name"] == task
+            ]
+            if found:
+                return found[0]
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the queue holds no rollout of {task!r}")
+
+    async def states(client: TestClient, route: str) -> list[tuple[str, str]]:
+        listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+        return [(row["task"], row["state"]) for row in listed]
+
+    async def run() -> None:
+        # No worker runs: the test takes and ends each item itself.
+        evaluations = ArtifactEvaluations(dispatcher, requires_prepared_templates=True)
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "environment": "e2b",
+                "max_concurrent_rollouts": 1,
+            }
+            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
+            assert response.status == 202, await response.text()
+            evaluation_id = (await response.json())["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
+            add_template = queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND])
+            sort_template = queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND])
+            assert [add_template.payload["task_name"], sort_template.payload["task_name"]] == ["add", "sort"]
+            error = "the registry holds no image of task add"
+            queue.fail(EVALUATIONS_QUEUE, add_template.id, "w", error, retryable=False)
+            # The worker fails the rollout of a task whose templates were not prepared, as ``score`` does.
+            add = await rollout_of("add")
+            assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == add.id
+            unprepared = f"the templates of task 'add' were not prepared: {error}"
+            queue.fail(EVALUATIONS_QUEUE, add.id, "w", unprepared, retryable=False)
+
+            # The retry builds the template of "add" again, and its rollout waits for that build.
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            assert queue.read(EVALUATIONS_QUEUE, add_template.id).state == "queued"
+            # The template of "sort" is ready meanwhile: its rollout takes the one place, which the waiting retry
+            # does not keep.
+            queue.finish(EVALUATIONS_QUEUE, sort_template.id, "w", {})
+            sort = await rollout_of("sort")
+            assert await states(client, route) == [("add", "waiting"), ("sort", "queued")]
+
+            # Once the template of "add" is ready, its retry waits for the place, and then runs.
+            assert queue.take(EVALUATIONS_QUEUE, "w", [TASK_TEMPLATE_KIND]).id == add_template.id
+            queue.finish(EVALUATIONS_QUEUE, add_template.id, "w", {})
+            await asyncio.sleep(0.3)
+            assert await states(client, route) == [("add", "waiting"), ("sort", "queued")]
+            assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == sort.id
+            queue.finish(EVALUATIONS_QUEUE, sort.id, "w", {"score": RolloutScore(0.5).to_json()})
+            for _ in range(200):
+                retried = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                if retried is not None:
+                    break
+                await asyncio.sleep(0.05)
+            assert retried is not None and retried.id == add.id
+            queue.finish(EVALUATIONS_QUEUE, add.id, "w", {"score": RolloutScore(1.0).to_json()})
+
+            answer = await finished(client, evaluation_id)
+            assert answer["state"] == "finished", answer
+            assert answer["policy_evaluation"]["scores"] == [
+                {"task": "add", "scores": [1.0]},
+                {"task": "sort", "scores": [0.5]},
             ]
 
     asyncio.run(run())
@@ -946,6 +1345,75 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("limit", [3, None])
+def test_a_resume_can_change_max_concurrent_rollouts(tmp_path: Path, limit: int | None) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    def not_final() -> list[WorkItem]:
+        return [item for item in queue.items(EVALUATIONS_QUEUE, scenario="s") if not item.final]
+
+    async def queued_rollouts(count: int) -> list[WorkItem]:
+        # A rollout enters the queue when the results thread settles the evaluation after a rollout ended.
+        for _ in range(200):
+            if len(not_final()) == count:
+                return not_final()
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"the queue did not hold {count} rollouts that are not final")
+
+    async def taken() -> WorkItem:
+        for _ in range(200):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            if item is not None:
+                return item
+            await asyncio.sleep(0.05)
+        raise AssertionError("no rollout entered the queue")
+
+    async def run() -> None:
+        # No worker runs: the test takes each rollout and ends it.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 2,
+                "max_concurrent_rollouts": 1,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            await queued_rollouts(1)
+            first = await taken()
+            queue.start(EVALUATIONS_QUEUE, first.id, "w")
+            assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
+
+            # A refused body changes nothing.
+            for refused in (
+                {"max_concurrent_rollouts": 0},
+                {"max_concurrent_rollouts": True},
+                {"rollouts_per_task": 1},
+            ):
+                assert (await client.post(f"{route}/resume", headers=AUTH, json=refused)).status == 400
+            answer = await (await client.get(route, headers=AUTH)).json()
+            assert (answer["state"], answer["request"]["max_concurrent_rollouts"]) == ("failed", 1)
+
+            # The cancelled rollout and the three that never started run at the new limit.
+            resumed = await client.post(f"{route}/resume", headers=AUTH, json={"max_concurrent_rollouts": limit})
+            assert resumed.status == 202, await resumed.text()
+            assert (await resumed.json())["request"]["max_concurrent_rollouts"] == limit
+            running = 4 if limit is None else limit
+            await queued_rollouts(running)
+            for value in (1.0, 0.0, 1.0, 1.0):
+                item = await taken()
+                assert len(not_final()) <= running
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
+            answer = await finished(client, accepted["evaluation_id"])
+            assert (answer["state"], answer["mean_score"]) == ("finished", 0.75)
+            assert answer["request"]["max_concurrent_rollouts"] == limit
+
+    asyncio.run(run())
+
+
 def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_path: Path, monkeypatch) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
@@ -965,13 +1433,15 @@ def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_pat
             body = {
                 "artifact_id": artifact_id,
                 "harness": {"name": "terminus-2"},
-                "rollouts_per_task": 6,
+                # Exactly ``FAILURE_CHECK_ROLLOUTS`` rollouts: the stop comes after the last one ends, so it cancels none
+                # that the loop below has not failed yet.
+                "rollouts_per_task": FAILURE_CHECK_ROLLOUTS // 2,
                 "max_failed_fraction": 0.5,
             }
             accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
-            for item in queue.items(EVALUATIONS_QUEUE, scenario="s"):
-                queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            for _ in range(FAILURE_CHECK_ROLLOUTS):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
                 queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox refused the task", retryable=False)
             assert (await finished(client, accepted["evaluation_id"]))["state"] == "failed"
 
@@ -1094,7 +1564,9 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
     )
     records = scored["extra"]["reef"]["records"]
     assert [record["agent_record_id"] for record in records] == ["e1:2:0:3:0", "e1:2:0:3:2"]
-    assert records[0]["created_at"] == 30.0 and records[0]["payload"]["response"]["choices"][0]["message"]["content"]
+    # Each record is the call's summary: its time and its settings, without the conversation that the steps hold.
+    assert records[0]["created_at"] == 30.0
+    assert not CONVERSATION_FIELDS & set(records[0]["payload"])
     # The second call repeats the first exchange, so the stitched steps hold each message once.
     assert [step["message"] for step in scored["steps"]] == ["solve add", "ls", "a.txt", "cat a.txt"]
     running = replace(item, state="running", ended_at=None, result=None, worker_id="w", lease_expires_at=9.0)
@@ -1261,7 +1733,8 @@ class TreeCallingLab(TaskLab):
         assert import_path == "reef.harness.harbor.agent:TreeAgent"
         kwargs = cast(dict[str, Any], agent["kwargs"])
         self.overrides = overrides
-        self.agent = TreeAgent(self.logs, **kwargs)
+        # Harbor gives the agent the config's env as extra_env.
+        self.agent = TreeAgent(self.logs, extra_env=cast(dict[str, str], agent.get("env") or {}), **kwargs)
         files = Path(kwargs["files_dir"])
         self.rendered = {str(path.relative_to(files)): path.read_text() for path in files.rglob("*") if path.is_file()}
         body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "solve"}]}).encode()
@@ -1327,14 +1800,22 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             activated: list[str] = []
             evaluations.results.activate = lambda scenario, request: activated.append(request.artifact_id)
             item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
-            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            harness = {
+                "item": item_id,
+                "env": {"REEF_MAX_OUTPUT_TOKENS": "8192", "TASK_MODE": "fast"},
+                "config": {"primary": {"defaultTools": []}},
+            }
+            body = {"artifact_id": artifact_id, "harness": harness}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
             assert activated == [], "a score with a harness from an item activates nothing"
 
         assert answer["state"] == "finished", answer
-        assert answer["request"]["harness"] == {"item": item_id}
+        assert answer["request"]["harness"] == harness
+        assert lab.agent is not None and lab.agent.extra_env["TASK_MODE"] == "fast", "the agent's commands get the env"
+        assert '"maxTokens": 8192' in lab.rendered["pi-agent/models.json"], "the env sets the binding's reply budget"
+        assert json.loads(lab.rendered["plugin/settings.json"]) == {"defaultTools": []}, "the config merges in"
         evaluation = answer["policy_evaluation"]
         assert evaluation["harness"]["base"] == "pi"
         assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
@@ -1380,6 +1861,13 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
         ({"adapter": "missing"}, "unknown harness adapter"),
         ({"adapter": "native"}, "cannot run in a task's container"),
         ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
+        ({"env": {"REEF_CONTEXT_WINDOW": "big"}}, "REEF_CONTEXT_WINDOW must be a positive number of tokens"),
+        ({"env": {"TOKEN": "${REEF_TOKEN}"}}, "text values without ${"),
+        ({"env": {"1BAD": "x"}}, "maps variable names"),
+        ({"config": {"primary": "x"}}, "maps config target names to JSON objects"),
+        ({"config": {"missing": {}}}, "declares no config target 'missing'"),
+        ({"config": {"models": {"providers": {"evil": {}}}}}, "the harness config fails validation"),
+        ({"config": {"primary": {"defaultTools": ["bash"]}}}, "the harness config fails validation"),
     ],
 )
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
@@ -1394,9 +1882,10 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
             await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
             uri = options.pop("uri", harness_tree(tmp_path / "tree"))
             environment = options.pop("environment", "docker")
+            extra = {key: options.pop(key) for key in ("env", "config") if key in options}
             body = {
                 "artifact_id": artifact_id,
-                "harness": {"item": tree_item(dispatcher, uri, **options)},
+                "harness": {"item": tree_item(dispatcher, uri, **options), **extra},
                 "environment": environment,
             }
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
@@ -1406,9 +1895,7 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
 
 
 @pytest.mark.integration
-def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_refused(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_an_item_of_another_owner_and_automatic_settings_are_refused(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
 
     async def run() -> None:
@@ -1425,13 +1912,6 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
             settings = {"artifact_evaluation": {"harness": {"item": item_id}}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=settings)
             assert response.status == 400 and "not an artifact item" in await response.text()
-
-            monkeypatch.setattr(
-                "reef.service.artifact_evaluations.task_agent_tools", lambda descriptor, task: ("mcp_servers",)
-            )
-            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
-            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
-            assert response.status == 400 and "mcp_servers" in await response.text()
 
     asyncio.run(run())
 
@@ -1509,6 +1989,67 @@ def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_report
             stopped = [row for row in rows if row["error"] == FAILURES_ERROR]
             assert answer["progress"]["cancelled"] == len(stopped)
             assert len(stopped) + [row["state"] for row in rows].count("waiting") == 2
+
+    asyncio.run(run())
+
+
+def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+    read_rollouts = evaluations.results.rollouts
+    reads: list[str] = []
+
+    def counted_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+        reads.append(evaluation_id)
+        return read_rollouts(evaluation_id, scenario)
+
+    monkeypatch.setattr(evaluations.results, "rollouts", counted_rollouts)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, accepted["evaluation_id"])
+            assert ended["progress"]["scored"] == 2
+
+            reads.clear()
+            for _ in range(2):
+                listed = (await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json())[
+                    "evaluations"
+                ]
+                assert listed[0]["progress"] == ended["progress"]
+            assert reads == []
+
+    asyncio.run(run())
+
+
+def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Path) -> None:
+    # A cancel stores the failed evaluation before it ends the rollouts; a reader in between sees a running rollout.
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            running = evaluations.results.rollouts(accepted["evaluation_id"], "s")
+            stored = replace(
+                evaluations.get("s", accepted["evaluation_id"]), state="failed", error="x", finished_at=1e10
+            )
+            evaluations.ended_progress.add("s", stored, running, {"ended": 0})
+            assert evaluations.ended_progress.read("s", stored) is None
 
     asyncio.run(run())
 

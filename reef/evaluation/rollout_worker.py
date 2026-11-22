@@ -5,6 +5,12 @@ item for each rollout (``reef.service.artifact_evaluations``). An ``EvaluationRo
 runs the task once with a Harbor agent against the candidate's model, and finishes the item with the rollout's
 ``RolloutScore``. Control reads the scores back when every rollout of the evaluation is final.
 
+On ``e2b``, control first adds one ``evaluation_task_template`` item for each task, and adds the task's rollouts once
+that item is final. A ``TaskTemplateWorker`` takes a template item and builds the task's sandbox templates for the
+owner of the scenario's items. So a rollout that waits for a template builder holds no rollout slot of its evaluation
+and no sandbox slot of a worker. A rollout of an evaluation that requires prepared templates runs no trial when its
+task's template item failed, and its trial builds no template.
+
 A worker asks inference to serve the candidate before each trial (a ``serve_artifact`` item of the ``serving`` queue),
 and waits until the engine is ready. It answers the agent's model calls from that engine on a loopback endpoint
 (``CandidateEndpoints``). The item writes no route, so no client reaches the candidate through ``served_models``, and
@@ -27,12 +33,12 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from reef_client.serve import CapturedTurn
 
@@ -49,12 +55,14 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import QueueWorker, WorkerStoppedError
+from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
-from reef.harness.harbor.agent import tree_agent, trial_directory
-from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
+from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
@@ -65,14 +73,23 @@ logger = logging.getLogger(__name__)
 EVALUATIONS_QUEUE = "evaluations"
 #: The kind of the item of one rollout.
 EVALUATION_ROLLOUT_KIND = "evaluation_rollout"
+#: The kind of the item that builds the sandbox templates of one task of an evaluation on e2b.
+TASK_TEMPLATE_KIND = "evaluation_task_template"
 #: The address at which a task's container reaches this host, by default.
 DEFAULT_AGENT_HOST = "host.docker.internal"
 #: The longest wait for inference to serve a candidate, in seconds: a first start can quantize its weights.
 SERVE_WAIT_S = 12 * 3600.0
 #: The wait between two reads of a serve item, in seconds.
 SERVE_POLL_S = 1.0
+#: The longest time that one attempt of a template item waits for its task's templates. An AgentENV worker builds a
+#: few templates at a time, so a template can wait hours for a free builder when many tasks are new.
+TEMPLATE_WAIT_S = 6 * 3600.0
 #: The seconds between two checks of a running trial's lease.
 LEASE_CHECK_S = 1.0
+#: What a stopping evaluation worker does with the rollouts that it runs: ``requeue`` cancels each one and gives it
+#: back to the queue, where another worker starts it again; ``finish`` takes no new rollout and finishes each one,
+#: and requeues those that still run at the end of the worker's ``finish_timeout_s``.
+ON_STOP_CHOICES = ("requeue", "finish")
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
 #: The directory of a trial's verifier directory where the verifier writes its own model calls and trajectories: the
@@ -119,19 +136,26 @@ class TreeHarness:
     """A harness tree that a rollout runs, read from an artifact item.
 
     Values: ``adapter`` is the name of an adapter, ``api`` the API dialect of the model calls, and ``files`` maps
-    each path of the tree to its text. Purpose: control reads it once when it accepts an evaluation, so that each
-    rollout runs the same tree; a worker runs it.
+    each path of the tree to its text. ``env`` maps the name of each variable that the agent's commands get to its
+    value; its token limits, when it sets them, are positive integers (``token_limits``). Purpose: control reads it
+    once when it accepts an evaluation, so that each rollout runs the same tree; a worker runs it.
     """
 
     adapter: str
     api: str
     files: Mapping[str, str]
+    env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_text(self.adapter, "adapter")
         require_text(self.api, "api")
         if not isinstance(self.files, Mapping):
             raise TypeError("files is a mapping of paths to text")
+        if not isinstance(self.env, Mapping) or not all(
+            isinstance(name, str) and name and isinstance(value, str) for name, value in self.env.items()
+        ):
+            raise TypeError("env maps non-empty variable names to text")
+        token_limits(self.env)
 
     def policy_harness(self) -> PolicyHarness:
         """The harness side of the policy: the adapter, with the tree rendered with no model binding."""
@@ -149,14 +173,19 @@ class TreeHarness:
             files_dir=directory / "rendered",
             timeout=TREE_AGENT_TIMEOUT_S,
             bridge=bridge,
+            env=self.env,
         )
 
     def to_json(self) -> dict[str, JsonValue]:
-        return {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
+        value: dict[str, JsonValue] = {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
+        if self.env:
+            value["env"] = dict(self.env)
+        return value
 
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> TreeHarness:
-        return cls(value["adapter"], value["api"], value["files"])
+        # A rollout stored before a tree harness had an env has none.
+        return cls(value["adapter"], value["api"], value["files"], value.get("env", {}))
 
 
 @dataclass(frozen=True)
@@ -169,8 +198,12 @@ class EvaluationRollout:
     service serves for the candidate; ``agent`` is the Harbor agent configuration, or None when ``tree`` is the
     harness; ``environment`` is the Harbor environment type; ``selection`` is the artifact selection that serves the
     candidate, as ``ArtifactSelection.to_dict`` gives it; ``tree`` is the harness tree, or None when ``agent``
-    is the harness; ``log_probs`` is the evaluation's ``log_probs``. The names are non-empty strings and the two
-    numbers are non-negative integers.
+    is the harness; ``log_probs`` is the evaluation's ``log_probs``. ``owner`` is, on ``e2b``, the owner that the
+    scenario's record stored when control accepted the evaluation, a non-empty string; it is None when the record
+    stored none, and on any other environment. With
+    ``requires_prepared_templates``, the rollout runs a trial only from its task's prepared templates; only a rollout
+    on ``e2b`` has it. The names are non-empty strings and the two numbers are non-negative integers. An item that an
+    older Reef queued has neither field: its owner is None, and it does not require prepared templates.
 
     Purpose: control makes it when it adds an evaluation (``to_payload``); a worker reads it (``from_item``).
     """
@@ -188,6 +221,8 @@ class EvaluationRollout:
     selection: Mapping[str, JsonValue]
     tree: TreeHarness | None = None
     log_probs: bool = False
+    owner: str | None = None
+    requires_prepared_templates: bool = False
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -210,6 +245,12 @@ class EvaluationRollout:
             raise TypeError("agent is a JSON object")
         if not isinstance(self.log_probs, bool):
             raise TypeError("log_probs is a bool")
+        if self.owner is not None and (not isinstance(self.owner, str) or not self.owner):
+            raise ValueError("owner is a non-empty string or None")
+        if not isinstance(self.requires_prepared_templates, bool):
+            raise TypeError("requires_prepared_templates is a bool")
+        if self.requires_prepared_templates and self.environment != "e2b":
+            raise ValueError("only a rollout on e2b requires prepared templates")
 
     def item_id(self) -> str:
         return rollout_item_id(self.evaluation_id, self.task_index, self.repeat)
@@ -235,6 +276,8 @@ class EvaluationRollout:
                 "selection": dict(self.selection),
                 "tree": None if self.tree is None else self.tree.to_json(),
                 "log_probs": self.log_probs,
+                "owner": self.owner,
+                "requires_prepared_templates": self.requires_prepared_templates,
             },
         )
 
@@ -254,14 +297,22 @@ class EvaluationRollout:
             payload["environment"],
             payload["selection"],
             None if payload["tree"] is None else TreeHarness.from_json(payload["tree"]),
-            # A rollout that an older Reef queued asks for no log probabilities.
+            # A rollout that an older Reef queued asks for no log probabilities, names no owner, and does not require
+            # prepared templates.
             payload.get("log_probs", False),
+            payload.get("owner"),
+            payload.get("requires_prepared_templates", False),
         )
 
 
 def rollout_item_id(evaluation_id: str, task_index: int, repeat: int) -> str:
     """The ID of the item of rollout ``repeat`` of task ``task_index`` of an evaluation."""
     return f"{EVALUATION_ROLLOUT_KIND}:{evaluation_id}:{task_index:05d}:{repeat:05d}"
+
+
+def template_item_id(evaluation_id: str, task_index: int) -> str:
+    """The ID of the template item of task ``task_index`` of an evaluation."""
+    return f"{TASK_TEMPLATE_KIND}:{evaluation_id}:{task_index:05d}"
 
 
 @dataclass(frozen=True)
@@ -282,12 +333,18 @@ class CandidateEndpoints(ABC):
 
     Purpose: an ``EvaluationRolloutWorker`` opens one around each rollout, with the value that reaches the engine
     that inference started for the candidate (``LocalCandidateEndpoints``). It keeps each call of the rollout as the
-    call ends (``add_call``).
+    call ends (``add_call``). A ``TaskTemplateWorker`` reads each task's directory and owner from it.
     """
 
     @abstractmethod
     def task_directory(self, rollout: EvaluationRollout) -> Path:
         """The Harbor task directory of ``rollout``'s task, on this process's file system."""
+
+    def task_owner(self, rollout: EvaluationRollout) -> str | None:
+        """The owner that the record of ``rollout``'s scenario stores now, whose data holds the task's item; None when
+        the record stores none. These endpoints read no scenario record, so the owner is None; endpoints that read
+        one return its owner."""
+        return None
 
     @abstractmethod
     @contextmanager
@@ -318,6 +375,9 @@ class LocalCandidateEndpoints(CandidateEndpoints):
 
     def task_directory(self, rollout: EvaluationRollout) -> Path:
         return self.artifacts.candidate_task(rollout.scenario, rollout.task_name)
+
+    def task_owner(self, rollout: EvaluationRollout) -> str | None:
+        return self.artifacts.task_owner(rollout.scenario)
 
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
@@ -555,20 +615,43 @@ class RolloutCalls(CaptureObserver):
         self.writer.shutdown(wait=True)
 
 
-async def run_while_held(
-    runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event, stopped: threading.Event
-) -> TaskRollout:
-    """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` or ``stopped`` is set first,
-    cancel the run, so that Harbor stops the trial and its sandbox. Then raise ``WorkLeaseLostError`` for
-    ``lease_lost``: a client cancelled the rollout, or another worker took it. Raise ``WorkerStoppedError`` for
-    ``stopped`` alone: the worker stops, and the rollout goes back to the queue. A process that ends with a trial
-    still running leaves the trial's sandbox running, so a stopping worker does not wait for the trial."""
-    run = asyncio.ensure_future(runner.run_rollouts_async([request], asyncio.Semaphore(1)))
+def check_finish_timeout(on_stop: str, finish_timeout_s: object, *, prefix: str = "") -> None:
+    """Raise ``ValueError`` unless ``finish_timeout_s`` is None, or ``on_stop`` is ``finish`` and ``finish_timeout_s``
+    is an int or float, not a bool, above 0 and at most ``threading.TIMEOUT_MAX``: the longest wait of the timer that
+    ends it. ``prefix`` starts the name of each setting in the message, such as ``evaluation.``."""
+    if finish_timeout_s is None:
+        return
+    if on_stop != "finish":
+        raise ValueError(f"{prefix}finish_timeout_s needs {prefix}on_stop: finish")
+    if (
+        isinstance(finish_timeout_s, bool)
+        or not isinstance(finish_timeout_s, (int, float))
+        # A comparison, not math.isfinite: it refuses NaN and infinity, and does not overflow on a large int.
+        or not 0 < finish_timeout_s <= threading.TIMEOUT_MAX
+    ):
+        raise ValueError(
+            f"{prefix}finish_timeout_s is a number of seconds above 0 and at most {threading.TIMEOUT_MAX:.0f}"
+        )
+
+
+Result = TypeVar("Result")
+
+
+async def run_while_held(work: Awaitable[Result], lease_lost: threading.Event, stopped: threading.Event) -> Result:
+    """Run ``work`` of a rollout and return its result. When ``lease_lost`` or ``stopped`` is set first, cancel
+    ``work``, so that Harbor stops a trial and its sandbox, or a template build stops. Then raise
+    ``WorkLeaseLostError`` for ``lease_lost``: a client cancelled the rollout, or another worker took it. Raise
+    ``WorkerStoppedError`` for ``stopped`` alone: the worker stops, and the rollout goes back to the queue. Work that
+    had already ended when ``stopped`` alone is seen keeps its result. A process that ends with a trial still running
+    leaves the trial's sandbox running, so a stopping worker does not wait for the trial."""
+    run = asyncio.ensure_future(work)
     while not lease_lost.is_set() and not stopped.is_set():
         done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
         if done:
-            [result] = run.result()
-            return result
+            return run.result()
+    if run.done() and not run.cancelled() and not lease_lost.is_set():
+        # The work ended before the stop could cancel it; the queue still fences the result to the lease holder.
+        return run.result()
     run.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await run
@@ -583,10 +666,19 @@ class EvaluationRolloutWorker(QueueWorker):
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
-    address at which a task's container reaches this host. Every failed rollout is retried: a trial fails for reasons
-    outside its input, such as a sandbox that did not start.
+    address at which a task's container reaches this host. ``on_stop`` is one of ``ON_STOP_CHOICES``: what the worker
+    does with the rollouts that run when it begins to stop (``begin_stop``). With ``requeue``, it cancels each one and
+    gives it back to the queue. With ``finish``, it takes no new rollout, and ``stop`` returns when each running one
+    has finished, so a process that a scale-down or a deploy stops loses no work in its grace period.
+    ``finish_timeout_s`` is None, or, with ``finish`` only, a positive number of seconds: the time from the first
+    ``begin_stop`` to the cancellation of the rollouts that still run (``cancel_rollouts``). Each of those goes back
+    to the queue, as with ``requeue``; a rollout whose trial has ended keeps its result. A failed rollout is retried: a
+    trial fails for reasons outside its input, such as a sandbox that did not start. A rollout of a harness tree whose
+    task needs what the tree's agent does not give it (``task_agent_tools``) fails for good, and so does a rollout
+    that requires prepared templates when its task's template item did not finish.
 
-    Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
+    Purpose: the evaluation service starts one (``start``), lets it begin to stop as soon as the process begins to
+    stop (``begin_stop``), and stops it (``stop``).
     """
 
     permanent_errors = ()
@@ -602,7 +694,12 @@ class EvaluationRolloutWorker(QueueWorker):
         agent_host: str = DEFAULT_AGENT_HOST,
         poll_seconds: float = 0.5,
         slots: int = 1,
+        on_stop: str = "requeue",
+        finish_timeout_s: float | None = None,
     ) -> None:
+        if on_stop not in ON_STOP_CHOICES:
+            raise ValueError(f"on_stop must be one of {', '.join(ON_STOP_CHOICES)}, not {on_stop!r}")
+        check_finish_timeout(on_stop, finish_timeout_s)
         super().__init__(
             queue,
             EVALUATIONS_QUEUE,
@@ -615,6 +712,63 @@ class EvaluationRolloutWorker(QueueWorker):
         self.lab = lab
         self.trial_observer = trial_observer
         self.agent_host = agent_host
+        self.on_stop = on_stop
+        self.finish_timeout_s = finish_timeout_s
+        #: The event that cancels the running rollouts: the worker's stop with ``requeue``; with ``finish``, the end of
+        #: ``finish_timeout_s``, and never without it.
+        self.rollouts_cancelled = self.stopped if on_stop == "requeue" else threading.Event()
+        #: The timer that ends ``finish_timeout_s``, from the first ``begin_stop`` until ``stop`` returns; else None.
+        self.cancel_timer: threading.Timer | None = None
+        #: Makes ``begin_stop`` one step, so that two calls start one timer.
+        self.stop_lock = threading.Lock()
+
+    def start(self) -> None:
+        if self.thread is None:
+            # A worker that starts again after a stop runs its rollouts to the end again.
+            self.rollouts_cancelled.clear()
+        super().start()
+
+    def begin_stop(self) -> None:
+        """Take no new rollout. With ``requeue``, cancel the running rollouts now. With ``finish_timeout_s``, start a
+        timer that cancels the rollouts that still run that many seconds after the first call (``cancel_rollouts``).
+        A later call does not move that time."""
+        with self.stop_lock:
+            if self.stopped.is_set():
+                return
+            self.stopped.set()
+            if self.finish_timeout_s is None:
+                return
+            timer = threading.Timer(self.finish_timeout_s, self.cancel_rollouts)
+            timer.daemon = True
+            timer.start()
+            # Only a started timer is kept, so that ``stop`` joins a thread that runs.
+            self.cancel_timer = timer
+        logger.info(
+            "evaluation worker %s takes no new rollout; it cancels the rollouts that still run in %.0f s",
+            self.worker_id,
+            self.finish_timeout_s,
+        )
+
+    def cancel_rollouts(self) -> None:
+        """Cancel the rollouts that still run at the end of ``finish_timeout_s``. Each one stops its trial and goes
+        back to the queue (``run_while_held``), and another worker starts it again."""
+        logger.warning(
+            "evaluation worker %s cancels the rollouts that still run %.0f s after its stop began",
+            self.worker_id,
+            self.finish_timeout_s,
+        )
+        self.rollouts_cancelled.set()
+
+    def stop(self) -> None:
+        """Begin to stop (``begin_stop``), wait until each running rollout has finished or gone back to the queue, and
+        end the timer of ``finish_timeout_s``."""
+        self.begin_stop()
+        super().stop()
+        with self.stop_lock:
+            timer, self.cancel_timer = self.cancel_timer, None
+        if timer is not None:
+            timer.cancel()
+            timer.join()
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         score, rewards, error = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
@@ -629,7 +783,7 @@ class EvaluationRolloutWorker(QueueWorker):
         self.queue.append(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
         deadline = time.monotonic() + SERVE_WAIT_S
         while time.monotonic() < deadline:
-            if self.stopped.is_set():
+            if self.rollouts_cancelled.is_set():
                 raise WorkerStoppedError
             if lease_lost.is_set():
                 raise WorkLeaseLostError("the evaluation worker lost its lease")
@@ -647,8 +801,27 @@ class EvaluationRolloutWorker(QueueWorker):
     ) -> tuple[RolloutScore, dict[str, JsonValue] | None, str | None]:
         """Run ``rollout`` once, when its candidate is ready, and return its score, the rewards of its verifier
         (``verifier_rewards``), and the reason of a failed score (None for a scored rollout). ``attempt`` is the
-        1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
+        1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``).
+
+        A rollout that requires prepared templates runs only when its task's template item finished, and its trial
+        builds no template. Else it fails for good with the template item's error, before its candidate is served."""
+        if rollout.requires_prepared_templates:
+            template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
+            unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
+            if template is None:
+                raise ItemFailedError(f"{unprepared}: the queue no longer holds its template item")
+            if template.state != "finished":
+                raise ItemFailedError(f"{unprepared}: {template.error or f'its template item is {template.state}'}")
         task_directory = self.endpoints.task_directory(rollout)
+        if rollout.tree is not None:
+            # A retry runs the same task with the same tree, so a task that asks for what the tree's agent cannot
+            # give fails for good, before its candidate is served.
+            tools = task_agent_tools(get_adapter(rollout.tree.adapter), task_directory)
+            if tools:
+                raise ItemFailedError(
+                    f"task {rollout.task_name!r} needs {', '.join(tools)}, which adapter {rollout.tree.adapter!r} "
+                    "does not give its agent"
+                )
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
         bridged = rollout.tree is not None and rollout.environment != "docker"
@@ -676,10 +849,18 @@ class EvaluationRolloutWorker(QueueWorker):
                 # ``calls`` keeps each call as it lands, so the runner keeps no call body: an agent's request holds
                 # the whole conversation so far, and a long rollout's bodies reached hundreds of MiB.
                 keeps_turns=False,
+                # A template that was removed after its preparation fails the trial; the trial does not build it.
+                builds_templates=not rollout.requires_prepared_templates,
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                result = asyncio.run(run_while_held(runner, request, lease_lost, self.stopped))
+                [result] = asyncio.run(
+                    run_while_held(
+                        runner.run_rollouts_async([request], asyncio.Semaphore(1)),
+                        lease_lost,
+                        self.rollouts_cancelled,
+                    )
+                )
             finally:
                 calls.close()
             # The trial directory is under ``work``, so read it before the block removes it.
@@ -746,11 +927,95 @@ class EvaluationRolloutWorker(QueueWorker):
                 )
 
 
+class TaskTemplateWorker(QueueWorker):
+    """The worker that builds the sandbox templates of the tasks of evaluations on e2b.
+
+    Values: as ``QueueWorker``, on the template items of the evaluations queue (``TASK_TEMPLATE_KIND``), with one
+    item in each slot. An item's payload is the payload of the task's first rollout (``EvaluationRollout``).
+    ``endpoints`` gives each task's directory and the owner that the scenario's record stores now, and ``builder``
+    makes the task's templates ready for that owner (``TaskTemplateBuilder.build_for_owner``). An item whose payload
+    names an owner fails for good, with no build, when the record stores another owner or none. An item that an older
+    Reef queued names no owner, so the record's owner alone counts. Every failure of a build is retryable, until the
+    item uses up its attempts. Control adds a task's rollouts once its item is final, also when the build failed. The
+    trial then builds the template itself, and its failure is the rollout's failure; but a rollout that requires
+    prepared templates fails with the item's error, and runs no trial.
+
+    Purpose: the evaluation service starts one beside its ``EvaluationRolloutWorker``. A wait for a template builder
+    then holds a slot of this worker, not a rollout slot of the evaluation or a sandbox slot.
+    """
+
+    permanent_errors = ()
+
+    def __init__(
+        self,
+        queue: WorkQueue,
+        endpoints: CandidateEndpoints,
+        builder: TaskTemplateBuilder,
+        *,
+        worker_id: str,
+        poll_seconds: float = 0.5,
+        slots: int = 1,
+    ) -> None:
+        super().__init__(
+            queue,
+            EVALUATIONS_QUEUE,
+            [TASK_TEMPLATE_KIND],
+            worker_id=worker_id,
+            poll_seconds=poll_seconds,
+            slots=slots,
+        )
+        self.endpoints = endpoints
+        self.builder = builder
+
+    def begin_stop(self) -> None:
+        """Take no new template item, and cancel the running builds now: each one goes back to the queue."""
+        self.stopped.set()
+
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        rollout = EvaluationRollout.from_item(item)
+        owner = self.endpoints.task_owner(rollout)
+        if rollout.owner is not None and owner != rollout.owner:
+            # The scenario was replaced by one of another owner, or removed: its templates are not this item's.
+            found = "no owner" if owner is None else f"the owner {owner!r}"
+            raise ItemFailedError(
+                f"scenario {rollout.scenario!r} has {found} now, not {rollout.owner!r}, the owner of the evaluation's "
+                f"tasks: the templates of task {rollout.task_name!r} are not built for another owner"
+            )
+        asyncio.run(
+            run_while_held(
+                self.build_task_template(owner, rollout, self.endpoints.task_directory(rollout)),
+                lease_lost,
+                self.stopped,
+            )
+        )
+        return {}
+
+    async def build_task_template(self, owner: str | None, rollout: EvaluationRollout, task_directory: Path) -> None:
+        """Make the e2b templates of the task of ``rollout``, at ``task_directory``, ready for ``owner`` with
+        ``builder``. A build that found no free builder in the task's build time limit (``TimeoutError``) waits again,
+        at most ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the item is retried.
+        Any other failure of the build fails the attempt in the same way."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TEMPLATE_WAIT_S
+        while True:
+            try:
+                await self.builder.build_for_owner(owner, rollout.scenario, rollout.task_name, task_directory)
+                return
+            except TimeoutError as error:
+                if loop.time() >= deadline:
+                    raise ReefError(
+                        f"the template of task {rollout.task_name!r} was not ready after {TEMPLATE_WAIT_S:.0f} s: "
+                        f"{error}"
+                    ) from error
+                logger.info("the template of task %r is not ready; waiting again: %s", rollout.task_name, error)
+
+
 __all__ = [
     "EVALUATIONS_QUEUE",
     "EVALUATION_ROLLOUT_KIND",
     "MAX_VERIFIER_BYTES",
     "MAX_VERIFIER_CALLS",
+    "TASK_TEMPLATE_KIND",
     "VERIFIER_CALLS_FILE",
     "VERIFIER_JUDGE_DIR",
     "VERIFIER_TRAJECTORY_FILES",
@@ -760,12 +1025,15 @@ __all__ = [
     "EvaluationRolloutWorker",
     "LocalCandidateEndpoints",
     "RolloutCalls",
+    "TaskTemplateWorker",
     "TreeHarness",
     "agent_harness",
+    "check_finish_timeout",
     "evaluation_call",
     "harbor_agent",
     "reply_summary",
     "rollout_item_id",
+    "template_item_id",
     "verifier_call",
     "verifier_output",
 ]

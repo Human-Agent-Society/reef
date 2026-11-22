@@ -13,6 +13,7 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.deployment import harness_adapter
@@ -20,7 +21,6 @@ from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import normalize_tokens
 from reef.service.cors import configure_browser_access
-from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.harness_imports import QueuedImports
 from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.lifecycle import (
@@ -40,6 +40,7 @@ from reef.service.routes.records import register_record_routes
 from reef.service.routes.routed_chat import register_routed_chat
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
+from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.service.web import service_application
 from reef.storage.records import RecordRetention
 
@@ -171,11 +172,13 @@ def create_data_app(
     *,
     tokens: str | Iterable[str] | None = None,
     console_origins: Iterable[str] = (),
+    max_task_archive_bytes: int = DEFAULT_MAX_TASK_ARCHIVE_BYTES,
 ) -> web.Application:
     """The HTTP app of the data service: the data routes and the reads of what each scenario stores.
 
     ``dispatcher`` runs the data service and no control (``reef serve --component data``): it loads each scenario
     on demand, for the checks of a data write and for the reads. The app closes it on cleanup.
+    ``max_task_archive_bytes`` is ``data.max_task_archive_bytes``: the most bytes of the body of a task archive.
     """
     if not dispatcher.services.runs_data:
         raise ValueError("the data app runs the data service: build its dispatcher with the data service")
@@ -183,7 +186,12 @@ def create_data_app(
     app = service_application(tokens)
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
-    register_data_service_routes(app, request_service=request_service, evaluations=ArtifactEvaluations(dispatcher))
+    register_data_service_routes(
+        app,
+        request_service=request_service,
+        evaluations=ArtifactEvaluations(dispatcher),
+        max_task_archive_bytes=max_task_archive_bytes,
+    )
     maintain_data_store(app, dispatcher)
 
     async def cleanup(app: web.Application) -> None:
@@ -239,6 +247,7 @@ def create_app(
     evaluations: ArtifactEvaluations | None = None,
     artifact_imports: ArtifactImports | None = None,
     harness_inference_url: str | None = None,
+    max_task_archive_bytes: int = DEFAULT_MAX_TASK_ARCHIVE_BYTES,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -262,6 +271,8 @@ def create_app(
     ``artifact_imports`` reads and holds artifact imports; None reads the
     built-in sources into the system's temporary directory.
     ``harness_inference_url`` is ``harness.inference_url``: where a client's harness layer sends its model calls.
+    ``max_task_archive_bytes`` is ``data.max_task_archive_bytes``: the most bytes of the body of a task archive, when
+    the app serves the data routes.
 
     Without routing, the app runs the inference routes in the same process (``reef.service.inference_service``): they read
     ``served_models`` and reach each row's engine through the runtime that inference serves it with, or through
@@ -301,6 +312,14 @@ def create_app(
     )
     app = service_application(accepted_tokens, evaluation_tokens=evaluation_tokens)
     app[REQUEST_SERVICE_KEY] = request_service
+    if close_dispatcher:
+
+        async def stop_taking_work(app: web.Application) -> None:
+            # The first shutdown hook, before any later hook waits, such as the finalization of managed requests:
+            # the workers take no new work from now on, and a stop deadline starts here.
+            app[REQUEST_SERVICE_KEY].dispatcher.workers.begin_stop()
+
+        app.on_shutdown.append(stop_taking_work)
     if routing is not None:
         app.middlewares.insert(1, routed_routes_only)
     if lifecycle is not None and writes is not None:
@@ -353,6 +372,7 @@ def create_app(
                 if artifact_imports is None
                 else artifact_imports
             ),
+            max_task_archive_bytes=max_task_archive_bytes,
         )
     else:
         register_routed_chat(app, request_service=request_service)

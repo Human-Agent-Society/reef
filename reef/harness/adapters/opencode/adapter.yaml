@@ -16,7 +16,10 @@
 # pin the benchmarking traps: autoupdate off, sharing off, permissions
 # allowed (runs are isolated roots), and only provider reef, the model
 # binding's, so a model choice the render check misses cannot reach
-# opencode's own zen provider.
+# opencode's own zen provider. The binding gives the model its limits:
+# without a context limit, opencode never compacts a session and fails at
+# the endpoint's limit. A run's REEF_CONTEXT_WINDOW and
+# REEF_MAX_OUTPUT_TOKENS set them.
 name: opencode
 binary: opencode
 # The vendor's install channel at the pinned version. Harness evolution startup
@@ -62,7 +65,10 @@ model:
               baseURL: "{base_url}/v1"
               apiKey: "{api_key}"
             models:
-              "{model}": {}
+              "{model}":
+                limit:
+                  context: "{context_window}"
+                  output: "{max_output_tokens}"
         model: "reef/{model}"
   anthropic:
     - target: agent
@@ -74,7 +80,10 @@ model:
               baseURL: "{base_url}/v1"
               apiKey: "{api_key}"
             models:
-              "{model}": {}
+              "{model}":
+                limit:
+                  context: "{context_window}"
+                  output: "{max_output_tokens}"
         model: "reef/{model}"
 # How the agent runs: one evaluation run in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.

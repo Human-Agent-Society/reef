@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Literal
 
 from sqlalchemy import (
@@ -139,6 +140,27 @@ class SQLEvaluationStore(EvaluationStore):
         return self.move(
             evaluation_id, ("finished", "failed"), state="running", finished_at=None, result_json=None, error=None
         )
+
+    def limit_rollouts(self, evaluation_id: str, max_concurrent_rollouts: int | None) -> StoredEvaluation:
+        table = self.table.table
+        with self.database._transaction(write=True) as connection:
+            row = (
+                connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise EvaluationStateConflictError(f"no evaluation {evaluation_id!r}")
+            stored = stored_evaluation(row)
+            # ``replace`` checks the new limit as a request checks it.
+            request = replace(stored.request, max_concurrent_rollouts=max_concurrent_rollouts)
+            request_json = json.dumps(request.to_json(), ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                table.update()
+                .where(self.table.condition(), table.c.evaluation_id == evaluation_id)
+                .values(request_json=request_json)
+            )
+        return replace(stored, request=request)
 
     def move(
         self,

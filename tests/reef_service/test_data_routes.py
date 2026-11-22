@@ -103,6 +103,51 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
     served(dispatcher, check)
 
 
+def test_a_deleted_item_is_listed_restored_to_its_scenario_and_purged(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    async def samples(client: TestClient) -> list[str]:
+        page = await (await client.get("/reef/scenarios/math/samples", headers=AUTH)).json()
+        return [sample["sample_id"] for sample in page["samples"]]
+
+    async def check(client: TestClient) -> None:
+        response = await client.post("/reef/scenarios", headers=AUTH, json={"name": "math", "owner": "acme"})
+        assert response.status == 201, await response.text()
+        base, deleted = "/reef/namespaces/acme/data", "/reef/namespaces/acme/deleted-items"
+        await upload_trajectories(client, AUTH, "t1", "t2", "t3", scenario="math", base=base)
+        for item_id in ("t1", "t2"):
+            gone = await client.delete(f"{base}/{item_id}", headers=AUTH)
+            assert (await gone.json())["deleted"] is True
+        assert (await client.get(f"{base}/t1", headers=AUTH)).status == 404
+        assert await samples(client) == ["t3"]
+
+        listing = await (await client.get(f"{deleted}?kind=trajectory&limit=1", headers=AUTH)).json()
+        (newest,) = listing["items"]
+        assert newest["id"] == "t2" and "content" not in newest
+        assert newest["purge_at"] - newest["deleted_at"] == 30 * 24 * 3600
+        assert listing["next"] == newest["sequence"]
+        rest = await (await client.get(f"{deleted}?before={listing['next']}", headers=AUTH)).json()
+        assert ([item["id"] for item in rest["items"]], rest["next"]) == (["t1"], None)
+        for query in ("?kind=dataset", "?before=x", "?limit=0"):
+            assert (await client.get(deleted + query, headers=AUTH)).status == 400, query
+
+        restored = await client.post(f"{deleted}/restore", headers=AUTH, json={"ids": ["t1"]})
+        assert restored.status == 200, await restored.text()
+        receipt = await restored.json()
+        assert ([item["id"] for item in receipt["items"]], receipt["synced"]) == (["t1"], True)
+        assert sorted(await samples(client)) == ["t1", "t3"]
+        assert (await client.get(f"{base}/t1", headers=AUTH)).status == 200
+        for body, status in (({"ids": ["t1"]}, 404), ({"ids": []}, 400), ({"ids": ["t2"], "x": 1}, 400)):
+            assert (await client.post(f"{deleted}/restore", headers=AUTH, json=body)).status == status, body
+
+        purged = await client.delete(f"{deleted}/t2", headers=AUTH)
+        assert await purged.json() == {"owner": "acme", "id": "t2", "purged": True}
+        assert (await client.delete(f"{deleted}/t2", headers=AUTH)).status == 404
+        assert (await (await client.get(deleted, headers=AUTH)).json())["items"] == []
+
+    served(dispatcher, check)
+
+
 def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
@@ -318,5 +363,60 @@ def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Pat
             bad = {"items": [{"id": item_id, "content": body, "metadata": metadata}]}
             response = await client.post("/reef/namespaces/acme/data", headers=AUTH, json=bad)
             assert response.status == 400, item_id
+
+    served(dispatcher, check)
+
+
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+def record_item_body(record_id: str, content: object, scenarios: dict[str, str]) -> dict[str, object]:
+    """A client record item of an inference whose user message holds ``content``."""
+    payload = {"messages": [{"role": "user", "content": content}], "response": {"content": "a"}}
+    record = {
+        "agent_record_id": record_id,
+        "request_type": "inference",
+        "payload": payload,
+        "created_at": 1.0,
+        "references": [],
+        "artifact_id": None,
+    }
+    metadata = {"kind": "record", "scenarios": scenarios, "origin": {"scenario": "old", "artifact_id": None}}
+    return {"items": [{"id": f"old/{record_id}", "content": record, "metadata": metadata}]}
+
+
+def test_a_weight_recipe_refuses_each_new_item_that_holds_an_image(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    data = "/reef/namespaces/acme/data"
+    image_step = {"step_id": 1, "source": "user", "message": [{"type": "image", "source": {"path": "a.png"}}]}
+    trajectory = {
+        "schema_version": "ATIF-v1.4",
+        "session_id": "t",
+        "agent": {"name": "a"},
+        "steps": [image_step, {"step_id": 2, "source": "agent", "message": "a"}],
+    }
+
+    async def check(client: TestClient) -> None:
+        # Also an item that names no scenario.
+        for record_id, scenarios in [("r1", {"s": "train"}), ("r2", {})]:
+            refused = await client.post(data, headers=AUTH, json=record_item_body(record_id, [IMAGE_PART], scenarios))
+            assert refused.status == 400
+            assert f"item 'old/{record_id}' holds an image" in await refused.text()
+        refused = await upload_trajectories(client, AUTH, lines=(json.dumps(trajectory) + "\n").encode(), base=data)
+        assert refused.status == 400
+        assert "item 't' holds an image" in await refused.text()
+        assert dispatcher.data_store.query("acme") == ()
+        assert (await client.post(data, headers=AUTH, json=record_item_body("r3", "q", {}))).status == 201
+
+    served(dispatcher, check)
+
+
+def test_a_recipe_that_trains_no_weights_stores_an_item_with_an_image(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, Recipe())
+
+    async def check(client: TestClient) -> None:
+        body = record_item_body("r1", [IMAGE_PART], {})
+        stored = await client.post("/reef/namespaces/acme/data", headers=AUTH, json=body)
+        assert stored.status == 201, await stored.text()
 
     served(dispatcher, check)

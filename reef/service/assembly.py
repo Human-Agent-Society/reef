@@ -24,7 +24,8 @@ from reef.artifact.repository import ConfigurableRepositoryBackendFactory, Repos
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.served import wait_for_control_lease
-from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
+from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
@@ -61,7 +62,6 @@ from reef.service.request_service import RequestService
 from reef.service.routed_inference import InferenceRetryPolicy
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import PreviewSettings
-from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
@@ -73,6 +73,7 @@ from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.task_import import DataScenarioStorage, TaskImport
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 from reef.train.component import build_training_component, training_backend_facts
 from reef.train.harness_backend.component import HarnessTrainingComponent
@@ -105,6 +106,8 @@ def _recipe_owned_settings(settings: ServiceSettings) -> dict[str, Any]:
 
 #: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
 GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
+#: The template items that one evaluation process builds at a time (``TaskTemplateWorker``).
+TEMPLATE_BUILD_SLOTS = 16
 
 
 def _require_non_empty(value: str | None, setting: str) -> str:
@@ -679,6 +682,25 @@ def build_dispatcher(
                     ),
                     agent_host=settings.evaluation_agent_host,
                     slots=settings.evaluation_max_sandboxes,
+                    on_stop=settings.evaluation_on_stop,
+                    finish_timeout_s=settings.evaluation_finish_timeout_s,
+                )
+            )
+            # The template builds of evaluations on e2b have their own slots, so a wait for a template builder holds
+            # no sandbox slot. A build mostly waits on AgentENV, so the slots can exceed the deployment's builders.
+            dispatcher.workers.add(
+                TaskTemplateWorker(
+                    dispatcher.queue,
+                    LocalCandidateEndpoints(dispatcher),
+                    (
+                        DockerfileTemplateBuilder()
+                        if settings.evaluation_task_template_builder is None
+                        else TaskTemplateBuilder.from_setting(
+                            settings.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+                        )
+                    ),
+                    worker_id=instance_id("evaluation-templates"),
+                    slots=TEMPLATE_BUILD_SLOTS,
                 )
             )
         if (
@@ -787,7 +809,10 @@ def build_app(
         components=components,
     )
     evaluations = ArtifactEvaluations(
-        dispatcher, new_artifacts=new_artifacts, sources=ArtifactSources.from_setting(settings.artifact_sources)
+        dispatcher,
+        new_artifacts=new_artifacts,
+        sources=ArtifactSources.from_setting(settings.artifact_sources),
+        requires_prepared_templates=settings.evaluation_require_prepared_templates,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
@@ -811,6 +836,7 @@ def build_app(
                 Path(settings.artifact_cache_dir) / "imports",
             ),
             harness_inference_url=settings.harness_inference_url,
+            max_task_archive_bytes=settings.max_task_archive_bytes,
         )
     except BaseException:
         with suppress(Exception):

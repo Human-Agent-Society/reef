@@ -25,7 +25,9 @@ from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceSettings
+from reef.storage import data as data_module
 from reef.storage.data import (
+    DeletedItem,
     ItemConflictError,
     ItemNotFoundError,
     MemoryDataStore,
@@ -33,8 +35,9 @@ from reef.storage.data import (
     RecordLink,
     ScenarioArchivedError,
     ScenarioHold,
+    StoredItem,
 )
-from reef.storage.item_kinds import json_digest
+from reef.storage.item_kinds import TaskFilesReference, json_digest, task_partition
 from reef.storage.job_data import job_data_key
 from reef.storage.record_items import (
     evaluation_call_item,
@@ -48,7 +51,7 @@ from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.sql_setup import prefix_upper_bound
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import LocalTaskFileStore, files_digest
+from reef.storage.tasks import LocalTaskFileStore, TaskFilesNotFoundError, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
@@ -320,6 +323,48 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     with pytest.raises(ValueError, match="only a task's files"):
         store.replace_task("acme", "t1", trajectory_task)
     assert store.read("acme", "fix-bug").digest == replaced.digest
+
+
+def test_a_task_item_is_created_and_replaced_by_a_reference_to_files_in_the_owners_partition(store, tmp_path):
+    digests = {}
+    for name, text in (("fix-bug", "Fix the bug.\n"), ("fix-bug-2", "Fix the bug in parse.\n"), ("other", "Other.\n")):
+        directory = tmp_path / name / ("fix-bug" if name.startswith("fix-bug") else name)
+        directory.mkdir(parents=True)
+        (directory / "instruction.md").write_text(text)
+        # A client writes the files into the owner's partition itself.
+        digests[name] = store.task_files.write(task_partition("acme"), directory)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (item,) = store.create("acme", [NewItem("fix-bug", TaskFilesReference(digests["fix-bug"]), metadata)])
+    assert (item.digest, item.inserted) == (digests["fix-bug"], True)
+    assert (store.task_path(item) / "instruction.md").read_text() == "Fix the bug.\n"
+
+    # A digest that the partition does not hold, holds under another name, or holds for another owner stores
+    # nothing, also beside a good reference.
+    for owner, name, digest in (
+        ("acme", "new-task", "0" * 64),
+        ("acme", "new-task", digests["other"]),
+        ("rival", "fix-bug", digests["fix-bug"]),
+    ):
+        with pytest.raises(TaskFilesNotFoundError, match="holds no task directory"):
+            store.create(
+                owner,
+                [
+                    NewItem("other", TaskFilesReference(digests["other"]), {"kind": "task"}),
+                    NewItem(name, TaskFilesReference(digest), {"kind": "task"}),
+                ],
+            )
+    assert store.read("acme", "other") is None and store.read("rival", "fix-bug") is None
+
+    replaced = store.replace_task("acme", "fix-bug", TaskFilesReference(digests["fix-bug-2"]))
+    assert (replaced.sequence, replaced.digest) == (item.sequence, digests["fix-bug-2"])
+    assert (store.task_path(replaced) / "instruction.md").read_text() == "Fix the bug in parse.\n"
+    with pytest.raises(TaskFilesNotFoundError):
+        store.replace_task("acme", "fix-bug", TaskFilesReference(digests["other"]))
+    with pytest.raises(ItemNotFoundError):
+        store.replace_task("acme", "missing", TaskFilesReference(digests["fix-bug"]))
+    assert store.read("acme", "fix-bug").digest == digests["fix-bug-2"]
+    with pytest.raises(ValueError, match="64 lowercase hexadecimal"):
+        TaskFilesReference("../" + digests["fix-bug"])
 
 
 def test_a_trajectory_items_content_is_replaced_in_place_and_its_uses_are_read_again(store, tmp_path):
@@ -598,6 +643,12 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+    # A restored ancestor is linked again.
+    store.restore("acme", ["coding/call-2"])
+    assert store.record_links("acme", ["coding/call-3", "coding/call-2"]) == {
+        "coding/call-2": RecordLink("coding/call-1", entries[2]),
+        "coding/call-3": RecordLink("coding/call-2", entries[3]),
+    }
 
 
 def test_writes_of_one_scenario_wait_and_writes_of_another_do_not(postgres_config, tmp_path):
@@ -677,6 +728,115 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
     assert store.scenarios_with_records("acme") == ("review",)
     assert store.delete_scenario("acme", "coding") == 0
     assert store.delete_scenario("globex", "review") == 0
+
+
+def test_a_deleted_item_leaves_every_read_until_a_restore_brings_it_back(store):
+    store.create("acme", [trajectory("t0")])
+    (kept,) = store.create(
+        "acme", [trajectory("t1", "one", trajectory_sets=["week-1"], scenarios={"coding": "train"})]
+    )
+    store.hold("acme", "review", "trajectory_set", "week-1", "train")
+    last_use = store.last_use_sequence("acme", "coding")
+    started = time.time()
+
+    assert store.delete("acme", "t1") is True
+    assert store.read("acme", "t1") is None
+    assert [item.item_id for item in store.query("acme")] == ["t0"]
+    assert store.sets("acme", "trajectory_set") == ()
+    assert uses_of(store, "coding", kind="trajectory") == uses_of(store, "review", kind="trajectory") == []
+    assert store.delete("acme", "t1") is False
+    (deleted,) = store.deleted_items("acme")
+    assert deleted.item == replace(kept, inserted=False)
+    assert started <= deleted.deleted_at <= time.time()
+    assert store.read_deleted("acme", ["t1", "t0", "t1"]) == (deleted,)
+    assert store.deleted_items("globex") == ()
+
+    (restored,) = store.restore("acme", ["t1"])
+    assert restored == replace(kept, inserted=False)
+    assert store.read("acme", "t1").content["steps"][0]["message"] == "one"
+    assert [item.item_id for item in store.query("acme")] == ["t0", "t1"]
+    assert [group.value for group in store.sets("acme", "trajectory_set")] == ["week-1"]
+    # Each use comes back with a new sequence, so a trainer reads the item again.
+    assert uses_of(store, "coding", after=last_use, kind="trajectory") == [("t1", "train", None)]
+    assert uses_of(store, "review", kind="trajectory") == [("t1", "train", "week-1")]
+    assert store.deleted_items("acme") == ()
+
+
+def test_a_restore_is_all_or_none_and_refuses_an_id_without_a_deleted_item_or_with_a_stored_item(store):
+    store.create("acme", [trajectory("t1", "one"), trajectory("t2", "two")])
+    store.delete("acme", "t1")
+    store.delete("acme", "t2")
+    with pytest.raises(ItemNotFoundError, match="no deleted item 'gone'"):
+        store.restore("acme", ["t1", "gone"])
+    with pytest.raises(ItemNotFoundError):
+        store.restore("globex", ["t1"])
+    # A create can use the ID of a deleted item, and the deleted item cannot come back then.
+    store.create("acme", [trajectory("t2", "new")])
+    with pytest.raises(ItemConflictError, match="'t2'"):
+        store.restore("acme", ["t1", "t2"])
+    assert store.read("acme", "t1") is None
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme")] == ["t2", "t1"]
+    # A second delete of an ID keeps only the newer deleted item.
+    store.delete("acme", "t2")
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme")] == ["t2", "t1"]
+    store.restore("acme", ["t2"])
+    assert store.read("acme", "t2").content["steps"][0]["message"] == "new"
+
+
+def test_deleted_items_page_newest_first_by_kind(store):
+    (made,) = calls(1)
+    store.create("acme", [trajectory("t1"), made, trajectory("t2"), trajectory("t3")])
+    for item_id in ("t2", made.item_id, "t1", "t3"):
+        store.delete("acme", item_id)
+    listed = store.deleted_items("acme")
+    assert [deleted.item.item_id for deleted in listed] == ["t3", "t2", made.item_id, "t1"]
+    assert all(isinstance(deleted, DeletedItem) and deleted.item.content is None for deleted in listed)
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme", kind="record")] == [made.item_id]
+    page = store.deleted_items("acme", kind="trajectory", limit=2)
+    assert [deleted.item.item_id for deleted in page] == ["t3", "t2"]
+    after = store.deleted_items("acme", kind="trajectory", before=page[-1].item.sequence)
+    assert [deleted.item.item_id for deleted in after] == ["t1"]
+    for arguments in ({"kind": "note"}, {"before": 0}, {"limit": 0}, {"limit": 1001}):
+        with pytest.raises(ValueError):
+            store.deleted_items("acme", **arguments)
+
+
+def test_a_purge_ends_a_deleted_item_and_maintain_purges_the_old_ones(store, monkeypatch):
+    store.create("acme", [trajectory("t1"), trajectory("t2"), trajectory("t3")])
+    for item_id in ("t1", "t2", "t3"):
+        store.delete("acme", item_id)
+    assert store.purge("acme", "t1") is True
+    assert store.purge("acme", "t1") is False
+    assert store.purge("globex", "t2") is False
+    with pytest.raises(ItemNotFoundError):
+        store.restore("acme", ["t1"])
+    assert store.purge_deleted(time.time() - 3600) == 0
+    store.maintain()
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme")] == ["t3", "t2"]
+    monkeypatch.setattr(data_module, "DELETED_ITEM_TTL_SECONDS", -1.0)
+    store.maintain()
+    assert store.deleted_items("acme") == ()
+
+
+def test_the_archive_of_a_scenario_removes_it_from_deleted_items(store):
+    store.create("acme", [trajectory("t1", scenarios={"coding": "train", "review": "train"})])
+    store.delete("acme", "t1")
+    assert store.delete_scenario("acme", "coding") == 0
+    (deleted,) = store.deleted_items("acme")
+    assert deleted.item.scenarios == {"review": "train"}
+    store.restore("acme", ["t1"])
+    assert uses_of(store, "coding", kind="trajectory") == []
+    assert uses_of(store, "review", kind="trajectory") == [("t1", "train", None)]
+
+
+def test_a_deleted_item_is_checked_at_construction():
+    item = StoredItem(1, "acme", "t1", {"kind": "trajectory"}, "d" * 64)
+    assert DeletedItem(item, 2.5).deleted_at == 2.5
+    for deleted_at in (True, "1", float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="deleted_at"):
+            DeletedItem(item, deleted_at)
+    with pytest.raises(ValueError, match="without its content"):
+        DeletedItem(replace(item, content={}), 1.0)
 
 
 def test_a_write_of_an_ended_generation_stores_nothing(store):
@@ -839,12 +999,17 @@ def test_an_owner_keeps_a_node_while_a_record_item_needs_its_messages(open_durab
         store.create("acme", calls(1, 2, 3))
         store.create("other", calls(1))
         assert node_counts(store) == (3 + 1, 2 + 2 + 1 + 1)
+        # A deleted record keeps its node until the purge.
         store.delete("acme", "coding/call-3")
+        assert node_counts(store) == (3 + 1, 2 + 2 + 1 + 1)
+        assert store.purge("acme", "coding/call-3")
         assert node_counts(store) == (2 + 1, 2 + 1 + 1)
         # call-2 continues call-1, so call-1's node stays while call-2 is stored.
         store.delete("acme", "coding/call-1")
+        store.purge("acme", "coding/call-1")
         assert store.read("acme", "coding/call-2").content == calls(2)[0].content
         store.delete("acme", "coding/call-2")
+        store.purge("acme", "coding/call-2")
         assert node_counts(store) == (1, 1)
 
 
@@ -1452,7 +1617,7 @@ def test_a_store_upgrades_the_uses_of_version_4_to_the_order_of_their_items(open
             nodes = {index["name"] for index in tables.get_indexes("data_record_node", schema=schema)}
             assert "data_record_node_scenario_bytes" in nodes
             versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
-            assert versions.fetchall() == [(6,)]
+            assert versions.fetchall() == [(7,)]
         # A new use after the upgrade has its item's sequence too.
         store.create("acme", calls(3))
         assert read(store)[1] == ["coding/call-1", "coding/call-2", "coding/call-3"]
@@ -1519,8 +1684,8 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
                 indexes = {index["name"] for index in tables.get_indexes("data_item", schema=schema)}
                 assert ("data_item_by_item_id" in indexes) == (connection.dialect.name == "postgresql")
                 versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
-                assert versions.fetchall() == [(6,)]
+                assert versions.fetchall() == [(7,)]
     with closing(open_durable_store()) as store, store.transaction() as connection:
-        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 7")
+        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 8")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()

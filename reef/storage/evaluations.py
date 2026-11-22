@@ -122,7 +122,8 @@ class EvaluationStore(ABC):
     Purpose: the evaluation service creates an evaluation when it accepts a
     request (``create``), starts a queued one when a run is free (``begin``),
     ends it when its rollouts end (``finish``, ``fail``), runs an ended one
-    again when a client retries its rollouts (``reopen``), and reads the store
+    again when a client retries its rollouts (``reopen``), changes how many of
+    its rollouts run at once when a client runs them again (``limit_rollouts``), and reads the store
     for the evaluation routes (``read``, ``newest``).
     """
 
@@ -158,6 +159,12 @@ class EvaluationStore(ABC):
     def reopen(self, evaluation_id: str) -> StoredEvaluation:
         """Make a finished or failed evaluation ``running`` again and return it, without its result, its error and
         its ``finished_at``; ``EvaluationStateConflictError`` for any other."""
+
+    @abstractmethod
+    def limit_rollouts(self, evaluation_id: str, max_concurrent_rollouts: int | None) -> StoredEvaluation:
+        """Store ``max_concurrent_rollouts`` as the most rollouts of the evaluation that run at once, and return the
+        evaluation; ``EvaluationStateConflictError`` when the store holds no such evaluation, and ``ValueError`` for
+        a value that ``ArtifactEvaluationRequest`` refuses. The rest of the evaluation stays as it is."""
 
     @abstractmethod
     def read(self, evaluation_id: str) -> StoredEvaluation | None:

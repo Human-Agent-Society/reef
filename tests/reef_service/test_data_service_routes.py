@@ -4,6 +4,7 @@ and control's cancel of a job and the contract's capabilities."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import io
 import json
 import tarfile
@@ -29,11 +30,14 @@ from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import DefaultStart, FileDownload
+from reef.artifact.sources import ArtifactSources
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
+from reef.service import data_transfer
 from reef.service.app import create_app
-from reef.storage.data_queue import DATA_QUEUE
+from reef.service.data_service import DataImport
+from reef.storage.data_queue import DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.component import TrainingJob
 from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE, job_kind, job_payload
@@ -130,6 +134,87 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         assert refused.status == 400
 
     served(dispatcher, check)
+
+
+def test_a_trajectory_import_checks_every_line_then_stores_and_reports_one_batch_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two lines fill a batch.
+    monkeypatch.setattr(data_transfer, "MAX_IMPORT_BATCH_CHARACTERS", 2 * len(trajectory_lines("t1")) - 1)
+    sources = {name: tmp_path / name for name in ("good", "repeated", "bad", "broken", "empty", "conflict")}
+    for source in sources.values():
+        source.mkdir()
+    (sources["good"] / "a.jsonl").write_bytes(trajectory_lines("t1", "t2", "t3"))
+    (sources["good"] / "b.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("t4", "t5")))
+    (sources["repeated"] / "a.jsonl").write_bytes(trajectory_lines("u1", "u2", "u3"))
+    (sources["repeated"] / "b.jsonl").write_bytes(trajectory_lines("u4", "u1"))
+    (sources["bad"] / "a.jsonl").write_bytes(trajectory_lines("w1", "w2", "w3"))
+    (sources["bad"] / "b.jsonl").write_bytes(trajectory_lines("w4") + b'{"session_id": "w5"}\n')
+    (sources["broken"] / "a.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("v1"))[:-8])
+    (sources["empty"] / "a.jsonl").write_bytes(trajectory_lines("y1"))
+    (sources["empty"] / "b.jsonl.gz").write_bytes(b"")
+    (sources["conflict"] / "a.jsonl").write_bytes(trajectory_lines("x1", "x2", "x3"))
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    async def check(client: TestClient) -> None:
+        other_x3 = json.dumps({**atif("x3"), "agent": {"name": "other"}}) + "\n"
+        stored_x3 = await upload_trajectories(client, AUTH, scenario=None, base=DATA, lines=other_x3.encode())
+        assert stored_x3.status == 201
+        statuses = {}
+        for name, source in sources.items():
+            response = await client.post(
+                f"{DATA}/imports", headers=AUTH, json={"uri": source.as_uri(), "metadata": {"kind": "trajectory"}}
+            )
+            assert (await response.json())["progress"] is None
+            statuses[name] = await finished(client, f"{DATA}/imports/{(await response.json())['id']}")
+        assert statuses["good"]["result"] == {"items": 5} and statuses["good"]["progress"] == {"items": 5}
+        progress = dispatcher.queue.read(DATA_QUEUE, statuses["good"]["id"]).progress
+        assert [entry["items"] for entry in progress] == [2, 4, 5]
+        # A bad line fails the import for good before it stores an item, also after two full batches of lines.
+        errors = {
+            "repeated": "b.jsonl line 2: session_id 'u1' is on an earlier line of a.jsonl",
+            "bad": "b.jsonl line 2: trajectory must have an ATIF schema_version",
+            "broken": "a.jsonl.gz is not UTF-8 text or not complete gzip",
+            "empty": "b.jsonl.gz is not UTF-8 text or not complete gzip: it is empty",
+        }
+        for name, error in errors.items():
+            status = statuses[name]
+            assert status["state"] == "failed" and status["progress"] is None and error in status["error"], status
+            assert dispatcher.queue.read(DATA_QUEUE, status["id"]).attempt_count == 1
+        # A conflict with a stored item stops the import, and keeps the batches before it.
+        conflict = statuses["conflict"]
+        assert conflict["state"] == "failed" and conflict["progress"] == {"items": 2}, conflict
+        assert "ItemConflictError" in conflict["error"]
+        listing = await (await client.get(DATA, headers=AUTH)).json()
+        stored = sorted(item["id"] for item in listing["items"])
+        assert stored == ["t1", "t2", "t3", "t4", "t5", "x1", "x2", "x3"]
+
+    served(dispatcher, check)
+
+
+def test_a_retried_trajectory_import_stores_and_reports_nothing_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two lines fill a batch.
+    monkeypatch.setattr(data_transfer, "MAX_IMPORT_BATCH_CHARACTERS", 2 * len(trajectory_lines("t1")) - 1)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.jsonl").write_bytes(trajectory_lines("t1", "t2", "t3", "t4", "t5"))
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    job = DataImport(dispatcher, ArtifactSources.from_setting(()))
+    payload = {"owner": "acme", "uri": source.as_uri(), "metadata": {"kind": "trajectory"}}
+    try:
+        # The test takes the item itself, as two workers one after the other.
+        dispatcher.workers.stop()
+        dispatcher.queue.append(NewWork(DATA_QUEUE, "import-1", "acme", DATA_IMPORT_KIND, payload))
+        for worker_id in ("w1", "w2"):
+            item = dispatcher.queue.take(DATA_QUEUE, worker_id, [DATA_IMPORT_KIND])
+            assert item is not None and job.run(item) == {"items": 5}
+            dispatcher.queue.give_back(DATA_QUEUE, item.id, worker_id)
+        progress = dispatcher.queue.read(DATA_QUEUE, "import-1").progress
+        assert [entry["items"] for entry in progress] == [2, 4, 5]
+    finally:
+        dispatcher.close()
 
 
 def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp_path: Path) -> None:

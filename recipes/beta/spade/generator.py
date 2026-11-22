@@ -347,18 +347,19 @@ class SpadeTaskGenerator(TaskGenerator):
                 continue
             plain = result.rollout_rewards
             hint: tuple[float, ...] = ()
-            if self.hint_plays and HINT_NAME in result.task.solution:
+            if self.hint_plays and f"solution/{HINT_NAME}" in result.task.files:
                 try:
                     hint = await self.hint_rewards(result.task, generation=open_generation.number)
                 except GeneratorError as exc:
                     error = error or f"the hint plays of {result.task.name} failed: {exc}"
                     logger.error("SPADE hint plays of %s failed: %s", result.task.name, exc)
+            instruction = result.task.files.get("instruction.md")
             play_record = PlayRecord(
                 name=result.task.name,
                 skill=pending.skill,
                 return_without_hint=mean_reward(plain),
                 return_with_hint=mean_reward(hint) if hint else mean_reward(plain),
-                instruction_excerpt=result.task.instruction[:RECORDED_EXCERPT_CHARS],
+                instruction_excerpt=(instruction if isinstance(instruction, str) else "")[:RECORDED_EXCERPT_CHARS],
             )
             measure = TaskMeasure(
                 name=result.task.name,

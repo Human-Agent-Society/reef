@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import math
 from collections.abc import Mapping
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.tasks import HarborTask, HarborTaskError
+from reef.core.tasks.harbor import BINARY_FILE_KEY
 from reef.harness.harbor.rollouts import RolloutTurn, TaskRollout
 from reef.record2sample.generator.designer import DesignerRequest
 from reef.record2sample.generator.harbor import OracleResult
@@ -48,11 +50,24 @@ def checked_text_files(document: Mapping[str, object], key: str, *, label: str) 
     return {str(name): text for name, text in value.items()}
 
 
-def checked_tables(document: Mapping[str, object], key: str, *, label: str) -> dict[str, dict[str, object]]:
+def checked_task_files(document: Mapping[str, object], key: str, *, label: str) -> dict[str, str | bytes]:
+    """The files of one task directory from their JSON form in :meth:`HarborTask.document`: a text file is its
+    string, a binary file is ``{BINARY_FILE_KEY: <its bytes, base64 encoded>}``."""
     value = document.get(key, {})
-    if not isinstance(value, Mapping) or any(not isinstance(table, Mapping) for table in value.values()):
-        raise WireError(f"{label}: {key!r} must map table names to objects")
-    return {str(name): {str(field): item for field, item in table.items()} for name, table in value.items()}
+    if not isinstance(value, Mapping):
+        raise WireError(f"{label}: {key!r} must map file names to their content")
+    files: dict[str, str | bytes] = {}
+    for name, content in value.items():
+        if isinstance(content, str):
+            files[str(name)] = content
+        elif isinstance(content, Mapping) and content.keys() == {BINARY_FILE_KEY}:
+            try:
+                files[str(name)] = base64.b64decode(content[BINARY_FILE_KEY], validate=True)
+            except (TypeError, ValueError) as exc:
+                raise WireError(f"{label}: {key}/{name} holds no valid base64 bytes") from exc
+        else:
+            raise WireError(f"{label}: {key}/{name} must be text or {{{BINARY_FILE_KEY!r}: <base64 bytes>}}")
+    return files
 
 
 def designer_request_document(request: DesignerRequest) -> dict[str, object]:
@@ -116,11 +131,8 @@ def task_from_document(document: object) -> HarborTask:
     try:
         return HarborTask(
             name=checked_string(fields, "name", label="a task"),
-            instruction=checked_string(fields, "instruction", label="a task"),
-            tests=checked_text_files(fields, "tests", label="a task"),
-            environment=checked_text_files(fields, "environment", label="a task"),
-            solution=checked_text_files(fields, "solution", label="a task"),
-            config=checked_tables(fields, "config", label="a task"),
+            files=checked_task_files(fields, "files", label="a task"),
+            config=checked_object(fields.get("config", {}), "a task's config"),
             metadata={str(key): value for key, value in metadata.items()},
             source_agent_record_ids=tuple(sources),
         )

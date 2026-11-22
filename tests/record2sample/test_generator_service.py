@@ -240,7 +240,7 @@ def test_a_proposal_comes_back_as_a_task_with_the_designers_record_id(tmp_path: 
     assert (
         proposed.task.source_agent_record_ids == ("designer-1",) and proposed.task.metadata["difficulty"] == "medium"
     )
-    assert proposed.task.solution["hint.txt"] == DOCUMENT["hint"] + "\n"
+    assert proposed.task.files["solution/hint.txt"] == DOCUMENT["hint"] + "\n"
     call = designer.calls[0]
     assert call["scenario"] == "spade" and call["model"] == "m" and call["tags"] == {"role": "designer"}
     assert "LAST TIME: ok" in call["messages"][1]["content"] and "inspection" in call["messages"][1]["content"]
@@ -318,9 +318,7 @@ def test_a_task_is_written_once_and_a_duplicate_or_a_name_conflict_is_refused(tm
             await generator.write_task(
                 HarborTask(
                     name=task.name,
-                    instruction=task.instruction + "Hurry.\n",
-                    tests=task.tests,
-                    environment=task.environment,
+                    files={**task.files, "instruction.md": f"{task.files['instruction.md']}Hurry.\n"},
                 )
             )
         await generator.delete_task(task.name)
@@ -774,16 +772,21 @@ def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     task = HarborTask(
         name="t",
-        instruction="Do the thing described here in enough words to pass.",
-        tests={"test.sh": "echo 1 > /logs/verifier/reward.txt"},
-        environment={"Dockerfile": "FROM x\nRUN true\n"},
+        files={
+            "instruction.md": "Do the thing described here in enough words to pass.",
+            "tests/test.sh": "echo 1 > /logs/verifier/reward.txt",
+            "environment/Dockerfile": "FROM x\nRUN true\n",
+            "environment/data.bin": b"\x00\xff",
+        },
         config={"agent": {"timeout_sec": 30}},
         metadata={"generation": 1},
         source_agent_record_ids=("d1",),
     )
     assert task_from_document(task_document(task)) == task
     with pytest.raises(ValueError, match="not a Harbor task"):
-        task_from_document({**task_document(task), "tests": {}})
+        task_from_document({**task_document(task), "name": "Not A Name"})
+    with pytest.raises(ValueError, match="no valid base64"):
+        task_from_document({**task_document(task), "files": {"data.bin": {"base64": "%%"}}})
     with pytest.raises(ValueError, match="must be a JSON object"):
         task_from_document("task")
     rollout = TaskRollout(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)
@@ -915,7 +918,8 @@ def test_history_write_refuses_a_name_conflict_without_replacing_the_task(tmp_pa
         task_generator = spade(generator, tmp_path)
         (item,) = await task_generator.generate(TaskGenerationRequest(source_records(), "rebuild"))
         written = await task_generator.write(item)
-        conflicting = replace(item, instruction=item.instruction + "Use the supplied state file.\n")
+        instruction = f"{item.files['instruction.md']}Use the supplied state file.\n"
+        conflicting = replace(item, files={**item.files, "instruction.md": instruction})
 
         with pytest.raises(TaskNameConflictError):
             await task_generator.write(conflicting)

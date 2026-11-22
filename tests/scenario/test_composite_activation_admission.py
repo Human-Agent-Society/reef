@@ -254,7 +254,10 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
 def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared_job_commit(tmp_path: Path) -> None:
     """A job's checkpoint decision is prepared without a reserved batch; both operations still wait for its commit."""
     dispatcher, _ = two_trainer_dispatcher(
-        tmp_path, training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True
+        tmp_path,
+        training=WeightsJobComponent(tmp_path / "checkpoints"),
+        hold_local_cycles=True,
+        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
     )
     try:
         scenario = two_trainer_scenario(dispatcher, 1, 2)
@@ -264,6 +267,8 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         for _ in range(4):
             result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
+            # The dispatcher normally asks the samples worker to recheck staleness after each commit.
+            make_samples(scenario)
         served = scenario.current_snapshot().revision
         assert served != base
         decided = _job_step(scenario, WEIGHTS)

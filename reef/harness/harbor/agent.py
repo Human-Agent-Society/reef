@@ -480,9 +480,10 @@ class TreeAgent(AdapterAgent):
     Values: ``adapter`` names the adapter, and ``tree_dir`` is the directory of the tree. ``mcp_servers``, which
     Harbor passes, are the MCP servers of the task: the render writes them into the agent's config
     (``task_mcp_overlays``). ``model``, ``base_url``,
-    ``api_key`` and ``api`` are the values of a ``ModelBinding``. ``files_dir`` receives the rendered tree. ``bridge``
-    bridges the container's loopback to ``base_url``, a loopback URL of this host, as ``AdapterAgent``'s
-    ``bridge_port``. The other values are ``AdapterAgent``'s.
+    ``api_key`` and ``api`` are the values of a ``ModelBinding``, with the token limits that ``extra_env``, the
+    environment that Harbor gives the agent (``tree_agent``'s ``env``), sets (``ModelBinding.with_env_limits``).
+    ``files_dir`` receives the rendered tree. ``bridge`` bridges the container's loopback to ``base_url``, a loopback
+    URL of this host, as ``AdapterAgent``'s ``bridge_port``. The other values are ``AdapterAgent``'s.
     Purpose: ``tree_agent`` names this class. The runner fills the placeholders of the binding in the agent's
     configuration, and the tree stays in a directory so that the runner does not fill them in the tree's own text.
     """
@@ -507,7 +508,7 @@ class TreeAgent(AdapterAgent):
         **kwargs: Any,
     ) -> None:
         descriptor = get_adapter(adapter)
-        binding = ModelBinding(base_url, model, api_key, api)
+        binding = ModelBinding(base_url, model, api_key, api).with_env_limits(kwargs.get("extra_env") or {})
         files = render_tree(
             HarnessTree.read(Path(tree_dir)),
             descriptor,
@@ -550,10 +551,12 @@ def tree_agent(
     files_dir: Path,
     timeout: float,
     bridge: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """The Harbor agent configuration that runs the tree in ``tree_dir``, with the placeholders of the model binding,
     as ``TaskRolloutRunner``'s ``agent``. ``bridge`` bridges the container's loopback to the binding's loopback URL
-    (``TreeAgent``). ``ValueError`` for an adapter that cannot run in a task's container."""
+    (``TreeAgent``). ``env`` holds the variables that Harbor sets for each command of the agent; the adapter's own
+    variables win over them. ``ValueError`` for an adapter that cannot run in a task's container."""
     install = descriptor.install
     if install is None or not can_run_in_task_container(descriptor):
         raise ValueError(f"adapter {descriptor.name!r} cannot play a Harbor task directory in the task's container")
@@ -569,6 +572,7 @@ def tree_agent(
             "api": api,
             "bridge": bridge,
         },
+        **({"env": dict(env)} if env else {}),
     }
 
 

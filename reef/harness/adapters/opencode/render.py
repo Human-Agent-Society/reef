@@ -112,10 +112,12 @@ export const ReefHarness = async (input: any) => {
 """
 PLUGIN_PACKAGE = {"name": "reef-harness", "type": "module", "main": "index.ts"}
 
-#: What the model binding writes: one ``reef`` provider holding these keys, its options, and empty model entries.
+#: What the model binding writes: one ``reef`` provider holding these keys, its options, and model entries that each
+#: hold only the model's ``limit``, with these keys.
 BINDING_PROVIDER = "reef"
 BINDING_PROVIDER_KEYS = frozenset({"models", "npm", "options"})
 BINDING_OPTION_KEYS = frozenset({"apiKey", "baseURL"})
+BINDING_LIMIT_KEYS = frozenset({"context", "output"})
 #: The agents opencode builds in, with their modes. Its title, summary and compaction agents are hidden: they hold
 #: the prompts of opencode's own calls, and a command may name one, but none starts a run.
 BUILTIN_AGENT_MODES = {
@@ -247,8 +249,12 @@ def check_binding_shape(config: Mapping[str, object]) -> None:
     options, models = reef["options"], reef["models"]
     if not isinstance(options, dict) or set(options) != BINDING_OPTION_KEYS or not isinstance(models, dict):
         raise RenderError(refusal)
-    if any(entry != {} for entry in models.values()):
-        raise RenderError(refusal)
+    for entry in models.values():
+        limit = entry.get("limit") if isinstance(entry, dict) and set(entry) == {"limit"} else None
+        if not isinstance(limit, dict) or set(limit) != BINDING_LIMIT_KEYS:
+            raise RenderError(refusal)
+        if any(isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0 for tokens in limit.values()):
+            raise RenderError(refusal)
     if not isinstance(model, str) or model.removeprefix(f"{BINDING_PROVIDER}/") not in models:
         raise RenderError("opencode harness tree must not set model: Reef's model binding chooses it")
 

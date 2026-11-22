@@ -18,11 +18,14 @@ from typing import Any
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.evaluation.rollout_worker import ON_STOP_CHOICES, check_finish_timeout
+from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -280,11 +283,44 @@ class ServiceSettings:
         public_path=("evaluation", "max_sandboxes"),
         help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
     )
+    #: What a stopping process of the evaluation service does with the rollouts that it runs (``ON_STOP_CHOICES`` of
+    #: ``reef.evaluation.rollout_worker``): ``requeue`` gives them back to the queue at once, ``finish`` finishes them.
+    evaluation_on_stop: str = config_option(
+        "requeue",
+        public_path=("evaluation", "on_stop"),
+        help="requeue or finish: what a stopping evaluation process does with the rollouts that it runs.",
+    )
+    #: With ``evaluation_on_stop`` ``finish``: the seconds from the start of a stop to the cancellation of the rollouts
+    #: that still run, which go back to the queue. None waits for every rollout.
+    evaluation_finish_timeout_s: float | None = config_option(
+        None,
+        public_path=("evaluation", "finish_timeout_s"),
+        help=(
+            "With evaluation.on_stop: finish, the seconds that a stopping evaluation process lets its running "
+            "rollouts finish; it then gives the rest back to the queue. Default: no limit."
+        ),
+    )
     #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
     evaluation_trial_observer: str | Mapping[str, Any] | None = config_option(
         None,
         public_path=("evaluation", "trial_observer"),
         help="A TrialObserver plugin reference that reads each evaluation trial before its directory is removed.",
+    )
+    #: Unset, or a ``TaskTemplateBuilder`` plugin: ``package.module:ClassName`` or module and config.
+    evaluation_task_template_builder: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("evaluation", "task_template_builder"),
+        help="A TaskTemplateBuilder plugin reference that makes the sandbox templates of each task of an e2b evaluation.",
+    )
+    #: Whether a rollout of an e2b evaluation runs a trial only from its task's prepared templates: a task whose
+    #: template item failed runs no trial, and a trial builds no missing template.
+    evaluation_require_prepared_templates: bool = config_option(
+        False,
+        public_path=("evaluation", "require_prepared_templates"),
+        help=(
+            "Run each e2b evaluation rollout only from the templates that its task's template item prepared; "
+            "a trial then never builds a template. Default: false."
+        ),
     )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
@@ -354,6 +390,13 @@ class ServiceSettings:
         ".reef/task-files",
         public_path=("storage", "task_file_dir"),
         help="Directory of the generated task files, or the local cache of a plugin store.",
+    )
+    #: The most bytes of the body of a task archive that the data routes take; a larger task uses a create by
+    #: reference. The body goes to a local file, so the limit bounds the disk that one upload uses.
+    max_task_archive_bytes: int = config_option(
+        DEFAULT_MAX_TASK_ARCHIVE_BYTES,
+        public_path=("data", "max_task_archive_bytes"),
+        help="The most bytes of the body of a task archive upload (POST and PUT .../data/tasks). Default: 512 MiB.",
     )
     task_import_manifest: str | None = config_option(
         None,
@@ -505,8 +548,17 @@ class ServiceSettings:
         sandboxes = self.evaluation_max_sandboxes
         if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
             raise ValueError("evaluation.max_sandboxes must be a positive integer")
+        if self.evaluation_on_stop not in ON_STOP_CHOICES:
+            raise ValueError(f"evaluation.on_stop must be one of {', '.join(ON_STOP_CHOICES)}")
+        check_finish_timeout(self.evaluation_on_stop, self.evaluation_finish_timeout_s, prefix="evaluation.")
         if self.evaluation_trial_observer is not None:
             TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
+        if self.evaluation_task_template_builder is not None:
+            TaskTemplateBuilder.reference(
+                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+            )
+        if not isinstance(self.evaluation_require_prepared_templates, bool):
+            raise ValueError("evaluation.require_prepared_templates must be true or false")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:
@@ -538,6 +590,9 @@ class ServiceSettings:
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
             TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
+        archive_bytes = self.max_task_archive_bytes
+        if isinstance(archive_bytes, bool) or not isinstance(archive_bytes, int) or archive_bytes < 1:
+            raise ValueError("data.max_task_archive_bytes must be a positive integer")
         if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":

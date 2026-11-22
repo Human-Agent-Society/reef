@@ -1,758 +1,33 @@
-Training components, serving and executors
-==========================================
+Executors
+=========
 
-Reef's runtime has three boundaries. Each one has its own contract:
+An executor (``reef.execution.executor.Executor``) launches workers and carries their ordered control RPC, health checks and shutdown. Reef uses the same executor factory for model workers, harness evaluation workers and service processes. Configuration selects a concrete executor; callers use the same methods.
 
-- A **training component** (``reef.train.component.TrainingComponent``) runs
-  whole training jobs with its framework's own training loop and saves
-  checkpoints. Reef submits jobs and reads their status. It does not drive
-  optimizer steps.
-- An **inference runtime** (``reef.inference.interfaces.InferenceRuntime``)
-  admits requests and serves the weights that Reef published. It never
-  trains.
-- An **executor** (``reef.execution.executor.Executor``) launches workers and
-  carries ordered control RPC, health checks and shutdown. Configuration
-  selects a concrete executor; callers use the same methods.
+:For: developers who select, configure or write an executor, and operators who place a stack's processes
+:Before you start: `Configuration <../reference/configuration.rst>`__ for the ``execution`` and ``executors`` keys
+:You will have: the built-in executors, the RPC and failure contracts, and how a whole stack is launched
 
-The runtime modules are ``jobs`` (training components), ``interfaces``
-(inference contracts), ``serving`` and ``residency`` (saved-weight serving
-and adapter residency), ``deployment`` (runtime factories and inference
-services), ``recovery`` (durable JSON files and engine supervision) and
-``executor/``. The namespace package has no ``__init__.py``; import classes
-from their owning modules.
+Related pages: `Training backends <training-backends.rst>`__, `Serving runtimes <serving-runtimes.rst>`__, and `Sandbox environments <sandboxes.rst>`__ for rollout isolation.
 
-.. code:: mermaid
-
-   flowchart TD
-       T[Weight trainer / JobLoop] -- submit, status, cancel --> Q[Jobs queue and training checks]
-       Q -- job, check --> C[TrainingComponent in the training service]
-       C --> W[Framework workers: Slime, Tinker]
-       C -- saved checkpoint --> Q
-       Q -- status --> T
-       T -- evaluate, select --> E[Candidate evaluation]
-       T -- publish snapshot --> R[Artifact repository]
-       R -- activate, restore --> I[InferenceRuntime]
-       I --> S[Serving engines or provider]
-
-Training components
--------------------
-
-A ``TrainingJob`` is one bounded job. It has a job ID, the backend name, the
-start, the job data directory that it trains (``data_dir``, and its URI
-``data_uri``; see `The job data directory
-<processors.rst#the-job-data-directory>`__), the backend's parameters and the
-scenario whose trainer submits it. The start is one that the component made,
-such as a saved checkpoint's ``path``. Reef reads none of the parameters.
-
-Only the training service builds a training component. Control, and every
-other service, holds the backend's facts (`Facts without a component`_) and
-reaches the component through the work queue (`Control and the training
-service`_). The component contract is:
-
-``submit(job)``
-   Record the job durably and return; the job runs in the background.
-   Submitting a job ID again does nothing. Raise ``ValueError`` for a job
-   that the component refuses.
-``check_job(job)``
-   Raise ``ValueError`` for a job that the component cannot train. The
-   training service calls it before control adds the job to the queue, so a
-   refused job consumes no sample.
-``status(job_id)``
-   Report ``running``, ``finished`` or ``failed``, the checkpoints saved so
-   far and the backend's metrics. Raise ``KeyError`` for an unknown job. A
-   restarted component resumes each unfinished job or reports it failed.
-``cancel(job_id)``
-   Stop the job; it then reports ``failed``.
-``changed_parts(start, checkpoint)``
-   The parts of the scenario component that the checkpoint changed from
-   ``start``, which the scenario's activation rule reads. The default is
-   none; the harness component diffs the trees.
-``import_start(artifact_dir)``
-   Copy a published snapshot into the component's own storage and return it
-   as a start. The training service calls it when it takes a job whose start
-   names a snapshot. Raise ``ValueError`` when the component cannot start
-   from those weights. The same snapshot must give the same start again.
-   ``root_start(root)`` does the same for a scenario's root; its default is
-   ``import_start`` of the root's files.
-``check_remote_artifact(names)``
-   Raise ``ValueError`` unless what ``names`` names resolves on the
-   component's service. ``names`` is what the facts' ``check_artifact``
-   returned for an import. A backend whose facts return ``None`` does not
-   implement it.
-``start_jobs()``
-   Start running jobs in this process and resume the jobs that have not
-   ended. Only the training service's job worker calls it, also in a
-   one-process deployment. A component that keeps its job state on disk,
-   such as Tinker's ``state_dir``, locks it here, so one process at a time
-   runs its jobs.
-``name``
-   The backend name that jobs carry.
-``shares_scenarios``
-   Whether jobs of several scenarios can run on the component. The default
-   is false.
-
-Each ``SavedCheckpoint`` has a ``path`` (what a later job starts from) and a
-``artifact_path`` (the weights that serving loads, without training state).
-Both are local directories of the training service. The training worker stores
-the files of ``artifact_path`` in the artifact backend as stored content, and
-records the content's name in the job's item. Control commits the checkpoint by
-that name: it reads no directory of the training service.
-
-A weight trainer has one training component, and it drives the component
-through ``reef.train.jobs.JobLoop``:
-
-#. When no job runs, the trainer reserves ready job data. The pipeline's
-   sample-to-job stage gives the job's parameters, by the kind of its samples. The job's backend is the
-   component's name. The job ID is a hash of the scenario, the backend, the
-   start, the records of the job's data and the parameters. A resubmission after a
-   crash therefore names the same job. Reef consumes those records when
-   it submits the job.
-#. The scenario's training worker reads the job's status every 2 seconds.
-   Each new checkpoint is a candidate. The recipe's candidate evaluation
-   decides whether Reef publishes it; the default selects every checkpoint.
-#. A job continues the trainer's training start unless its request names
-   another start with ``train_from``. A job that continues the training start
-   begins there and moves it to each checkpoint that it saves, whether or not
-   evaluation selected the checkpoint. The trainer runs one such job at a
-   time. Evaluation decides only what is served.
-#. A job with its own start begins from that artifact and never moves the
-   training start. The trainer submits it while other jobs of its scenario
-   run when the component has ``concurrent_jobs``: a job then depends only on
-   its own start, data and parameters. The Tinker component has it. Without
-   it, the trainer runs one job at a time.
-#. A failed job ends like a finished one. Reef consumed the records of its data
-   when it submitted the job, so they do not train again.
-#. For a ``train-from``, control first asks the backend's facts
-   (``check_import_start``) and cancels the running job that continues the
-   start before. It then writes the ``train_from`` commit. The training start
-   is now the name of the snapshot. The training service imports the snapshot
-   with ``import_start`` when it takes the next job that names no start. A
-   backend that cannot load the snapshot refuses it in the facts, and Reef
-   answers the request with HTTP 400. A request's ``train_from`` names its
-   start the same way. Activating an artifact changes only what serves; the
-   component never sees it.
-
-The trainer stores its state, a ``JobLoopState``, in the scenario's commit
-record. The state holds ``start``, ``jobs``, ``finished_jobs`` and
-``last_job``. A component never learns the scenario. Per-scenario state, such
-as one adapter per scenario, belongs to serving.
-
-Two scenarios can share a training component only if the component allows it
-(``shares_scenarios``). The Tinker component allows it, because each job
-carries its own start. The Slime component does not: its workers hold one set
-of weights, so a Slime deployment trains one scenario. The inference runtime
-must also serve each scenario its own weights.
-
-``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in
-components. It keeps each job in a directory under the component's job root:
-``job.json``, ``checkpoints.json`` and, once the job ended, ``result.json``.
-It runs jobs one at a time in a thread; a subclass with ``concurrent_jobs``
-runs every submitted job in its own thread. A subclass implements ``check_job``
-and ``run``. It must call ``start_jobs()`` once it can train. Until then no
-job runs, including the jobs that a restart left. After a restart,
-``start_jobs()`` resumes the unfinished jobs in submission order.
-
-`Tinker integration <../reference/python-api.rst#tinker-integration>`__ in
-the Python API describes the Tinker component.
-
-Facts without a component
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-A service that does not run a training component still needs some answers
-about it, and a new scenario needs its root before any job runs. A backend
-states both from its configuration as a
-``reef.train.component.TrainingBackendFacts`` value.
-``TrainingComponentFactory.facts(config, model_path, environ)`` returns it from
-the config that ``__call__`` builds the component from, and
-``training_backend_facts(config, model_path=...)`` calls it. Every factory
-defines ``facts``; it is abstract. Stating the facts builds no component,
-starts nothing, calls no service and imports no training framework or SDK. The
-members are:
-
-``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs``
-   The component's members of the same names.
-``default_start_inputs``
-   The ``inputs`` of the default start: the model and the settings that
-   decide its content.
-``default_start()``
-   The content of a new scenario's root, as a ``DefaultStart``: a few small
-   text files and ``default_start_inputs``. It holds no weight file. A backend
-   that trains a base model writes a base root (``base.json``,
-   ``reef.artifact.base_root``) or a reference to the base model's commit
-   (``hf-reference.json``).
-``parameters_schema(kind)``
-   The JSON Schema of a job's parameters, or ``None``.
-``start_files``
-   The paths of the only files of a start that the next two checks read,
-   such as ``("base.json", "tinker-checkpoint.json")``; ``None`` when they
-   read the whole component, as the harness checks read its tree. Control
-   makes only these files local before it calls them, so a check fetches no
-   weight file.
-``check_root_start(root)``
-   Raise ``ValueError`` for a scenario root that the component's
-   ``root_start`` refuses. It reads the root's ``start_files`` and writes
-   nothing.
-``check_import_start(artifact_dir)``
-   Raise ``ValueError`` for a published snapshot that the component's
-   ``import_start`` refuses. It reads the ``start_files`` in
-   ``artifact_dir`` and writes nothing. Control calls it for a
-   ``train-from`` and for a request's ``train_from``.
-``check_artifact(files)``
-   Check the files of an import against the layout of the backend's
-   snapshots, as far as the files and the settings decide. Return ``None``
-   when that is the whole check. Return a JSON object when something must
-   also resolve on the backend's service; the component's
-   ``check_remote_artifact`` gets it in the training service. The default
-   checks ``artifact_format`` and returns ``None``.
-
-The component holds a value of the same type and answers these members from
-it, so the facts and the component give the same answers. The Slime component
-also refuses to start when its options, as written, state other facts than
-Slime's parser read from them.
-
-Everything else stays a call to the component in the training service,
-because it needs the backend's service, its files or its framework:
-``root_start`` and ``import_start`` (they write a start),
-``check_remote_artifact``, ``check_task_jobs``, ``check_job``,
-``changed_parts`` and the jobs.
-
-The facts are the one place that states the default start. A
-``TrainingComponent`` has no ``default_start`` method and no
-``default_start_inputs`` property, and Reef asks no component for a root. The
-component has one duty toward the start: ``root_start(root)`` accepts a root
-that holds the files of ``facts.default_start()`` and returns the start of a
-job at the base model. The default ``root_start`` calls ``import_start`` on
-the root's files.
-
-The harness component has no factory; ``HarnessFacts.from_settings`` makes its
-facts from the ``HarnessSettings``.
-
-Control and the training service
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Control's trainers see ``reef.train.job_queue.JobQueueComponent``. It holds the
-facts and the work queue, and no component. A deployment in one process takes
-the same path: its dispatcher runs the training service's workers beside
-control.
-
-- Jobs. ``submit`` first adds a check to the ``training_checks`` queue and
-  raises ``JobCheckPendingError``. The trainer releases the job's data and
-  builds the job again at its next poll: the same data names the same job, so
-  the poll finds the job's check. No lock and no reservation is held while
-  the answer is missing, so ``train-from``, activation, imports and the
-  commits of running jobs go on, and no sample is consumed.
-  ``TrainingCheckWorker`` in the training service answers with ``check_job``.
-  A refusal comes back as the component's ``ValueError``, where control's own
-  check raised it before. A check that could not run, for example because the
-  training service cannot reach the artifact store, ends after its attempts
-  with an error that says so; a request's job then fails the request, and its
-  samples stay untrained. An accepted job enters the ``jobs`` queue, and
-  ``TrainingJobWorker`` runs it. The check worker answers no check that
-  control did not ask for within 10 minutes, and control's sweep deletes
-  ended checks with the other ended work.
-- Starts. ``JobLoopState.start`` and a job's start can name a snapshot of the
-  scenario (``SnapshotStart``): the root of a new trainer, or the artifact of
-  a ``train-from``. The training service reads the snapshot from the artifact
-  store and makes the component's start of it (``resolved_job``). The facts
-  refuse a bad root or artifact at once.
-- Imports. The layout of the weight component
-  (``TrainingArtifactLayout``) runs the facts' ``check_artifact``. When the
-  facts return names, control adds an ``artifact`` check and waits up to 60
-  seconds for the answer. A refusal is the same HTTP 400. Without an answer
-  the import ends with HTTP 503.
-- Checkpoints. The training worker records the parts that each checkpoint
-  changed (``changed_parts``) in the job's progress, so control reads them
-  from the queue. A job item that does not parse, such as one that an older
-  release wrote, is a failed job with that error; the trainer goes on.
-
-An outside backend gets all of this from its component and its facts. It adds
-nothing to control.
-
-Decide what a scenario trains
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-In ``auto`` mode Reef starts a job by its own rule: a trainer trains when
-``job_samples`` untrained samples wait. A deployment can replace the rule
-with a training manager, a ``TrainingManager`` plugin that
-``training.manager`` names. An agent that plans experiments is one use.
-
-Control asks the manager every 2 seconds, once for each trainer of each
-loaded scenario in ``auto`` mode. ``actions(view)`` reads a ``ManagerView``
-and returns the actions that Reef runs, in order:
-
-- ``Train(samples, reason, parameters, train_from)`` files a training
-  request, as ``POST /reef/train`` does. With ``train_from`` the job starts
-  from that artifact and runs beside the other jobs. Without it the job
-  continues the training start.
-- ``TrainFrom(artifact_id)`` sets the training start.
-- ``Cancel(job_id)`` cancels a job.
-
-The view holds the training start, whether the selected artifact serves, the
-untrained samples that an automatic job would train next, the job size, the
-number of waiting requests, the jobs that have not ended, and the artifact
-listing with each artifact's metrics.
-
-Reef limits a manager in three ways. It checks each action as it checks a
-person's request, because the view can be old when the action runs. It drops
-a ``Train`` action while ``job_limit`` jobs of the manager's requests wait or
-run; the default limit is 1. And a manager has no action that changes what a
-scenario serves: the activation rule decides that. A request of a manager has
-the session ``training-manager``, and the commit of its job keeps the
-action's ``reason`` as the request's text.
-
-The manager runs on one thread of control, outside every scenario lock, so a
-slow decision delays only the other managed trainers. An error in
-``actions``, or a refused action, is logged, and the next round reads the
-trainer again.
-
-Production inference contract
------------------------------
-
-A runtime that serves weights must keep each admitted request on the
-artifact that the request selected:
-
-- A request admitted for artifact A uses A's model and adapter until its
-  generation ends.
-- Its response and its stored record identify A.
-- The receiver refuses a request for an unavailable or uncertain binding
-  before generation. No request runs on weights that it did not select.
-
-The contract applies to local engines, to hosted providers, and to a gateway
-in front of several engine replicas. Training and the trainer's own rollout
-engines have separate contracts.
-
-A published route does not meet the contract by itself: it describes the
-binding when the runtime made it, and reserves that binding for no request.
-An echoed artifact header, a health check, or a load-ID check before the
-request does not meet it either. The serving path needs one of these:
-
-- **An immutable revision** behind the route, such as a provider deployment
-  or a Tinker sampler revision. Nothing replaces its weights, so a hosted
-  provider needs no native GPU controls.
-- **A receiver that pins each request**, for engines whose weights change
-  while they run. In one atomic step, the receiver admits the request under
-  the weights that it selected and holds those weights against loading,
-  unloading and replacement. Generation and prefix-cache reuse keep that
-  binding until the last token. Reef's saved-weight runtimes always use
-  such a receiver (`Request pinning`_).
-
-What a runtime implements
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Every ``InferenceRuntime`` implements three members:
+Built-in executors
+------------------
 
 .. list-table::
    :header-rows: 1
-   :widths: 28 72
+   :widths: 14 86
 
-   * - Required member
-     - What it does
-   * - ``inference_handler``
-     - Returns the handler that executes a request. An HTTP integration
-       can reuse Reef's HTTP handler.
-   * - ``activate_checkpoint``
-     - Establishes the binding before any route exposes it, and returns
-       its runtime load ID. It raises on failure.
-   * - ``served_artifact``
-     - Reports the route of a binding that already holds: a verified load,
-       or an immutable revision. It loads nothing. It returns ``None`` for
-       an unknown artifact and for an unavailable or uncertain binding;
-       Reef then publishes no route.
+   * - Name
+     - Behavior
+   * - ``uni``
+     - One worker in the caller's process; the executor rejects more than one. RPC may use one local thread. A GPU scorer uses the caller's CUDA visibility: ``uni`` changes no visibility mask and reserves no cluster resource. For services, one ``ProcessWorker`` starts the service subprocess.
+   * - ``mp``
+     - Independent worker ranks launched with Python ``spawn``. Each rank has ordered RPC, constructor readiness, health checks and bounded shutdown. Worker classes, scorers and arguments must be spawn-pickleable: module-level classes and functions, not closures or objects that hold locks. Declared GPU scorer requirements give disjoint per-rank CUDA masks before the worker imports. It needs no Ray and implements no model-parallel collectives.
+   * - ``ray``
+     - Ray actors from ordered ``WorkerSpec`` objects. Worker options include Ray resources, placement strategies and runtime environments. New actors disable automatic task retries. ``RayExecutor.from_workers`` attaches existing handles; it borrows them unless ``owned=True``, and a borrowed shutdown closes the executor without terminating its actors.
+   * - ``auto`` (default)
+     - ``uni`` for one worker, ``mp`` for several local workers. An existing multi-worker Ray placement context, or explicit cluster or Ray actor options, selects ``ray``.
 
-Every other member has a default. Override one only for a capability that
-the runtime has: engines of its own, takeover of a retained endpoint,
-several artifacts at the same time, any artifact on request, or snapshots
-without weights. `Runtime responsibilities
-<../reference/python-api.rst#runtime-responsibilities>`__ gives each
-member's signature, default, result and errors.
-
-When a binding is in doubt, the runtime must fail safely:
-
-- After an ambiguous load, the affected engines stay unavailable until a
-  known binding is restored and checked.
-- On takeover, ``adopt(served)`` returns false when the retained endpoint
-  cannot establish its binding.
-- Retirement lets admitted requests finish on their pinned weights, or it
-  interrupts them explicitly.
-- A stream that has sent output never retries on another artifact. An
-  incomplete stream can keep a diagnostic record, but it gets no receipt.
-
-`Integration qualification`_ lists the cases to test before an engine or
-provider serves weights for production requests.
-
-Routes that bind no weights
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Two modes bind no weights and claim no weight identity. The contract and
-request pinning do not apply to them:
-
-- **A snapshot without a weight component**, such as a record-only or
-  harness snapshot, gets no activation. Its route names the model that
-  ``endpoint_model_name(scenario)`` returns, under the snapshot's own
-  artifact ID. That ID identifies the snapshot, not weights: Reef does not
-  check what the endpoint serves under the name. The built-in
-  ``inference_proxy`` runtime returns its configured model, and it refuses
-  weight snapshots. A scenario with a weight component never uses this
-  mode.
-- **A routed target** of the Semantic Router (``reef.routing_manifest``) is
-  not a Reef artifact: its requests and records name no artifact (see
-  `Routed external-model requests
-  <../reference/http-api.rst#routed-external-model-requests>`__). A target
-  must expose an OpenAI chat endpoint, which the component's native
-  receiver (``reef.inference.remote``) is not.
-
-Serving saved weights
----------------------
-
-Serving loads only the weights that a job saved and Reef published. It loads
-them when a scenario starts, when a committed snapshot is activated, and when
-a person activates a snapshot. No trainer holds a serving engine.
-
-These runtimes serve saved weights on inference components. The first two,
-in ``reef.inference.serving``, run over an ``InferenceBackend``:
-
-- ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
-  base model. Requests name the adapter per scenario, and a scenario that
-  serves a base root names the base model. At most
-  ``adapter_capacity`` adapters are resident.
-  ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
-  adapter first, then the oldest-activated adapter that is no scenario's
-  current one.
-- ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model, and they stay paused
-  until the first activation succeeds. Each activation loads the artifact's
-  files from the artifact repository. A base root loads the base model's
-  directory, the runtime's ``model_path``.
-- ``CheckpointSlotsRuntime`` (``reef.inference.checkpoint_slots``) serves
-  several full-weight checkpoints of one training scenario at the same
-  time. It holds one ``FullWeightServingRuntime`` for each inference
-  component that ``inference.remote`` names (``url`` and ``slot-urls``), so
-  each checkpoint has its own engines, load IDs, health checks and
-  recovery. It never replaces a checkpoint that still serves: when every
-  component holds one, it refuses a further checkpoint. A checkpoint that
-  stops serving releases its component, which keeps its engines. The
-  runtime evaluates no artifact that is not deployed.
-
-Each load gets a new runtime load ID, and every engine reports it afterwards.
-The IDs of one runtime belong to a fresh incarnation, so a restart never
-reuses an ID for other weights. Loading content that the engines already serve
-does nothing.
-
-The ``inference`` section selects the serving, not the training backend
-(``reef.service.deploy.serving``). With ``inference.serving: engines``,
-``reef serve`` starts a local **inference component** (``python -m
-reef.inference.remote``) as the ``inference`` service, unless
-``inference.remote`` names a component that runs elsewhere. The control plane
-reaches the component through ``RemoteInferenceBackend`` and the runtime kind
-``remote_serving``. The training component's ``artifact_format`` chooses the
-runtime (``adapter`` or ``full``) and the engines' adapter settings. The local
-component joins the deployment's Ray cluster, so its engines and the training
-workers reserve separate GPUs.
-
-The serving runtime checks the component's health every 30 seconds. The
-component names its process in each health report, so the control plane sees
-a component that restarted and runs no engines. After a failed check, the
-runtime pauses generation. When an engine is lost or dead, or the component
-reports an uncertain binding, the runtime replaces the whole engine stack.
-It then loads what it served again, and resumes.
-
-Generation resumes only after the reload and its load-ID check succeed.
-Until then, the runtime reports no route. A route that is already published
-stays published, and its requests wait or fail. The runtime retries the
-restore at each health check, also when every engine is alive. Two cases
-differ:
-
-- A ``FullWeightServingRuntime`` without a verified checkpoint has nothing
-  to restore: before its first successful activation, and after it
-  released its checkpoint. A failed health check then only replaces the
-  engines, which stay paused until the next activation.
-- An ``AdapterServingRuntime`` keeps every scenario's previous adapter as
-  the restore target until the whole restore succeeds. A capacity refusal
-  changes no adapter, and the current adapters keep serving.
-
-A new serving owner always starts a new engine stack, because the old
-engines' load IDs cannot prove that the weights are unchanged. The owner
-changes when the owning inference worker restarts or loses its lease. The
-new stack ends the requests in flight, and the worker activates each
-completed selection again, so a takeover needs no operator action. `Startup
-status <../reference/http-api.rst#startup-status>`__ gives the retries of a
-failed startup.
-
-Request pinning
-~~~~~~~~~~~~~~~
-
-The inference component, local or ``inference.remote``, pins every
-production request for the saved-weight runtimes. No setting turns this
-protection off: the runtimes refuse engines whose receiver does not declare
-it (``ServingEngines.request_pinning``). The trainer's rollout engines do
-not use it, because the trainer synchronizes its own rollouts with its
-weight updates.
-
-The component gives these guarantees:
-
-- **Admission.** Each full-weight load serves under its own model name,
-  which the published route names; an adapter keeps its immutable adapter
-  name. On an adapter stack, the base model serves under the load ID that
-  the owner gave the new stack, for the route of a base root. The component
-  refuses a request for a load that it no longer serves, before any output,
-  and the replica retries once (see `Request
-  <../reference/http-api.rst#request>`__).
-- **Drain.** Before it changes weights or adapters, the component stops
-  admitting requests and waits for the admitted ones to finish, for at most
-  ``inference.timeout-s``. A request whose client disconnected keeps its
-  pin until the engine finishes it. A drain that times out interrupts the
-  remaining requests, and the engines then need recovery.
-- **Prefix sharing.** With ``inference.prefix-sharing: true``, requests on
-  the same weights share the engine's prefix cache. After the drain, the
-  component clears the cache before each change, so no cache entry outlives
-  its weights.
-- **Uncertain binding.** A failed load, an ambiguous pause or a failed
-  cache clear stops admission. Admission resumes after the component
-  replaces its engine stack, and the intended artifacts are loaded and
-  checked again. An explicit refusal from the engine leaves the binding in
-  place.
-- **Ownership.** A newer serving owner fences the older one: the component
-  refuses the older owner's control calls with HTTP 412. The new owner's
-  engine stack ends the requests in flight.
-
-The protection has these limits:
-
-- **Engines.** It covers the built-in SGLang and vLLM engines with their
-  built-in request handlers. Engine serving refuses another
-  ``inference.backend`` or ``inference.handler-factory``. Another engine
-  needs its own serving runtime (``inference.serving: module:Factory``)
-  that meets the `Production inference contract`_.
-- **Topology.** The component starts its own engines and router.
-  Generation and weight changes must go through the component, so the
-  native engine addresses stay private. The component forwards only the
-  engine's generation route, and other inference paths return HTTP 404.
-- **Caches.** The component clears only the engine's own prefix cache. It
-  cannot clear KV that an engine keeps outside itself, so engine serving
-  refuses the engine options that select such a store. `Serving of a
-  weight-training deployment
-  <../reference/configuration.rst#serving-of-a-weight-training-deployment>`__
-  lists them, and what the check does not cover. Prefix sharing needs
-  regular SGLang engines: prefill/decode-disaggregated engines cannot use
-  the clearing pause.
-- **Trust.** The component trusts the engine's acknowledgements of loads
-  and cache clears. It does not inspect the weights
-  or the cache in engine memory, so qualify the engine version that you
-  deploy (see `Integration qualification`_).
-
-`Run the services in separate processes
-<../user-guide/operate.rst#run-the-services-in-separate-processes>`__ gives
-the operating rules for the component.
-
-Integration qualification
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-CPU tests with fake engines cannot verify which weights a real engine
-serves. Before an engine or provider serves production requests, check
-these cases on the version that you deploy. Cases 1 to 3 apply to every
-integration, and the others under their condition:
-
-#. Delay a request or an activation across a promotion. Check the actual
-   output, the response identity and the stored identity. Include the
-   interval before the new route is published, and a late operation from a
-   former owner.
-#. Make a binding unavailable; for an immutable provider, select a
-   revision that it does not serve. The request must fail, and must not
-   run on another artifact.
-#. Interrupt a stream after its first token. It must get no receipt and no
-   retry on another artifact.
-#. If its engines report load IDs, make them report mixed IDs after a load,
-   and uniformly wrong ones. Neither load may give a route for the
-   requested artifact.
-#. If it changes the weights of running engines, fail one replica while it
-   loads, then recover. Requests must be refused while its weights are
-   uncertain, and succeed after a checked reload.
-#. If it adopts retained routes, present a missing or mismatched binding.
-   Adoption must be refused.
-#. If it supports adapters or prefix-cache reuse, check that each preserves
-   the selected artifact.
-
-Use two small artifacts whose outputs differ, and identify each answer
-from its generated content, not from labels or version metadata. Record the
-engine version and the capabilities checked. These cases verify behavior.
-Use a representative concurrent workload to measure throughput,
-95th-percentile latency, drain time and unavailable time.
-
-Two commands run a real integration through the real inference HTTP app
-and record store. They are not pytest tests, so ``pytest tests/`` and CI do
-not run them.
-
-**Cutover check.** ``tests.support.inference_qualification`` runs your
-integration's two artifacts through a promotion. It keeps A's route
-published after it activates B. Each answer must then come from A and agree
-with its artifact header and stored record, or fail without a receipt.
-Write a factory that takes the output directory and returns a context
-manager. The context manager owns the run's isolated resources and yields
-an ``InferenceQualification``, whose ``OutputOracle`` names the artifact
-from the generated content alone. Run the command from the checkout, with
-the factory as ``--target`` (``module:factory``):
-
-.. code-block:: bash
-
-   python -m tests.smoke.inference_cutover --target my_qualification:target \
-     --output /scratch/cutover
-
-``--output`` must be an absolute path to a new or empty directory outside
-the checkout. The command stores the records and ``report.json`` there, and
-exits with status 0 only when every check passes. The report lists the
-checked cases and the cases that the run does not cover. The CPU suite runs
-the same check against toy SGLang and vLLM components that pin each request.
-
-**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own
-SGLang and vLLM integrations on one GPU, with two synthetic checkpoints.
-`Run one area <../contributing/testing.rst#run-one-area>`__ gives its
-command, its profiles and their limits. Only its ``lifecycle`` profile
-covers control-plane publication and a public deployment of several
-artifacts. Neither command covers a managed router lifecycle, or validation
-of the router's deployment image.
-
-Engine supervision
-------------------
-
-``reef.inference.recovery.InferenceControl`` pauses, resumes and recovers the
-engines of one inference service. The engine integration implements its hook,
-``InferenceEngineGroup``, which pauses, resumes, replaces dead engines and
-retires engines.
-
-``InferenceControl`` records the pause intent before the engine barrier, so a
-partial pause failure still fences replacement engines. Recovery replaces dead
-engines. It pauses them again when generation was paused. A failed recovery
-keeps generation paused. Only ``resume`` lets the engines serve again. Each
-engine actor implements ``reef.inference.interfaces.InferenceEngine``, the
-per-engine vocabulary that the group and the backend call by name.
-
-Independent SGLang backend
---------------------------
-
-``reef/inference/sglang/`` owns the chat backend, SGLang plugin, native
-engine process, router, Ray engine groups and inference lifecycle. Native
-``ServerArgs`` and ``launch_server`` come directly from SGLang, not from
-Slime. The runtime-load-ID value type lives in ``reef.inference.interfaces``.
-
-Install ``reef-infra[sglang]`` for Python-side inference dependencies and install
-native SGLang in the selected GPU environment. This extra does not install
-Slime or Megatron.
-
-Engines load published weights from files. The engine control worker's
-``load_weights_from_disk`` reloads full weights through SGLang's
-``update_weights_from_disk``. Its ``load_adapter_from_disk`` loads an adapter
-through ``load_lora_adapter_from_disk``. The plugin name ``reef`` is
-preserved.
-
-CPU tests cover native launch bindings, shared placement, response parsing,
-LoRA requirements and recovery.
-Actual GPU execution and backend combinations still require acceptance testing.
-
-Slime integration
------------------
-
-``reef.train.slime_backend.component.SlimeTrainingComponent`` runs in the
-HTTP service's process and holds no GPU. It parses Slime's arguments once at
-startup and, for each job, starts a driver process
-(``reef.train.slime_backend.driver``) with the job's directory. The driver owns
-one Ray session and runs ``SlimeJobRunner``: Slime's actor (and critic) workers
-and, for a dataset job or a task job, Slime's own rollout engines
-(``reef.train.slime_backend.rollout_group``). The engines belong to Slime's
-serving session, a detached ``ServingCluster`` named after the save root, which
-the first such job's driver creates and the next drivers attach to through
-Slime's ``create_rollout_manager``. The session holds the engines, their router
-and the placement group of the training GPUs; while it runs, every driver
-trains on its placements, and a driver detaches from it when it exits, also
-after a failure. Without a session, a driver places its job with Slime's own
-placement and starts no engines. A driver records each saved checkpoint in the
-job's directory, where the component reports it, and releases its workers (and
-the GPUs it placed) when it exits. The session's actors run under a process
-lease of their own, recorded with the session's name in the save root's
-``reef-serving.json``, so a driver's process cleanup leaves them running; the
-component disposes the session and retires that lease when it closes
-(``driver --dispose``). Serving never shares GPUs with training; with
-``--colocate`` the rollout engines share the training GPUs, and Slime moves the
-memory between them. A cancel or a close stops the driver; a restarted
-component starts the job's driver again.
-
-A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of
-training). Without the job parameter ``save_interval``, the job is one
-rollout. With it, each run of ``save_interval`` optimizer steps is one
-rollout. The workers train the rollout's optimizer steps, and the component
-then saves the paired Hugging Face and Megatron checkpoints. A checkpoint's
-step is the job's optimizer steps up to it. The snapshot is the Hugging Face export, or with LoRA
-the PEFT adapter. A job's ``objective`` parameter selects the loss family, and its
-``learning_rate_schedule`` parameter the learning-rate schedule. The actor workers switch to it when they receive the
-job's data.
-
-The job's last checkpoint records the objective's state after the job's
-data. An earlier checkpoint records the state of the job's start, because
-the objective computes its state for the whole data. When the objective
-skips the job's data, the job saves no checkpoint, so the next job continues
-the start's weights and objective state. The Tinker component does the same.
-
-Every driver loads Slime's latest checkpoint. A job therefore starts from
-the component's latest checkpoint; the start of the startup weights names the
-untrained weights, until the first rollout is saved. A scenario trains on Slime
-only when its root snapshot came from the default start of the configured
-inputs (``root_start``). The default start is a base root. The workers make the
-startup weights from the model when they start, so ``root_start`` reads the
-root's source and none of its files. The component checks the start
-when Reef submits the job, and the driver again when the job runs: a queued
-job whose start an earlier job moved past fails. ``import_start`` refuses
-every snapshot, so a Slime scenario refuses ``train-from``. Because the jobs
-continue one save root, a Slime deployment trains one scenario. A restarted
-job continues after its last recorded checkpoint. A restart can also stop a job after Megatron saved a
-rollout but before the component recorded it. The job then records that
-checkpoint and does not train the rollout's data twice.
-
-The optimizer state carries from one job to the next in the Megatron
-checkpoint, which every driver loads.
-
-`Slime worker executors <#slime-worker-executors>`__ describes how the
-component launches its workers.
-
-Executors
----------
-
-An executor launches workers and carries their control RPC. Reef uses the
-same executor factory for model workers, harness evaluation workers and
-service processes.
-
-Built-in executors
-~~~~~~~~~~~~~~~~~~
-
-``uni``
-   One worker in the caller's process. RPC may use one local thread. The
-   executor rejects more than one worker. A GPU scorer uses the caller's CUDA
-   visibility; ``uni`` changes no global visibility mask or cluster resource
-   reservation.
-   For services, one ``ProcessWorker`` starts the actual service subprocess.
-
-``mp``
-   Independent worker ranks launched with Python ``spawn``. Each rank has
-   ordered RPC, constructor readiness, health checks and bounded shutdown.
-   Worker classes, scorers and arguments must be spawn-pickleable (normally
-   module-level classes/functions), not closures or objects holding locks.
-   No Ray installation is needed. Declared GPU scorer requirements produce
-   disjoint per-rank CUDA masks before worker imports/construction. This does
-   not implement model-parallel collectives. Timeouts stop waiting, not the
-   work, and never retry RPC.
-
-``ray``
-   Launches Ray actors from ordered ``WorkerSpec`` objects. Worker options
-   include Ray resources, placement strategies and runtime environments.
-   New actors disable automatic task retries. ``RayExecutor.from_workers``
-   attaches existing handles; it borrows them unless ``owned=True`` is explicit.
-   Borrowed shutdown closes the executor without terminating its actors.
-
-``auto`` (default)
-   Resolves to ``uni`` for one worker or ``mp`` for multiple local workers.
-   Existing multi-worker Ray placement context or explicit cluster/Ray actor
-   options select ``ray``.
-
-A Python class or the reference ``package.module:ExecutorSubclass``
-selects a custom executor. The dot form ``package.module.Class`` is not accepted. CPU-only execution does not import Ray, Slime,
-Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
+A Python class or the reference ``package.module:ExecutorSubclass`` selects a custom executor. The dot form ``package.module.Class`` is not accepted. CPU-only execution imports no Ray, Slime, Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
 
@@ -778,109 +53,70 @@ Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
            executor.shutdown()
 
 RPC and lifetime contracts
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------
 
-``collective_rpc`` dispatches to every worker before waiting, returning results
-in worker/rank order. ``rpc(rank, ...)`` addresses one rank. ``non_block=True``
-returns an ``ExecutorFuture``. ``resolve`` waits on futures and on nested
-lists or tuples of them, under one shared deadline. Ordinary results remain
-ordinary values. Backend object references never cross this control-RPC
-interface as futures.
+**Calls.**
 
-A timeout bounds the wait. It does not cancel GPU work or repeat a mutating
-operation. Training-job recovery must consult the durable checkpoint/commit
-state before deciding what can be resumed. ``shutdown`` terminates only owned
-workers. A failed constructor cleans up the workers that the executor already
-acquired. Backend-specific launchers must track every allocation, including
-partially initialized workers.
+- ``collective_rpc`` dispatches to every worker before it waits, and returns results in rank order. ``rpc(rank, ...)`` addresses one rank.
+- ``non_block=True`` returns an ``ExecutorFuture``. ``resolve`` waits on futures and on nested lists or tuples of them, under one shared deadline. Ordinary results remain ordinary values. Backend object references never cross this interface as futures.
+- A timeout bounds the wait. It does not cancel GPU work, repeat a mutating operation or retry an RPC. Training-job recovery must read the durable checkpoint and commit state before it decides what to resume.
 
-Executors expose a terminal ``failure`` (``ExecutorFailure``) and
-``register_failure_listener(listener)``. An observer implements
-``on_executor_failure(failure)``. The executor calls it once, also when the
-observer registers after the failure. Listeners must be nonblocking and must
-not call shutdown from the callback. The executor logs observer exceptions
-and still reports the worker failure. Normal shutdown and ordinary
-worker-method or scorer errors are not terminal infrastructure failures. A
-wait timeout does not mean that a worker died.
+**Shutdown.** ``shutdown`` terminates only owned workers. A failed constructor cleans up the workers that the executor already acquired. A backend-specific launcher must track every allocation, including partially initialized workers.
 
-``mp`` monitors process sentinels, including idle ranks. Owned ``ray`` groups
-monitor actor readiness in the background; a queued probe on a busy actor is
-not considered a failure. For borrowed/serialized Ray groups, registering a
-listener starts process-local monitoring; listeners are not serialized with
-actor handles. Local workers share the caller's process and have no separate
-process-death detector. Custom executors report terminal failure via ``_fail``.
-When the executor detects a failure, outstanding waits fail promptly with
-``ExecutorFailedError``. The executor then rejects new submissions and
-retires its owned worker peers. Borrowed actors stay owned by their original
-launcher. There
-is no automatic recreation, request replay, or distributed-group recovery.
+**Failure.** An executor exposes a terminal ``failure`` (``ExecutorFailure``) and ``register_failure_listener(listener)``:
 
-Implement ``_init_executor``, ``rpc``, ``collective_rpc``, ``check_health`` and
-``shutdown`` in an ``Executor`` subclass. A transport that submits one call and
-gets a future back can subclass ``SubmittingExecutor`` instead. It then
-implements only ``_submit`` and ``_submit_all``. The bundled ``uni``, ``mp``
-and ``ray`` executors and ``DelegatingExecutor`` are built that way.
-Backend-specific launch configuration belongs in ``ExecutorLaunch.options``.
-GPU tensors, optimizer state, NCCL collectives and KV transfers remain the
-model backend's responsibility. Changing executors does not resize a live
-topology or reshard checkpoints.
+- An observer implements ``on_executor_failure(failure)``. The executor calls it once, also when the observer registers after the failure. A listener must not block and must not call shutdown. The executor logs an observer's exception and still reports the worker failure.
+- When the executor detects a failure, outstanding waits fail promptly with ``ExecutorFailedError``. The executor then rejects new submissions and retires its owned workers. Borrowed actors stay with their original launcher.
+- Normal shutdown, an ordinary worker-method or scorer error, and a wait timeout are not terminal failures.
+- Reef does not recreate workers, replay requests or recover a distributed group.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - Executor
+     - How it detects a dead worker
+   * - ``uni``
+     - No detector: the worker shares the caller's process.
+   * - ``mp``
+     - Process sentinels, including idle ranks.
+   * - ``ray``, owned
+     - Background readiness probes. A queued probe on a busy actor is not a failure.
+   * - ``ray``, borrowed or serialized
+     - Registering a listener starts process-local monitoring. Listeners are not serialized with actor handles.
+   * - custom
+     - The subclass reports it with ``_fail``.
+
+**Write an executor.** Implement ``_init_executor``, ``rpc``, ``collective_rpc``, ``check_health`` and ``shutdown`` in an ``Executor`` subclass. A transport that submits one call and gets a future back can subclass ``SubmittingExecutor`` and implement only ``_submit`` and ``_submit_all``; the bundled executors and ``DelegatingExecutor`` are built that way. Put backend-specific launch configuration in ``ExecutorLaunch.options``. GPU tensors, optimizer state, NCCL collectives and KV transfers remain the model backend's responsibility. Changing executors does not resize a live topology or reshard checkpoints.
 
 Custom service and inference executors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A service executor receives one ``WorkerSpec`` for a ``ProcessWorker`` (the
-Ray backend uses ``RayProcessWorker``). Its constructor arguments are the
-config snapshot, a one-element service list, run directory, readiness
-timeout and config path. A backend may execute this worker on another node.
-It may also implement the equivalent RPC protocol: ``describe``,
-``prepare(config)``, ``start``, ``probe(name, timeout)``, ``status``,
-``read_log(name, offset)``, ``request_stop(force=False)``, ``tree_alive`` and
-``shutdown(grace=...)``. ``describe`` returns ``host``, ``pids`` and
-``run_dir``. ``status`` maps service names to ``None`` while running or an
-exit code; a missing service is not alive.
+**Service executors.** A service executor receives one ``WorkerSpec`` for a ``ProcessWorker`` (the Ray backend uses ``RayProcessWorker``). Its constructor arguments are the config snapshot, a one-element service list, the run directory, the readiness timeout and the config path. A backend may run this worker on another node, or implement the equivalent RPC protocol:
 
-Custom inference executors expose one control rank. Its RPC vocabulary is
-``inference_url``, ``get_runtime_load_ids``, ``updatable_engines``,
-``load_adapter_from_disk``, ``load_weights_from_disk``,
-``pause_generation_for_update``, ``continue_generation_after_update``,
-``terminate_updatable_engines``, ``recover_updatable_engines`` and
-``check_health``. Executor shutdown owns serving resource teardown. The
-manager does not manipulate backend server groups or actor handles directly.
+- ``describe`` returns ``host``, ``pids`` and ``run_dir``.
+- ``prepare(config)``, ``start``, ``probe(name, timeout)``, ``read_log(name, offset)``, ``request_stop(force=False)``, ``tree_alive`` and ``shutdown(grace=...)``.
+- ``status`` maps service names to ``None`` while running, or to an exit code. A missing service is not alive.
+
+**Inference executors.** A custom inference executor exposes one control rank. Its RPC vocabulary is ``inference_url``, ``get_runtime_load_ids``, ``updatable_engines``, ``load_adapter_from_disk``, ``load_weights_from_disk``, ``pause_generation_for_update``, ``continue_generation_after_update``, ``terminate_updatable_engines``, ``recover_updatable_engines`` and ``check_health``. Executor shutdown owns the teardown of serving resources. The manager does not touch backend server groups or actor handles.
 
 Slime worker executors
 ~~~~~~~~~~~~~~~~~~~~~~
 
-``SlimeTrainGroup`` launches the Slime workers through its default
-``SlimeRayExecutor``. That executor uses Slime's allocator for GPU
-placement, rank-zero rendezvous and the memory-saver environment. RPC goes
-through the shared ``RayExecutor``.
+``SlimeTrainGroup`` launches the Slime workers through its default ``SlimeRayExecutor``. That executor uses Slime's allocator for GPU placement, rank-zero rendezvous and the memory-saver environment. RPC goes through the shared ``RayExecutor``.
 
-``--reef-executor-backend`` in ``training.options`` selects another worker
-executor. The executor receives these values in ``ExecutorLaunch.options``:
+``--reef-executor-backend`` in ``training.options`` selects another worker executor. Reef refuses ``uni`` and ``mp`` for Slime GPU worker roles. The executor must preserve rank order and Slime's worker methods. It receives these values in ``ExecutorLaunch.options``:
 
-- ``args``, the parsed Slime arguments.
-- The node and GPU counts, and the placement group ``pg``.
-- The GPU allocation of each actor.
-- ``role``, and the reference and teacher flags.
-- ``actor_cls``, the worker class.
-
-The executor must preserve rank order and Slime's worker methods.
-
-Reef refuses ``uni`` and ``mp`` for Slime GPU worker roles.
+- ``args``, the parsed Slime arguments
+- the node and GPU counts, and the placement group ``pg``
+- the GPU allocation of each actor
+- ``role``, and the reference and teacher flags
+- ``actor_cls``, the worker class
 
 Harness evolution: worker executor selection
 --------------------------------------------
 
-Harness evolution evaluates external model endpoints, so it does not require
-a local GPU. ``TaskScorer.execution_requirements()`` declares local worker
-needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
-supplies the worker count and resources from ``execution.evolution``. The
-selector chooses ``uni`` for one local worker and ``mp`` for multiple local
-workers. An existing multi-worker Ray placement context or declared
-cluster/actor options selects ``ray``. Installed GPUs or ``RAY_ADDRESS`` alone
-do not select Ray. Like vLLM's local-topology default, insufficient local CUDA
-capacity is an error, not an implicit switch to Ray. Select ``ray``
-explicitly for a cluster.
+Harness evolution evaluates external model endpoints, so it needs no local GPU. Set the worker group under ``execution.evolution``:
 
 .. code:: yaml
 
@@ -891,64 +127,39 @@ explicitly for a cluster.
      # The other evolution keys (adapter, method, evaluation, models, seed) stay as they are.
      executor: sandbox      # independent isolation policy; requires bubblewrap
 
-``execution.evolution`` accepts a backend, named profile, or inline object.
-Its backend defaults to ``auto``. Omitted resources keep the scorer's
-declared requirements (by default one CPU and zero GPUs per worker). ``workers`` is the
-fixed worker-group size. It is not a rollout count or a separate
-business-level concurrency limit. For ``uni/mp``, CPU requests describe
-capacity but do not reserve cores or enforce a CPU quota. Ray maps them to
-``num_cpus``/``num_gpus`` per actor. These are scheduling reservations, not
-hard CPU limits.
+``execution.evolution`` accepts a backend, a named profile, or an inline object. In Python, pass ``worker_executor=ExecutorSettings(workers=..., resources=WorkerResources(...))``.
 
-Set workers and resources under ``execution.evolution``. In Python, pass
-``worker_executor=ExecutorSettings(workers=..., resources=WorkerResources(...))``.
-``evolution.executor`` still means ``local`` or ``sandbox`` rollout isolation;
-it is NOT renamed to ``uni``/``mp``. Sandbox preflight runs on the execution
-node too. A custom rollout executor must preserve its own isolation and
-owner-loss cleanup. Built-in local rollouts in remote/process workers use a
-POSIX owner lease, so loss of a worker also kills the rollout process group.
-Commands must not detach. Worker loss can leave temporary rollout
-directories.
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
 
-To retain an in-process callback, choose ``uni`` with exactly one worker.
-With ``mp`` each rank gets its own copy of the scorer. Mutable scorer state is
-not shared or merged back into the recipe. The parent keeps ownership of
-the method's step, composition, selection and publication. Only rollout execution and
-scoring cross the worker boundary. Candidate and current results keep their
-pairing order.
+   * - Key
+     - Meaning
+   * - ``backend``
+     - Defaults to ``auto``: ``uni`` for one local worker, ``mp`` for several. An existing multi-worker Ray placement context, or declared cluster or actor options, selects ``ray``. Installed GPUs or ``RAY_ADDRESS`` alone do not. Insufficient local CUDA capacity is an error, not a switch to Ray: select ``ray`` explicitly for a cluster.
+   * - ``workers``
+     - The fixed size of the worker group. It is not a rollout count or a separate concurrency limit.
+   * - ``resources``
+     - Omitted resources keep the scorer's declared requirements: by default one CPU and zero GPUs per worker (``TaskScorer.execution_requirements()``, an ``ExecutionRequirements``). For ``uni`` and ``mp``, CPU requests describe capacity but reserve no cores. Ray maps them to ``num_cpus`` and ``num_gpus`` per actor, which are scheduling reservations, not hard limits.
 
-Each backend/scenario starts one fixed pool of
-``execution.evolution.workers`` ranks on its first nonempty evaluation. It
-reuses the pool across evaluations. Workers and lazy scorer/model
-initialization persist. Each rollout still gets a fresh harness subprocess
-and temporary directory.
+``evolution.executor`` is a separate setting: it selects ``local`` or ``sandbox`` rollout isolation (`Sandbox environments <sandboxes.rst>`__). Sandbox preflight runs on the execution node too. A custom rollout executor must preserve its own isolation and owner-loss cleanup.
 
-Reef keeps the upstream step records and per-rollout stage paths. Uni/MP
-workers write records on the same host. Ray/custom workers return a
-compressed record with each successful RPC, so the parent process owns the
-durable path without shared storage. Reef extracts archives with Python's
-``data`` filter, and an archive cannot replace an existing record directory.
-A failed RPC or lost remote worker may leave no returned trajectory. This is
-not a durable artifact-transfer protocol, and large records add RPC memory
-and transfer overhead.
+**The worker pool.** Each scenario starts one fixed pool of ``execution.evolution.workers`` ranks on its first nonempty evaluation and reuses it across evaluations.
 
-RPC is ordered within each rank. A scorer error drains the submitted batch
-before the next evaluation, while worker death terminally fails the pool.
-Reef does not rebuild failed pools automatically and never replays
-evaluations.
+- Workers and lazy scorer or model initialization persist. Each rollout still gets a fresh harness subprocess and temporary directory.
+- The parent keeps the method's step, composition, selection and publication. Only rollout execution and scoring cross the worker boundary. Candidate and current results keep their pairing order.
+- With ``mp``, each rank gets its own copy of the scorer. Mutable scorer state is not shared or merged back. To keep an in-process callback, choose ``uni`` with exactly one worker.
+- RPC is ordered within each rank. A scorer error drains the submitted batch before the next evaluation. Worker death terminally fails the pool: Reef does not rebuild it and never replays evaluations.
+- Closing the trainer or the scenario closes the pool. Direct Python callers must call ``backend.close()`` in ``finally``. Ray GPU reservations stay held until close, also between evaluations. This is worker reuse, not elastic resizing.
+- Python launchers must use the ``if __name__ == "__main__":`` guard.
 
-Trainer/scenario close (including scenario replacement) closes the pool.
-Direct Python callers must call ``backend.close()`` in ``finally``; garbage
-collection is only a fallback. Ray GPU reservations remain held until close,
-even between evaluations. This is worker reuse, not elastic resizing or
-scale-to-zero; no YAML change is needed to enable it.
-Python launchers must use the usual ``if __name__ == "__main__":`` guard.
+**Rollout processes and records.**
 
-A GPU scorer can override ``execution_requirements()`` to return
-``ExecutionRequirements(gpus_per_worker=1)``; ``auto`` selects ``uni/mp`` when
-local CUDA capacity is sufficient. Initialize the scorer's GPU model lazily
-inside the worker, not in its constructor in the recipe process. For a
-plain evaluator function without that interface, declare its needs explicitly:
+- Built-in local rollouts in remote or process workers use a POSIX owner lease, so the loss of a worker also kills the rollout process group. Commands must not detach. Worker loss can leave temporary rollout directories.
+- ``uni`` and ``mp`` workers write step records on the same host. Ray and custom workers return a compressed record with each successful RPC, so the parent owns the durable path without shared storage. Reef extracts archives with Python's ``data`` filter, and an archive cannot replace an existing record directory.
+- A failed RPC or a lost remote worker may leave no returned trajectory. Large records add RPC memory and transfer overhead.
+
+**GPU scorers.** A scorer overrides ``execution_requirements()`` to return ``ExecutionRequirements(gpus_per_worker=1)``. Initialize its GPU model lazily inside the worker, not in its constructor. For a plain evaluator function, declare the needs in the config:
 
 .. code:: yaml
 
@@ -959,165 +170,79 @@ plain evaluator function without that interface, declare its needs explicitly:
          cpus_per_worker: 2
          gpus_per_worker: 1  # per worker: two local workers need two visible GPUs
 
-This describes worker/scorer GPUs, not the external inference server's GPUs.
-Local GPU allocations require whole GPUs. MP assigns disjoint CUDA masks
-within its worker group; uni leaves the caller's visibility unchanged. These
-are not exclusive reservations against other programs on the host. Choose
-``backend: ray`` for cluster scheduling or fractional GPU reservations.
-Sandbox device access is unchanged; declaring a GPU for the scorer does not
-expose it inside a sandboxed harness. CPU workers don't reserve GPUs, but the
-selector is not a hardware-access security boundary. Explicit settings cannot
-reduce a scorer's declared GPU needs; ``uni/mp`` cannot fulfill cluster
-reservations. Ray nodes need the same modules, binaries, models and
-reachable model endpoints. Reef does not inspect arbitrary Python or commands
-to guess GPU needs. Slime training still requires its specialized Ray
-launcher.
+- These are the scorer's GPUs, not the inference server's.
+- Local GPU allocations need whole GPUs. ``mp`` assigns disjoint CUDA masks within its group, and ``uni`` leaves the caller's visibility unchanged. Neither is an exclusive reservation against other programs on the host.
+- Choose ``backend: ray`` for cluster scheduling or fractional GPUs. Ray nodes need the same modules, binaries, models and reachable model endpoints.
+- Explicit settings cannot reduce a scorer's declared GPU needs. Reef does not inspect code or commands to guess them.
+- Declaring a GPU for the scorer does not expose it inside a sandboxed harness. The selector is not a security boundary for hardware access.
 
 Whole-stack deployment configuration
 ------------------------------------
 
-A configuration file has no process list. Reef assembles the native
-inference, training and HTTP processes with the same executor factory as the
-model workers. Method services such as a PRM run independently, and recipes
-consume their endpoints. The one auxiliary child that Reef assembles
-is the generator service of a ``generator`` section, under the ``generator``
-executor role. The orchestrator only handles dependencies, readiness,
-endpoint publication, log tailing, failure detection and reverse-order
-shutdown. It does not contain local process or Ray placement operations.
+A configuration file has no process list. Reef assembles the inference, training and HTTP processes with the same executor factory as the model workers. The orchestrator handles dependencies, readiness, endpoint publication, log tailing, failure detection and reverse-order shutdown. It contains no local process or Ray placement code.
 
-Omitted selectors (or YAML ``null``) use ``auto``. Existing YAML without
-resource reservations or a Ray placement-group context continues to launch
-services locally and Slime workers through Ray. A training stack that runs
-Slime starts Ray before the HTTP service, which hosts the training component
-(see `Slime integration <#slime-integration>`__).
+Method services such as a PRM run on their own, and recipes consume their endpoints (for example ``recipe.config.prm-url``). The one auxiliary child that Reef assembles is the generator service of a ``generator`` section, under the ``generator`` executor role.
 
-Selection happens before the Executor factory imports the chosen class.
-Service startup logs the selected backend and reason.
-Explicit backend/profile selections take precedence over automatic decisions.
-For ``auto``, the policy is:
+**Selecting an executor.** Each selector accepts a built-in name, a ``package.module:ClassName`` reference, an inline ``backend``/``options`` object, or a named profile under ``executors``. An explicit selection takes precedence. An omitted selector, or YAML ``null``, uses ``auto``:
 
-* Services with ``cuda`` or declared ``env.CUDA_VISIBLE_DEVICES`` use ``uni``.
-  Combining that visibility pin with resource/worker options is an error.
-* Services with nonempty ``resources`` or executor ``options`` use ``ray``.
-* Otherwise, services already running inside a Ray placement group use ``ray``;
-  remaining services use ``uni``. This selects the backend, not a new placement
-  strategy; Ray's normal placement/capture rules and explicit worker options apply.
-* Slime training uses its specialized Ray executor, even with one GPU. Reef
-  has no built-in ``mp``/``uni`` Slime GPU launcher.
+.. list-table::
+   :header-rows: 1
+   :widths: 55 45
 
-Installing Ray, setting ``RAY_ADDRESS``, or initializing Ray outside a
-placement group does not by itself change a service to Ray. The selector
-does not import or initialize Ray to probe it. It does not count GPUs, change
-TP/PP, or retry a failed backend with another backend. Resource requests must
-describe the intended scheduling. Standalone SGLang commands still control
-their own model parallelism. ``auto`` is also the default
-``ExecutorLaunch.backend`` for the low-level worker factory. A service
-controller is not a model rank. Slime's specialized Ray requirement and
-service resource reservations stay specific to each component; they do not
-implement vLLM's TP/PP launcher.
+   * - Service
+     - ``auto`` selects
+   * - Has ``cuda`` or a declared ``env.CUDA_VISIBLE_DEVICES``
+     - ``uni``. Combining this pin with resource or worker options is an error.
+   * - Has nonempty ``resources`` or executor ``options``
+     - ``ray``
+   * - Already runs inside a Ray placement group
+     - ``ray``
+   * - Any other service
+     - ``uni``
+   * - Slime training
+     - Its specialized Ray executor, even with one GPU.
 
-Each selector accepts a built-in name, a ``package.module:ClassName`` reference, an inline ``backend/options``
-object, or a named profile under ``executors``. Explicit Slime command-line
-flags override the corresponding role selection; they also accept profile
-names. Profiles for training and rollout carry domain-launcher options, not
-necessarily Ray actor options. The reserved Slime launch arguments (``args``,
-``pg``, rank/GPU layout, role) come from the model configuration. Profile
-options cannot override them.
+Selection happens before the factory imports the chosen class, and service startup logs the selected backend and the reason. The selector imports and initializes no Ray, counts no GPUs, and never retries a failed backend with another one. Installing Ray, setting ``RAY_ADDRESS``, or initializing Ray outside a placement group does not change a service to Ray.
 
-OpenClawRL's PRM and user model are outside this lifecycle. The example's
-Docker Compose file holds their deployment commands, readiness checks and
-resource allocation. Reef receives only recipe client parameters such as
-``recipe.config.prm-url``, and its stack gets no auxiliary process
-definitions.
+Explicit Slime command-line flags override the corresponding role selection, and accept profile names. The reserved Slime launch arguments (``args``, ``pg``, the rank and GPU layout, the role) come from the model configuration; profile options cannot override them.
 
-Ray executors share a process-wide runtime, initialized only when needed.
-Without an external address, Reef starts a local cluster using the deployment's
-visible GPUs. Set ``RAY_ADDRESS`` (or the deployment's ``reef.ray_address``) to
-connect to an external cluster; connection errors never fall back to local.
-Reef borrows an already initialized Ray connection and leaves it intact.
-Otherwise, the last owner disconnects. Reef stops only a local cluster that
-it started.
-Attached/serialized executor handles borrow their owner's runtime.
+**Resources.** ``resources`` holds worker options: for Ray, ``num_gpus``, ``num_cpus``, ``resources`` and scheduling options. Ray owns CUDA visibility, so Reef rejects Ray execution together with ``cuda`` or a ``CUDA_VISIBLE_DEVICES`` override. Local execution uses ``cuda`` and reserves no cluster GPUs. Slime's GPU-layout flags describe model parallelism, not service placement. A standalone SGLang's ``num_gpus`` must cover its complete local TP group; Reef synthesizes no multi-node SGLang arguments.
 
-An explicitly declared ``execution.training`` or ``execution.rollout`` role
-that resolves to ``ray`` also requests this runtime, even when all service
-controllers run locally. It reserves no GPUs; Slime's model topology still
-determines its GPU placement. With an external address and only local
-controllers, Reef passes the address through. The HTTP service and the
-inference component then connect after their readiness dependencies are
-satisfied. Stacks without Ray services or declared Ray training or rollout
-roles do not start Ray.
+**The Ray runtime.** Ray executors share one process-wide runtime, initialized only when needed:
 
-The service stack keeps the runtime alive through service shutdown. It
-publishes the actual address as ``reef.ray_address`` in runtime snapshots. It
-also supplies ``RAY_ADDRESS`` to later services, including the HTTP service
-and the inference component. A managed local stack needs no ``ray-head``
-service or fixed port. Explicitly managed heads remain supported: connect to
-their address and keep the head on ``executor: uni`` with the appropriate
-dependencies. Reef does not create cloud machines or install software on Ray
-nodes. The command, working directory, Python environment, models and recipe
-modules must exist on the selected nodes. Use shared storage or images, or
-Ray runtime environments. Standalone SGLang ``num_gpus`` must cover its
-complete local TP group. This launcher does not synthesize multi-node SGLang
-CLI arguments.
+- Without an external address, Reef starts a local cluster on the deployment's visible GPUs. A managed local stack needs no ``ray-head`` service or fixed port.
+- ``RAY_ADDRESS``, or the deployment's ``reef.ray_address``, connects to an external cluster. A connection error never falls back to local.
+- Reef borrows a Ray connection that is already initialized and leaves it intact. Otherwise the last owner disconnects. Reef stops only a local cluster that it started.
+- A declared ``execution.training`` or ``execution.rollout`` role that resolves to ``ray`` also requests the runtime, even when all service controllers run locally. It reserves no GPUs. A stack without Ray services or declared Ray roles starts no Ray.
+- A training stack that runs Slime starts Ray before the service that hosts the training component.
+- The stack keeps the runtime alive through service shutdown. It publishes the address as ``reef.ray_address`` in runtime snapshots and as ``RAY_ADDRESS`` to later services.
+- An explicitly managed head remains supported: connect to its address and keep the head on ``executor: uni``. Reef does not place a head's dependents before the head is ready.
 
-``resources`` contains worker options (for Ray: ``num_gpus``, ``num_cpus``,
-``resources``, scheduling options, etc.). Ray owns CUDA visibility. Reef
-rejects Ray execution combined with ``cuda`` or a ``CUDA_VISIBLE_DEVICES``
-override.
-Local execution continues to use ``cuda`` and does not reserve cluster GPUs.
-Slime's GPU-layout flags describe model parallelism, not service-worker
-placement.
+Reef creates no machines and installs no software on Ray nodes. The command, working directory, Python environment, models and recipe modules must exist on the selected nodes.
 
-The readiness command runs on the execution node with the service's
-environment and working directory, under a bounded timeout. ``{host}`` in
-``endpoint`` is the Ray node address, or ``127.0.0.1`` for local execution. A
-local service that must be reachable from remote consumers must declare a
-routable ``advertise_host``. Reef prepares eligible services together:
-executors acquire placement and publish ``${endpoints.SERVICE_NAME}`` before
-their service processes start. Each service receives a private node-local
-config snapshot through ``REEF_CONFIG``. The snapshot holds every endpoint
-published so far, including those of independent peers prepared in the same
-batch. A reference to a producer behind dependencies still requires that
-producer to be prepared first. Reef does not rewrite ordinary ``127.0.0.1``
-literals elsewhere.
+**Endpoints and readiness.**
 
-Process launch and readiness waits run concurrently for independent services.
-``depends_on`` remains a readiness prerequisite. A dependent starts as soon
-as all of its declared dependencies are ready, without waiting for unrelated
-services. Each service has its own readiness deadline, measured from its
-start RPC, not from the beginning of the deployment. The stack is ready only
-when every service is ready. Reef keeps checking services that passed
-readiness for process exits while their peers initialize. Explicit Ray-head
-services can remain dependencies of Ray-executed services. Reef does not
-place their dependents before the head is ready.
+- The readiness command runs on the execution node with the service's environment and working directory, under a bounded timeout.
+- ``{host}`` in ``endpoint`` is the Ray node address, or ``127.0.0.1`` for local execution. A local service that remote consumers must reach declares a routable ``advertise_host``. Reef does not rewrite other ``127.0.0.1`` literals.
+- Reef prepares eligible services together: executors acquire placement and publish ``${endpoints.SERVICE_NAME}`` before their processes start. Each service receives a private node-local config snapshot through ``REEF_CONFIG``, with every endpoint published so far. A reference to a producer behind dependencies still needs that producer prepared first.
+- Independent services launch and wait for readiness concurrently. A dependent starts as soon as all of its ``depends_on`` services are ready. Each service has its own readiness deadline, measured from its start RPC. The stack is ready when every service is ready. Reef keeps checking ready services for process exits while their peers start.
 
-Logs are kept on the worker and tailed into ``run_dir/SERVICE.log``. Worker
-metadata (host, PIDs and worker log directory) is written to
-``run_dir/SERVICE.worker.json``; a remote PID must never be signalled locally.
-Each service has a separate config directory. Resolved config
-snapshots are private files and may contain credentials; protect the run
-directory as deployment state. Ray process workers use a POSIX owner-lease
-guard so loss of the owning actor terminates their process group. Commands
-must remain foreground processes and must not detach into another session.
+**Logs and run directory.** Logs stay on the worker and are tailed into ``run_dir/SERVICE.log``. Worker metadata (host, PIDs and worker log directory) goes to ``run_dir/SERVICE.worker.json``; never signal a remote PID locally. Each service has its own config directory. Resolved config snapshots are private files and may contain credentials, so protect the run directory as deployment state.
 
-Failure policy is fail-stop, not automatic restart/replay. A startup failure
-cancels peer readiness waits and joins launch tasks before Reef closes the
-executors it already created. A late launch therefore cannot escape cleanup.
-Shutdown attempts every dependent before its dependencies, even if an RPC
-fails. An individual executor does not delete shared Slime placement groups. The HTTP service closes its training component
-and inference runtime after the dispatcher stops every scenario worker.
+**Failure and shutdown.** The policy is fail-stop, with no automatic restart or replay:
+
+- A startup failure cancels the peers' readiness waits and joins the launch tasks before Reef closes the executors that it created. A late launch therefore cannot escape cleanup.
+- Shutdown attempts every dependent before its dependencies, even if an RPC fails. An executor does not delete shared Slime placement groups.
+- Ray process workers use a POSIX owner-lease guard, so the loss of the owning actor terminates their process group. Commands must stay foreground processes and must not detach into another session.
+- The HTTP service closes its training component and inference runtime after the dispatcher stops every scenario worker.
 
 Verification
 ------------
 
-CPU tests cover custom service and inference executors, resource
-selection, dependency ordering, endpoint propagation, rollback, process-tree
-cleanup, bounded probes and owner-lease loss. To run the real Ray/HTTP tests:
+CPU tests cover custom service and inference executors, resource selection, dependency ordering, endpoint propagation, rollback, process-tree cleanup, bounded probes and owner-lease loss. To run the real Ray and HTTP tests:
 
 .. code:: bash
 
    REEF_TEST_RAY=1 python -m pytest tests/reef_service/deploy/test_service_executor_ray.py
 
-These are control-plane tests, not a GPU SGLang/Megatron validation or a
-multi-machine networking benchmark.
+These are control-plane tests, not a GPU SGLang or Megatron validation, and not a multi-machine networking benchmark.
