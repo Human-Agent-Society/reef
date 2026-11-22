@@ -5,7 +5,7 @@ import importlib.util
 import pytest
 
 import reef
-from reef import sample2job
+from reef.train import sample2job
 
 
 @pytest.mark.unit
@@ -225,7 +225,7 @@ def test_pairing_interlock_surface_is_replaced_by_the_engine_spec() -> None:
     ``_collect_candidates``/``_terminal_report_ids`` dual bookkeeping) must
     stay gone.
     """
-    from reef.record2sample import assembly
+    from reef.samples import assembly
     from reef.train.pipeline import TrainingPipeline
 
     for name in ("DataProcessor", "ReportedFeedbackProcessor", "ComputedFeedbackProcessor"):

@@ -211,7 +211,7 @@ def test_the_recipe_config_refuses_max_staleness() -> None:
 @pytest.mark.unit
 def test_a_stage_setting_in_the_recipe_config_is_refused_with_its_pipeline_key() -> None:
     from recipes.sao import SAORecipe
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         load_recipe(SAORecipe, {"data": {"batch_size": 4}}, {})

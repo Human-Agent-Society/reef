@@ -471,7 +471,7 @@ Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Sl
 
 The examples need each of these settings, on Tinker and on Slime:
 
-- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
+- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.samples.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
 - **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Tinker takes a prompt whose length plus `max_tokens` passes the context, so on Tinker the cap does not shorten a rollout's history. SGLang refuses such a prompt, so on Slime a rollout ends at a history of 65536 - 16384 = 49152 tokens. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
 - **No compaction, no thinking.** `enable_summarize: false`, as the official solver, and `enable_thinking: false`. Reef trains a rollout as one sample: a summarized history does not assemble into one, and in a thinking history only the last turn trains.
 - **No recording.** `record_terminal_session: false`: the tasks have no network, and on `e2b` the recorder's install hangs the rollout.
@@ -493,7 +493,7 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
    from pathlib import Path
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
-   from reef.pipeline_context import PipelineContext
+   from reef.samples.context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings, StoredGeneratorState
    from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, GenerationJob, next_generation
    from reef.storage.samples import SampleStore

@@ -56,13 +56,7 @@ from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.record2sample.service import (
-    RECORD_SELECTION_KIND,
-    SAMPLES_QUEUE,
-    SamplesWorker,
-    Selection,
-    request_selection,
-)
+from reef.samples.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, Selection, request_selection
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

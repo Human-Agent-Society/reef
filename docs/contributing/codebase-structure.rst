@@ -72,10 +72,10 @@ Reef is organized around an application kernel and three capability domains, not
    * - ``reef/train/``
      - The trainer, the training job loop, the training pipeline, job data types, training components and their backends
      - HTTP endpoints, deployment configuration parsing
-   * - ``reef/record2sample/``
-     - Which records Reef uses, which train together, and their samples (``Record2Sample``, ``ReportSamples``, ``JudgedSamples``); the samples service; the generator service that writes, checks and runs Harbor tasks
+   * - ``reef/samples/``
+     - Which records Reef uses, which train together, and their samples (``Record2Sample``, ``ReportSamples``, ``JudgedSamples``); the samples service; the generator service that writes, checks and runs Harbor tasks; the context that the training pipeline and its stages read (``context``)
      - Job data shape, record storage, training loops
-   * - ``reef/sample2job/``
+   * - ``reef/train/sample2job/``
      - Shaping the samples of the next job into one job's data (``Sample2Job``), and the job size
      - Which records train, the training loop, step signals
    * - ``reef/evaluation/``
@@ -142,7 +142,7 @@ A deployment runs seven services (``SERVICE_COMPONENTS`` in ``reef/execution/wor
      - ``served_models`` routes and stops; records
    * - ``samples``
      - ``QueueServiceApp``
-     - ``SamplesWorker`` in ``reef/record2sample/service/``
+     - ``SamplesWorker`` in ``reef/samples/service/``
      - The ``samples`` queue
      - Samples
    * - ``training``
@@ -188,7 +188,7 @@ The shared store has four parts. Each row names the module that defines its cont
      - ``reef/artifact/``
      - The snapshots of each scenario, and the stored content of checkpoints
 
-A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/record2sample/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/api/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
+A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/samples/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/api/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
 
 Choose a destination
 --------------------
@@ -214,13 +214,13 @@ Choose a destination
    * - A value that both training and inference read
      - ``reef/core/``, such as ``reef/core/weight_layout.py``
    * - Which records train, in which groups, and how a record set becomes samples
-     - ``reef/record2sample/``
+     - ``reef/samples/``
    * - Shaping samples into job data
-     - ``reef/sample2job/``. ``reef/train/pipeline.py`` drives both stages; a recipe selects and binds them.
+     - ``reef/train/sample2job/``. ``reef/train/pipeline.py`` drives both stages; a recipe selects and binds them.
    * - Turning job data into a step signal
      - The training backend that trains it: ``reef/train/slime_backend/`` or ``reef/train/tinker_backend/``. The backends share no code.
    * - Writing, checking or running generated Harbor tasks
-     - ``reef/record2sample/generator/``. The built-in recipe that trains on them is ``reef/recipe/generated_tasks/``.
+     - ``reef/samples/generator/``. The built-in recipe that trains on them is ``reef/recipe/generated_tasks/``.
    * - One service telling another what to do
      - A queue item or a table of the shared store, not a call (`Services and the shared store`_)
    * - A data route

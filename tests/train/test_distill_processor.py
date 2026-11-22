@@ -17,11 +17,11 @@ from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
-from reef.record2sample.distill import DistillSamples, DistillSamplesSettings
-from reef.record2sample.samples import recorded_response
-from reef.sample2job import DistillJobData
+from reef.samples.distill import DistillSamples, DistillSamplesSettings
+from reef.samples.samples import recorded_response
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import DistillJobData
 from reef.train.types import JobData
 
 QUESTION = "What is the boiling point of water?"

@@ -25,11 +25,10 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.operations.data_service import DataWorker, data_jobs
 from reef.control.operations.data_transfer import ArchiveWriters
 from reef.control.scenario.live_objects import LiveObjects
-from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
-from reef.record2sample import NoSamples, Record2Sample
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import NoSamples, Record2Sample
+from reef.samples.context import PipelineContext
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -37,6 +36,7 @@ from reef.storage.task_import import DataScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train import JobData
 from reef.train.pipeline import PipelineSpec
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 
 TOKEN = "upload-test-token"
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}

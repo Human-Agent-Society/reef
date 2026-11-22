@@ -45,7 +45,7 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
 from reef.inference.provider_protocol import ANTHROPIC_CLIENT_HEADERS, response_events
-from reef.record2sample.generator.designer import (
+from reef.samples.generator.designer import (
     HARBOR_OUTPUT_TEXT,
     SYSTEM_PROMPT,
     DesignerAnswer,
@@ -981,7 +981,7 @@ class ModelReplies:
     """One-reply model calls through the Reef at ``reef_url``, each recorded under a scenario.
 
     ``api`` is the dialect: ``openai`` (Chat Completions) goes through the generator service's
-    :class:`~reef.record2sample.generator.designer.ReefDesigner`; ``responses`` makes the same call to the Responses
+    :class:`~reef.samples.generator.designer.ReefDesigner`; ``responses`` makes the same call to the Responses
     API.
     """
 

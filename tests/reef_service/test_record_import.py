@@ -26,13 +26,13 @@ from reef.core.reports import ScoredRolloutReport
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
-from reef.record2sample import ReportSamples
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import ReportSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData
 from reef.train.job_queue import TrainingJobWorker
 from reef.train.pipeline import PipelineSpec
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 

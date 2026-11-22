@@ -22,11 +22,11 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
-from reef.record2sample.staleness import ServedArtifacts
-from reef.sample2job import DistillJobData
+from reef.samples.staleness import ServedArtifacts
 from reef.storage.data import NewItem
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import DistillJobData
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.objectives import SftObjective, resolve_objective

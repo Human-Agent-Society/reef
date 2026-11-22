@@ -21,7 +21,7 @@ from reef.control.scenario.registry import ScenarioRegistry
 from reef.control.workers.served import ServedModelsPublisher
 from reef.core.errors import ReefError
 from reef.execution.workers import ServiceWorker
-from reef.record2sample.service import SAMPLES_QUEUE, request_selection
+from reef.samples.service import SAMPLES_QUEUE, request_selection
 from reef.storage.work_queue import JsonValue, LeaseExtender, WorkLeaseLostError, WorkQueue
 from reef.train.component import TrainingComponent
 from reef.train.job_queue import CHECKS_QUEUE, archive_item_id, cancel_scenario_jobs

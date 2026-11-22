@@ -10,7 +10,7 @@ from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 from reef.control.dispatcher import Dispatcher
 from reef.control.workers.samples import LocalSampleProducers
 from reef.core.records_types import AgentRecord, RequestType
-from reef.record2sample.service import SamplesWorker
+from reef.samples.service import SamplesWorker
 from reef.train.job_queue import TrainingCheckWorker
 
 

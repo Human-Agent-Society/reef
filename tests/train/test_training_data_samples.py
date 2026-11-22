@@ -242,10 +242,10 @@ def test_request_only_batch_preserves_manual_training_contract():
 
 
 def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job():
-    from reef.pipeline_context import PipelineContext
-    from reef.record2sample import ReportSamples
-    from reef.sample2job import Sample2Job
+    from reef.samples import ReportSamples
+    from reef.samples.context import PipelineContext
     from reef.train.pipeline import TrainingPipeline
+    from reef.train.sample2job import Sample2Job
 
     class MixedTasks(ReportSamples):
         def make_sample(self, context):

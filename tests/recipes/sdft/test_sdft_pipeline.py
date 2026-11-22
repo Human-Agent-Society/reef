@@ -28,10 +28,10 @@ from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
-from reef.record2sample.distill import student_call
-from reef.sample2job import DistillJobData
+from reef.samples.distill import student_call
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import DistillJobData
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job

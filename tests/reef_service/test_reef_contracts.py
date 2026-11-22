@@ -32,8 +32,8 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream, RuntimeLoadMismatchError
 from reef.recipe import Recipe
-from reef.record2sample import NoSamples
-from reef.record2sample.service import SAMPLES_QUEUE
+from reef.samples import NoSamples
+from reef.samples.service import SAMPLES_QUEUE
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit

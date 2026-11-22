@@ -51,10 +51,10 @@ from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import ConfigReader, reader_field, section_field
 from reef.recipe.errors import RecipeConfigError
-from reef.record2sample.traces import TraceSamples
-from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.samples.traces import TraceSamples
 from reef.train.harness_backend.settings import EvolutionSettings, HarnessSettings, configured_tasks
 from reef.train.pipeline import PipelineSettings, PipelineSpec
+from reef.train.sample2job.traces import TraceJobData, TrainTaskJobData
 
 
 @dataclass(frozen=True)

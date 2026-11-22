@@ -20,13 +20,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.inference.http import InferenceProxyRuntime
-from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError, load_recipe_config
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.loading import build_recipe
 from reef.recipe.registry import recipe_class_for
-from reef.sample2job import NoJobData
+from reef.samples.context import PipelineContext
 from reef.train.pipeline import PipelineSettings, TrainingPipeline
+from reef.train.sample2job import NoJobData
 from reef.train.slime_backend.objectives import resolve_objective
 from reef.train.types import JobData
 

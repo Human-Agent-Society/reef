@@ -22,14 +22,14 @@ from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError
 from reef.recipe.harness import HarnessLayout
-from reef.record2sample import NoSamples
-from reef.sample2job import NoJobData
+from reef.samples import NoSamples
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import ScenarioRoot, SnapshotStart, TrainingComponent
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSettings
+from reef.train.sample2job import NoJobData
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:

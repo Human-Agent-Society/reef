@@ -17,11 +17,11 @@ from reef.control.workers.samples import LocalSampleProducers
 from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
-from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.record2sample import Record2Sample, SampleResult
-from reef.record2sample.service import Selection
-from reef.record2sample.sets import RecordSet
+from reef.samples import Record2Sample, SampleResult
+from reef.samples.context import PipelineContext
+from reef.samples.service import Selection
+from reef.samples.sets import RecordSet
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 STAGE = f"{__name__}:WindowSamples"

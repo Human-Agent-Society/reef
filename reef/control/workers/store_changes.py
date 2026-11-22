@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from reef.control.scenario.registry import ScenarioRegistry
 from reef.control.scenario.scenario import Scenario
 from reef.execution.workers import ServiceWorker
-from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE
+from reef.samples.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.work_queue import WorkQueue
 from reef.train.job_queue import JOBS_QUEUE

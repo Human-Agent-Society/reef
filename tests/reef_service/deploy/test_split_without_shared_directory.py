@@ -53,7 +53,7 @@ from reef.harness.tree import TreePatch
 from reef.recipe import Recipe
 from reef.recipe.base import WEIGHTS_COMPONENT
 from reef.recipe.composite import CompositeRecipe
-from reef.record2sample.service.worker import SAMPLES_QUEUE
+from reef.samples.service.worker import SAMPLES_QUEUE
 from reef.storage.sql_coordination import open_coordination
 from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.job_queue import (

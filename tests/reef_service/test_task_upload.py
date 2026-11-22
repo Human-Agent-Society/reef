@@ -22,11 +22,11 @@ from reef.core.tasks import write_harbor_task
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.record2sample import NoSamples
-from reef.sample2job import Sample2Job
+from reef.samples import NoSamples
 from reef.storage.item_kinds import task_partition
 from reef.train import JobData
 from reef.train.pipeline import PipelineSettings
+from reef.train.sample2job import Sample2Job
 
 TOKEN = "task-upload-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -195,7 +195,7 @@ def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_do
         dispatcher.close()
 
 
-OFFLINE_STAGE = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskJobData"}}}
+OFFLINE_STAGE = {"pipeline": {"sample2job": {"module": "reef.train.sample2job.traces:TrainTaskJobData"}}}
 
 
 @pytest.mark.parametrize(

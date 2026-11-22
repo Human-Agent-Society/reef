@@ -16,7 +16,6 @@ from reef.artifact import SnapshotRef
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import HarborTask
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
-from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskJobData
 from reef.recipe.generated_tasks.generator import (
     GeneratedTaskResult,
@@ -25,12 +24,13 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
-from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sample2job import Sample2JobSettings
+from reef.samples.context import PipelineContext
+from reef.samples.generator.inputs import TaskGenerationRequest
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioStore
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2JobSettings
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 

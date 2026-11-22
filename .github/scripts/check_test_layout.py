@@ -20,7 +20,6 @@ TEST_DIRECTORIES = {
     "packaging",
     "plugin_contracts",
     "recipes",
-    "record2sample",
     "reef_client",
     "reef_recipe",
     "reef_service",
@@ -30,7 +29,7 @@ TEST_DIRECTORIES = {
     "slime_backend",
     "smoke",
     "storage",
-    "sample2job",
+    "samples",
     "tinker_backend",
     "train",
 }

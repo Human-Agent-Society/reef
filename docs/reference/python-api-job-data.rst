@@ -98,7 +98,7 @@ The ``reef.core.trajectories`` helpers construct and consume ATIF:
    * - ``trajectory_reward(item)``
      - A finite policy reward.
 
-``SampleAssembly.build`` (``reef.record2sample.assembly``) makes a report's sample: the trajectory's last call, or every call with ``accept_multi_turn_policy_samples``. A task rollout of a training component uses ``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from ``reef.record2sample.samples`` to keep the tensors that its engine returned.
+``SampleAssembly.build`` (``reef.samples.assembly``) makes a report's sample: the trajectory's last call, or every call with ``accept_multi_turn_policy_samples``. A task rollout of a training component uses ``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from ``reef.samples.samples`` to keep the tensors that its engine returned.
 
 Completed text-only streaming responses contribute their aggregated ``response.message`` to the ATIF agent step. The original SSE body remains in the captured record. Matching assistant messages in later request history are reused as context without duplicating those steps. An explicit ``training.response_message`` takes precedence over the stream summary.
 

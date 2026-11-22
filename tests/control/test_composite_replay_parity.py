@@ -50,10 +50,10 @@ from reef.core.reports import ReportBase
 from reef.evaluation.harness import EvaluationSettings
 from reef.execution.jobs import SupportsReceipt
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
-from reef.record2sample.assembly import SampleAssemblySettings
-from reef.record2sample.staleness import ServedArtifacts, lags_behind
+from reef.samples import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
+from reef.samples.assembly import SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.samples.staleness import ServedArtifacts, lags_behind
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.pipeline import PipelineSettings
 from reef.train.types import JobData, Sample
