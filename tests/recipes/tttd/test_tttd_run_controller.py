@@ -290,7 +290,7 @@ def test_status_client_reads_authenticated_public_training_status() -> None:
                             },
                             "served_artifact_id": "v1",
                             "job_data_ready": False,
-                            "processor": {"failed_steps": []},
+                            "pipeline": {"failed_steps": []},
                         }
                     },
                 }

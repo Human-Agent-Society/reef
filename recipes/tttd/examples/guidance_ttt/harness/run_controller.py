@@ -327,11 +327,11 @@ def scenario_status(body: Mapping[str, Any], scenario: str) -> dict[str, Any] | 
 
 
 def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any] | None:
-    """Return this step's terminal processor failure, if present."""
-    processor = status.get("processor")
-    failed_steps = processor.get("failed_steps") if isinstance(processor, Mapping) else None
+    """Return this step's terminal failure in the status's ``pipeline`` object, if present."""
+    pipeline = status.get("pipeline")
+    failed_steps = pipeline.get("failed_steps") if isinstance(pipeline, Mapping) else None
     if not isinstance(failed_steps, list):
-        raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
+        raise RuntimeError(f"Reef returned invalid pipeline status: {status!r}")
     for failure in failed_steps:
         if (
             not isinstance(failure, Mapping)
@@ -339,7 +339,7 @@ def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any]
             or not failure["reason"]
             or not isinstance(failure.get("artifact_ids"), list)
         ):
-            raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
+            raise RuntimeError(f"Reef returned invalid pipeline status: {status!r}")
         if failure.get("step") == step:
             return dict(failure)
     return None

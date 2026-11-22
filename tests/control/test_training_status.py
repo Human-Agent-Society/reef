@@ -153,7 +153,7 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
     outcome = {"failed_steps": [{"step": 1, "reason": "mixed_artifact_ids", "artifact_ids": ["old", "new"]}]}
     dispatcher = bound_dispatcher(scenario_double(pipeline_status=outcome))
 
-    assert dispatcher.build_training_status()["scenarios"]["s"]["processor"] == outcome
+    assert dispatcher.build_training_status()["scenarios"]["s"]["pipeline"] == outcome
 
 
 def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer() -> None:

@@ -47,7 +47,7 @@ Scenario routes
 ---------------
 
 - ``GET /reef/scenarios`` lists every known scenario, its selections once loaded and, for a harness recipe, the ``adapter`` that its tree is rendered for, also while the scenario loads.
-- ``GET /reef/scenarios/{scenario}/contract`` returns ``{scenario, processor, required_request_types, training_mode, status, parameters_schema}``. ``training_mode`` and ``status`` are live values. ``parameters_schema`` maps a sample kind to the JSON Schema of a job's parameters, for each kind whose schema the training component declares.
+- ``GET /reef/scenarios/{scenario}/contract`` returns ``{scenario, sample2job, required_request_types, training_mode, status, parameters_schema}``. ``sample2job`` is the class name of the recipe's sample-to-job stage; the answer also holds it under ``processor``, the older name of the key. ``training_mode`` and ``status`` are live values. ``parameters_schema`` maps a sample kind to the JSON Schema of a job's parameters, for each kind whose schema the training component declares.
 - ``DELETE /reef/scenarios/{scenario}`` deletes the scenario (`Deleting a scenario`_).
 
 - `Training jobs <http-api-training.rst#training-jobs>`__ gives the routes that list the scenario's training jobs and cancel a job or a training request.

@@ -312,7 +312,7 @@ class Trainer:
             }
             for name, value in pipeline_metrics.items():
                 if isinstance(value, (int, float)) and math.isfinite(value):
-                    values[f"processor/{name}"] = int(value) if isinstance(value, bool) else value
+                    values[f"pipeline/{name}"] = int(value) if isinstance(value, bool) else value
         finally:
             self._lock.release()
         return values

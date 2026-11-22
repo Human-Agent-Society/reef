@@ -520,7 +520,7 @@ def _reef_status(
                 "training_job": training_job,
                 "finished_jobs": finished_jobs,
                 "served_artifact_id": served_artifact_id,
-                "processor": {"failed_steps": failed_steps or []},
+                "pipeline": {"failed_steps": failed_steps or []},
             }
         },
     }

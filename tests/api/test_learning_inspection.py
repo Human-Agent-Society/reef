@@ -86,6 +86,8 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             contract = await (await client.get("/reef/scenarios/one/contract", headers=headers)).json()
             assert "historical_decisions_available" not in contract
             assert "training_mode" in contract
+            # The route gives the stage's class name under ``sample2job`` and under the older key.
+            assert contract["sample2job"] == contract["processor"]
             commits = await (await client.get("/reef/scenarios/one/commits?limit=1", headers=headers)).json()
             assert commits["commits"][0]["consumed_ids"] == ["consumed"]
             assert commits["commits"][0]["metrics"] == commit.metrics

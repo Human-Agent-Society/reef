@@ -8,7 +8,7 @@ from aiohttp import web
 from reef.api.artifact_page import harness_artifact_page
 from reef.api.request_handling import RequestHandling
 from reef.api.request_page import harness_request_page
-from reef.api.wire import scenario_header
+from reef.api.wire import scenario_header, status_with_older_keys
 from reef.control.operations.harness import harness_request_progress, harness_step_records
 from reef.core.records_types import SCENARIO_HEADER
 
@@ -69,7 +69,7 @@ def register_system_routes(app: web.Application, *, request_handling: RequestHan
 
     async def status(request: web.Request) -> web.Response:
         value = await asyncio.to_thread(lambda: dispatcher.build_training_status())
-        return web.json_response(value)
+        return web.json_response(status_with_older_keys(value))
 
     # One to nine digits: a step that is no number, or longer than any catalog, is no row; the router's own 404 answers it.
     app.router.add_get(r"/reef/harness/artifacts/{step:\d{1,9}}/page", artifact_page)

@@ -137,10 +137,13 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
             assert scenario.pending_requests() == 9
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
-            processor = (await status.json())["scenarios"]["agents"]["processor"]
-            assert processor["pending_requests"] == 9
+            block = (await status.json())["scenarios"]["agents"]
+            pipeline = block["pipeline"]
+            # The route gives the same object under the older key.
+            assert block["processor"] == pipeline
+            assert pipeline["pending_requests"] == 9
             # The recipe sets job_samples 3; the default buffer holds the data of one job.
-            assert (processor["ready_samples"], processor["job_samples"], processor["buffer_size"]) == (0, 3, 3)
+            assert (pipeline["ready_samples"], pipeline["job_samples"], pipeline["buffer_size"]) == (0, 3, 3)
             assert len(scenario.training_requests.queued()) == 9
             # Retrying an accepted request does not add another pending request.
             retry = await _post(client, {**_request("request 0"), "agent_record_id": ids[0]})
@@ -155,7 +158,7 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
             assert scenario.pending_requests() == 0
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
-            drained = (await status.json())["scenarios"]["agents"]["processor"]
+            drained = (await status.json())["scenarios"]["agents"]["pipeline"]
             assert drained["pending_requests"] == 0
         finally:
             release.set()

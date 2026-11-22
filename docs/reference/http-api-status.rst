@@ -31,7 +31,7 @@ Status
          "served_artifact_id": "5e1c...",
          "job_data_ready": false,
          "training_mode": "auto",
-         "processor": {"...": "..."},
+         "pipeline": {"...": "..."},
          "inference_admission": {"...": "..."},
          "artifacts": {"weights": {"active": "5e1c...", "training_start": "5e1c..."}},
          "training_jobs": [{"job_id": "9c41...", "start": "/checkpoints/iter_0000004", "checkpoints_handled": 0,
@@ -56,7 +56,8 @@ Fields of each scenario:
 - ``job_data_ready`` says whether the training pipeline has a job's data waiting.
 - ``training_mode`` is the selected mode.
 - ``artifacts`` gives two ``artifact_id`` values for each component: its active artifact and its trainer's training start. A value is ``null`` when Reef does not know it. Both values start at the creation artifact.
-- ``processor`` includes ``ready_samples``, the untrained samples that the next automatic job takes, from recorded traffic and uploaded trajectories; ``job_samples``, the samples that automatic job data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most samples that one automatic job takes, beside the rest of a group. A processor that takes requests also reports ``pending_requests``.
+- ``pipeline`` includes ``ready_samples``, the untrained samples that the next automatic job takes, from recorded traffic and uploaded trajectories; ``job_samples``, the samples that automatic job data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most samples that one automatic job takes, beside the rest of a group. A processor that takes requests also reports ``pending_requests``.
+- ``processor`` is the older name of ``pipeline``. The answer holds the same object under both keys, in each scenario and in each entry of ``components``, so that a caller that reads ``processor`` continues to work. Read ``pipeline`` in new code.
 
 A scenario that trains weights also reports its training jobs:
 
@@ -70,7 +71,7 @@ A scenario that trains weights also reports its training jobs:
 - ``finished_jobs`` counts the jobs of the scenario that ended, finished or failed.
 - A runtime that serves each scenario its own adapter adds ``adapter_runtime_load_id``: the runtime load ID of the scenario's served adapter, or ``null`` while the scenario samples the base model.
 
-A scenario whose recipe runs one trainer per recipe component adds a ``components`` object. For each recipe component, it holds the component's own ``job_data_ready``, ``training_mode``, ``processor`` status and ``last_training_commit``. The scenario-wide ``job_data_ready``, ``training_mode`` and ``processor`` then describe the first trainer that trains, else the first trainer. The scenario-wide ``last_training_commit`` is the latest training commit of any recipe component.
+A scenario whose recipe runs one trainer per recipe component adds a ``components`` object. For each recipe component, it holds the component's own ``job_data_ready``, ``training_mode``, ``pipeline`` status and ``last_training_commit``. The scenario-wide ``job_data_ready``, ``training_mode`` and ``pipeline`` then describe the first trainer that trains, else the first trainer. The scenario-wide ``last_training_commit`` is the latest training commit of any recipe component.
 
 Status codes
 ------------

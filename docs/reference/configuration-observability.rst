@@ -44,9 +44,9 @@ Recipe and stage code logs through the same logger without importing W&B:
 .. code:: python
 
    experiment_logger.log({"temperature": 0.6}, namespace="recipe")
-   self.experiment_logger.log({"accepted": 12}, namespace="processor")
+   self.experiment_logger.log({"accepted": 12}, namespace="stage")
 
-Those become ``recipe/*`` and ``processor/*``, each namespace on its own ``<namespace>/event`` axis. Only finite numeric values are sent.
+Those become ``recipe/*`` and ``stage/*``, each namespace on its own ``<namespace>/event`` axis. Only finite numeric values are sent.
 
 Operational metrics
 ~~~~~~~~~~~~~~~~~~~
@@ -73,15 +73,15 @@ The following names are relative to ``operations/``:
      - Training-visible records after the read cursor of the record-to-sample stage. These may still need feedback or filtering; this is not a ready job data count.
    * - ``records/oldest_unread_age_seconds``
      - Age of the first unread record, measured from its recorded creation time; zero when none remain.
-   * - ``processor/waiting_reports``
+   * - ``pipeline/waiting_reports``
      - Reported-feedback reports that wait for their group or for the sample store. An incomplete group still counts as waiting.
-   * - ``processor/oldest_report_wait_seconds``
+   * - ``pipeline/oldest_report_wait_seconds``
      - Age of the oldest waiting report; zero when none remain.
-   * - ``processor/tracked_records``, ``processor/judging_records``
+   * - ``pipeline/tracked_records``, ``pipeline/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
-   * - ``processor/waiting_candidates``
+   * - ``pipeline/waiting_candidates``
      - Computed-feedback candidates that wait to become samples.
-   * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
+   * - ``pipeline/ready_samples``, ``pipeline/job_samples``, ``pipeline/buffer_size``
      - Samples that the next automatic job can take now, samples that automatic job data needs, and the most samples that one automatic job takes.
    * - ``training/reserved_job_data``
      - Zero or one. A reservation can be executing or waiting for settlement; it is not necessarily queued job data.
@@ -117,7 +117,7 @@ How to read the samples:
 - A completed execution call is not necessarily a commit: a poll of a running job that saved no new checkpoint commits nothing.
 - The measurements are not persisted training history. Execution measurements reset when their trainer is rebuilt, including recovery; ``training/started_at_seconds`` identifies that reset. Request and ingestion measurements reset when the scenario is rebuilt; ``operations/started_at_seconds`` identifies that reset.
 - Malformed HTTP payloads and headers, and failures before Reef resolves the scenario, are outside these measurements.
-- Additional finite numeric fields of the ``processor`` object of the status appear under ``operations/processor/``. Sampling does not advance the training pipeline or consume its queue. If ingestion or a commit holds the trainer lock, that sample omits the queue gauges and still reports the execution measurements.
+- Additional finite numeric fields of the ``pipeline`` object of the status appear under ``operations/pipeline/``. Sampling does not advance the training pipeline or consume its queue. If ingestion or a commit holds the trainer lock, that sample omits the queue gauges and still reports the execution measurements.
 - Samples contain no request bodies, record IDs, scenario names or error messages. Uploading them configures no alert notifications. The inference engines keep their own high-frequency monitoring.
 
 Commit correlation

@@ -7,6 +7,7 @@ from aiohttp import web
 from reef.api.inference_service import TrafficWeights
 from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
+from reef.api.wire import contract_with_older_keys
 from reef.control.operations.artifact_evaluations import ArtifactEvaluations
 from reef.control.operations.artifact_imports import ArtifactImports
 from reef.core.errors import ScenarioNotFoundError
@@ -79,9 +80,8 @@ def register_scenario_reads(app: web.Application, *, request_handling: RequestHa
 
     async def scenario_contract(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        return web.json_response(
-            request_handling.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
-        )
+        contract = request_handling.dispatcher.scenario_contract(scenario)
+        return web.json_response(contract_with_older_keys(contract), headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
