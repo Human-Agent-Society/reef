@@ -42,7 +42,7 @@ Target IDs and ``automatic_model`` must not start with ``reef-entrypoint/``, in 
 Managed routing lifecycle
 -------------------------
 
-With ``reef.routing_manifest`` set, ``reef serve`` runs the SR container and a routed Reef child. ``reef serve --component`` refuses a managed manifest. The lifecycle needs Linux, a local Docker daemon with Compose, and the local ``uni`` service executor. You run the model services yourself.
+With ``reef.routing_manifest`` set, ``reef serve`` runs the SR container and a routed Reef child. ``reef serve --service`` refuses a managed manifest. The lifecycle needs Linux, a local Docker daemon with Compose, and the local ``uni`` service executor. You run the model services yourself.
 
 .. code-block:: yaml
 
@@ -140,7 +140,7 @@ Startup reads the manifest once and fixes the image for the generation. Policy u
 External router lifecycle
 -------------------------
 
-Use ``reef.routing_deployment.lifecycle: external`` when each Reef service runs in its own process and another system, such as Kubernetes, runs SR. Reef then needs no Docker. Each replica of the ``inference`` service uses one SR on its own loopback. Every service can read the same configuration, because the other services ignore the manifest. ``reef serve`` without ``--component`` refuses this lifecycle.
+Use ``reef.routing_deployment.lifecycle: external`` when each Reef service runs in its own process and another system, such as Kubernetes, runs SR. Reef then needs no Docker. Each replica of the ``inference`` service uses one SR on its own loopback. Every service can read the same configuration, because the other services ignore the manifest. ``reef serve`` without ``--service`` refuses this lifecycle.
 
 .. code-block:: yaml
 
@@ -167,7 +167,7 @@ To start a replica:
         --config /etc/reef/reef.yaml --output /app/config/config.yaml
 
 3. Run SR with ``/app/config/config.yaml`` as its argument, in the replica's network namespace. SR listens on ``127.0.0.1:<sr_management_port>``. The render step writes the file with mode 0600, so run SR as the user that wrote it.
-4. Run ``reef serve --component inference``. Clients reach it on ``reef.host``.
+4. Run ``reef serve --service inference``. Clients reach it on ``reef.host``.
 
 Use ``GET /readyz`` as the replica's readiness check. It needs no token. It answers 200 after SR reports its generated runtime as active and ready, every enabled target lists its model, and one preview per Scenario passes. It answers 503 otherwise, including for requests of Scenarios outside the manifest. The replica reads SR every five seconds and checks a new runtime hash in the same way before requests use it.
 

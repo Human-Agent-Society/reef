@@ -151,7 +151,7 @@ Implementation
   ``trainer_serving_config``.
 - Implement ``facts(config, model_path, environ)`` on the factory (`Backend
   facts <../developer-guide/training-backends.rst#backend-facts>`__). Only
-  ``reef serve --component training`` builds the component; every other
+  ``reef serve --service training`` builds the component; every other
   service reads the facts.
 
   - Define the facts type in the integration's own package, from its own

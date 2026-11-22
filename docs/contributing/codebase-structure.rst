@@ -80,7 +80,7 @@ Nothing under ``reef/`` imports a method package. A weight method keeps its obje
 Services and the shared store
 -----------------------------
 
-A deployment runs seven services (``SERVICE_NAMES`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
+A deployment runs seven services (``SERVICE_NAMES`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --service NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
 
 ``reef/api/services.py`` holds one app builder per service (``SERVICE_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/api/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
 

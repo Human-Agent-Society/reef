@@ -1,4 +1,4 @@
-"""The harness service (``reef serve --component harness``): it serves a harness client, and control commits imports.
+"""The harness service (``reef serve --service harness``): it serves a harness client, and control commits imports.
 
 Control and the harness service run as two dispatchers over one record store, one artifact repository and one
 coordination store, as two processes on one host do.

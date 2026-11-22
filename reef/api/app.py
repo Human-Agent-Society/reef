@@ -176,7 +176,7 @@ def create_data_app(
 ) -> web.Application:
     """The HTTP app of the data service: the data routes and the reads of what each scenario stores.
 
-    ``dispatcher`` runs the data service and no control (``reef serve --component data``): it loads each scenario
+    ``dispatcher`` runs the data service and no control (``reef serve --service data``): it loads each scenario
     on demand, for the checks of a data write and for the reads. The app closes it on cleanup.
     ``max_task_archive_bytes`` is ``data.max_task_archive_bytes``: the most bytes of the body of a task archive.
     """
@@ -210,7 +210,7 @@ def create_harness_app(
 ) -> web.Application:
     """The HTTP app of the harness service: the routes that a harness client calls (RFC #1048, harness supplement).
 
-    ``dispatcher`` runs the harness service and no control (``reef serve --component harness``): it loads each
+    ``dispatcher`` runs the harness service and no control (``reef serve --service harness``): it loads each
     scenario on demand, without activating it, and reads its commits and artifacts. An import goes to control as a
     ``harness_sync`` item (``QueuedImports``). ``inference_url`` is ``harness.inference_url``. The app closes the
     dispatcher on cleanup.

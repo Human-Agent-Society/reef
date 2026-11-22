@@ -27,13 +27,13 @@ class RoutingDeploymentSettings:
     len - 1)]``, so the last delay repeats. These settings apply only when ``reef.routing_manifest`` is set;
     ``require_identity`` then returns ``deployment_id`` or refuses a deployment without one.
     With ``managed``, ``reef serve`` runs the container and reads every setting. With ``external``, another system
-    runs the router beside ``reef serve --component inference``, and only the port, preview and finalization
+    runs the router beside ``reef serve --service inference``, and only the port, preview and finalization
     settings apply. ``image_build_timeout_seconds`` bounds only a managed startup's build of the router image;
     it is not part of the rendered configuration.
     """
 
     lifecycle: str = config_option(
-        "managed", help="Who runs the router: managed (reef serve) or external (beside --component inference)."
+        "managed", help="Who runs the router: managed (reef serve) or external (beside --service inference)."
     )
     deployment_id: str | None = config_option(None, help="Stable local deployment identifier.")
     restart_policy: str = config_option("fail_stop", help="Failure policy: fail_stop or bounded.")
