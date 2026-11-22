@@ -61,10 +61,23 @@ def save_collection(data: DataAccess, owner: str, name: str, body: Mapping[str, 
     return {"owner": owner, **collection.to_json()}
 
 
-def list_collections(data: DataAccess, owner: str) -> dict[str, Any]:
-    """The collections of ``owner``, by name: ``{owner, collections}``."""
-    stored = data.require_store().collections(owner)
-    return {"owner": owner, "collections": [collection.to_json() for collection in stored]}
+def list_collections(data: DataAccess, owner: str, *, counts: bool = False) -> dict[str, Any]:
+    """The collections of ``owner``, by name: ``{owner, collections}``.
+
+    With ``counts``, add the distinct benchmark and task counts to each collection.
+    """
+    store = data.require_store()
+    stored = {collection.name: collection for collection in store.collections(owner)}
+    records = [collection.to_json() for collection in stored.values()]
+    if counts:
+        expanded = {name: collection_benchmarks(stored, name) for name in stored}
+        benchmarks = tuple({benchmark for names in expanded.values() for benchmark in names})
+        tasks = store.benchmark_item_ids(owner, benchmarks)
+        for record in records:
+            names = expanded[record["name"]]
+            record["benchmark_count"] = len(names)
+            record["task_count"] = len(set().union(*(tasks[name] for name in names)))
+    return {"owner": owner, "collections": records}
 
 
 def read_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]:

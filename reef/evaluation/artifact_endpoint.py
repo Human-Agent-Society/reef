@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailableError, UpstreamStatusError
+from reef.core.errors import InferenceUnavailableError, ReefError, UpstreamStatusError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
@@ -169,6 +169,14 @@ class CandidateArtifacts(ABC):
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` on this process's file system, which the task
         file store fetches when another process stored it. ``ReefError`` for a task that the scenario does not use."""
+
+    def candidate_task_for_digest(self, scenario: str, task_name: str, digest: str) -> Path:
+        """The directory of the pinned version of ``task_name`` in the scenario's owner's task file store."""
+        raise ReefError("this candidate provider cannot read a task by files digest")
+
+    def candidate_task_version(self, scenario: str, task_name: str) -> tuple[Path, str | None]:
+        """The current task directory and its stored files digest, or None when the digest is unavailable."""
+        return self.candidate_task(scenario, task_name), None
 
     def task_owner(self, scenario: str) -> str | None:
         """The owner that the record of ``scenario`` stores (``ScenarioSettings.owner``); None when the scenario does

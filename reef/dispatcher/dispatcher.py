@@ -1235,13 +1235,28 @@ class Dispatcher(
 
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""
+        return self.candidate_task_version(scenario, task_name)[0]
+
+    def candidate_task_version(self, scenario: str, task_name: str) -> tuple[Path, str | None]:
+        """The directory and stored digest of the current task used by ``scenario``."""
         with self.locked_scenario(scenario) as current:
             samples = self.storage.sample_store(scenario, current.store)
             found = () if samples is None else samples.read((task_name,))
         sample = found[0].sample if found else None
         if not isinstance(sample, TaskSample):
             raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")
-        return sample.task_path
+        return sample.task_path, sample.files.digest if sample.files is not None else None
+
+    def candidate_task_for_digest(self, scenario: str, task_name: str, digest: str) -> Path:
+        """The directory of the version of ``task_name`` with ``digest`` in the scenario owner's task file store."""
+        with self.locked_scenario(scenario) as current:
+            samples = self.storage.sample_store(scenario, current.store)
+        if samples is None:
+            raise ReefError(f"scenario {scenario!r} has no sample store")
+        path = samples.data.task_path_for_digest(samples.owner, digest)
+        if path.name != task_name:
+            raise ReefError(f"the files with digest {digest} do not belong to task {task_name!r}")
+        return path
 
     def task_owner(self, scenario: str) -> str | None:
         """The owner that the record of ``scenario`` stores, or None (``CandidateArtifacts``). Unlike

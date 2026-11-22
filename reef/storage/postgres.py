@@ -31,7 +31,12 @@ from reef.storage.record_items import ItemRecordStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import PostgresDataStore
-from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
+from reef.storage.sql_evaluations import (
+    SQLEvaluationStore,
+    evaluation_digest_table,
+    evaluation_start_table,
+    evaluation_table,
+)
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
 from reef.storage.sql_samples import SQLTrainingState, stage_record_table
 from reef.storage.sql_setup import postgres_url, validate_postgres_schema
@@ -77,6 +82,8 @@ class PostgresRecordDatabase:
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.stage_record_table = stage_record_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
+        self.evaluation_start_table = evaluation_start_table(metadata, foreign_key="record_store.storage_id")
+        self.evaluation_digest_table = evaluation_digest_table(metadata)
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
             self._engine = create_engine(postgres_url(database_url), pool_pre_ping=True, hide_parameters=True)
@@ -243,8 +250,12 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations of this store generation."""
+        scope = {"storage_id": self.storage_id}
         return SQLEvaluationStore(
-            self, ScopedTable(self._database.evaluation_table, scope={"storage_id": self.storage_id})
+            self,
+            ScopedTable(self._database.evaluation_table, scope=scope),
+            ScopedTable(self._database.evaluation_start_table, scope=scope),
+            self._database.evaluation_digest_table,
         )
 
     def commit_history(self) -> SQLCommitHistory:

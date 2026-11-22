@@ -7,6 +7,7 @@ and decides whether a snapshot is published; training on tasks assembles the sam
 from __future__ import annotations
 
 import hashlib
+import heapq
 import math
 import re
 from abc import ABC, abstractmethod
@@ -16,7 +17,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import FILES_DIGEST_PATTERN, TrajectorySample
 from reef.core.values import JsonValue, require_integer, require_text
 
 #: The JSON value of a failed rollout's score (``RolloutScore.to_json``).
@@ -151,6 +152,12 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
     return math.fsum(values) / len(values) if values else None
 
 
+def mean_benchmark_score(benchmark_means: Iterable[float | None]) -> float | None:
+    """Give each benchmark with a score equal weight. Return None if none have a score."""
+    means = [score for score in benchmark_means if score is not None]
+    return math.fsum(means) / len(means) if means else None
+
+
 #: How an evaluation on a collection computes its mean score: ``task`` is the mean of every rollout, and ``benchmark``
 #: is the mean of the mean scores of the benchmarks.
 CollectionAverage = Literal["task", "benchmark"]
@@ -199,6 +206,46 @@ class EvaluationCollection:
         """Every task of the collection."""
         return frozenset(name for _, task_names in self.benchmarks for name in task_names)
 
+    def covering_tasks(self, ranked: Sequence[str], count: int) -> set[str]:
+        """Select tasks that cover each benchmark, from its tasks in ``ranked``.
+
+        Take each benchmark's highest-ranked task if they fit in ``count``. Otherwise take tasks that
+        cover the most uncovered benchmarks first, breaking ties by rank. Raise ValueError if this
+        selection exceeds ``count``.
+        """
+        rank = {name: index for index, name in enumerate(ranked)}
+        selected = {min(names, key=rank.__getitem__) for _, names in self.benchmarks}
+        if len(selected) <= count:
+            return selected
+
+        tasks_by_benchmark = dict(self.benchmarks)
+        memberships: list[set[str]] = [set() for _ in ranked]
+        for benchmark, names in self.benchmarks:
+            for name in names:
+                memberships[rank[name]].add(benchmark)
+        candidates = [(-len(benchmarks), index) for index, benchmarks in enumerate(memberships)]
+        heapq.heapify(candidates)
+        uncovered_count = len(self.benchmarks)
+        selected = set()
+        for remaining_slots in range(count, 0, -1):
+            negative_coverage, index = heapq.heappop(candidates)
+            while -negative_coverage != len(memberships[index]):
+                negative_coverage, index = heapq.heappop(candidates)
+            if -negative_coverage * remaining_slots < uncovered_count:
+                break
+            selected.add(ranked[index])
+            for benchmark in tuple(memberships[index]):
+                uncovered_count -= 1
+                for name in tasks_by_benchmark[benchmark]:
+                    task_rank = rank[name]
+                    remaining = memberships[task_rank]
+                    remaining.remove(benchmark)
+                    if remaining:
+                        heapq.heappush(candidates, (-len(remaining), task_rank))
+            if uncovered_count == 0:
+                return selected
+        raise ValueError("increase num_samples to cover every benchmark in the eval split of the collection")
+
     def benchmark_scores(self, scores: RolloutScores) -> list[dict[str, Any]]:
         """The score of each benchmark, in order: ``{"benchmark", "task_count", "mean_score"}``. ``task_count`` is
         the number of the benchmark's tasks, and ``mean_score`` is ``mean_score`` of the rollouts of those tasks in
@@ -218,8 +265,7 @@ class EvaluationCollection:
         mean of the benchmark means that are not None, or None when there is none."""
         if self.average == "task":
             return mean_score(scores.rollouts())
-        means = [entry["mean_score"] for entry in self.benchmark_scores(scores) if entry["mean_score"] is not None]
-        return math.fsum(means) / len(means) if means else None
+        return mean_benchmark_score(entry["mean_score"] for entry in self.benchmark_scores(scores))
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -438,7 +484,9 @@ class ArtifactEvaluationRequest:
     than 1, above which Reef stops the evaluation; None for no limit. ``log_probs`` is a bool: True asks the
     candidate's engine for the sampled tokens' log probabilities and token IDs in every model call of the
     evaluation (``ArtifactEndpoint``), so that the kept calls hold them.
-    Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
+    For a pinned evaluation, ``task_digests`` holds one lowercase hex SHA-256 per accepted task, in task order.
+    An unpinned request has no digests. A list view can omit them for a pinned request.
+    Purpose: the evaluation service makes the request, stores it (``to_json``), and runs it.
     """
 
     artifact_id: str
@@ -452,6 +500,7 @@ class ArtifactEvaluationRequest:
     max_failed_fraction: float | None = None
     collection: EvaluationCollection | None = None
     log_probs: bool = False
+    task_digests: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -504,6 +553,15 @@ class ArtifactEvaluationRequest:
             or len(set(self.task_names)) != len(self.task_names)
         ):
             raise ValueError("an artifact evaluation's task_names are distinct non-empty strings")
+        if self.task_digests is not None and (
+            not isinstance(self.task_digests, tuple)
+            or len(self.task_digests) != len(self.task_names)
+            or any(
+                not isinstance(digest, str) or FILES_DIGEST_PATTERN.fullmatch(digest) is None
+                for digest in self.task_digests
+            )
+        ):
+            raise ValueError("task_digests must give one files digest per task name")
         if self.collection is not None and (
             not isinstance(self.collection, EvaluationCollection)
             or self.collection.task_names() != frozenset(self.task_names)
@@ -523,7 +581,11 @@ class ArtifactEvaluationRequest:
         if not isinstance(self.log_probs, bool):
             raise ValueError("an artifact evaluation's log_probs is true or false")
 
-    def to_json(self) -> dict[str, Any]:
+    def task_digest(self, index: int) -> str | None:
+        """The files digest of the task at ``index``, or None if this request has no task digests."""
+        return None if self.task_digests is None else self.task_digests[index]
+
+    def to_json(self, *, include_task_digests: bool = True) -> dict[str, Any]:
         return {
             "artifact_id": self.artifact_id,
             "component": self.component,
@@ -536,18 +598,26 @@ class ArtifactEvaluationRequest:
             "max_failed_fraction": self.max_failed_fraction,
             "collection": None if self.collection is None else self.collection.to_json(),
             "log_probs": self.log_probs,
+            **(
+                {"task_digests": list(self.task_digests)}
+                if include_task_digests and self.task_digests is not None
+                else {}
+            ),
         }
 
     @classmethod
     def from_json(cls, value: object) -> ArtifactEvaluationRequest:
         """The request that ``to_json`` gave; raise ``ValueError`` for any other value. A request stored before
         ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit, one stored before
-        ``collection`` existed has no collection, and one stored before ``log_probs`` existed asks for none."""
+        ``collection`` existed has no collection, and older requests can omit ``log_probs`` and ``task_digests``."""
         keys = {"artifact_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
         if (
             not isinstance(value, Mapping)
-            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction", "collection", "log_probs"} != keys
+            or set(value)
+            - {"max_concurrent_rollouts", "max_failed_fraction", "collection", "log_probs", "task_digests"}
+            != keys
             or not isinstance(value["task_names"], list)
+            or ("task_digests" in value and not isinstance(value["task_digests"], list))
         ):
             raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
         return cls(
@@ -562,6 +632,7 @@ class ArtifactEvaluationRequest:
             value.get("max_failed_fraction"),
             None if value.get("collection") is None else EvaluationCollection.from_json(value["collection"]),
             value.get("log_probs", False),
+            tuple(value["task_digests"]) if "task_digests" in value else None,
         )
 
 
@@ -630,24 +701,27 @@ class ArtifactEvaluationSettings:
             log_probs=self.log_probs,
         )
 
-    def sampled_task_names(self, task_names: Sequence[str]) -> tuple[str, ...]:
-        """The tasks of ``task_names``, distinct names, that an evaluation with these settings runs, in the order
-        that it runs them.
+    def sampled_task_names(
+        self, task_names: Sequence[str], collection: EvaluationCollection | None = None
+    ) -> tuple[str, ...]:
+        """Select up to ``num_samples`` distinct ``task_names`` and return them in run order.
 
-        Without a ``sample_seed``, the order is that of ``task_names``, and the tasks rank by the SHA-256 digests of
-        their names. With one, the tasks rank by the digests of ``"<sample_seed>:<name>"``, and the order is that
-        rank: a random order that the seed fixes. The evaluation runs all of them when ``num_samples`` is None or
-        not less than their number, else the first ``num_samples`` of the rank. The choice reads the names and the
-        seed only, so every evaluation of the same tasks with the same ``num_samples`` and ``sample_seed`` runs the
-        same tasks in the same order, and a smaller ``num_samples`` gives a subset.
+        Without a seed, rank by SHA-256 of each name and keep the input order. With a seed, rank by
+        SHA-256 of ``"<sample_seed>:<name>"`` and use rank order. If ``collection`` uses a benchmark
+        average, its tasks must match ``task_names``. Cover its benchmarks before filling the remaining
+        places by rank. Raise ValueError if the coverage selection exceeds the budget.
         """
         count = len(task_names) if self.num_samples is None else min(self.num_samples, len(task_names))
-        if self.sample_seed is None:
-            ranked = sorted(task_names, key=lambda name: hashlib.sha256(name.encode()).digest())
-            sampled = frozenset(ranked[:count])
-            return tuple(name for name in task_names if name in sampled)
-        seeded = sorted(task_names, key=lambda name: hashlib.sha256(f"{self.sample_seed}:{name}".encode()).digest())
-        return tuple(seeded[:count])
+        prefix = "" if self.sample_seed is None else f"{self.sample_seed}:"
+        ranked = sorted(task_names, key=lambda name: hashlib.sha256(f"{prefix}{name}".encode()).digest())
+        if collection is not None and collection.average == "benchmark" and count < len(task_names):
+            sampled = collection.covering_tasks(ranked, count)
+            remaining = [name for name in ranked if name not in sampled]
+            sampled.update(remaining[: count - len(sampled)])
+        else:
+            sampled = set(ranked[:count])
+        order = task_names if self.sample_seed is None else ranked
+        return tuple(name for name in order if name in sampled)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -1049,5 +1123,6 @@ __all__ = [
     "RolloutScores",
     "SelectionDecision",
     "UpdateCandidate",
+    "mean_benchmark_score",
     "mean_score",
 ]

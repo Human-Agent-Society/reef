@@ -163,6 +163,12 @@ class ServingWorker(QueueWorker):
         self.recovered = False
         self.release_due = False
         self.activated: dict[str, str] = {}
+        # Retirement waits for serving work to commit its routes.
+        self.serving_work_changed = threading.Condition()
+        self.starting_items: set[int] = set()
+        self.retiring_item: int | None = None
+        # Evaluation starts return an endpoint without a route in served_models.
+        self.endpoints_served_during_retirement: set[tuple[str, str]] = set()
         # Engines can read selected files after startup. Keep local views alive until this worker stops.
         self.repositories: dict[str, Repository] = {}
         self.repositories_lock = threading.Lock()
@@ -267,8 +273,31 @@ class ServingWorker(QueueWorker):
             return ()
         return tuple(served for served in previous if runtime.adopt(served))
 
+    def run_taken(self, item: WorkItem) -> None:
+        """Keep retirement separate from serving work until its result commits."""
+        if self.slots == 1:
+            super().run_taken(item)
+            return
+        try:
+            super().run_taken(item)
+        finally:
+            with self.serving_work_changed:
+                self.starting_items.discard(item.changed_sequence)
+                if self.retiring_item == item.changed_sequence:
+                    self.retiring_item = None
+                    self.endpoints_served_during_retirement.clear()
+                self.serving_work_changed.notify_all()
+
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         """Serve one work item, treating a receiver fence as ownership loss rather than a failed training selection."""
+        if self.slots > 1:
+            with self.serving_work_changed:
+                self.serving_work_changed.wait_for(lambda: self.retiring_item is None)
+                if item.kind == STOP_SERVING_KIND:
+                    self.retiring_item = item.changed_sequence
+                    self.serving_work_changed.wait_for(lambda: not self.starting_items)
+                else:
+                    self.starting_items.add(item.changed_sequence)
         self.release_due = True
         try:
             return self.serve_item(item, lease_lost)
@@ -310,7 +339,8 @@ class ServingWorker(QueueWorker):
                 stop.served == served and stop.stop_after == item.payload["stop_after"]
                 for stop in self.routes.due_stops(time.time())
             )
-            if due and not self.routes.is_referenced(served):
+            refreshed = (served.url, served.model_name) in self.endpoints_served_during_retirement
+            if due and not refreshed and not self.routes.is_referenced(served):
                 # A scenario that this endpoint served must activate the same artifact again to serve it again.
                 stopped_scenarios = [
                     scenario
@@ -498,6 +528,10 @@ class ServingWorker(QueueWorker):
             raise WorkLeaseLostError("the serving worker lost runtime ownership")
         if item.kind == SERVE_ARTIFACT_KIND:
             super().finish_item(item, result)
+            with self.serving_work_changed:
+                if self.retiring_item is not None and result["served"] is not None:
+                    served = ServedArtifact.from_json(result["served"])
+                    self.endpoints_served_during_retirement.add((served.url, served.model_name))
             return
         if item.kind == STOP_SERVING_KIND:
             moment = item.payload["stop_after"]

@@ -286,7 +286,11 @@ def register_data_routes(
         return web.json_response(receipt)
 
     async def collections(request: web.Request) -> web.Response:
-        return web.json_response(await asyncio.to_thread(list_collections, data, request.match_info["owner"]))
+        return web.json_response(
+            await asyncio.to_thread(
+                list_collections, data, request.match_info["owner"], counts=request.query.get("counts") == "true"
+            )
+        )
 
     async def collection(request: web.Request) -> web.Response:
         """Store, read or delete one collection, by the method."""

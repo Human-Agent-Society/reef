@@ -4,7 +4,9 @@ from contextlib import closing
 from dataclasses import replace
 
 import pytest
+from sqlalchemy.schema import DropTable
 
+from reef.core.errors import ScenarioDeletedError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     EvaluationCollection,
@@ -14,8 +16,15 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
 )
-from reef.storage.evaluations import EvaluationStateConflictError, StoredEvaluation
+from reef.storage.evaluations import (
+    EvaluationStart,
+    EvaluationStartConflictError,
+    EvaluationStateConflictError,
+    EvaluationStore,
+    StoredEvaluation,
+)
 from reef.storage.postgres import PostgresScenarioStorage
+from reef.storage.sql_evaluations import SQLEvaluationStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 REQUEST = ArtifactEvaluationRequest("r1", "weights", harness={"name": "terminus-2"}, rollouts_per_task=2)
@@ -110,6 +119,63 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
         assert finished.to_json()["mean_score"] == 1.0 and failed.to_json()["policy_evaluation"] is None
 
 
+def test_the_evaluation_list_can_omit_digests_without_changing_the_stored_request(storage):
+    names = tuple(f"task-{index}" for index in range(10_000))
+    request = replace(
+        REQUEST,
+        task_names=names,
+        task_digests=tuple(f"{index:064x}" for index in range(len(names))),
+        harness={"name": "terminus-2", "kwargs": {"stop": "\0"}},
+    )
+    with closing(storage.open("math")) as session:
+        evaluations = session.evaluations
+        created = evaluations.create(evaluation_id="e1", owner="service-a", request=request, created_at=10.0)
+        assert evaluations.newest_for_list(limit=1) == (replace(created, request=replace(request, task_digests=None)),)
+        assert evaluations.newest(limit=1) == (created,)
+        assert evaluations.read("e1") == created
+
+        class LegacyStore(SQLEvaluationStore):
+            newest_for_list = EvaluationStore.newest_for_list
+
+            def newest(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
+                return super().newest(limit=limit)
+
+        legacy = LegacyStore(evaluations.database, evaluations.table, evaluations.starts, evaluations.digests)
+        assert legacy.newest_for_list(limit=1) == (created,)
+
+
+def test_an_evaluation_start_fingerprint_must_be_a_string():
+    with pytest.raises(ValueError, match="fingerprint"):
+        EvaluationStart("start-1", ("a",) * 64, "{}")  # type: ignore[arg-type]
+
+
+def test_the_start_reservation_and_work_share_the_evaluation_transaction(storage):
+    with closing(storage.open("math")) as session, closing(storage.open("other")) as other:
+        evaluations = session.evaluations
+        start = EvaluationStart("start-1", "0" * 64, '{"scenario": "math"}')
+        pinned = replace(REQUEST, task_names=("add",), task_digests=("1" * 64,))
+        parameters = {"owner": "service-a", "request": pinned, "created_at": 10.0, "start": start}
+        created = evaluations.create(evaluation_id="e1", **parameters)
+        assert evaluations.read_started(start.start_id, start.fingerprint) == (created, start.first_work_json)
+        with pytest.raises(EvaluationStartConflictError):
+            evaluations.create(evaluation_id="e2", **parameters)
+        assert evaluations.read("e2") is None
+        assert other.evaluations.read_started(start.start_id, start.fingerprint) is None
+        separate_start = replace(start, first_work_json='{"scenario": "other"}')
+        separate = other.evaluations.create(
+            evaluation_id="e1",
+            **{**parameters, "start": separate_start, "request": replace(pinned, task_digests=None)},
+        )
+        assert other.evaluations.read("e1").request.task_digests is None
+        evaluations.complete_start("e1")
+        assert evaluations.pending_starts() == ()
+        assert evaluations.read_started(start.start_id, start.fingerprint) == (created, None)
+        assert other.evaluations.read_started(start.start_id, start.fingerprint) == (
+            separate,
+            separate_start.first_work_json,
+        )
+
+
 def test_an_ended_evaluation_reopens_and_ends_again(storage):
     with closing(storage.open("math")) as session:
         evaluations = session.evaluations
@@ -133,6 +199,31 @@ def test_evaluations_survive_a_restart(open_durable_storage):
         session.evaluations.finish("e1", result=RESULT, finished_at=12.0)
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         assert session.evaluations.read("e1").result == RESULT
+
+
+def test_upgrade_adds_digest_storage_and_archive_keeps_it_scoped(open_durable_storage):
+    pinned = replace(REQUEST, task_names=("add",), task_digests=("1" * 64,))
+    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
+        evaluations = session.evaluations
+        old = evaluations.create(evaluation_id="old", owner="service-a", request=REQUEST, created_at=10.0)
+        with evaluations.database._transaction(write=True) as connection:
+            connection.execute(DropTable(evaluations.digests))
+    with closing(open_durable_storage()) as storage:
+        with closing(storage.open("math")) as session, closing(storage.open("other")) as other:
+            evaluations = session.evaluations
+            assert evaluations.read("old") == old
+            evaluations.create(evaluation_id="e1", owner="service-a", request=pinned, created_at=20.0)
+            limited = evaluations.limit_rollouts("e1", 10)
+            assert limited.request.task_digests == pinned.task_digests
+            assert evaluations.finish("e1", result=RESULT, finished_at=25.0).request == limited.request
+            separate = other.evaluations.create(
+                evaluation_id="e1", owner="service-a", request=REQUEST, created_at=20.0
+            )
+        storage.archive("math")
+        with pytest.raises(ScenarioDeletedError):
+            storage.open("math")
+        with closing(storage.open("other")) as other:
+            assert other.evaluations.read("e1") == separate
 
 
 def test_a_request_configures_exactly_one_side_of_the_policy():

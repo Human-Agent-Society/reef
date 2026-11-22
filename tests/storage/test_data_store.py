@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -51,7 +52,7 @@ from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.sql_setup import prefix_upper_bound
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.tasks import FilesDigest, LocalTaskFileStore, TaskFilesNotFoundError, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
@@ -420,6 +421,34 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
         store.task_path(store.create("acme", [trajectory("t1")])[0])
 
 
+def test_a_legacy_task_retry_reuses_its_digest_only_with_the_same_executable_flags(store, tmp_path):
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    script = task / "run.sh"
+    body = b"#!/bin/sh\nexit 0\n"
+    script.write_bytes(body)
+    legacy = FilesDigest(task.name)
+    legacy.add_file(script.name, len(body))
+    legacy.update(body)
+    old_digest = legacy.hexdigest()
+    stored = store.task_files.scenario_directory(task_partition("acme")) / old_digest / task.name
+    shutil.copytree(task, stored)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (original,) = store.create("acme", [NewItem(task.name, TaskFilesReference(old_digest), metadata)])
+    used_before = store.scenario_items("acme", "coding", kinds=("task",))[0].sequence
+
+    assert store.create("acme", [NewItem(task.name, task, metadata)]) == (original,)
+    assert store.replace_task("acme", task.name, task) == original
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0].sequence == used_before
+
+    script.chmod(0o755)
+    changed = store.replace_task("acme", task.name, task)
+    assert changed.digest != old_digest
+    assert (store.task_path_for_digest("acme", changed.digest) / script.name).stat().st_mode & 0o111
+    assert (store.task_path_for_digest("acme", old_digest) / script.name).stat().st_mode & 0o111 == 0
+    assert store.replace_task("acme", task.name, task) == changed
+
+
 def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, tmp_path):
     def task(name: str, **metadata) -> NewItem:
         (tmp_path / name).mkdir()
@@ -435,11 +464,24 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
     assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
     assert store.query("acme", benchmark="unknown") == ()
     assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ()) == {}
+    with pytest.raises(ValueError, match="owner"):
+        store.benchmark_item_ids("", ())
+    assert store.benchmark_item_ids("acme", ["full", "lite", "unknown"]) == {
+        "full": {"add", "sort"},
+        "lite": {"add"},
+        "unknown": set(),
+    }
     # A patch replaces the list, and null removes it.
     store.update("acme", ["sort"], {"benchmarks": ["lite"]})
     store.update("acme", ["add"], {"benchmarks": None})
     assert [item.item_id for item in store.query("acme", benchmark="lite")] == ["sort"]
     assert store.query("acme", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ["full", "lite"]) == {"full": set(), "lite": {"sort"}}
+    assert store.delete("acme", "sort")
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": set()}
+    assert store.restore("acme", ["sort"])
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": {"sort"}}
     for benchmarks in ("lite", ["lite", "lite"], [""], [1]):
         with pytest.raises(ValueError, match="benchmarks"):
             store.update("acme", ["sort"], {"benchmarks": benchmarks})
@@ -1190,10 +1232,66 @@ def test_the_calls_of_one_rollout_leave_out_the_other_rollouts_of_the_evaluation
         )
         return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
 
-    store.create("acme", [call_item(1, 1), call_item(1, 10), call_item(11, 1), call_item(1, 1, "verifier")])
+    store.create(
+        "acme",
+        [
+            call_item(1, 1, "verifier"),
+            call_item(1, 10),
+            call_item(11, 1),
+            call_item(1, 1),
+            trajectory("coding/e1:1:1:not-a-call"),
+            evaluation_call_item("other", "a1", "e1", evaluation_call(1, 1, 8)[0]),
+        ],
+    )
+    store.create("another-owner", [call_item(1, 1)])
     kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 1))
-    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:0", "coding/e1:1:1:1:verifier:0"]
+    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:verifier:0", "coding/e1:1:1:1:0"]
+    assert not list(evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 0)))
     assert len(list(evaluation_call_items(store, "acme", "coding", "e1", content=False))) == 4
+
+
+def test_sparse_rollout_reads_do_not_scan_the_other_calls_on_fresh_sqlite(tmp_path):
+    def call_item(task_index: int, index: int = 0) -> NewItem:
+        summary = EvaluationCallSummary(
+            task_index, 0, 1, index, "/v1/chat/completions", 200, 10.0, 0.5, None, None, None, 0
+        )
+        return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
+
+    with closing(SQLiteDataStore(None, LocalTaskFileStore(tmp_path))) as store:
+        with store.transaction(read_only=True) as connection:
+            sqlite = connection.connection.driver_connection
+        store.create("acme", [call_item(0), call_item(95)])
+
+        def read_sparse_rollouts() -> int:
+            progress = 0
+
+            def count() -> int:
+                nonlocal progress
+                progress += 1
+                return 0
+
+            sqlite.set_progress_handler(count, 100)
+            try:
+                found = [
+                    item.item_id
+                    for index in range(96)
+                    for item in evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(index, 0))
+                ]
+                assert found == ["coding/e1:0:0:1:0", "coding/e1:95:0:1:0"]
+                return progress
+            finally:
+                sqlite.set_progress_handler(None, 0)
+
+        sparse = read_sparse_rollouts()
+        store.create("acme", [call_item(index) for index in range(96, 2_096)])
+        crowded = read_sparse_rollouts()
+        assert crowded <= 2 * sparse + 10
+
+        # One rollout can span several storage pages. The cursor follows insertion order, not ID sort order.
+        new_calls = [call_item(0, index) for index in range(data_module.MAX_QUERY_LIMIT + 1, 0, -1)]
+        store.create("acme", new_calls)
+        kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(0, 0))
+        assert [item.item_id for item in kept] == ["coding/e1:0:0:1:0", *(call.item_id for call in new_calls)]
 
 
 def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):

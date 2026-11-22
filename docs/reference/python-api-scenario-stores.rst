@@ -29,6 +29,8 @@ Three abstract bases hold a scenario's state. A storage implementation subclasse
 
 ``reef.storage.scenario`` also exports ``ScenarioSettings`` and ``ScenarioStoreConflictError``. The bundled implementations are ``ItemRecordStore``, ``CommitHistoryScenarioStore``, ``SQLiteScenarioStorage`` and ``PostgresScenarioStorage``.
 
+An existing ``EvaluationStore`` supports unkeyed evaluations. To support start IDs, implement ``KeyedEvaluationStore`` from ``reef.storage.evaluations``. Reserve the ID, save the evaluation, and save its pending work in one transaction.
+
 .. code:: python
 
    from pathlib import Path

@@ -79,7 +79,7 @@ Every task must be within these limits on its files. The module ``reef.storage.t
 
 The setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see `The data section <configuration-service.rst#the-data-section>`__). The files of one archive unpack to at most 8 GiB; create larger tasks in the reference form. Harbor's task loader must accept each task directory.
 
-**Reference form.** First write each task directory into the owner's partition of the task file store, in the layout of the deployment's ``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner ``<owner>`` is ``data/<owner>``, and the directory has the task name as its name. Compute its digest with ``reef.storage.tasks.FilesDigest``, or with ``files_digest`` for a local directory. Then send the task names and digests as JSON. ``metadata`` is optional, as in the archive form:
+**Reference form.** First write each task directory into the owner's partition of the task file store, in the layout of the deployment's ``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner ``<owner>`` is ``data/<owner>``, and the directory has the task name as its name. Compute its digest with ``reef.storage.tasks.TaskDirectoryDigest``, or with ``files_digest`` for a local directory. Then send the task names and digests as JSON. ``metadata`` is optional, as in the archive form:
 
 .. code:: bash
 
@@ -121,7 +121,8 @@ Replace a task's files
 
 The item keeps its ID, metadata and splits. The same files again change nothing. After a change:
 
-- Each evaluation attempt reads the task's current files. A new evaluation, and a retry of a started one, run the new files. An attempt that already runs finishes with the old files, so one evaluation can hold scores of both.
+- By default, each evaluation attempt reads the task's current files. A new evaluation, and a retry of a started one, run the new files. An attempt that already runs finishes with the old files, so one evaluation can hold scores of both.
+- With ``evaluation.pin_task_files`` enabled, every attempt uses the files that Reef selected when it accepted the evaluation. Start a new evaluation to score the replacement files.
 - A trainer of a scenario that uses the task reads it again.
 
 The response is ``{"owner", "item", "synced"}``, without content. Reef returns these errors and changes nothing:

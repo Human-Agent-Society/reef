@@ -29,6 +29,7 @@ from reef.storage.tasks import (
     StoredTask,
     TaskCandidate,
     TaskConflictError,
+    TaskDirectoryDigest,
     TaskLimitError,
     TaskStoreError,
     files_digest,
@@ -359,10 +360,10 @@ def tricky_task(root: Path) -> Path:
     return source
 
 
-def test_files_digest_keeps_its_value_and_a_stream_of_files_gives_the_same_digest(tmp_path, monkeypatch):
+def test_files_digest_includes_executable_flags_in_file_order(tmp_path, monkeypatch):
     source = tricky_task(tmp_path)
-    # The digest of this tree before ``FilesDigest``: stored digests stay valid.
-    expected = "3ddb08ecfba184b01aaa63d827e7f315bcac4236af0eabc84774ef597b1b099a"
+    expected = "d0be57194fac620ae1c4f405668251a2e8bd410ee3a7aa02a27f05e28af7fcd3"
+    legacy = "3ddb08ecfba184b01aaa63d827e7f315bcac4236af0eabc84774ef597b1b099a"
     assert files_digest(source) == expected
     monkeypatch.setattr("reef.storage.tasks.DIGEST_CHUNK_BYTES", 5)
     assert files_digest(source) == expected
@@ -371,13 +372,21 @@ def test_files_digest_keeps_its_value_and_a_stream_of_files_gives_the_same_diges
         (path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file()), key=task_file_order
     )
     assert files[:3] == ["_x", "a/b", "a/b-c/d"] and files.index("a/b.c") < files.index("a b") < files.index("a-b")
-    digest = FilesDigest("tricky-task")
+    digest = TaskDirectoryDigest("tricky-task")
     for name in files:
         content = (source / name).read_bytes()
-        digest.add_file(name, len(content))
+        digest.add_file(name, len(content), 0o644)
         for start in range(0, len(content), 1000):
             digest.update(content[start : start + 1000])
     assert digest.hexdigest() == expected
+    assert digest.content.hexdigest() == legacy
+    (source / "a" / "b").chmod(0o755)
+    executable = files_digest(source)
+    (source / "a" / "b").chmod(0o744)
+    assert files_digest(source) == executable != expected
+    (source / "a" / "b").chmod(0o644)
+    (source / "a" / "b.c").chmod(0o755)
+    assert files_digest(source) not in (expected, executable)
     # Empty directories add nothing; the directory name is part of the digest.
     assert FilesDigest("empty").hexdigest() == hashlib.sha256(b"empty").hexdigest()
 

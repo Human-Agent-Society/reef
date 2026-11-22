@@ -322,6 +322,11 @@ class ServiceSettings:
             "a trial then never builds a template. Default: false."
         ),
     )
+    evaluation_pin_task_files: bool = config_option(
+        False,
+        public_path=("evaluation", "pin_task_files"),
+        help="Use the task files selected at evaluation acceptance for all attempts. Default: false.",
+    )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
@@ -553,12 +558,17 @@ class ServiceSettings:
         check_finish_timeout(self.evaluation_on_stop, self.evaluation_finish_timeout_s, prefix="evaluation.")
         if self.evaluation_trial_observer is not None:
             TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
-        if self.evaluation_task_template_builder is not None:
-            TaskTemplateBuilder.reference(
-                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
-            )
         if not isinstance(self.evaluation_require_prepared_templates, bool):
             raise ValueError("evaluation.require_prepared_templates must be true or false")
+        if not isinstance(self.evaluation_pin_task_files, bool):
+            raise ValueError("evaluation.pin_task_files must be true or false")
+        if self.evaluation_task_template_builder is not None:
+            reference = TaskTemplateBuilder.reference(
+                self.evaluation_task_template_builder, setting="evaluation.task_template_builder"
+            )
+            builder = TaskTemplateBuilder.referenced_class(reference)
+            if self.evaluation_pin_task_files and not builder.supports_pinned_versions():
+                raise ValueError("evaluation.pin_task_files needs a template builder that overrides build_for_version")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:

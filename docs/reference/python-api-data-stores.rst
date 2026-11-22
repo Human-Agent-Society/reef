@@ -65,7 +65,7 @@ The scenario's imported tasks are not a task store. They are task items that the
 Task file stores
 ----------------
 
-A ``TaskFileStore`` (``reef.storage.tasks``) keeps the directories of the published tasks, addressed by the digest of their files. The digest covers the directory name, and the path and bytes of each file, so a repeated save of the same files changes nothing.
+A ``TaskFileStore`` (``reef.storage.tasks``) keeps the directories of the published tasks, addressed by the digest of their files. The digest covers the directory name and each file's path, bytes, and executable flag, so a repeated save of the same files changes nothing. The flag is set if any executable bit is set. Existing digests still address their stored directories. The store can reuse a legacy digest when the files and their executable flags match. Use the digest that the store returns to read a saved directory.
 
 A deployment selects the store in ``storage.task_file_backend`` (`Choose the task file store <../user-guide/storage.rst#choose-the-task-file-store>`__). ``LocalTaskFileStore`` is the built-in store. An embedded caller can give a store to ``SQLiteScenarioStorage(..., task_files=...)`` or ``PostgresScenarioStorage(..., task_files=...)``. Without one, the storage uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
 
@@ -99,9 +99,11 @@ The module also gives the digest and the limits that every client uses for a tas
    * - Name
      - Contract
    * - ``files_digest(source)``
-     - Return the SHA-256 hex digest of the local task directory ``source``: its name, and the path and bytes of each file. Directories add nothing. Raise ``TaskStoreError`` for a symbolic link or a special file.
+     - Return the SHA-256 hex digest of the local task directory ``source``: its name and each file's path, bytes, and executable flag. Directories add nothing. Raise ``TaskStoreError`` for a symbolic link or a special file.
+   * - ``TaskDirectoryDigest(directory_name)``
+     - Compute ``files_digest`` from files given one at a time. Call ``add_file(relative_path, size_bytes, mode)`` for each file, then ``update(chunk)`` until the file's bytes are given, then ``hexdigest()``. The files come in increasing ``task_file_order``. A file out of order, or a file with more or fewer bytes than its size, raises ``TaskStoreError``.
    * - ``FilesDigest(directory_name)``
-     - Compute ``files_digest`` from files given one at a time. Call ``add_file(relative_path, size_bytes)`` for each file, then ``update(chunk)`` until the file's bytes are given, then ``hexdigest()``. The files come in increasing ``task_file_order``. A file out of order, or a file with more or fewer bytes than its size, raises ``TaskStoreError``.
+     - Compute the legacy digest without executable flags.
    * - ``task_file_order(relative_path)``
      - Return the sort key of a file path relative to the task directory: the tuple of its parts, so ``a/b`` comes before ``a-b``. Raise ``ValueError`` for an empty part, ``.`` or ``..``.
    * - ``task_limit_errors(entries)``
