@@ -44,10 +44,10 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.routing.manifest import RoutingDecision
 from reef.routing.preview import PreviewSettings
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.records import AppendResult
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.scenario.records import AppendResult
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 def provider_server(*routes: tuple[str, str, web.Handler]) -> TestServer:

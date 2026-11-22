@@ -25,9 +25,9 @@ from reef.core.trajectories import recorded_payload, recorded_payloads, source_r
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.samples.context import PipelineContext
 from reef.samples.traces import InferenceSamples, TraceSamples
-from reef.storage.commits import CommitRecord
-from reef.storage.data import NewItem
-from reef.storage.samples import SampleStore, consumed_sample_id
+from reef.storage.data.store import NewItem
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id
 from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.train.types import JobData

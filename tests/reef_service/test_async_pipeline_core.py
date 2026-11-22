@@ -19,8 +19,8 @@ from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
 from reef.inference.interfaces import InferenceHandler
 from reef.observability import ExperimentLogger, ExperimentTracker
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer

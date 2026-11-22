@@ -67,9 +67,9 @@ from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, pro
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
-from reef.storage.records import RecordStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.records import RecordStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.component import HISTORY_DIR, HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoopState

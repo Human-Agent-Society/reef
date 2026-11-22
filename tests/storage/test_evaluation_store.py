@@ -16,16 +16,16 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
 )
-from reef.storage.evaluations import (
+from reef.storage.scenario.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
     EvaluationStateConflictError,
     EvaluationStore,
     StoredEvaluation,
 )
-from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.sql_evaluations import SQLEvaluationStore
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.evaluations import SQLEvaluationStore
+from reef.storage.sql.postgres import PostgresScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 REQUEST = ArtifactEvaluationRequest("r1", "weights", harness={"name": "terminus-2"}, rollouts_per_task=2)
 RESULT = PolicyEvaluation(

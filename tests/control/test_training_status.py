@@ -32,9 +32,9 @@ from reef.control.workers.local_workers import POLL_SECONDS, LocalBackendWorker,
 from reef.core.job_data import JobOutcome
 from reef.recipe import CompositeRecipe, Recipe
 from reef.samples import NoSamples
-from reef.storage.samples import stage_item_id
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.samples import stage_item_id
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import PipelineSpec
 from reef.train.types import Sample

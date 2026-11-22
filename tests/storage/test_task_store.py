@@ -17,9 +17,7 @@ from reef.core.config import config_option
 from reef.core.errors import ScenarioDeletedError
 from reef.core.plugins import PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
-from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import (
+from reef.storage.data.tasks import (
     MAX_TASK_DIRECTORY_ENTRIES,
     MAX_TASK_FILE_BYTES,
     MAX_TASK_FILES,
@@ -36,6 +34,8 @@ from reef.storage.tasks import (
     task_file_order,
     task_limit_errors,
 )
+from reef.storage.sql.postgres import PostgresScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 def generated(name: str, *, instruction: str = "", sources: tuple[str, ...] = ("record-1",)) -> HarborTask:
@@ -365,7 +365,7 @@ def test_files_digest_includes_executable_flags_in_file_order(tmp_path, monkeypa
     expected = "d0be57194fac620ae1c4f405668251a2e8bd410ee3a7aa02a27f05e28af7fcd3"
     legacy = "3ddb08ecfba184b01aaa63d827e7f315bcac4236af0eabc84774ef597b1b099a"
     assert files_digest(source) == expected
-    monkeypatch.setattr("reef.storage.tasks.DIGEST_CHUNK_BYTES", 5)
+    monkeypatch.setattr("reef.storage.data.tasks.DIGEST_CHUNK_BYTES", 5)
     assert files_digest(source) == expected
     # The order of rglob is the order of the path parts: "a/b" comes before "a-b".
     files = sorted(
@@ -498,7 +498,7 @@ def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_roo
 
 @pytest.mark.parametrize(
     "backend",
-    ["unknown", "reef.storage.tasks:TaskFileStore", {"module": "reef.storage.sqlite:SQLiteScenarioStorage"}],
+    ["unknown", "reef.storage.data.tasks:TaskFileStore", {"module": "reef.storage.sql.sqlite:SQLiteScenarioStorage"}],
 )
 def test_the_deployment_rejects_an_invalid_task_file_backend(backend):
     with pytest.raises(ValueError, match="task_file_backend"):

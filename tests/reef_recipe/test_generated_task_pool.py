@@ -25,8 +25,8 @@ from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, pool_revie
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
 from reef.recipe.generated_tasks.training import TaskUse, task_items
-from reef.storage.samples import TrainerSamples, stage_item_id
-from reef.storage.tasks import TaskStore
+from reef.storage.data.tasks import TaskStore
+from reef.storage.scenario.samples import TrainerSamples, stage_item_id
 from reef.train.pipeline import TrainingPipeline
 
 TASK_A, TASK_B, TASK_C = "harbor-00000-000", "harbor-00000-001", "harbor-00000-002"

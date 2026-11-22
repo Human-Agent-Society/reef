@@ -39,13 +39,13 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import call_summary, source_record_id, trajectory_reward
 from reef.recipe import WeightTrainingRecipe
 from reef.samples.service import ProducedSamples
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, PipelineContext, Trainer, TrainingPipeline
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState

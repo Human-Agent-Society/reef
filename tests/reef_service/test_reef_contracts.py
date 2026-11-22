@@ -34,8 +34,8 @@ from reef.inference.interfaces import InferenceArtifact, InferenceHandler, Infer
 from reef.recipe import Recipe
 from reef.samples import NoSamples
 from reef.samples.service import SAMPLES_QUEUE
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
@@ -1358,7 +1358,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
 
     from reef.core import AgentRecord
     from reef.core.reports import ReportValidationError
-    from reef.storage.records import RecordConflictError
+    from reef.storage.scenario.records import RecordConflictError
 
     with closing(
         build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())

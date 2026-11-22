@@ -50,18 +50,18 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.recipe.deployment import refuses_images
 from reef.samples.service import SamplesWorker, request_selection
-from reef.storage.artifact_items import request_artifact_copy
-from reef.storage.control_lease import ControlLeaseState
-from reef.storage.coordination import Coordination, instance_id
-from reef.storage.data import DataStore, MemoryDataStore, check_owner
-from reef.storage.data_sync import ScenarioUses
-from reef.storage.record_items import evaluation_call_item, evaluation_trajectory_item
-from reef.storage.records import RecordRetention
-from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
-from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.served_models import ControlLeaseConflictError
-from reef.storage.tasks import LocalTaskFileStore
-from reef.storage.work_queue import FINAL_STATES, WorkItem
+from reef.storage.coordination.control_lease import ControlLeaseState
+from reef.storage.coordination.served_models import ControlLeaseConflictError
+from reef.storage.coordination.store import Coordination, instance_id
+from reef.storage.coordination.work_queue import FINAL_STATES, WorkItem
+from reef.storage.data.artifact_items import request_artifact_copy
+from reef.storage.data.store import DataStore, MemoryDataStore, check_owner
+from reef.storage.data.sync import ScenarioUses
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import evaluation_call_item, evaluation_trajectory_item
+from reef.storage.scenario.records import RecordRetention
+from reef.storage.scenario.samples import SAMPLE_KINDS, ListedSample, StoredSample
+from reef.storage.scenario.store import ScenarioSettings, ScenarioStorage
 from reef.train.job_queue import (
     JobExperimentRecorder,
     JobQueueComponent,
@@ -172,9 +172,9 @@ class Dispatcher(
 
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
         that this process runs. A process that runs every service and keeps no state across restarts, such as an
-        embedded dispatcher, gives it ``reef.storage.sql_coordination.memory_coordination()``.
+        embedded dispatcher, gives it ``reef.storage.sql.coordination.memory_coordination()``.
 
-        The data store keeps the data directory of each training job (``reef.storage.job_data``): control writes
+        The data store keeps the data directory of each training job (``reef.storage.data.job_data``): control writes
         it, and the training service opens it. Without a data store, a ``MemoryDataStore`` keeps them.
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago, and cleans up the deleted scenarios

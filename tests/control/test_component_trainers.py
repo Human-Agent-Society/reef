@@ -73,14 +73,14 @@ from reef.samples.context import PipelineContext
 from reef.samples.service import SAMPLES_QUEUE
 from reef.samples.staleness import ServedArtifacts, lags_behind
 from reef.samples.traces import TraceSamples
-from reef.storage.commits import (
+from reef.storage.scenario.commits import (
     SCENARIO_METADATA_KEY,
     CommitHistoryError,
     CommitRecord,
     parse_scenario_metadata,
     scenario_metadata_for,
 )
-from reef.storage.samples import consumed_sample_id, stage_item_id
+from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SnapshotStart, TrainingJob
 from reef.train.job_queue import (

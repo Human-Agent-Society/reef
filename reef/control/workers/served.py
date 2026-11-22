@@ -14,10 +14,10 @@ from reef.control.scenario.scenario import Scenario
 from reef.core.errors import ReefError
 from reef.core.served_models import CACHE_SECONDS
 from reef.execution.workers import ServiceWorker
-from reef.storage.control_lease import ControlLease, ControlLeaseState
-from reef.storage.coordination import Coordination
-from reef.storage.served_models import AUTOMATIC_RETRIES, REDEPLOY, ControlLeaseConflictError
-from reef.storage.work_queue import JsonValue, WorkItem, clock
+from reef.storage.coordination.control_lease import ControlLease, ControlLeaseState
+from reef.storage.coordination.served_models import AUTOMATIC_RETRIES, REDEPLOY, ControlLeaseConflictError
+from reef.storage.coordination.store import Coordination
+from reef.storage.coordination.work_queue import JsonValue, WorkItem, clock
 
 logger = logging.getLogger(__name__)
 

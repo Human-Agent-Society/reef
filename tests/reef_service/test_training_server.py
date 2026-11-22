@@ -29,8 +29,8 @@ from reef.evaluation.activation import NeverActivate
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.samples.context import PipelineContext
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobStatus, TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent

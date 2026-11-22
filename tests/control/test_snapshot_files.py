@@ -20,8 +20,8 @@ from reef.control.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.core.plugins import PluginReference
 from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.backend import ArtifactTextFiles
 
 MARKER = TreePatch(changed_rules("marker rules\n"))

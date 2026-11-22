@@ -2,9 +2,9 @@
 
 The services of a deployment hand work to each other through these tables:
 
-- ``served_model`` and ``scheduled_stop`` hold ``served_models`` (``reef.storage.served_models``);
-- ``control_lease`` holds the control lease (``reef.storage.control_lease``);
-- ``work_item`` holds the work queues (``reef.storage.work_queue``);
+- ``served_model`` and ``scheduled_stop`` hold ``served_models`` (``reef.storage.coordination.served_models``);
+- ``control_lease`` holds the control lease (``reef.storage.coordination.control_lease``);
+- ``work_item`` holds the work queues (``reef.storage.coordination.work_queue``);
 - ``coordination_sequence`` holds two counters: ``WORK_SEQUENCE`` numbers the changes of the work queues, and
   ``SERVED_SEQUENCE`` the changes of ``served_models`` and its stops.
 
@@ -62,9 +62,8 @@ from sqlalchemy.schema import CreateSchema
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
-from reef.storage.control_lease import ControlLease, ControlLeaseState
-from reef.storage.coordination import Coordination, CoordinationResource
-from reef.storage.served_models import (
+from reef.storage.coordination.control_lease import ControlLease, ControlLeaseState
+from reef.storage.coordination.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
     REDEPLOY,
@@ -76,9 +75,8 @@ from reef.storage.served_models import (
     serving_serial_key,
     without_redeploy,
 )
-from reef.storage.sql_records import batches
-from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
-from reef.storage.work_queue import (
+from reef.storage.coordination.store import Coordination, CoordinationResource
+from reef.storage.coordination.work_queue import (
     FINAL_STATES,
     HELD_STATES,
     WORK_STATES,
@@ -95,6 +93,8 @@ from reef.storage.work_queue import (
     check_prefix_state_counts,
     clock,
 )
+from reef.storage.sql.records import batches
+from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 
 
 @dataclass(frozen=True)

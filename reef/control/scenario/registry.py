@@ -42,8 +42,8 @@ from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
 from reef.recipe.deployment import harness_adapter
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.served_models import ServedModels
+from reef.storage.coordination.served_models import ServedModels
+from reef.storage.scenario.store import ScenarioSettings, ScenarioStorage
 from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)

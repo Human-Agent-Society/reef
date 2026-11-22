@@ -30,9 +30,9 @@ from reef.core import ScenarioNotFoundError
 from reef.core.errors import ScenarioDeletedError
 from reef.recipe import Recipe
 from reef.samples.service import SAMPLES_QUEUE
-from reef.storage.sql_coordination import memory_coordination, open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import NewWork
+from reef.storage.coordination.work_queue import NewWork
+from reef.storage.sql.coordination import memory_coordination, open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import (
     CHECKS_QUEUE,
     JOBS_QUEUE,

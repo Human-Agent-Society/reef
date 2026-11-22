@@ -13,8 +13,8 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.factory import read_trainer_specs
 from reef.control.scenario.live_objects import LiveObjects
 from reef.recipe import CompositeRecipe, Recipe
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.trainer_builder import build_trainers
 
 

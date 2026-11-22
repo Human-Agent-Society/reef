@@ -66,8 +66,8 @@ from reef.routing.reef_lifecycle_client import (
     RoutingControlError,
 )
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.records import AppendResult, RecordConflictError
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.scenario.records import AppendResult, RecordConflictError
 
 pytestmark = pytest.mark.unit
 

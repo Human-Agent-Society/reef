@@ -30,9 +30,9 @@ from reef.api.app import create_app
 from reef.control.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer

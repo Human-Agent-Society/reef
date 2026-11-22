@@ -11,8 +11,8 @@ from reef.api.auth import create_authentication_middleware
 from reef.api.cors import configure_browser_access
 from reef.control.dispatcher import build_default_dispatcher
 from reef.deploy.service_config import service_config_from_mapping
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 ORIGIN = "https://api.reefinfra.ai"
 

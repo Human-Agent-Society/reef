@@ -17,8 +17,8 @@ from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.deployment import harness_adapter
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.settings import EvolutionSettings
 
 #: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its package and empty configs.

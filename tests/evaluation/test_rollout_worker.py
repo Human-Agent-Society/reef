@@ -48,8 +48,8 @@ from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
-from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError, WorkQueue
+from reef.storage.sql.coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:

@@ -49,8 +49,8 @@ from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.samples.context import PipelineContext
-from reef.storage.commits import CommitRecord
-from reef.storage.sqlite import SQLiteScenarioDatabase
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.sql.sqlite import SQLiteScenarioDatabase
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer

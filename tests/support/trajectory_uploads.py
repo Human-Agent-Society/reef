@@ -29,11 +29,11 @@ from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.samples import NoSamples, Record2Sample
 from reef.samples.context import PipelineContext
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.task_import import DataScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.task_import import DataScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import JobData
 from reef.train.pipeline import PipelineSpec
 from reef.train.sample2job import Sample2Job, Sample2JobSettings

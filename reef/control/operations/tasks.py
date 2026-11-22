@@ -14,7 +14,7 @@ from typing import Any
 
 from reef.control.dispatcher import Dispatcher
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.storage.tasks import task_limit_errors
+from reef.storage.data.tasks import task_limit_errors
 
 #: The most tasks in one upload.
 MAX_TASKS_PER_UPLOAD = 1000
@@ -33,7 +33,7 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
     (``TASK_NAME_PATTERN``); a top-level file, a link, a device, an absolute path, a ``..`` component or another
     top-level name is refused with ``ValueError``, as is an archive of no task or of more than
     ``MAX_TASKS_PER_UPLOAD`` tasks, of files that unpack to more than ``MAX_ARCHIVE_UNPACKED_BYTES``, and a task that
-    breaks a limit of ``reef.storage.tasks.task_limit_errors``.
+    breaks a limit of ``reef.storage.data.tasks.task_limit_errors``.
     Nothing is unpacked then.
     """
     try:

@@ -33,8 +33,7 @@ from reef.inference.startup import (
     serving_work,
 )
 from reef.recipe.base import Recipe
-from reef.storage.coordination import Coordination
-from reef.storage.served_models import (
+from reef.storage.coordination.served_models import (
     INFERENCE_OWNER_QUEUE,
     REDEPLOY,
     SERVE_ARTIFACT_KIND,
@@ -42,7 +41,15 @@ from reef.storage.served_models import (
     SERVING_QUEUE,
     STOP_SERVING_KIND,
 )
-from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.store import Coordination
+from reef.storage.coordination.work_queue import (
+    JsonValue,
+    LeaseExtender,
+    NewWork,
+    WorkItem,
+    WorkLeaseLostError,
+    WorkQueue,
+)
 
 logger = logging.getLogger(__name__)
 #: The error of serving work that a newer request replaced; the queue gives queued work the same error.

@@ -23,7 +23,7 @@ from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
 from reef.samples.staleness import ServedArtifacts
-from reef.storage.data import NewItem
+from reef.storage.data.store import NewItem
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
 from reef.train.sample2job import DistillJobData

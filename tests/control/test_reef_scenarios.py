@@ -23,9 +23,9 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError
 from reef.recipe.harness import HarnessLayout
 from reef.samples import NoSamples
-from reef.storage.commits import SCENARIO_METADATA_KEY
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commits import SCENARIO_METADATA_KEY
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import ScenarioRoot, SnapshotStart, TrainingComponent
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSettings
@@ -88,7 +88,7 @@ def test_scenario_owns_scenario_scoped_repository() -> None:
 
 
 def test_scenario_metadata_round_trips() -> None:
-    from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
+    from reef.storage.scenario.commits import parse_scenario_metadata, scenario_metadata_for
 
     scenario = build_default_dispatcher(
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -122,7 +122,7 @@ def test_scenario_metadata_round_trips() -> None:
 def test_checkpoint_metadata_names_only_a_training_step(operation) -> None:
     """An artifact is made only by a training step; its metadata names no other operation."""
     from reef.core.snapshot import SnapshotRef
-    from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
+    from reef.storage.scenario.commits import parse_scenario_metadata, scenario_metadata_for
 
     base = SnapshotRef("base", None)
     metadata = scenario_metadata_for(name="math", source=RootSource("default"), start_artifact=base, commit_number=1)
@@ -274,7 +274,12 @@ def test_lock_instance_tells_a_replaced_instance_from_a_removed_one() -> None:
 @pytest.mark.parametrize("operation", [None, "training"])
 def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> None:
     from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
-    from reef.storage.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
+    from reef.storage.scenario.commits import (
+        CommitRecord,
+        RecordProgress,
+        parse_scenario_metadata,
+        scenario_metadata_for,
+    )
 
     base = SnapshotRef("base-snapshot", None)
     head = SnapshotRef("checkpoint-snapshot", base.revision)
@@ -352,7 +357,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() -> None:
     """A recovery without the commit history reads from the artifact head which artifact serves."""
     from reef.core.snapshot import SnapshotRef
-    from reef.storage.commits import (
+    from reef.storage.scenario.commits import (
         RecordProgress,
         active_snapshot,
         parse_scenario_metadata,
@@ -407,7 +412,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
 )
 def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) -> None:
     from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
-    from reef.storage.commits import parse_scenario_metadata
+    from reef.storage.scenario.commits import parse_scenario_metadata
 
     base = SnapshotRef("base", None)
     metadata = {

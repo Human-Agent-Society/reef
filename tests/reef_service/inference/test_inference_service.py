@@ -16,10 +16,10 @@ from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import EngineClients, InferenceHandler, StartupStep, StartupSteps
-from reef.storage.commits import CommitRecord
-from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.coordination.served_models import SERVING_KIND, SERVING_QUEUE
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 TOKEN = "service-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "x-reef-scenario": "math", "x-reef-tag-session": "s1"}

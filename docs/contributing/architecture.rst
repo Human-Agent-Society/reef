@@ -191,8 +191,9 @@ execution: how Reef runs things
 storage: the database and the work queues
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **SQLite or PostgreSQL holds the state.** The state of each scenario is its records, commit history, samples, tasks and evaluations. The data store holds the data items of the whole deployment.
-- **The coordination store connects the services.** No service calls another. Each one reads and writes the work queues, ``served_models`` and the control lease.
+- **It holds the state of each scenario and the data of the deployment.** ``storage/scenario/`` holds a scenario's records, commit history, samples and evaluations. ``storage/data/`` holds the data store, which keeps the data items of the whole deployment.
+- **The coordination store connects the services.** No service calls another. Each one reads and writes the work queues, ``served_models`` and the control lease in ``storage/coordination/``.
+- **SQLite or PostgreSQL holds all of it.** ``storage/sql/`` implements each store in the two databases. The other three subpackages hold the contracts and import no SQL code.
 - **It does not decide how Reef uses the data.** The rule for which records train is in ``samples``.
 
 artifact: version files
@@ -233,8 +234,6 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
      - ``samples``. The part that builds job data stays in ``train``.
    * - ``reef/recipe/generated_tasks/``
      - ``recipes/``
-   * - The modules of ``reef/storage/``, in one directory
-     - Subpackages of ``storage``: the scenario stores, the data store, the coordination store, and the SQL backends
 
 The request service moves after its imports change. ``reef/api/request_service.py`` imports the harness pages, the wire shapes, the pending writes and the routed inference of ``reef/api/``, and ``reef/api/harness_imports.py`` imports the request service.
 

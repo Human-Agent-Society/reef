@@ -12,7 +12,7 @@ from collections.abc import Collection, Mapping
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.storage.work_queue import JsonValue, WorkItem
+from reef.storage.coordination.work_queue import JsonValue, WorkItem
 
 SERVING_QUEUE = "serving"
 SERVING_KIND = "serve"

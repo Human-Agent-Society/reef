@@ -16,8 +16,8 @@ from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import validate_component_name
 from reef.core.snapshot import RootSource
-from reef.storage.commits import CommitRecord, active_record
-from reef.storage.scenario import ScenarioStore
+from reef.storage.scenario.commits import CommitRecord, active_record
+from reef.storage.scenario.store import ScenarioStore
 
 
 @dataclass(frozen=True)

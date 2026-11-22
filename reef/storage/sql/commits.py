@@ -16,9 +16,9 @@ from threading import RLock
 from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select
 from sqlalchemy.engine import Connection
 
-from reef.storage.commit_history import CommitHistory, same_commit
-from reef.storage.commits import CommitHistoryError, CommitRecord, encode_commit
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
+from reef.storage.scenario.commit_history import CommitHistory, same_commit
+from reef.storage.scenario.commits import CommitHistoryError, CommitRecord, encode_commit
+from reef.storage.sql.records import ScopedTable, SQLScenarioDatabase
 
 
 def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:

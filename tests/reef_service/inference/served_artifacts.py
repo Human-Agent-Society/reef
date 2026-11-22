@@ -9,8 +9,8 @@ from tests.support.runtime_stubs import live_objects
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
 from reef.control.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceHandler
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class ArtifactEcho(InferenceHandler):

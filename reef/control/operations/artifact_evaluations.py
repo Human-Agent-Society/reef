@@ -80,9 +80,12 @@ from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.adapters.parts import PLACEHOLDER
 from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tree import HarnessTree, validate_tree
-from reef.storage.commits import CommitRecord
-from reef.storage.data import DataStore, StoredItem, record_source
-from reef.storage.evaluations import (
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem
+from reef.storage.data.item_kinds import evaluation_call_id
+from reef.storage.data.store import DataStore, StoredItem, record_source
+from reef.storage.data.task_collections import CollectionNotFoundError
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
     EvaluationStateConflictError,
@@ -90,16 +93,13 @@ from reef.storage.evaluations import (
     StoredEvaluation,
     check_evaluation_start_id,
 )
-from reef.storage.item_kinds import evaluation_call_id
-from reef.storage.observer import RecordObserver
-from reef.storage.record_items import (
+from reef.storage.scenario.observer import RecordObserver
+from reef.storage.scenario.record_items import (
     evaluation_call_items,
     evaluation_call_summary,
     evaluation_trajectory_items,
     stored_evaluation_call,
 )
-from reef.storage.task_collections import CollectionNotFoundError
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
 

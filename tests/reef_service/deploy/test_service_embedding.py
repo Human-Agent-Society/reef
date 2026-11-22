@@ -18,7 +18,7 @@ from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendConte
 from reef.deploy.deployment_config import translate_layout
 from reef.deploy.service_config import service_config_from_mapping
 from reef.inference.interfaces import InferenceHandler
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 UNREACHABLE_BACKEND = "tests.support.artifact_backend_plugin:UnreachableArtifactBackend"
@@ -123,7 +123,10 @@ def test_service_config_reads_the_artifact_backend_from_the_storage_section() ->
     ("overrides", "message"),
     [
         ({"artifact_backend": "s3"}, "git_lfs or 'package.module:ClassName'"),
-        ({"artifact_backend": "reef.storage.sqlite:SQLiteScenarioStorage"}, "ConfigurableRepositoryBackendFactory"),
+        (
+            {"artifact_backend": "reef.storage.sql.sqlite:SQLiteScenarioStorage"},
+            "ConfigurableRepositoryBackendFactory",
+        ),
         ({"artifact_backend": MEMORY_BACKEND, "artifact_repository": "/srv/artifacts.git"}, "requires"),
     ],
 )

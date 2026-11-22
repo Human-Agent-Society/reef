@@ -32,7 +32,7 @@ from reef.deploy import orchestrator
 from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.training import local_model_required
 from reef.inference.tinker import TINKER_URL, TinkerInferenceRuntime
-from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql.coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.component import ScenarioRoot, SnapshotStart, TrainingArtifactLayout, TrainingJob, job_id_for
@@ -985,7 +985,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     from reef.control.dispatcher import Dispatcher
     from reef.core import AgentRecord, RequestType
     from reef.recipe.base import WeightTrainingRecipe
-    from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.storage.sql.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSpec
 
     @dataclass(frozen=True)
@@ -1108,7 +1108,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     from reef.api.app import create_app
     from reef.artifact import InMemoryRepositoryBackend
     from reef.control.dispatcher import Dispatcher
-    from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.storage.sql.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSettings
 
     initial = tmp_path / "initial"

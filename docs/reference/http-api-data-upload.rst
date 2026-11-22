@@ -48,7 +48,7 @@ Create task items
 - An archive (``Content-Type: application/gzip``). The data service unpacks the archive and copies each task directory into the task file store.
 - A reference (``Content-Type: application/json``). The client wrote each task directory into the task file store itself, and the data service copies no file.
 
-Every task must be within these limits on its files. The module ``reef.storage.tasks`` defines them, so a client can check a task before it sends it (``task_limit_errors``):
+Every task must be within these limits on its files. The module ``reef.storage.data.tasks`` defines them, so a client can check a task before it sends it (``task_limit_errors``):
 
 .. list-table::
    :header-rows: 1
@@ -79,7 +79,7 @@ Every task must be within these limits on its files. The module ``reef.storage.t
 
 The setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see `The data section <configuration-service.rst#the-data-section>`__). The files of one archive unpack to at most 8 GiB; create larger tasks in the reference form. Harbor's task loader must accept each task directory.
 
-**Reference form.** First write each task directory into the owner's partition of the task file store, in the layout of the deployment's ``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner ``<owner>`` is ``data/<owner>``, and the directory has the task name as its name. Compute its digest with ``reef.storage.tasks.TaskDirectoryDigest``, or with ``files_digest`` for a local directory. Then send the task names and digests as JSON. ``metadata`` is optional, as in the archive form:
+**Reference form.** First write each task directory into the owner's partition of the task file store, in the layout of the deployment's ``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner ``<owner>`` is ``data/<owner>``, and the directory has the task name as its name. Compute its digest with ``reef.storage.data.tasks.TaskDirectoryDigest``, or with ``files_digest`` for a local directory. Then send the task names and digests as JSON. ``metadata`` is optional, as in the archive form:
 
 .. code:: bash
 

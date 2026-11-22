@@ -14,9 +14,9 @@ from reef.control.workers.served import (
 )
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.served_models import CACHE_SECONDS, ScheduledStop, ServedArtifact
-from reef.storage.coordination import Coordination
-from reef.storage.served_models import AUTOMATIC_RETRIES, SERVING_KIND, SERVING_QUEUE
-from reef.storage.sql_coordination import SQLControlLease, SQLiteCoordinationDatabase, SQLServedModels, SQLWorkQueue
+from reef.storage.coordination.served_models import AUTOMATIC_RETRIES, SERVING_KIND, SERVING_QUEUE
+from reef.storage.coordination.store import Coordination
+from reef.storage.sql.coordination import SQLControlLease, SQLiteCoordinationDatabase, SQLServedModels, SQLWorkQueue
 
 
 class Runtime:

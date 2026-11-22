@@ -20,7 +20,7 @@ from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.samples import SAMPLE_KINDS, SampleKind
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 

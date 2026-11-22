@@ -617,7 +617,7 @@ def replay_records(directory: Path, scenario: str) -> list[AgentRecord]:
 
     Opening a store writes its settings, so the replay reads a copy and leaves the run's files unchanged.
     """
-    from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
     with tempfile.TemporaryDirectory(prefix="reef-native-records-") as scratch:
         copy = Path(scratch) / "records"

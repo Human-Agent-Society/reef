@@ -11,9 +11,9 @@ from tests.support.harness_service import checkpoint_result, report_once
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflictError, ArtifactPublicationError
 from reef.control.dispatcher import Dispatcher
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 __all__ = ["fake_git_lfs"]
 

@@ -27,7 +27,7 @@ from reef.recipe.composite import CompositeRecipe, component_recipes
 from reef.recipe.deployment import harness_recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.storage.data import DataStore
+from reef.storage.data.store import DataStore
 from reef.train.component import (
     ScenarioRoot,
     TrainingArtifactLayout,

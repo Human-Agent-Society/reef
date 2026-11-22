@@ -41,8 +41,8 @@ from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.types import TrainingCommit
 
 WEIGHTS = "weights"

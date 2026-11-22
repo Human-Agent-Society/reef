@@ -364,7 +364,7 @@ class TaskFileStore(Plugin, ABC):
     def contains(self, partition: str, digest: str, name: str) -> bool:
         """Return whether ``partition`` holds a complete task directory named ``name`` with the files of ``digest``.
 
-        ``partition`` is a scenario, or the partition of a data owner (``reef.storage.item_kinds.task_partition``).
+        ``partition`` is a scenario, or the partition of a data owner (``reef.storage.data.item_kinds.task_partition``).
         A client can write a directory into the store itself, in the layout of the store: the directory is complete
         when the client has written its last part. When the call returns True, ``path(partition, digest)``
         returns the directory. The call does not read the files or check their digest. Raises ``ValueError`` if

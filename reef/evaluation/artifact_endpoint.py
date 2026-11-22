@@ -158,9 +158,9 @@ class CandidateArtifacts(ABC):
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
     ``task_owner(scenario)`` returns the owner that the record of ``scenario`` stores, whose data holds its tasks.
     ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
-    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
+    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.scenario.record_items.evaluation_call_item``).
     ``add_evaluation_trajectory(scenario, evaluation_id, trajectory)`` keeps one trajectory that a rollout's verifier
-    wrote as a trajectory item of that owner (``reef.storage.record_items.evaluation_trajectory_item``).
+    wrote as a trajectory item of that owner (``reef.storage.scenario.record_items.evaluation_trajectory_item``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """

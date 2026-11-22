@@ -16,8 +16,8 @@ from reef.control.dispatcher import Dispatcher
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 from reef.recipe.base import Recipe
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
 

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
+
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
@@ -23,12 +24,12 @@ from reef.evaluation.rollout_worker import ON_STOP_CHOICES, check_finish_timeout
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.routing.settings import RoutedServiceSettings, RoutingDeploymentSettings
-from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
-from reef.storage.records import RecordRetention
-from reef.storage.scenario import ScenarioStorage
-from reef.storage.segments import SegmentStore
-from reef.storage.sql_setup import postgres_url, validate_postgres_schema
-from reef.storage.tasks import TaskFileStore
+from reef.storage.data.segments import SegmentStore
+from reef.storage.data.store import JOB_DIRECTORY_TTL_SECONDS, DataStore
+from reef.storage.data.tasks import TaskFileStore
+from reef.storage.scenario.records import RecordRetention
+from reef.storage.scenario.store import ScenarioStorage
+from reef.storage.sql.setup import postgres_url, validate_postgres_schema
 from reef.train.manager import TrainingManager
 
 

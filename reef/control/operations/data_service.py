@@ -22,15 +22,15 @@ from reef.control.operations.data import MAX_ITEMS_PER_CREATE, DataAccess, DataS
 from reef.control.operations.data_transfer import ArchiveWriters, run_export, run_import
 from reef.execution.workers import QueueWorker
 from reef.recipe.deployment import harness_adapter
-from reef.storage.artifact_items import artifact_item
-from reef.storage.data import ItemConflictError, ItemNotFoundError, NewItem
-from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
-from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, WorkItem, WorkQueue
+from reef.storage.data.artifact_items import artifact_item
+from reef.storage.data.queue import ARTIFACT_COPY_KIND, DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
+from reef.storage.data.store import ItemConflictError, ItemNotFoundError, NewItem
 
 
 def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
     """Store the artifact item of each artifact that ``scenario`` lists and that its owner does not store yet
-    (``reef.storage.artifact_items``); return how many items it stored.
+    (``reef.storage.data.artifact_items``); return how many items it stored.
 
     A scenario without an owner has no store to copy into, and copies nothing. An item that the owner stores already
     stays as it is, so a copy can run again at any time.

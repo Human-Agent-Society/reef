@@ -1,7 +1,7 @@
 """Commit history contract and the scenario store that combines it with a record store.
 
 CommitHistory is the contract for the ordered commits of one scenario
-generation. ``sql_commits`` implements it as a table in the scenario's record
+generation. ``reef.storage.sql.commits`` implements it as a table in the scenario's record
 database. CommitHistoryScenarioStore combines a CommitHistory with an injected
 RecordStore. The history append is the durable commit point; recovery restores
 consumption progress. Artifact publication is not in this module.
@@ -16,12 +16,12 @@ from contextlib import AbstractContextManager, contextmanager
 from threading import RLock
 
 from reef.core.errors import ReefError
-from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord, CommitSnapshots
-from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import RecordStore
-from reef.storage.samples import TrainingState
-from reef.storage.scenario import ScenarioStore, ScenarioStoreConflictError
-from reef.storage.tasks import TaskStorage
+from reef.storage.data.tasks import TaskStorage
+from reef.storage.scenario.commits import RECORD_KIND, CommitHistoryError, CommitRecord, CommitSnapshots
+from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import TrainingState
+from reef.storage.scenario.store import ScenarioStore, ScenarioStoreConflictError
 
 
 def same_commit(left: CommitRecord, right: CommitRecord) -> bool:

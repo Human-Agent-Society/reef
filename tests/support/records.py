@@ -7,9 +7,9 @@ open the record items of one scenario in a data store.
 from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
-from reef.storage.data import DataStore, MemoryDataStore
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.store import DataStore, MemoryDataStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import ItemRecordStore
 
 
 def item_records(data: DataStore, scenario: str = "math", owner: str | None = None) -> ItemRecordStore:

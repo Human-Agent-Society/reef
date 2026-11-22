@@ -16,8 +16,8 @@ from reef.core.served_models import ScenarioModel, ServedArtifact
 from reef.core.snapshot import RootSource
 from reef.core.training_request import normalize_training_request_payload
 from reef.observability import NullExperimentTracker
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import ScenarioRoot
 from reef.train.training_requests import TrainingRequestQueue
 

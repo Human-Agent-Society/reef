@@ -17,8 +17,8 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
 from reef.core.tasks import write_harbor_task
 from reef.recipe import Recipe
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 

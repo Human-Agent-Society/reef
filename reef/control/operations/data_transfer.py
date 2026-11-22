@@ -47,9 +47,9 @@ from reef.control.operations.data import (
     create_trajectory_items,
     jsonl_trajectories,
 )
-from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFoundError, StoredItem, check_owner
-from reef.storage.data_queue import DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem
+from reef.storage.data.queue import DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
+from reef.storage.data.store import MAX_QUERY_LIMIT, ItemNotFoundError, StoredItem, check_owner
 
 #: The transfer kinds by the route segment that names them.
 TRANSFER_KINDS = {"imports": DATA_IMPORT_KIND, "exports": DATA_EXPORT_KIND}

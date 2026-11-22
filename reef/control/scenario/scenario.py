@@ -29,9 +29,9 @@ from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.samples.service import ProducedSamples, Selection
 from reef.samples.staleness import ServedArtifacts
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
-from reef.storage.records import RecordStore
-from reef.storage.scenario import ScenarioStore
+from reef.storage.scenario.commits import SCENARIO_METADATA_KEY, CommitRecord
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.store import ScenarioStore
 from reef.train.component import TrainingComponent
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.training_requests import ScenarioTrainingRequests

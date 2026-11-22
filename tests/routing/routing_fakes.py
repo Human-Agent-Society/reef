@@ -38,8 +38,8 @@ from reef.routing.preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_
 from reef.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
 from reef.routing.registry import DeploymentOwnership
 from reef.routing.settings import RoutingDeploymentSettings
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 ROUTER_HASH = "1" * 64
 RUNTIME_HASH = "6" * 64

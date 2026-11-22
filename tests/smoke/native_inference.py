@@ -117,9 +117,9 @@ from reef.routing.manifest import (
     scenario_entrypoint,
 )
 from reef.routing.preview import PreviewSettings
-from reef.storage.coordination import Coordination
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.coordination.store import Coordination
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 PROFILES = ("features", "routing", "recovery", "lifecycle")
 ENGINES = ("sglang", "vllm")

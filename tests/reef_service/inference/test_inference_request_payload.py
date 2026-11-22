@@ -21,8 +21,8 @@ from reef.artifact.artifact import Artifact
 from reef.core import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 SCENARIO = "reef-sampling"
 COMPLETION = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}]}

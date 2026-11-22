@@ -14,7 +14,7 @@ from reef.core.version import __version__
 
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.api.wire import ReportPayload, RequestHeaders, parse_request_headers
-from reef.storage.records import RecordStore
+from reef.storage.scenario.records import RecordStore
 from reef.evaluation import (
     ActivationRule,
     CandidateEvaluationPlugin,
@@ -25,7 +25,7 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.storage.commits import SCENARIO_METADATA_KEY
+from reef.storage.scenario.commits import SCENARIO_METADATA_KEY
 from reef.control.scenario import Scenario
 from reef.recipe import (
     RecipeConfigError,

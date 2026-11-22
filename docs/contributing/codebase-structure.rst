@@ -94,7 +94,7 @@ Reef is organized around an application kernel and three capability domains, not
      - Artifact bytes, repositories, materialization, snapshot heads, and the components that a recipe declares
      - Commit policy, weight loading
    * - ``reef/storage/``
-     - Record, commit, task, sample and data store contracts and their SQLite and PostgreSQL implementations; the coordination store (work queues, ``served_models``, the control lease)
+     - The storage contracts and their SQLite and PostgreSQL implementations (``sql/``): the record, commit, sample and evaluation stores of a scenario (``scenario/``), the data store with its tasks (``data/``), and the coordination store with the work queues, ``served_models`` and the control lease (``coordination/``)
      - Scenario coordination, training
    * - ``reef/harness/``
      - Adapters (the parts of each agent's tree and its descriptor), the source tree (patches, validation, rendering), task runs, runners, trajectories, and the loopback gateway of an agent process
@@ -176,19 +176,19 @@ The shared store has four parts. Each row names the module that defines its cont
      - Contract
      - Content
    * - Coordination store
-     - ``reef/storage/coordination.py``, with SQL tables in ``reef/storage/sql_coordination.py``
-     - The work queues (``reef/storage/work_queue.py``, table ``work_item``), ``served_models`` (``reef/storage/served_models.py``, tables ``served_model`` and ``scheduled_stop``), and the control lease (``reef/storage/control_lease.py``)
+     - ``reef/storage/coordination/store.py``, with SQL tables in ``reef/storage/sql/coordination.py``
+     - The work queues (``reef/storage/coordination/work_queue.py``, table ``work_item``), ``served_models`` (``reef/storage/coordination/served_models.py``, tables ``served_model`` and ``scheduled_stop``), and the control lease (``reef/storage/coordination/control_lease.py``)
    * - Scenario storage
-     - ``reef/storage/scenario.py``
+     - ``reef/storage/scenario/store.py``
      - The commit history, settings, tasks and evaluations of each scenario
    * - Data store
-     - ``reef/storage/data.py``
+     - ``reef/storage/data/store.py``
      - Data items: records, trajectories, tasks, samples, artifact items, and job data directories
    * - Artifact backend
      - ``reef/artifact/``
      - The snapshots of each scenario, and the stored content of checkpoints
 
-A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/samples/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data_queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/api/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
+A queue name is a constant beside the worker that takes its items: ``JOBS_QUEUE`` and ``CHECKS_QUEUE`` in ``reef/train/job_queue.py``, ``SAMPLES_QUEUE`` in ``reef/samples/service/worker.py``, ``EVALUATIONS_QUEUE`` in ``reef/evaluation/rollout_worker.py``, ``SERVING_QUEUE`` in ``reef/storage/coordination/served_models.py``, ``DATA_QUEUE`` and ``DATA_SYNC_QUEUE`` in ``reef/storage/data/queue.py``, ``HARNESS_SYNC_QUEUE`` in ``reef/api/harness_imports.py``, ``DELETES_QUEUE`` in ``reef/control/workers/scenario_deletes.py``, and ``TRAINING_REQUESTS_QUEUE`` in ``reef/train/training_requests.py``. ``QueueWorker`` in ``reef/execution/workers.py`` is the loop that takes, leases and finishes items.
 
 Choose a destination
 --------------------
@@ -202,7 +202,7 @@ Choose a destination
    * - A value or error that unrelated layers need, without behavior
      - ``reef/core/``
    * - Scenario state, commit ordering, recovery, activation, training starts
-     - ``reef/control/scenario/``. The persisted ``CommitRecord`` is in ``reef/storage/commits.py``.
+     - ``reef/control/scenario/``. The persisted ``CommitRecord`` is in ``reef/storage/scenario/commits.py``.
    * - A record, task, sample or data store contract, or its implementation
      - ``reef/storage/``. Implementations depend on the contracts, never the reverse.
    * - Persisting or materializing versioned bytes, or declaring a snapshot component

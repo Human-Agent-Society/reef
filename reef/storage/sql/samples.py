@@ -13,9 +13,9 @@ from threading import Lock
 
 from sqlalchemy import Column, ForeignKey, MetaData, String, Table, Text, select
 
-from reef.storage.commits import CommitRecord
-from reef.storage.samples import CONSUMED_SAMPLE_PREFIX, TrainingState
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import CONSUMED_SAMPLE_PREFIX, TrainingState
+from reef.storage.sql.records import ScopedTable, SQLScenarioDatabase
 
 
 def scoped_table(name: str, metadata: MetaData, columns: tuple[Column, ...], foreign_key: str | None) -> Table:

@@ -62,19 +62,19 @@ from reef.recipe.loading import build_recipe, load_recipe, named_recipe_config, 
 from reef.recipe.registry import recipe_class_for
 from reef.routing.manifest import RoutingAdapter
 from reef.routing.preview import PreviewSettings
-from reef.storage.coordination import Coordination, instance_id
-from reef.storage.data import DataStore
-from reef.storage.job_data import JobDataKind
-from reef.storage.observer import ObservedScenarioStorage
-from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.records import RecordRetention
-from reef.storage.scenario import ScenarioStorage
-from reef.storage.segments import LocalSegmentStore, SegmentStore
-from reef.storage.sql_coordination import open_coordination
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.task_import import DataScenarioStorage, TaskImport
-from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+from reef.storage.coordination.store import Coordination, instance_id
+from reef.storage.data.job_data import JobDataKind
+from reef.storage.data.segments import LocalSegmentStore, SegmentStore
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import LocalTaskFileStore, TaskFileStore
+from reef.storage.scenario.observer import ObservedScenarioStorage
+from reef.storage.scenario.records import RecordRetention
+from reef.storage.scenario.store import ScenarioStorage
+from reef.storage.scenario.task_import import DataScenarioStorage, TaskImport
+from reef.storage.sql.coordination import open_coordination
+from reef.storage.sql.data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql.postgres import PostgresScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import build_training_component, training_backend_facts
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.facts import HarnessFacts

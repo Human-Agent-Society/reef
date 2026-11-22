@@ -58,11 +58,11 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.samples.context import PipelineContext
 from reef.samples.traces import InferenceSamples
-from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.samples import CONSUMED_SAMPLE_PREFIX
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop, JobLoopState

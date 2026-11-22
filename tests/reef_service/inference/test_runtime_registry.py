@@ -17,8 +17,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 @pytest.mark.unit

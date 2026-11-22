@@ -18,13 +18,13 @@ from reef.control.workers.scenario_deletes import DELETES_QUEUE
 from reef.core import AgentRecord, RequestType
 from reef.deploy.service_config import service_config_from_mapping
 from reef.recipe import Recipe
-from reef.storage.data import DataStore
-from reef.storage.record_items import record_item
-from reef.storage.records import RecordRetention
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import LocalTaskFileStore, TaskFileStore
+from reef.storage.scenario.record_items import record_item
+from reef.storage.scenario.records import RecordRetention
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 def trace(record_id: str, scenario: str = "math") -> AgentRecord:

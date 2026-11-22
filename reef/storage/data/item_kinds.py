@@ -5,8 +5,8 @@ kind (``ITEM_KIND_RULES``), and every data store checks them when it creates an 
 
 * ``trajectory``: an ATIF document (``TrajectorySample``).
 * ``record``: an inference or a report that a scenario made, as ``copied_record`` reads it
-  (``reef.storage.record_items``).
-* ``artifact``: a reference to an artifact's files (``check_artifact_content``, ``reef.storage.artifact_items``).
+  (``reef.storage.scenario.record_items``).
+* ``artifact``: a reference to an artifact's files (``check_artifact_content``, ``reef.storage.data.artifact_items``).
 * ``task``: a Harbor task directory named after the item, which the store copies into the owner's task file
   partition (``task_partition``), or a ``TaskFilesReference`` to such a directory that the partition already holds.
 
@@ -26,7 +26,7 @@ from typing import Any
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
-from reef.storage.tasks import FILES_DIGEST_PATTERN, TaskFilesNotFoundError, TaskFileStore
+from reef.storage.data.tasks import FILES_DIGEST_PATTERN, TaskFilesNotFoundError, TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
 #: starts with it, and archiving a scenario never moves an owner's task files.
@@ -128,7 +128,7 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
 
 
 def check_artifact_content(content: Mapping[str, Any], *, made_by_scenario: bool) -> None:
-    """Raise ``ValueError`` unless ``content`` is the content of an artifact item, as ``reef.storage.artifact_items``
+    """Raise ``ValueError`` unless ``content`` is the content of an artifact item, as ``reef.storage.data.artifact_items``
     defines it.
 
     ``made_by_scenario`` is whether the item has an ``origin``. Every value is a non-empty string or null;

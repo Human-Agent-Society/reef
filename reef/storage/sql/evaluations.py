@@ -31,14 +31,14 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.evaluations import (
+from reef.storage.scenario.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
     EvaluationStateConflictError,
     KeyedEvaluationStore,
     StoredEvaluation,
 )
-from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
+from reef.storage.sql.records import ScopedTable, SQLScenarioDatabase
 
 
 def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:

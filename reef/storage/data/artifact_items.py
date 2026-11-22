@@ -32,10 +32,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.storage.data import NewItem
-from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_QUEUE
-from reef.storage.item_kinds import check_artifact_content
-from reef.storage.work_queue import WorkItem, WorkQueue
+from reef.storage.coordination.work_queue import WorkItem, WorkQueue
+from reef.storage.data.item_kinds import check_artifact_content
+from reef.storage.data.queue import ARTIFACT_COPY_KIND, DATA_QUEUE
+from reef.storage.data.store import NewItem
 
 
 def artifact_item(

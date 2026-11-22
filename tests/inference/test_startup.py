@@ -45,10 +45,16 @@ from reef.inference.serving import FullWeightServingRuntime, OpenedEngines
 from reef.inference.startup import StartupFailedError, StartupStoppedError, redeploying, report_startup, stopping
 from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
-from reef.storage.served_models import REDEPLOY, SERVE_ARTIFACT_KIND, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
-from reef.storage.sql_coordination import memory_coordination, open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.coordination.served_models import (
+    REDEPLOY,
+    SERVE_ARTIFACT_KIND,
+    SERVING_KIND,
+    SERVING_QUEUE,
+    STOP_SERVING_KIND,
+)
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.sql.coordination import memory_coordination, open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}

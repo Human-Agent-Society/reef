@@ -28,7 +28,7 @@ from reef.core.errors import (
     TrainingStartRefusedError,
     UpstreamStatusError,
 )
-from reef.storage.records import RecordConflictError
+from reef.storage.scenario.records import RecordConflictError
 
 
 @pytest.mark.unit

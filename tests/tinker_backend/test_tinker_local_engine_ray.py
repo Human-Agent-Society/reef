@@ -248,8 +248,8 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     """
     from recipes.tttd.recipe import TTTDRecipe
     from reef.control.dispatcher import Dispatcher
-    from reef.storage.sql_coordination import open_coordination
-    from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.storage.sql.coordination import open_coordination
+    from reef.storage.sql.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSettings
 
     if not REAL:

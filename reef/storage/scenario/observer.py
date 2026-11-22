@@ -17,13 +17,13 @@ from typing import Any, Self
 
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commits import CommitRecord, CommitSnapshots
-from reef.storage.data import DataStore
-from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
-from reef.storage.samples import SampleStore, TrainingState
-from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
-from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import TaskFileStore, TaskStorage
+from reef.storage.scenario.commits import CommitRecord, CommitSnapshots
+from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.records import AppendResult, RecordLoss, RecordStore, StoredRecord
+from reef.storage.scenario.samples import SampleStore, TrainingState
+from reef.storage.scenario.store import ScenarioSettings, ScenarioStorage, ScenarioStore
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobOutcome, TaskFiles, TaskSample
-from reef.storage.samples import SampleKind
+from reef.storage.scenario.samples import SampleKind
 from reef.train.component import job_id_for
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.learning_rate import (

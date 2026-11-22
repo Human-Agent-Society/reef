@@ -16,9 +16,9 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
-from reef.storage.commits import CommitRecord
-from reef.storage.observer import ObservedScenarioStore, RecordObserver
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.observer import ObservedScenarioStore, RecordObserver
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class RecordingTracker(ExperimentTracker):

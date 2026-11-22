@@ -83,8 +83,8 @@ from reef.inference.interfaces import (
 )
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
 from reef.inference.startup import STARTUP_FAILED_PREFIX, reported_steps
-from reef.storage.scenario import ScenarioStorage
-from reef.storage.served_models import ServedModels
+from reef.storage.coordination.served_models import ServedModels
+from reef.storage.scenario.store import ScenarioStorage
 
 logger = logging.getLogger(__name__)
 #: A client's identifier of a conversation, which keeps the conversation on one artifact of a traffic split.

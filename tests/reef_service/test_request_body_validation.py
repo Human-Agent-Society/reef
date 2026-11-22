@@ -11,8 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.api.app import create_app
 from reef.api.wire import ReportPayload
 from reef.control.dispatcher import build_default_dispatcher
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "body-validation"}
 NON_OBJECTS = ([], "text", 1, True, None)
