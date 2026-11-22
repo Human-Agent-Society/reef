@@ -8,7 +8,7 @@ before the cycle, as the samples worker would.
 from __future__ import annotations
 
 from reef.control.scenario.scenario import Scenario
-from reef.record2sample.staleness import ServedArtifacts
+from reef.samples.staleness import ServedArtifacts
 from reef.train.trainer import Trainer
 
 

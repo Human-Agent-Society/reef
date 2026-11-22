@@ -7,9 +7,9 @@ from typing import Any
 from recipes.opd.processor import OPDSamples
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
-from reef.sample2job import DistillJobData
 from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
+from reef.train.sample2job import DistillJobData
 
 
 @dataclass(frozen=True, kw_only=True)

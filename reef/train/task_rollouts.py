@@ -28,8 +28,8 @@ from reef.core.errors import inference_aborted
 from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.samples import recorded_training
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.samples import recorded_training
 
 logger = logging.getLogger(__name__)
 

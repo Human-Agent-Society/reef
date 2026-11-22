@@ -51,11 +51,11 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceHandler
-from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import weight_training_selection
+from reef.samples.context import PipelineContext
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -241,7 +241,7 @@ def test_composite_recipe_merges_components_seeds_and_trainers(tmp_path: Path) -
 
 @pytest.mark.unit
 def test_each_component_trainer_takes_only_its_own_record2sample_keys(tmp_path: Path) -> None:
-    trajectories = {"record2sample": {"module": "reef.record2sample.trajectories:TrajectorySamples"}}
+    trajectories = {"record2sample": {"module": "reef.samples.trajectories:TrajectorySamples"}}
     stages = PipelineSettings.from_setting(trajectories, spec=PipelineSpec(), environ={})
     harness = _composite(tmp_path).components["harness"]
     recipe = CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe(pipeline_stages=stages)})

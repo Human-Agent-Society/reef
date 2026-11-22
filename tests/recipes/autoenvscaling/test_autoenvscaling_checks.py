@@ -35,7 +35,7 @@ from recipes.beta.autoenvscaling.designer import REVIEW_TEXT
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks.generator import RejectedTask, RolledOutTask
-from reef.record2sample.generator import GeneratorError, WrittenTask
+from reef.samples.generator import GeneratorError, WrittenTask
 
 
 FINDING = {

@@ -45,7 +45,7 @@ def channel_dispatcher(
     candidates = iter(patches)
     stages: dict = (
         {
-            "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
+            "record2sample": {"module": "reef.samples.traces:InferenceSamples"},
         }
         if inference_stages
         else {}

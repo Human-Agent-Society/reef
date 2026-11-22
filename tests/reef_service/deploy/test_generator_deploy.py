@@ -15,7 +15,7 @@ from reef.deploy.generator import GeneratorSettings, attach_generator_service, g
 from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.service_config import service_config_from_mapping
 from reef.execution.executor.config import ExecutorSettings, role_executor_settings, select_executor
-from reef.record2sample.generator import HarborChecks, ReefGeneratorRollouts
+from reef.samples.generator import HarborChecks, ReefGeneratorRollouts
 
 pytestmark = pytest.mark.unit
 

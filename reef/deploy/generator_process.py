@@ -1,4 +1,4 @@
-"""Run the generator service (``reef.record2sample.generator``) from the deployment ``reef serve`` resolved, or from a file."""
+"""Run the generator service (``reef.samples.generator``) from the deployment ``reef serve`` resolved, or from a file."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from reef.deploy.config_utils import DeployConfigError, load_config
 from reef.deploy.generator import GeneratorSettings
 from reef.deploy.inference import local_service_url
 from reef.deploy.service_config import service_config_from_mapping
-from reef.record2sample.generator.designer import ReefDesigner
-from reef.record2sample.generator.service import (
+from reef.samples.generator.designer import ReefDesigner
+from reef.samples.generator.service import (
     GeneratorService,
     HarborChecks,
     JobRunner,

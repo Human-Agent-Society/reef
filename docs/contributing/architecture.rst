@@ -229,10 +229,8 @@ A new top-level package needs an accepted RFC (`Changes that need an RFC <../../
      - Target
    * - ``reef/api/request_service.py`` and ``reef/api/harness_imports.py``
      - ``control/operations/``
-   * - ``reef/record2sample/``, ``reef/pipeline_context.py``, and the part of ``TrainingPipeline`` that makes samples
-     - ``samples``
-   * - ``reef/sample2job/`` and the part of ``TrainingPipeline`` that builds job data
-     - ``train``
+   * - The part of ``TrainingPipeline`` in ``reef/train/pipeline.py`` that makes samples
+     - ``samples``. The part that builds job data stays in ``train``.
    * - ``reef/recipe/generated_tasks/``
      - ``recipes/``
    * - The modules of ``reef/storage/``, in one directory

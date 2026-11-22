@@ -17,10 +17,10 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import trajectory_reward
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 logger = logging.getLogger(__name__)

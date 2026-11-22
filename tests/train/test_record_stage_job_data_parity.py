@@ -38,7 +38,7 @@ from reef.core.plugins import NoSettings, PluginSettings
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.core.training_request import normalize_training_request_payload
 from reef.execution.jobs import SupportsReceipt
-from reef.record2sample import (
+from reef.samples import (
     GroupDecision,
     JudgedSamples,
     Record2Sample,
@@ -47,17 +47,17 @@ from reef.record2sample import (
     ReportGrouping,
     ReportSamples,
 )
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.distill import DistillSamples
-from reef.record2sample.staleness import ServedArtifacts, lags_behind
-from reef.record2sample.traces import TraceSamples
-from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
-from reef.sample2job.traces import TraceJobData
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.distill import DistillSamples
+from reef.samples.staleness import ServedArtifacts, lags_behind
+from reef.samples.traces import TraceSamples
 from reef.storage.record_items import ItemRecordStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.train import PipelineContext, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSpec
+from reef.train.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
+from reef.train.sample2job.traces import TraceJobData
 from reef.train.training_requests import ScenarioTrainingRequests
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 

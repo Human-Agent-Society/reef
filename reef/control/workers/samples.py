@@ -11,7 +11,7 @@ from __future__ import annotations
 from reef.control.scenario.registry import ScenarioRegistry
 from reef.control.workers.local_workers import LocalTrainingWorkers
 from reef.execution.workers import ItemFailedError
-from reef.record2sample.service import ProducedSamples, SampleProducers, Selection
+from reef.samples.service import ProducedSamples, SampleProducers, Selection
 from reef.train.job_queue import SCENARIO_DELETED_ERROR
 
 

@@ -12,7 +12,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | `execution/`, `inference/`, `train/` | Worker executors, inference contracts and integrations, and the training pipeline |
 | `sandbox/` | Shared execution, environment contracts, isolation, file transfer, and cleanup |
 | `slime_backend/`, `tinker_backend/` | Contracts specific to a training backend |
-| `record2sample/`, `sample2job/` | The corresponding stages of the training pipeline |
+| `samples/` | The record-to-sample stage of the training pipeline, the samples service, and the generator service |
 | `evaluation/`, `harness/`, `observability/` | Candidate evaluation, harness execution, and tracking |
 | `reef_recipe/` | Shared recipe contracts and built-in recipes from `reef/recipe/` |
 | `recipes/<recipe>/` | Cookbook methods and their examples; use the method name for beta recipes too |

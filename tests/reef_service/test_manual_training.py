@@ -53,12 +53,11 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
 from reef.core.trajectories import source_record_id
 from reef.harness.tree import TreePatch
-from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.record2sample.traces import InferenceSamples
-from reef.sample2job import Sample2Job
+from reef.samples.context import PipelineContext
+from reef.samples.traces import InferenceSamples
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
@@ -69,6 +68,7 @@ from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.manager import MANAGER_REQUEST_PREFIX, MANAGER_SESSION, Train, TrainFrom, TrainingManager
 from reef.train.pipeline import PipelineSpec, TrainingPipeline
+from reef.train.sample2job import Sample2Job
 from reef.train.trainer import Trainer
 from reef.train.training_requests import ScenarioTrainingRequests
 from reef.train.types import JobData, Sample

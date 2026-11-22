@@ -62,7 +62,6 @@ from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.service_config import service_config_from_mapping
-from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import (
@@ -71,9 +70,10 @@ from reef.recipe.generated_tasks.processor import (
     complete_generation_count,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
-from reef.record2sample.generator import DuplicateTaskError, GeneratorError, WrittenTask
-from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.context import PipelineContext
+from reef.samples.generator import DuplicateTaskError, GeneratorError, WrittenTask
+from reef.samples.generator.harbor import ORACLE_TIMEOUT_S
+from reef.samples.generator.inputs import TaskGenerationRequest
 from reef.train.tinker_backend.objectives import resolve_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
@@ -976,7 +976,7 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     assert config["generator"]["agent"] == rollout_agent
     kwargs = rollout_agent["kwargs"]
     # A training rollout that fills the context ends and is scored.
-    assert rollout_agent["import_path"] == "reef.record2sample.generator.terminus:VerifiedTerminus2"
+    assert rollout_agent["import_path"] == "reef.samples.generator.terminus:VerifiedTerminus2"
     # Each rollout's advantage is its reward minus its task's mean reward.
     objective = resolve_objective(config["recipe"]["config"]["job_parameters"]["objective"])
     assert isinstance(objective, AutoEnvScalingTinkerObjective)

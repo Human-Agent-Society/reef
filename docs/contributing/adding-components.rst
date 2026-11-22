@@ -34,8 +34,8 @@ Implementation
   declarations.
 - Put the method's record-to-sample and sample-to-job stages in
   ``<method-package>/processor.py``, subclassing ``ReportSamples`` or
-  ``JudgedSamples`` (``reef/record2sample/``) and ``Sample2Job``
-  (``reef/sample2job/``), and its record stage in the recipe module.
+  ``JudgedSamples`` (``reef/samples/``) and ``Sample2Job``
+  (``reef/train/sample2job/``), and its record stage in the recipe module.
   Extend those contracts only when they do not already express it.
 - Put the method's training objective with the backend that it targets: a
   ``SlimeObjective`` (``reef/train/slime_backend/objectives.py``) in

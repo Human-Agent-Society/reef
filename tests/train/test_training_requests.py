@@ -8,13 +8,13 @@ from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core.training_request import normalize_training_request_payload
-from reef.pipeline_context import PipelineContext
-from reef.sample2job import Sample2Job
+from reef.samples.context import PipelineContext
 from reef.storage.records import RecordConflictError
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job
 from reef.train.trainer import Trainer
 from reef.train.training_requests import TRAINING_REQUESTS_QUEUE, TrainingRequestQueue, training_request_kind
 from reef.train.types import JobData

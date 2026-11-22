@@ -35,7 +35,6 @@ from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
-from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecipe
@@ -57,8 +56,9 @@ from reef.recipe.generated_tasks.processor import (
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
 from reef.recipe.loading import load_recipe
-from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples import NoSamples, Record2Sample, RecordSet, SampleResult
+from reef.samples.context import PipelineContext
+from reef.samples.generator.inputs import TaskGenerationRequest
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.tasks import TaskStorage

@@ -26,9 +26,9 @@ from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepo
 from reef.control.dispatcher import Dispatcher
 from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import NeverActivate
-from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.samples.context import PipelineContext
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobStatus, TrainingJob

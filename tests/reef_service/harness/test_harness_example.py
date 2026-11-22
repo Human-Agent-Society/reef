@@ -44,11 +44,11 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, Mo
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, validate_patch
-from reef.pipeline_context import PipelineContext
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
+from reef.samples.context import PipelineContext
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioDatabase
 from reef.train.backend import ComponentArtifacts

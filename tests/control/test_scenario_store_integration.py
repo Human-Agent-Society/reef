@@ -16,9 +16,9 @@ from reef.control.scenario.live_objects import LiveObjects
 from reef.control.workers.scenario_deletes import DELETES_QUEUE
 from reef.core.errors import ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.pipeline_context import PipelineContext
 from reef.recipe.base import Recipe
-from reef.record2sample import NoSamples
+from reef.samples import NoSamples
+from reef.samples.context import PipelineContext
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore

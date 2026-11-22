@@ -86,12 +86,11 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime
-from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
-from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.samples.context import PipelineContext
 from reef.storage.data import NewItem
 from reef.storage.samples import StoredSample
 from reef.storage.sql_coordination import memory_coordination
@@ -101,6 +100,7 @@ from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
+from reef.train.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainingCommit
 
@@ -485,7 +485,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
 
 def test_offline_runs_need_task_directories_to_evaluate_on_and_a_scorer() -> None:
     """A prompt adapter's offline steps play train task directories, so its evaluation tasks are directories too."""
-    offline = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskJobData"}}}
+    offline = {"pipeline": {"sample2job": {"module": "reef.train.sample2job.traces:TrainTaskJobData"}}}
     store = {"tasks": [], "imported_tasks": True}
     built, _ = from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime())
     assert built.stages().sample2job.plugin_class is TrainTaskJobData and built.runs_offline()
@@ -523,7 +523,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         *from_config(
             settings(
                 pipeline={
-                    "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
+                    "record2sample": {"module": "reef.samples.traces:InferenceSamples"},
                     "sample2job": {"config": {"buffer_size": 6, "job_samples": 2}},
                 },
             ),

@@ -54,7 +54,6 @@ from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflictError, extend_split_by_source
 from reef.core.values import require_integer
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
-from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import (
     GeneratedTaskResult,
     GeneratorState,
@@ -80,13 +79,14 @@ from reef.recipe.generated_tasks.training import (
     task_items,
     train_task_names,
 )
-from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
-from reef.record2sample.generator.client import Generator, HttpGenerator
-from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.record2sample.reports import report_score
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.context import PipelineContext
+from reef.samples.generator.client import Generator, HttpGenerator
+from reef.samples.generator.inputs import TaskGenerationRequest
+from reef.samples.reports import report_score
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import GenerationState, SplitName, TaskConflictError, TaskStore, TaskStoreError
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)

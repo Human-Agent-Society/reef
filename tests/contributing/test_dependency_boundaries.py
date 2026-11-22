@@ -132,7 +132,7 @@ def test_core_package_does_not_depend_on_artifacts() -> None:
 
 
 def test_harbor_task_values_and_validation_do_not_depend_on_harness() -> None:
-    for module_name in ("reef.core.tasks.harbor", "reef.record2sample.generator.harbor"):
+    for module_name in ("reef.core.tasks.harbor", "reef.samples.generator.harbor"):
         module = importlib.import_module(module_name)
         imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
         assert _imports_of(imported, "reef.harness") == [], module_name
@@ -618,8 +618,8 @@ def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
     # The generator service owns the request; the generated-task recipe owns the generator contract.
     for module_name, package, consumers in (
         (
-            "reef.record2sample.generator.inputs",
-            "reef.record2sample.generator",
+            "reef.samples.generator.inputs",
+            "reef.samples.generator",
             ("reef.train", "reef.recipe", "recipes"),
         ),
         ("reef.recipe.generated_tasks.generator", "reef.recipe.generated_tasks", ("reef.train", "recipes")),
@@ -667,12 +667,15 @@ def test_record_to_sample_stage_depends_only_on_contracts_below_training() -> No
     allowed = (
         "reef.core",
         "reef.execution.jobs",
-        "reef.pipeline_context",
-        "reef.record2sample",
+        "reef.samples.context",
+        "reef.samples",
     )
-    for path in sorted((REPO_ROOT / "reef" / "record2sample").glob("*.py")):
-        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.record2sample"):
-            if target.startswith("reef.record2sample.generator"):
+    for path in sorted((REPO_ROOT / "reef" / "samples").glob("*.py")):
+        if path.name == "context.py":
+            # The pipeline context serves both stages; the next test holds its rule.
+            continue
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.samples"):
+            if target.startswith("reef.samples.generator"):
                 raise AssertionError(f"{path.relative_to(REPO_ROOT)} imports the generator service: {target}")
             if target == "reef" or target.startswith("reef."):
                 assert any(
@@ -685,13 +688,16 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
     allowed = (
         "reef.core",
         "reef.observability",
-        "reef.pipeline_context",
-        "reef.record2sample",
+        "reef.samples.context",
+        "reef.samples",
         "reef.storage.samples",
         "reef.storage.tasks",
-        "reef.sample2job",
+        "reef.train.sample2job",
     )
-    paths = [*sorted((REPO_ROOT / "reef" / "sample2job").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]
+    paths = [
+        *sorted((REPO_ROOT / "reef" / "train" / "sample2job").rglob("*.py")),
+        REPO_ROOT / "reef" / "samples" / "context.py",
+    ]
     for path in paths:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):

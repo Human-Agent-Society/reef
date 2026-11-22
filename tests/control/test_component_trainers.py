@@ -66,14 +66,13 @@ from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.execution.jobs import SupportsReceipt
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
-from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
-from reef.record2sample.assembly import SampleAssemblySettings
-from reef.record2sample.service import SAMPLES_QUEUE
-from reef.record2sample.staleness import ServedArtifacts, lags_behind
-from reef.record2sample.traces import TraceSamples
-from reef.sample2job.traces import TraceJobData
+from reef.samples import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
+from reef.samples.assembly import SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.samples.service import SAMPLES_QUEUE
+from reef.samples.staleness import ServedArtifacts, lags_behind
+from reef.samples.traces import TraceSamples
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitHistoryError,
@@ -94,6 +93,7 @@ from reef.train.job_queue import (
 )
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSpec, TrainingPipeline
+from reef.train.sample2job.traces import TraceJobData
 from reef.train.types import JobData, Sample
 
 

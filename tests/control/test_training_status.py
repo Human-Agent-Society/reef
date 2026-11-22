@@ -31,7 +31,7 @@ from reef.control.scenario.live_objects import LiveObjects
 from reef.control.workers.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
 from reef.core.job_data import JobOutcome
 from reef.recipe import CompositeRecipe, Recipe
-from reef.record2sample import NoSamples
+from reef.samples import NoSamples
 from reef.storage.samples import stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage

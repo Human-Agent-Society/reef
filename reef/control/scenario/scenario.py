@@ -27,8 +27,8 @@ from reef.core.values import JsonValue
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.record2sample.service import ProducedSamples, Selection
-from reef.record2sample.staleness import ServedArtifacts
+from reef.samples.service import ProducedSamples, Selection
+from reef.samples.staleness import ServedArtifacts
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore

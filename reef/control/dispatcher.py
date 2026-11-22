@@ -49,7 +49,7 @@ from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.recipe.deployment import refuses_images
-from reef.record2sample.service import SamplesWorker, request_selection
+from reef.samples.service import SamplesWorker, request_selection
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
@@ -1315,7 +1315,7 @@ class Dispatcher(
 
     def request_samples(self, current: Scenario, trigger: str) -> None:
         """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains,
-        because of ``trigger`` (``reef.record2sample.service.TRIGGERS``)."""
+        because of ``trigger`` (``reef.samples.service.TRIGGERS``)."""
         for component_trainer in current.trainers:
             if component_trainer.trainer.trains:
                 request_selection(self.queue, current.name, component_trainer.component, trigger=trigger)

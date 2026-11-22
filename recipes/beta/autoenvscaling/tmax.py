@@ -46,7 +46,7 @@ from pathlib import Path, PurePosixPath
 
 from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.record2sample.generator.designer import checked_harbor_files
+from reef.samples.generator.designer import checked_harbor_files
 
 #: The verifier of a converted task: the fraction of its tests that pass.
 VERIFIER = Path(__file__).with_name("tmax_verifier.sh")

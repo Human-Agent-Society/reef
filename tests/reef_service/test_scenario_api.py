@@ -29,7 +29,7 @@ from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core import ScenarioNotFoundError
 from reef.core.errors import ScenarioDeletedError
 from reef.recipe import Recipe
-from reef.record2sample.service import SAMPLES_QUEUE
+from reef.samples.service import SAMPLES_QUEUE
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
