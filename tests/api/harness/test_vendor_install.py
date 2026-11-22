@@ -29,7 +29,7 @@ from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.vendor_install import (
+from reef.harness.runs.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
     PREFIX_ENV,
@@ -200,7 +200,7 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
         steps.append(list(command))
         _write_executable(binary, "#!/bin/sh\necho 'Hermes Agent v0.21.0'\n")
 
-    monkeypatch.setattr("reef.harness.tasks.vendor_install._run", record)
+    monkeypatch.setattr("reef.harness.runs.vendor_install._run", record)
 
     assert resolve_binary(descriptor, prefix=prefix) == str(binary)
     assert [step[0:2] for step in steps] == [
@@ -227,7 +227,7 @@ def test_the_uv_kind_installs_the_pinned_uv_from_pypi_into_a_venv_of_its_own(tmp
                 prefix / descriptor.install.binary_path, "#!/bin/sh\necho 'uv 0.13.4 (1a2b3c 2026-10-20)'\n"
             )
 
-    monkeypatch.setattr("reef.harness.tasks.vendor_install._run", record)
+    monkeypatch.setattr("reef.harness.runs.vendor_install._run", record)
 
     assert resolve_binary(descriptor, prefix=prefix) == str(prefix / "venv/bin/uv")
     assert steps == [
@@ -253,7 +253,7 @@ def _counting_resolver(monkeypatch, result):
             raise result
         return result
 
-    monkeypatch.setattr("reef.harness.tasks.vendor_install.resolve_binary", resolve)
+    monkeypatch.setattr("reef.harness.runs.vendor_install.resolve_binary", resolve)
     return calls
 
 

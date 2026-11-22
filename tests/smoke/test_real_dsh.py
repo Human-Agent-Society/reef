@@ -16,8 +16,8 @@ import pytest
 from tests.support.openai_stub import MODEL, StubOpenAI
 
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import run_task
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import run_task
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_DSH = os.environ.get("REEF_REAL_DSH_BINARY", "")

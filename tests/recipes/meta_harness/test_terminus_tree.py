@@ -18,7 +18,7 @@ from reef_terminus.trajectory import TrialReader
 from reef_terminus.tree import ENVIRONMENT_ENV
 
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 #: The model comes from Reef's binding: a tree cannot set model_name.

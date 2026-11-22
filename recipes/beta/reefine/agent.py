@@ -62,9 +62,9 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.gateway import AgentTool
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import headless_argv, launch_agent, read_session
-from reef.harness.tasks.trajectory import final_assistant_text
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import headless_argv, launch_agent, read_session
+from reef.harness.runs.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.train.harness_backend import AgentExecution, Services, Workspace
 from reef.train.harness_backend.agent.run import agent_env

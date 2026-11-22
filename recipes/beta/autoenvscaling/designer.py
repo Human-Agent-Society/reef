@@ -41,8 +41,8 @@ from reef.execution.sandbox.environment import download_directory
 from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import AgentGateway, AgentTool, refuse, relay
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
 from reef.inference.provider_protocol import ANTHROPIC_CLIENT_HEADERS, response_events
 from reef.samples.generator.designer import (

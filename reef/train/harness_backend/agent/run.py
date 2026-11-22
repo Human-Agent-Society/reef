@@ -30,8 +30,8 @@ from reef.execution.sandbox.environment import download_directory
 from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import AgentGateway, AgentTool
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import headless_argv, headless_env, launch_agent, read_session
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.tree import HarnessTree, render_tree
 from reef.train.harness_backend.contract import AgentExecution, AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace

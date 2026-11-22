@@ -25,9 +25,9 @@ import yaml
 
 import reef.harness.adapters
 from reef.harness.adapters.descriptor import ADAPTER_FILE, AdapterDescriptor
+from reef.harness.runs import run as run_run
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.sync import TOKEN_PLACEHOLDER, LayerInstall
-from reef.harness.tasks import run as run_run
-from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 from reef.harness.tree.checks import NATIVE_LOOP_DEFAULT_MAX_STEPS
 

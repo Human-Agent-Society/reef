@@ -28,7 +28,7 @@ from reef.control.scenario.live_objects import harness_models
 from reef.core.evaluation import PolicyHarness, RolloutRequest
 from reef.harness import TaskResult
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 from reef.train.backend import ComponentArtifacts
 

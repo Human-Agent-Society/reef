@@ -35,8 +35,8 @@ from reef.evaluation.harness.runner import TaskRun
 from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBindings
-from reef.harness.tasks.run import TaskRunError, TrajectoryKeepError, run_task
+from reef.harness.runs.model_binding import ModelBindings
+from reef.harness.runs.run import TaskRunError, TrajectoryKeepError, run_task
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.harness_backend.backend import HarnessBackend
@@ -339,7 +339,7 @@ def test_an_run_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it
 
     # The failure is not a run failure: run_task raises it past the launch mapping, and the run
     # root is still removed on the way out.
-    from reef.harness.tasks import run as run_module
+    from reef.harness.runs import run as run_module
 
     removed: list[Path] = []
     remove = run_module.remove_run_root
@@ -493,7 +493,7 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
     """Per agent, the usage on the assistant messages and compactions of a
     native trajectory adds up beside the turn and tool counters, and the
     side's sum keeps every counter."""
-    from reef.harness.tasks.trajectory import agent_work, sum_agents
+    from reef.harness.runs.trajectory import agent_work, sum_agents
 
     trajectory = [
         {"type": "session", "data": {"agent": "root"}},

@@ -60,9 +60,9 @@ from reef.evaluation.harness import (
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.harness_models import HarnessModels
-from reef.harness.tasks.model_binding import ModelBindings
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.harness_models import HarnessModels
+from reef.harness.runs.model_binding import ModelBindings
+from reef.harness.runs.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
 from reef.storage.data.job_data import JobDataKind
 from reef.storage.durable_files import read_json, write_json

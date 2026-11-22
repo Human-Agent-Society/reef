@@ -29,7 +29,7 @@ from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, Progra
 from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend import AgentExecution, MethodJob, Services, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings

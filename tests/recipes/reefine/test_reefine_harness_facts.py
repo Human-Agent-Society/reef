@@ -19,7 +19,7 @@ from tests.recipes.reefine.support import PLAN_MARKER, TREE, Model, answer, desi
 from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.harness_facts import harness_facts
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree
 
 CHAT = {"commands/chat.md": "# chat\n\nChat mode is on."}

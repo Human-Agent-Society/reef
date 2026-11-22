@@ -32,7 +32,7 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.operations.harness import before_artifact_id, result_of
 from reef.core.plugins import PluginReference
 from reef.evaluation.activation import AlwaysActivate
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 
 MODULE = Path(__file__).parents[2] / "reef" / "api" / "artifact_page.py"

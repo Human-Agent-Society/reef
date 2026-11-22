@@ -28,7 +28,7 @@ from reef.execution.sandbox.modal import ModalExecutor
 from reef.execution.sandbox.process import LocalExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import deployment_owner
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.state import HarnessState

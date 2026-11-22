@@ -73,6 +73,8 @@ def test_recipe_symbols_are_removed_in_favor_of_processors_and_trainer() -> None
         # its store is RecordStore, both exported from their canonical modules.
         "reef.core.agent_record",
         "reef.api.routes.agent_record",
+        # The package holds the code of one run, not tasks: it is reef.harness.runs.
+        "reef.harness.tasks",
     ],
 )
 def test_old_naming_modules_are_removed(module: str) -> None:

@@ -59,7 +59,7 @@ from reef.execution.sandbox.process import (
     SandboxUnavailableError,
 )
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.runs.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.render import render_tree
 

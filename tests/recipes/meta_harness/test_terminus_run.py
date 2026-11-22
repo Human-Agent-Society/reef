@@ -28,8 +28,8 @@ from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import TaskRunError, run_task
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import TaskRunError, run_task
 from reef.harness.tree import HarnessTree, render_tree
 
 # Stands in for the runner: prove the run reaches it with what it needs.

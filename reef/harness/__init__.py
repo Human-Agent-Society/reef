@@ -14,7 +14,7 @@ The map, one subpackage per job:
     render steps. pi, opencode, claude, codex, dsh, hermes, and native, the
     program Reef ships. Another distribution adds an adapter through the
     ``reef.harness_adapters`` entry point group.
-``tasks/``
+``runs/``
     one headless run and its reading: launch on a rendered root through any
     ``reef.execution.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
@@ -44,8 +44,8 @@ artifact stack (``reef.artifact``, ``reef.control.scenario``).
 """
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor
-from reef.harness.tasks.run import TaskResult, TaskRunError, TrajectoryKeepError, run_task
-from reef.harness.tasks.trajectory import TrajectoryError, read_opencode_session, read_pi_session
+from reef.harness.runs.run import TaskResult, TaskRunError, TrajectoryKeepError, run_task
+from reef.harness.runs.trajectory import TrajectoryError, read_opencode_session, read_pi_session
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 
 __all__ = [

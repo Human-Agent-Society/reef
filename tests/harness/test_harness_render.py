@@ -22,7 +22,7 @@ from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
 from reef.harness.adapters.hermes.render import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.render import read_frontmatter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError
+from reef.harness.runs.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree import HarnessTree, RenderError, render_tree, validate_tree
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"

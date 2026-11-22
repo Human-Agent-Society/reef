@@ -55,9 +55,9 @@ from reef.harness.runners.native import (
 from reef.harness.runners.native.enforce import BwrapEnforcer
 from reef.harness.runners.native.graph import SEED_GRAPH
 from reef.harness.runners.native.host import NativeHost
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import run_task
-from reef.harness.tasks.trajectory import reader_for
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import run_task
+from reef.harness.runs.trajectory import reader_for
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
@@ -1664,7 +1664,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         checker_request = next(r for r in model.requests if "You are the checker" in r["messages"][0]["content"])
         assert [t["function"]["name"] for t in checker_request["tools"]] == ["read_file"]
         # Per agent work, as the verdict will carry it.
-        from reef.harness.tasks.trajectory import agent_work
+        from reef.harness.runs.trajectory import agent_work
 
         assert agent_work(result.trajectory) == {
             "checker": {

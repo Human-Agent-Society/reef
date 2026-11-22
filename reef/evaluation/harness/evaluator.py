@@ -47,9 +47,9 @@ from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.harbor.agent import can_run_in_task_container
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
-from reef.harness.tasks.run import TrajectoryKeepError
-from reef.harness.tasks.trajectory import sum_agents
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.run import TrajectoryKeepError
+from reef.harness.runs.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import clip_record_text
 from reef.storage.data.tasks import files_digest

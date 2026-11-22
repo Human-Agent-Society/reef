@@ -46,7 +46,7 @@ from recipes.beta.autoenvscaling.designer import (
     call_receipt,
     repository_snapshot,
 )
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.samples.generator.designer import HARBOR_OUTPUT_TEXT, SYSTEM_PROMPT
 
 

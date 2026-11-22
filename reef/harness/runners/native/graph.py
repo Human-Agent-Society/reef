@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from reef.core.errors import InternalError
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree.checks import NAME, NATIVE_END_REASONS, validate_native_graph
 
 #: The built-in loop as a graph: think, act while the model calls tools, end when it answers. The loop runs this

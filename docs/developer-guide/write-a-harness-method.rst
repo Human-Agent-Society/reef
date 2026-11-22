@@ -313,7 +313,7 @@ one finished run; higher is better:
 .. code:: python
 
    from reef.evaluation.harness import TaskScorer
-   from reef.harness.tasks.trajectory import final_assistant_text
+   from reef.harness.runs.trajectory import final_assistant_text
 
    EXPECTED = {"[fib]": "2880067194370816120"}
 

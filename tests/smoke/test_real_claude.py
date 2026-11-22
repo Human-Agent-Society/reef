@@ -20,9 +20,9 @@ import pytest
 from tests.support.harness_render import write_layer
 
 from reef.harness.adapters import get_adapter
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import run_task
 from reef.harness.sync import layer_install
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import run_task
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_CLAUDE = os.environ.get("REEF_REAL_CLAUDE_BINARY", "")

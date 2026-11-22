@@ -10,7 +10,7 @@ component (``component``) runs it (prepare, evaluate, settle). It holds the depl
 per job in ``propose``; the tree the method leaves in the job's workspace is
 the candidate. The harness training component builds the backend from the
 deployment's ``evolution`` settings (``settings``) and models
-(``reef.harness.tasks.harness_models``);
+(``reef.harness.runs.harness_models``);
 methods never subclass it.
 
 The evaluation and the activation are Reef's, shared with weight training:
