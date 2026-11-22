@@ -127,42 +127,32 @@ What Reef does next
 -------------------
 
 This deployment starts a training step for each report. The step does not
-change the head directly. It makes a candidate and tests it first.
+change the head directly:
 
-.. container:: flow
+#. The method gets a copy of the head and your session, and writes new rules
+   from what went wrong.
+#. Reef checks the copy, and refuses files that the agent cannot read.
+#. The copy and the head run the same tasks.
+#. A winning copy becomes the new head, and your next ``pi`` session starts
+   on it.
 
-   Copy
-       the method gets a copy of the head and your session
-
-   **Edit**
-       it writes new rules from what went wrong
-
-   Check
-       Reef refuses files the agent cannot read
-
-   Evaluate
-       candidate and head run the same tasks
-
-   Decide
-       the better one is the head
-
-A winning candidate becomes the new head, and your next ``pi`` session
-starts on it. List the steps and their results:
+List the steps and their results:
 
 .. code:: bash
 
    curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/artifacts
 
 Each step has a page, ``/reef/harness/artifacts/<step>/page``. A change to
-code, such as a pi extension, waits for you to promote it.
+code, such as a pi extension, waits until you `activate it
+<../user-guide/evolve-your-harness.rst#activate-an-inactive-artifact>`__.
 
 When you and Reef change the same file
 --------------------------------------
 
 You can edit Reef's files too, for example the rules in
 ``~/.local/share/reef-client/harness/my-agent/plugin/rules.md``. The client
-sends your edit with the next sync, and Reef merges it onto the active selection. Text
-files merge line by line:
+sends your edit with the next sync, and Reef merges it onto the active
+selection. Text files merge line by line:
 
 +---------------------------------+--------------------------------------+
 | You changed                     | Result                               |

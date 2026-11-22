@@ -8,6 +8,8 @@ Only the guidance response contributes tokens to the training job's data.
 
 The example includes Polyomino Packing, Lasso Path, AHC058, and TriMul.
 These tasks cover packing, numerical solvers, planning, and GPU kernels.
+The recipe, its grid, and its training transaction are those of
+`TTT-Discover <tttd.rst>`__; this page describes what the guidance loop adds.
 
 .. list-table::
    :header-rows: 0
@@ -154,8 +156,7 @@ selected Harbor trial. It then submits the best archived program for a final
 verification. The final Harbor reward remains evaluation-only.
 
 The default run checks integration. It does not reproduce the paper's
-30-update, 8-by-16 search budget. The local executor also differs from the
-paper's GLM-5.2 executor.
+30-update, 8-by-16 search budget or its GLM-5.2 executor.
 
 Configure a search
 ------------------
@@ -222,13 +223,13 @@ A missing judge, malformed score, or executor service error stops the step.
 These errors do not become zero-reward training examples. A rejected candidate
 receives the task's invalid reward and still counts as a PUCT visit.
 
-Four paper results
-------------------
+Paper results
+-------------
 
-The following values come from the paper's main results at commit
-``709c405``. They are historical experiment results, not new measurements of
-this example. Each configuration uses a frozen GLM-5.2 executor and 30 updates
-with eight groups of 16 rollouts.
+These values come from the paper's main results at commit ``709c405``. They
+are historical experiment results, not new measurements of this example. Each
+configuration uses a frozen GLM-5.2 executor and 30 updates with eight groups
+of 16 rollouts.
 
 .. list-table::
    :header-rows: 1
@@ -260,48 +261,15 @@ with eight groups of 16 rollouts.
 The lines show the best archived solution during search. Search-time
 measurements and final evaluations use different protocols for some tasks.
 For Lasso, the search peak is about 0.21259, while the frozen-solver result
-is 0.1739. AHC058's search curve uses the 150 public cases. Its reported
+is 0.1739. AHC058's search curve uses the 150 public cases, and its reported
 AtCoder score comes from the final submission. TriMul's final value comes
 from fixed-kernel timing, not the lowest observed search latency.
 
-Polyomino Packing
-~~~~~~~~~~~~~~~~~
-
-The final program scores 91.89 against the paper's human reference of 89.10.
-CORAL with Opus 4.6 scores 84.20, and TTT-Discover with GPT-OSS-120B scores
-83.72. The discovered solver combines skyline packing with reconstruction
-and simulated annealing over earlier placements.
-
-Lasso Path
-~~~~~~~~~~
-
-The final score is 0.1739 against 0.1243 for SimpleTES and 0.1368 for
-TTT-Discover. Both references use GPT-OSS-120B. The solver uses a segment tree
-to prioritize candidate correlations and avoid repeated scans over inactive
-features. Every accepted solver must meet the reference objective tolerance
-of ``1e-6``.
-
-AHC058
-~~~~~~
-
-The final AtCoder score is 850,082,731. The paper reports 849,325,750 for
-SimpleTES with GPT-OSS-20B and 848,414,228 for TTT-Discover with GPT-OSS-120B.
-The discovered policy changes investment phases according to the current
-state and values the downstream effects of machine upgrades.
-
-TriMul
-~~~~~~
-
-The fixed kernel reaches 1,129 microseconds. The paper lists 1,131 for
-K-Search, 1,261.99 for TTT-Discover, and 1,128 for the eligible GPUMode rank-1
-reference. Thus, Guidance-TTT does not beat that public rank-1 result.
-Its kernel fuses normalization, projection, gating, and layout conversion,
-then selects a contraction path by input shape.
-
-These comparisons use the models and budgets of their source experiments.
-They are not controlled comparisons with identical model capacity or cost.
 The `result records <../../../recipes/tttd/examples/guidance_ttt/results/paper/README.md>`__
-include all displayed baseline values, source checksums, and numerical histories.
+hold the baseline values, source checksums, and numerical histories. The
+baselines use the models and budgets of their source experiments, so they are
+not controlled comparisons. TriMul's 1,129 microseconds does not beat the
+eligible GPUMode rank-1 reference of 1,128.
 
 Inspect progress and resume
 ---------------------------
@@ -326,11 +294,12 @@ Enable experiment tracking
 
 Set ``observability.wandb.enabled`` to ``true`` in ``serve.yaml``. Supply the
 project, optional entity, and credentials through the normal W&B configuration.
-`Experiment tracking <../operate.rst>`__ describes Reef's tracking behavior.
+`Track experiments with W&B <../operate.rst#track-experiments-with-w-b>`__ describes Reef's tracking behavior.
 
-The recipe records ``tttd/reward_mean``, ``tttd/reward_max``, and grid metrics.
-These rewards describe the training job's data. Use the committed archive's raw
-score for the best discovered program, especially when the reward is normalized.
+The recipe records the `TTT-Discover search metrics <tttd.rst>`__, such as
+``tttd/reward_mean``. These rewards describe the training job's data. Use the
+committed archive's raw score for the best discovered program, especially
+when the reward is normalized.
 
 Add another task
 ----------------
