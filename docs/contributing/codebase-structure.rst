@@ -8,44 +8,7 @@ Each package's ``__init__`` docstring states the boundaries that it holds and ho
 Packages
 --------
 
-Reef is organized around an application kernel and three capability domains, not a strict stack of top-level packages. The arrows show the primary composition and use paths; they are not an exhaustive import graph:
-
-.. code:: mermaid
-
-   flowchart TD
-       accTitle: Reef application kernel, capability domains, and adapters
-
-       Methods("<b>Method plug-ins</b><br/><code>recipes/*</code>")
-       Entry("<b>Entrypoints</b><br/>HTTP · CLI")
-       Policy("<b>Policy</b><br/><code>reef/recipe</code>")
-       Service("<b>Delivery &amp; composition</b><br/><code>reef/api</code> · <code>reef/deploy</code>")
-       Kernel(["<b>Application kernel</b><br/><code>reef/control</code>"])
-
-       subgraph Domains["Capability domains"]
-           direction LR
-           Serving("<b>Serving</b><br/><code>inference</code> · <code>routing</code>")
-           Evolution("<b>Evolution</b><br/><code>train</code> · <code>evaluation</code> · <code>harness</code>")
-           State("<b>State</b><br/><code>artifact</code> · <code>storage</code>")
-       end
-
-       subgraph Adapters["Concrete adapters"]
-           direction LR
-           ServingAdapters("inference backends")
-           EvolutionAdapters("training backends<br/>harness adapters")
-           StateAdapters("Git/LFS repositories<br/>SQLite · PostgreSQL")
-       end
-
-       Observability(["<b>Cross-cutting</b><br/><code>reef/observability</code>"])
-       Core(["<b>Shared kernel</b><br/><code>reef/core</code>"])
-
-       Methods --> Policy --> Kernel
-       Entry --> Service --> Kernel
-       Kernel --> Serving & Evolution & State
-       Serving --> ServingAdapters
-       Evolution --> EvolutionAdapters
-       State --> StateAdapters
-       Kernel -. telemetry .-> Observability
-       ServingAdapters & EvolutionAdapters & StateAdapters --> Core
+`Architecture <architecture.rst>`__ gives the four layers of the packages and what each package is for. The table below says which package owns a change.
 
 .. list-table::
    :header-rows: 1
@@ -272,30 +235,28 @@ Concrete integrations may depend on shared contracts. Shared contracts never imp
      - ``storage``, ``core``
    * - ``observability``
      - ``artifact``, ``storage``, ``core``
-   * - ``pipeline_context``
-     - ``observability``, ``storage``, ``core``
    * - ``inference``
      - ``tinker``, ``execution``, ``artifact``, ``core``
+   * - ``routing``
+     - ``inference``, ``storage``, ``core``
    * - ``harness``
      - ``inference``, ``execution``, ``artifact``, ``core``
-   * - ``record2sample``
-     - ``harness``, ``pipeline_context``, ``execution``, ``storage``, ``core``
-   * - ``sample2job``
-     - ``record2sample``, ``pipeline_context``, ``observability``, ``storage``, ``core``
+   * - ``samples``
+     - ``harness``, ``observability``, ``execution``, ``storage``, ``core``
    * - ``evaluation``
      - ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``core``
    * - ``train``
-     - ``evaluation``, ``sample2job``, ``record2sample``, ``harness``, ``tinker``, ``pipeline_context``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``samples``, ``harness``, ``tinker``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``sample2job``, ``record2sample``, ``harness``, ``pipeline_context``, ``execution``, ``artifact``, ``storage``, ``core``
-   * - ``scenario``
-     - ``recipe``, ``train``, ``evaluation``, ``sample2job``, ``record2sample``, ``inference``, ``harness``, ``artifact``, ``storage``, ``observability``, ``core``
-   * - ``dispatcher``
-     - ``scenario``, ``recipe``, ``train``, ``evaluation``, ``record2sample``, ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
-   * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``evaluation``, ``record2sample``, ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``samples``, ``harness``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``control``
+     - ``recipe``, ``train``, ``evaluation``, ``samples``, ``inference``, ``harness``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``api``
+     - ``control``, ``recipe``, ``train``, ``evaluation``, ``inference``, ``routing``, ``harness``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``deploy``
+     - ``api``, ``recipe``, ``samples``, ``inference``, ``routing``, ``execution``, ``artifact``, ``core``
    * - ``cli``
-     - ``service``, ``core``
+     - ``deploy``, ``core``
 
 Three rules follow from the graph:
 
@@ -319,13 +280,13 @@ Deployment modules
    * - ``config_utils.py``
      - Reads YAML, expands environment and config references, and locates recipe source packages. It downloads no model and validates no process graph.
    * - ``service_config.py``
-     - Declares the shared HTTP, storage and runtime fields, and converts effective values into ``ServiceSettings`` for app assembly.
+     - Converts the effective values of a deployment into ``ServiceSettings`` for app assembly. ``reef/api/settings.py`` declares the shared HTTP, storage and runtime fields.
    * - ``deployment_config.py``
      - Declares the ``DeploymentSettings`` defaults, loads the selected recipe and runtime declarations, translates the versioned public layout, and validates component values.
    * - ``cli.py``
      - Builds help and applies dotted command-line overrides before the shared type conversion. CLI values take precedence over YAML.
-   * - ``inference.py``, ``training.py``, ``serving.py``
-     - Assemble the inference processes, the training deployment that ``training.backend`` names, and the serving runtime.
+   * - ``inference.py``, ``training.py``
+     - Assemble the inference processes and the training deployment that ``training.backend`` names. They read the serving mode and the training backend from ``reef/api/serving.py`` and ``reef/api/training.py``.
    * - ``execution.py``, ``process.py``, ``guard.py``
      - Validate process definitions and dependency order, select executors, own worker processes, and clean up a remote process group when its Ray owner disappears.
    * - ``diagnostics.py``
