@@ -62,7 +62,6 @@ from reef.service.request_service import RequestService
 from reef.service.routed_inference import InferenceRetryPolicy
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import PreviewSettings
-from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
@@ -74,6 +73,7 @@ from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.task_import import DataScenarioStorage, TaskImport
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 from reef.train.component import build_training_component, training_backend_facts
 from reef.train.harness_backend.component import HarnessTrainingComponent

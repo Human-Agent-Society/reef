@@ -16,7 +16,7 @@ beta/spade/
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
-SPADE is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) runs the tasks and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+SPADE is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) runs the tasks and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks).
 
 ## The generator
 
@@ -129,4 +129,4 @@ The input contract is `TaskGenerationRequest` in `reef.record2sample.generator`.
 
 To call the generator directly, wrap the shared request in `DesignerRequest(inputs=request, difficulty="hard")`. Then call `HttpGenerator.propose(...)`. `DesignerRequest` holds the shared input and adds Designer settings. The HTTP client reads local `assets` into `asset_files`. The service reconstructs the same input type. Each source record retains its payload, type, timestamp, references, and artifact version. Use matching client and generator versions for historical inputs.
 
-The recipe's rounds use the `description` of its record-to-sample stage and the previous generation's scores. With `source_records_per_round` above 0, each round also sends recorded sessions that carry the record stage's `source_tag`; see [generated tasks](../../../docs/reference/configuration.rst#generated-tasks). Otherwise, the caller selects historical sessions. The Designer makes one model call. It does not yet inspect files with tools or revise a task after a failed check. Passing the oracle check does not establish that the reconstruction is faithful to the original task.
+The recipe's rounds use the `description` of its record-to-sample stage and the previous generation's scores. With `source_records_per_round` above 0, each round also sends recorded sessions that carry the record stage's `source_tag`; see [generated tasks](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks). Otherwise, the caller selects historical sessions. The Designer makes one model call. It does not yet inspect files with tools or revise a task after a failed check. Passing the oracle check does not establish that the reconstruction is faithful to the original task.

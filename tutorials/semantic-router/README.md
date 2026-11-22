@@ -194,7 +194,7 @@ SR's HTTP API is published on `127.0.0.1:50053` only, with two credentials that
 `reef serve` generates at each start: one allows only previews, the other only
 configuration and readiness. Reef's own lifecycle control uses a private Unix
 socket, never `reef.port`. See the
-[configuration reference](../../docs/reference/configuration.rst#managed-routing-lifecycle)
+[configuration reference](../../docs/reference/configuration-routing.rst#managed-routing-lifecycle)
 for every `routing_deployment` setting.
 
 ## 5. Send requests

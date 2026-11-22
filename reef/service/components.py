@@ -33,6 +33,7 @@ from aiohttp import web
 
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.deployment import harness_adapter
@@ -52,7 +53,6 @@ from reef.service.assembly import (
 )
 from reef.service.auth import evaluation_token_for
 from reef.service.deploy.service_config import ServiceSettings
-from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import ServedModelsCache, build_inference_app
 from reef.service.routed_replica import ReplicaRecords, add_replica_routing
 from reef.service.web import service_application
