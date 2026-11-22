@@ -18,7 +18,7 @@ from threading import Lock
 
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.control.scenario.registry import ScenarioRegistry
-from reef.control.workers.served import ServedModelsPublisher
+from reef.control.workers.served_models import ServedModelsPublisher
 from reef.core.errors import ReefError
 from reef.execution.workers import ServiceWorker
 from reef.samples.service import SAMPLES_QUEUE, request_selection

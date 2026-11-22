@@ -14,9 +14,10 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | `slime_backend/`, `tinker_backend/` | Contracts specific to a training backend |
 | `samples/` | The record-to-sample stage of the training pipeline, the samples service, and the generator service |
 | `evaluation/`, `harness/`, `observability/` | Candidate evaluation, harness execution, and tracking |
-| `reef_recipe/` | Shared recipe contracts and built-in recipes from `reef/recipe/` |
+| `recipe/` | Shared recipe contracts and built-in recipes from `reef/recipe/` |
 | `recipes/<recipe>/` | Cookbook methods and their examples; use the method name for beta recipes too |
-| `reef_service/` | HTTP contracts, deployment, and service workflows across components |
+| `api/` | HTTP contracts and service workflows across components |
+| `deploy/` | Deployment configuration, service startup, executors, and component selection |
 | `routing/` | The Semantic Router integration: routing policy, lifecycle, and the routing deployment |
 | `cli/`, `reef_client/` | CLI behavior and the separate `reef_client` package |
 | `contributing/` | Repository policy, documentation, and checks across shipped examples |
@@ -25,7 +26,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | `support/` | Shared fixtures and helpers; no collected test modules |
 
 Keep component tests with their owner even when they use a dispatcher or a
-service fixture. A test belongs in `reef_service/` when it checks the service
+service fixture. A test belongs in `api/` when it checks the service
 contract or the service's coordination of several components.
 
 Two suites group related modules in subdirectories:
@@ -33,12 +34,11 @@ Two suites group related modules in subdirectories:
 | Subdirectory | Responsibility |
 | --- | --- |
 | `inference/sglang/`, `inference/vllm/` | Behavior of one serving engine |
-| `reef_service/deploy/` | Deployment configuration, service startup, executors, and component selection |
-| `reef_service/harness/` | Harness routes, the evolution recipe, client sync, and vendor installs |
-| `reef_service/inference/` | Inference routes, served artifacts, traffic weights, and streams |
+| `api/harness/` | Harness routes, the evolution recipe, client sync, and vendor installs |
+| `api/inference/` | Inference routes, served artifacts, traffic weights, and streams |
 
 Keep contracts that all engines share in `inference/`. Keep contracts across
-service components in `reef_service/`.
+service components in `api/`.
 
 Use markers for `unit`, `integration`, `acceptance`, and `sandbox`; do not add a
 second directory hierarchy for those categories. A mock-based test stays with

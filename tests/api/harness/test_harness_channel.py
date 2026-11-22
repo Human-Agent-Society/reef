@@ -12,7 +12,7 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient
-from tests.reef_service.harness.harness_channel import (
+from tests.api.harness.harness_channel import (
     HEADERS,
     PATCHES,
     UPDATE_POLL_S,
@@ -39,7 +39,7 @@ PI = get_adapter("pi")
 @pytest.fixture(autouse=True)
 def poll_stub_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Poll completed stub jobs without spending the HTTP assertion timeout on idle waits."""
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
 
 
 async def committed_step(client: TestClient) -> dict:

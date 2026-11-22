@@ -15,7 +15,7 @@
 #   inference      python -m reef.inference.remote (the serving engines)
 #   ray-head       ray start --head --block ...
 #   basic-example  python -m recipes.basic
-#   tests          pytest tests/reef_service -q
+#   tests          pytest tests/api -q
 #
 # Build:   docker build -f docker/Dockerfile.reef -t reef .
 # Deploy:  reef serve -c recipes/basic/local-sglang.yaml

@@ -58,8 +58,8 @@ Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
 
 - Add dotted-resolution and configuration tests in
-  ``tests/reef_recipe/test_reef_recipes.py`` and
-  ``tests/reef_recipe/test_recipe_config_fields.py``.
+  ``tests/recipe/test_reef_recipes.py`` and
+  ``tests/recipe/test_recipe_config_fields.py``.
 - Add method behavior tests under ``tests/recipes/<method>/``. Add an integration
   contract when the method calls into a concrete backend.
 - Put every runnable configuration beside its method under
@@ -186,7 +186,7 @@ Tests and documentation
 - Put framework-internal tests in ``tests/<integration>/``.
 - Put import-scope, packaging, and plugin-loading tests in
   ``tests/plugin_contracts/``.
-- Put service-facing lifecycle and wire contracts in ``tests/reef_service/``.
+- Put service-facing lifecycle and wire contracts in ``tests/api/``.
 - Add a test that compares the facts with the component for two configs, and
   one that builds the facts without the framework.
 - Prove that importing backend-neutral Reef modules does not import the
@@ -261,7 +261,7 @@ satisfies Reef's backend-neutral lifecycle. Read `Serving runtimes
   entry-point group, then ``package.module:ClassName``. Do not write another
   lookup; give the resolver your table of built-in names.
 - Test built-in name and reference resolution in
-  ``tests/reef_service/inference/test_runtime_registry.py``. Add request,
+  ``tests/api/inference/test_runtime_registry.py``. Add request,
   recovery, and malformed-result contracts for every capability that the
   runtime implements. `Integration qualification
   <../developer-guide/serving-runtimes.rst#integration-qualification>`__ lists
@@ -337,7 +337,7 @@ current request contract.
 - Raise domain errors. If a new error needs a non-default HTTP status, add it
   to ``ERROR_STATUS_TABLE`` in ``reef/api/errors.py`` instead of adding a
   route-local exception table.
-- Add route and service tests under ``tests/reef_service/``. Update the wire
+- Add route and service tests under ``tests/api/``. Update the wire
   guide for a public endpoint; the docs contract check requires the guide to
   name every registered route.
 - Treat removal, incompatible payload changes, and changes to authentication

@@ -3,7 +3,7 @@
 The data service needs no control lease: it writes the data store and the items of
 the ``data`` queue, and no table that control alone writes. A ``DataWorker`` takes the ``data`` queue items of the
 data service and runs each with the ``DataJob`` of its kind; the ``data_sync`` items are control's
-(``reef.control.workers.data_sync_worker``).
+(``reef.control.workers.data_sync``).
 
 - ``artifact_copy``: make the artifact items of one scenario's artifacts (``copy_scenario_artifacts``).
 - ``data_import`` and ``data_export``: the transfers of ``reef.control.operations.data_transfer``.

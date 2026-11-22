@@ -19,7 +19,7 @@ import reef.control.operations.harness_imports as harness_imports
 from reef.api.app import create_harness_app
 from reef.control.dispatcher import Dispatcher
 from reef.control.operations.harness_imports import HarnessSyncWorker
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.storage.sql.coordination import open_coordination
 from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
@@ -45,7 +45,7 @@ def open_service(tmp_path: Path, repository, components: frozenset[str]) -> Disp
 @pytest.mark.unit
 def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp_path: Path) -> None:
     repository = harness_repository(tmp_path)
-    control = open_service(tmp_path, repository, frozenset(SERVICE_COMPONENTS) - {"harness"})
+    control = open_service(tmp_path, repository, frozenset(SERVICE_NAMES) - {"harness"})
     control.get_or_create_scenario("demo")
     # The assembly of a control process without the harness service starts this worker.
     control.workers.add(HarnessSyncWorker(control.queue, control, worker_id="harness-sync-test"))
@@ -107,7 +107,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
 def test_an_import_that_control_does_not_take_answers_503_and_stays_queued(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(harness_imports, "SYNC_WAIT_SECONDS", 0.2)
     repository = harness_repository(tmp_path)
-    control = open_service(tmp_path, repository, frozenset(SERVICE_COMPONENTS) - {"harness"})
+    control = open_service(tmp_path, repository, frozenset(SERVICE_NAMES) - {"harness"})
     control.get_or_create_scenario("demo")
     control.close()
     harness = open_service(tmp_path, repository, frozenset({"harness"}))
@@ -128,7 +128,7 @@ def test_an_import_that_control_does_not_take_answers_503_and_stays_queued(tmp_p
 
 @pytest.mark.unit
 def test_the_harness_app_runs_the_harness_service_without_control(tmp_path: Path) -> None:
-    control = open_service(tmp_path, harness_repository(tmp_path), frozenset(SERVICE_COMPONENTS))
+    control = open_service(tmp_path, harness_repository(tmp_path), frozenset(SERVICE_NAMES))
     try:
         with pytest.raises(ValueError, match="without control"):
             create_harness_app(control)

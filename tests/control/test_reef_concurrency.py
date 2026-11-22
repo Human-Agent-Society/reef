@@ -115,7 +115,7 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     pairs_per_thread = 4
     thread_count = 4
@@ -159,7 +159,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     P. The worker must finish that trainer and version-chain commit before preparing
     another batch; otherwise P could be recorded as two commits.
     """
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(max_artifact_lag=4),

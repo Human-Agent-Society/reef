@@ -51,7 +51,7 @@ Checks
 
    pre-commit run --all-files
    .venv/bin/python -m mypy
-   .venv/bin/python -m pytest tests/reef_service -q
+   .venv/bin/python -m pytest tests/api -q
 
 Start with the smallest suite that exercises your change; `Testing
 <testing.rst>`__ describes the full suite and the opt-in suites. Keep provider

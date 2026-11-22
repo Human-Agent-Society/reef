@@ -252,7 +252,7 @@ class NoTrainingStack:
         if fullname.split('.')[0] in BLOCKED:
             raise RuntimeError('unexpected training dependency: ' + fullname)
 sys.meta_path.insert(0, NoTrainingStack())
-from reef.api.components import build_component_app
+from reef.api.services import build_service_app
 from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.service_config import service_config_from_mapping
 directory = Path(sys.argv[1])
@@ -274,7 +274,7 @@ settings = replace(
     artifact_cache_dir=str(directory / 'cache'),
     artifact_backend={'module': 'tests.support.artifact_backend_plugin:MemoryArtifactBackend', 'config': {'label': 'm'}},
 )
-app = build_component_app('inference', settings, environ={})
+app = build_service_app('inference', settings, environ={})
 app.freeze()
 asyncio.run(app.cleanup())
 loaded = sorted(name for name in sys.modules if name.split('.')[0] in BLOCKED)

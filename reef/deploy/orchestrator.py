@@ -520,11 +520,11 @@ def run_component(config_path: str | None, overrides: dict[str, str] | None, com
     settings = service_config_from_mapping(loaded.resolved)
     from aiohttp import web
 
-    from reef.api.components import build_component_app
+    from reef.api.services import build_service_app
 
     log_status(f"service: {component}")
     try:
-        app = build_component_app(component, settings)
+        app = build_service_app(component, settings)
     except (RecipeConfigError, RuntimeConfigError):
         raise
     except ValueError as exc:

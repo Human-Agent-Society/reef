@@ -373,7 +373,7 @@ def test_build_dispatcher_refuses_an_activation_section_for_a_preset(stub_reposi
 
 @pytest.mark.unit
 def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_repository, tmp_path) -> None:
-    generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+    generator = {"module": "tests.recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
     pipeline = {
         "record2sample": {
             "module": "reef.recipe.generated_tasks:GeneratedTaskSamples",
@@ -409,7 +409,7 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_reposito
 def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
     stub_repository, tmp_path, recipe, error, message
 ) -> None:
-    pipeline = {"record2sample": {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator"}}
+    pipeline = {"record2sample": {"module": "tests.recipe.test_generated_tasks:ScriptedGenerator"}}
     with pytest.raises(error, match=message):
         build(tmp_path, recipe=recipe, pipeline_settings=pipeline)
 
@@ -518,7 +518,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     tmp_path, monkeypatch, per_scenario_adapters
 ) -> None:
     synchronization_timeout_seconds = 30
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
     dispatcher = Dispatcher(

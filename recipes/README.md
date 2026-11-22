@@ -150,7 +150,7 @@ lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the
 smallest weight-training one is
 [`recipes/sao/examples/imo_answerbench/serve.yaml`](sao/examples/imo_answerbench/serve.yaml)).
 Two contracts hold the set honest:
-[`test_training_server.py`](../tests/reef_service/test_training_server.py)
+[`test_training_server.py`](../tests/api/test_training_server.py)
 boots the internal service from every cookbook stack, and
 [`docs/site/scripts/check-doc-contracts.mjs`](../docs/site/scripts/check-doc-contracts.mjs)
 derives the documented port and health route from `local-sglang.yaml`.

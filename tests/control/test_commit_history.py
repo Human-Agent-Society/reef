@@ -31,7 +31,7 @@ from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.control.dispatcher import Dispatcher
 from reef.control.scenario import Scenario
-from reef.control.workers import local_workers
+from reef.control.workers import training as training_workers
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
@@ -636,7 +636,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
 
     monkeypatch.setattr(scenario.trainer.pipeline, "release_requests", exploding_release)
     # The failed cycle does not wake its worker again; the worker polls the recovered running job.
-    monkeypatch.setattr(local_workers, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(training_workers, "POLL_SECONDS", 0.01)
     train_pair(first, 1)
     assert first_component.trained_data == [["i1"]]
     assert crash["armed"] is False

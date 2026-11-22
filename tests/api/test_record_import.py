@@ -190,7 +190,7 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk, monkeypatch):
     # The trainer's worker and the training worker look again soon, so the four jobs end within the waits.
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     recipe = LearningRecipe()
     dispatcher = dispatcher_for(tmp_path, recipe, served_live())
     for worker in dispatcher.workers.workers:

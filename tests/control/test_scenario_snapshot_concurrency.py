@@ -22,7 +22,7 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.scenario import Scenario
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPendingError
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql.coordination import memory_coordination
 from reef.storage.sql.sqlite import SQLiteScenarioStorage
@@ -89,7 +89,7 @@ def local_scenario(tmp_path):
         coordination=memory_coordination(),
         # The test makes the samples and commits each step itself. No samples worker makes them, and control's local
         # training workers run no cycle: a woken worker would prepare and commit the same result as the test.
-        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        components=frozenset(SERVICE_NAMES) - {"samples"},
         hold_local_cycles=True,
     )
     scenario = dispatcher.get_or_create_scenario("math")

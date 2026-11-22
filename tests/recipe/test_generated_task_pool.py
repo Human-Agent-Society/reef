@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.reef_recipe.support import (
+from tests.recipe.support import (
     ScriptedGenerator,
     finished_job,
     generated,

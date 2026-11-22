@@ -43,11 +43,11 @@ from reef.control.scenario.live_objects import (
     close_runtimes,
     harness_models,
 )
-from reef.control.workers.served import wait_for_control_lease
+from reef.control.workers.served_models import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
-from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
+from reef.execution.workers import SERVICE_NAMES, ServiceSet
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeRegistry
@@ -566,7 +566,7 @@ def build_dispatcher(
     hold_local_cycles: bool = False,
     evaluation_token: str | None = None,
     new_artifacts: NewArtifacts | None = None,
-    components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+    components: frozenset[str] = frozenset(SERVICE_NAMES),
 ) -> Dispatcher:
     """Build the dispatcher of a service.
 
@@ -581,7 +581,7 @@ def build_dispatcher(
     recipe of one component calls its runtime's endpoint directly, as it did
     before composites, and neither applies to it.
 
-    ``components`` names the services that this process runs (``SERVICE_COMPONENTS``); the default is all of them,
+    ``components`` names the services that this process runs (``SERVICE_NAMES``); the default is all of them,
     the one-process layout.
     """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
@@ -747,7 +747,7 @@ def build_app(
     environ: Mapping[str, str] | None = None,
     inference_handler: InferenceHandler | None = None,
     lifecycle: LifecycleSettings | None = None,
-    components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+    components: frozenset[str] = frozenset(SERVICE_NAMES),
 ) -> web.Application:
     """Build the complete HTTP service from settings: dispatcher, retention, retries, tokens and cleanup.
 

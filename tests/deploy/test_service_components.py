@@ -26,9 +26,9 @@ from tests.support.training_deployment import LocalFacts, LocalServingFactory, f
 from tests.support.trajectories import policy_trajectory
 
 from reef.api import assembly
-from reef.api import components as component_apps
+from reef.api import services as service_apps
 from reef.api.app import create_data_app, get_dispatcher
-from reef.api.components import build_component_app
+from reef.api.services import build_service_app
 from reef.api.settings import ServiceSettings
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.files import DirectoryFiles
@@ -38,10 +38,10 @@ from reef.control.operations.data_service import DataJob, DataWorker
 from reef.control.operations.data_transfer import ArchiveWriters
 from reef.control.operations.scenario_files import artifact_directory
 from reef.control.scenario.live_objects import LiveObjects, check_recipe_objects, scenario_components
-from reef.control.workers.data_sync_worker import DataSyncWorker
+from reef.control.workers.data_sync import DataSyncWorker
 from reef.control.workers.samples import LocalSampleProducers
 from reef.control.workers.scenario_deletes import DeletedScenarioFollower
-from reef.control.workers.served import ServedModelsPublisher
+from reef.control.workers.served_models import ServedModelsPublisher
 from reef.control.workers.store_changes import StoreChanges, StoreChangesWatcher
 from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.job_data import JobData
@@ -50,7 +50,7 @@ from reef.deploy.cli import build_serve_parser
 from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.service_config import service_config_from_mapping
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, TaskTemplateWorker
-from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
+from reef.execution.workers import SERVICE_NAMES, ServiceWorker, service_names
 from reef.inference.serving import AdapterServingRuntime
 from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.errors import RecipeConfigError
@@ -101,7 +101,7 @@ def worker_types(tmp_path: Path, components: frozenset[str]) -> set[type]:
 @pytest.mark.unit
 def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> None:
     control = {ServedModelsPublisher, StoreChangesWatcher, EndedWorkSweeper, DataSyncWorker}
-    assert worker_types(tmp_path / "all", frozenset(SERVICE_COMPONENTS)) == control | {
+    assert worker_types(tmp_path / "all", frozenset(SERVICE_NAMES)) == control | {
         SamplesWorker,
         DataWorker,
         EvaluationRolloutWorker,
@@ -117,9 +117,9 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
         DeletedScenarioFollower,
     }
     with pytest.raises(ValueError, match="unknown services"):
-        service_components({"control", "router"})
+        service_names({"control", "router"})
     with pytest.raises(ValueError, match="one or more"):
-        service_components(frozenset())
+        service_names(frozenset())
 
 
 def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
@@ -155,7 +155,7 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     assert coordination.work_queue.read(JOBS_QUEUE, "one") is None
 
     async def run() -> None:
-        app = build_component_app("training", config, environ={})
+        app = build_service_app("training", config, environ={})
         async with TestClient(TestServer(app)) as client:
             assert (await client.get("/healthz")).status == 200
             deadline = asyncio.get_running_loop().time() + 5
@@ -189,7 +189,7 @@ def test_a_training_worker_start_failure_closes_its_component_and_queue(
     deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
     coordination = memory_coordination()
     monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ, runs_training: deployment)
-    monkeypatch.setattr(component_apps, "open_service_coordination", lambda settings: coordination)
+    monkeypatch.setattr(service_apps, "open_service_coordination", lambda settings: coordination)
     threads: list[Thread | None] = []
     start = TrainingJobWorker.start
     failure = RuntimeError("worker startup failed")
@@ -208,7 +208,7 @@ def test_a_training_worker_start_failure_closes_its_component_and_queue(
     else:
         monkeypatch.setattr(TrainingJobWorker, "start", fail_start)
     with pytest.raises(RuntimeError) as raised:
-        build_component_app("training", settings(tmp_path), environ={})
+        build_service_app("training", settings(tmp_path), environ={})
     assert raised.value is failure
     assert component.closed
     assert all(thread is not None and not thread.is_alive() for thread in threads)
@@ -240,7 +240,7 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     monkeypatch.setattr(TrainingJobWorker, "start", observe_start)
 
     async def run() -> None:
-        async with TestClient(TestServer(build_component_app("training", config, environ={}))) as client:
+        async with TestClient(TestServer(build_service_app("training", config, environ={}))) as client:
             assert (await client.get("/healthz")).status == 200
 
     asyncio.run(run())
@@ -411,7 +411,7 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
 @pytest.mark.unit
 def test_the_inference_component_answers_from_served_models_alone(tmp_path: Path) -> None:
     async def run() -> None:
-        app = build_component_app("inference", settings(tmp_path))
+        app = build_service_app("inference", settings(tmp_path))
         async with TestClient(TestServer(app)) as client:
             assert (await client.get("/healthz")).status == 200
             auth = {"Authorization": f"Bearer {TOKEN}"}
@@ -447,7 +447,7 @@ def weight_settings(tmp_path: Path, training: dict, inference: dict | None = Non
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("service", sorted(set(SERVICE_COMPONENTS) - {"training", "inference"}))
+@pytest.mark.parametrize("service", sorted(set(SERVICE_NAMES) - {"training", "inference"}))
 def test_only_the_training_service_builds_the_training_component(tmp_path: Path, service: str) -> None:
     # The factory of this deployment raises when it builds a component: only its facts work.
     deployment = weight_settings(tmp_path, {"backend": "tests.support.training_deployment:FactsOnlyDeployment"})
@@ -502,7 +502,7 @@ def test_the_inference_service_serves_an_activated_artifact_without_a_training_c
     # The two processes reach the same artifact repository.
     repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     monkeypatch.setattr(assembly, "build_artifact_backend", lambda settings: repository)
-    monkeypatch.setattr(component_apps, "build_artifact_backend", lambda settings: repository)
+    monkeypatch.setattr(service_apps, "build_artifact_backend", lambda settings: repository)
     runtimes: list[StubInferenceRuntime] = []
     build_runtime = LocalServingFactory.__call__
 
@@ -515,7 +515,7 @@ def test_the_inference_service_serves_an_activated_artifact_without_a_training_c
     built_before = facts_component_factory.built
 
     async def run() -> None:
-        app = build_component_app("inference", deployment, environ={})
+        app = build_service_app("inference", deployment, environ={})
         # The inference service built the runtime from the backend's facts, and no component.
         assert facts_component_factory.built == built_before
         control_runtime, inference_runtime = runtimes
@@ -601,12 +601,12 @@ def test_live_objects_hold_the_facts_of_the_training_backend_with_or_without_its
 def test_the_evaluation_service_runs_on_its_own_and_an_unknown_service_is_refused(tmp_path: Path) -> None:
     # It serves its candidates itself, so it starts with the config alone: no other service's URL.
     async def run() -> None:
-        async with TestClient(TestServer(build_component_app("evaluation", settings(tmp_path)))) as client:
+        async with TestClient(TestServer(build_service_app("evaluation", settings(tmp_path)))) as client:
             assert (await client.get("/healthz")).status == 200
 
     asyncio.run(run())
     with pytest.raises(ValueError, match="unknown service"):
-        build_component_app("router", settings(tmp_path))
+        build_service_app("router", settings(tmp_path))
 
 
 @pytest.mark.unit
@@ -620,9 +620,9 @@ def test_the_evaluation_service_starts_the_finish_timeout_of_its_rollouts_when_i
         built.append(dispatcher)
         return dispatcher
 
-    monkeypatch.setattr(component_apps, "build_dispatcher", build_dispatcher)
+    monkeypatch.setattr(service_apps, "build_dispatcher", build_dispatcher)
     config = replace(settings(tmp_path), evaluation_on_stop="finish", evaluation_finish_timeout_s=600.0)
-    app = build_component_app("evaluation", config)
+    app = build_service_app("evaluation", config)
     [dispatcher] = built
     [worker] = [worker for worker in dispatcher.workers.workers if isinstance(worker, EvaluationRolloutWorker)]
     assert (worker.on_stop, worker.finish_timeout_s) == ("finish", 600.0)
@@ -662,7 +662,7 @@ def test_the_one_process_app_begins_to_stop_its_workers_in_its_first_shutdown_ho
 @pytest.mark.unit
 def test_the_harness_service_needs_a_recipe_that_evolves_a_harness(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="evolves no harness, so it has no harness service"):
-        build_component_app("harness", settings(tmp_path))
+        build_service_app("harness", settings(tmp_path))
 
 
 @pytest.mark.unit

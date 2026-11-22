@@ -13,7 +13,7 @@ from typing import NoReturn
 import pytest
 import yaml
 
-from reef.api.components import COMPONENT_APPS, build_component_app
+from reef.api.services import SERVICE_APPS, build_service_app
 from reef.api.settings import ServiceSettings
 from reef.deploy import orchestrator
 from reef.routing.containers import ContainerRuntime
@@ -208,10 +208,10 @@ def test_managed_routing_refuses_standalone_components(
     def refuse_start(*args, **kwargs) -> NoReturn:
         pytest.fail("a managed deployment started a standalone component")
 
-    monkeypatch.setattr(COMPONENT_APPS[component], "build", refuse_start)
+    monkeypatch.setattr(SERVICE_APPS[component], "build", refuse_start)
     settings = ServiceSettings(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
     with pytest.raises(ValueError, match="requires reef serve without --component"):
-        build_component_app(component, settings)
+        build_service_app(component, settings)
     with pytest.raises(orchestrator.DeployConfigError, match="requires reef serve without --component"):
         orchestrator.run_component(str(path), None, component)
 

@@ -138,7 +138,7 @@ def wait_for_operational_sample(
 @pytest.fixture
 def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Stub jobs finish immediately; polling must not consume the assertion timeout.
-    monkeypatch.setattr("reef.control.workers.local_workers.POLL_SECONDS", 0.01)
+    monkeypatch.setattr("reef.control.workers.training.POLL_SECONDS", 0.01)
     opened = []
 
     def start(backend_type=None, *, experiment_tracker=None, max_artifact_lag=0, **component_options):

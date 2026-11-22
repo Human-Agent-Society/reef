@@ -9,7 +9,7 @@ control changed the scenario's ``record2sample_config``. Control learns of the s
 from __future__ import annotations
 
 from reef.control.scenario.registry import ScenarioRegistry
-from reef.control.workers.local_workers import LocalTrainingWorkers
+from reef.control.workers.training import LocalTrainingWorkers
 from reef.execution.workers import ItemFailedError
 from reef.samples.service import ProducedSamples, SampleProducers, Selection
 from reef.train.job_queue import SCENARIO_DELETED_ERROR

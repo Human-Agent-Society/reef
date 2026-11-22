@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 import sqlalchemy.exc
-from tests.reef_recipe.support import (
+from tests.recipe.support import (
     DESCRIPTION,
     InlineWorker,
     ScriptedGenerator,
@@ -65,9 +65,9 @@ from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
 from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
-MODULE = "tests.reef_recipe.test_generated_tasks"
+MODULE = "tests.recipe.test_generated_tasks"
 #: The module of the scripted generator that a pipeline section names.
-SUPPORT_MODULE = "tests.reef_recipe.support"
+SUPPORT_MODULE = "tests.recipe.support"
 #: The ``rollout`` job parameter of the recipe's task jobs.
 ROLLOUT = {"rollouts_per_task": 2}
 

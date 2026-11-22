@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.control.workers.served import (
+from reef.control.workers.served_models import (
     ControlInstance,
     ServedModelsPublisher,
     retry_delay_seconds,

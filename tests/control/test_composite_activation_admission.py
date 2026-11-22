@@ -30,11 +30,11 @@ from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComp
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.control.dispatcher import Dispatcher
-from reef.control.errors import local_error_source
 from reef.control.scenario import Scenario
+from reef.control.training_errors import local_error_source
 from reef.core.errors import CommitPendingError, ReefError, TrainingStartRefusedError
 from reef.evaluation.harness import EvaluationSettings
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.recipe import CompositeRecipe
 from reef.train.harness_backend.settings import EvolutionSettings
 
@@ -58,7 +58,7 @@ def _dispatcher(
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
         # No samples worker: the test makes the samples and commits each step itself.
-        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        components=frozenset(SERVICE_NAMES) - {"samples"},
     )
     return dispatcher
 
@@ -257,7 +257,7 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         tmp_path,
         training=WeightsJobComponent(tmp_path / "checkpoints"),
         hold_local_cycles=True,
-        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        components=frozenset(SERVICE_NAMES) - {"samples"},
     )
     try:
         scenario = two_trainer_scenario(dispatcher, 1, 2)

@@ -7,7 +7,7 @@ import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.inference.served_artifacts import (
+from tests.api.inference.served_artifacts import (
     ArtifactEcho,
     NamedComponent,
     answering_each_artifact,

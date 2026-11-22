@@ -20,7 +20,7 @@ from reef.core.errors import DeployConfigError, ReefError
 from reef.deploy.deployment_config import RECIPE_SECTION_PATHS, component_config_arguments, deployment_config_arguments
 from reef.deploy.service_config import service_override
 from reef.execution.executor.arguments import normalize_native_options
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 
 _DESCRIPTION = """reef serve — connect an external provider or start a configured stack.
 
@@ -262,7 +262,7 @@ def build_serve_parser(
     parser.add_argument(
         "--component",
         default=None,
-        choices=SERVICE_COMPONENTS,
+        choices=SERVICE_NAMES,
         help=(
             "Run one service of the deployment in this process, on the shared store: control, inference, samples, "
             "training, evaluation, data or harness. Without it, one process runs all of them."

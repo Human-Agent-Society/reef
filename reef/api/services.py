@@ -51,7 +51,7 @@ from reef.api.settings import ServiceSettings
 from reef.api.web import service_application
 from reef.control.scenario.live_objects import RecipeChecks, ServedEndpoint, close_runtimes
 from reef.control.workers.serving import ServingWorker
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_NAMES
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
@@ -63,25 +63,25 @@ from reef.storage.scenario.observer import ObservedScenarioStorage
 from reef.train.job_queue import TrainingCheckWorker, TrainingJobWorker
 
 
-class ComponentApp(ABC):
+class ServiceApp(ABC):
     """How ``reef serve --component NAME`` builds the app of one service.
 
     Values: ``build(settings, environ)`` returns the app of the service, which owns what it opens and closes it at
-    cleanup. Purpose: ``COMPONENT_APPS`` holds one per service; ``build_component_app`` calls it.
+    cleanup. Purpose: ``SERVICE_APPS`` holds one per service; ``build_service_app`` calls it.
     """
 
     @abstractmethod
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application: ...
 
 
-class ControlApp(ComponentApp):
+class ControlApp(ServiceApp):
     """Control: the Reef HTTP API except the data routes."""
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         return build_app(settings, environ=environ, components=frozenset({"control"}))
 
 
-class InferenceApp(ComponentApp):
+class InferenceApp(ServiceApp):
     """The inference service owns runtime startup and serves requests from published routes.
 
     It runs no training job, so it builds no training component: it reads the backend's facts
@@ -157,7 +157,7 @@ class InferenceApp(ComponentApp):
         return app
 
 
-class DataApp(ComponentApp):
+class DataApp(ServiceApp):
     """The data service: a dispatcher that loads each scenario on demand, for the checks of a write and for the
     reads, and runs the data workers."""
 
@@ -170,7 +170,7 @@ class DataApp(ComponentApp):
         )
 
 
-class HarnessApp(ComponentApp):
+class HarnessApp(ServiceApp):
     """The harness service: a dispatcher that loads each scenario on demand, without activating it, and serves the
     routes that a harness client calls."""
 
@@ -187,14 +187,14 @@ class HarnessApp(ComponentApp):
         )
 
 
-class TrainingApp(ComponentApp):
+class TrainingApp(ServiceApp):
     """Build the training service from its job components and coordination store.
 
     Values: this stateless builder returns an app with two workers per job component of the process, one that
     runs the jobs (``TrainingJobWorker``) and one that answers control's checks (``TrainingCheckWorker``), and
     refuses a deployment with no job component. The app owns these workers, their components, the runtime and the
     coordination store.
-    Purpose: ``build_component_app("training", ...)`` is the only process of a split deployment that builds a
+    Purpose: ``build_service_app("training", ...)`` is the only process of a split deployment that builds a
     training component. It opens no scenario store. It opens the data store, which keeps the data directory of
     each job, and the artifact store, from which it reads the snapshot that a job starts from
     (``reef.train.job_queue.resolved_job``).
@@ -301,7 +301,7 @@ class TrainingApp(ComponentApp):
         return app
 
 
-class QueueServiceApp(ComponentApp):
+class QueueServiceApp(ServiceApp):
     """A service that only takes work from a queue (samples, evaluation): a dispatcher that runs only the
     service's own workers on the shared store, and answers ``/healthz`` alone. The evaluation service loads each
     rollout's scenario on demand, resolves the candidate artifact and serves it itself.
@@ -330,7 +330,7 @@ class QueueServiceApp(ComponentApp):
 
 
 #: The app builder of each service.
-COMPONENT_APPS: dict[str, ComponentApp] = {
+SERVICE_APPS: dict[str, ServiceApp] = {
     "control": ControlApp(),
     "inference": InferenceApp(),
     "samples": QueueServiceApp("samples"),
@@ -341,27 +341,27 @@ COMPONENT_APPS: dict[str, ComponentApp] = {
 }
 
 
-def build_component_app(
-    component: str,
+def build_service_app(
+    service: str,
     settings: ServiceSettings,
     *,
     environ: Mapping[str, str] | None = None,
 ) -> web.Application:
-    """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
+    """The app of the service ``service`` (one of ``SERVICE_NAMES``), which owns what it opens.
 
     Every service of a deployment reads the same settings. With ``external`` routing only ``inference`` routes; the
     other services ignore the manifest.
 
     Raise ``ValueError`` for an unknown service or a managed routing manifest, which requires the orchestrator.
     """
-    builder = COMPONENT_APPS.get(component)
+    builder = SERVICE_APPS.get(service)
     if builder is None:
-        raise ValueError(f"unknown service {component!r}; the services are {SERVICE_COMPONENTS}")
+        raise ValueError(f"unknown service {service!r}; the services are {SERVICE_NAMES}")
     if settings.routing_manifest is not None and settings.routing_deployment.lifecycle == "managed":
         raise ValueError("managed routing requires reef serve without --component")
-    if component != "inference":
+    if service != "inference":
         settings = replace(settings, routing_manifest=None)
     return builder.build(settings, os.environ if environ is None else environ)
 
 
-__all__ = ["COMPONENT_APPS", "ComponentApp", "build_component_app"]
+__all__ = ["SERVICE_APPS", "ServiceApp", "build_service_app"]

@@ -23,9 +23,9 @@ from dataclasses import dataclass, field
 from threading import Event, Lock, Thread
 from typing import Literal
 
-from reef.control.errors import TrainingErrors, error_text, local_error_source
 from reef.control.scenario.registry import InstanceState, ScenarioRegistry
 from reef.control.scenario.scenario import Scenario
+from reef.control.training_errors import TrainingErrors, error_text, local_error_source
 from reef.inference.interfaces import RuntimeContractError
 
 logger = logging.getLogger(__name__)
