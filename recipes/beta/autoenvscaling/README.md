@@ -60,8 +60,12 @@ Each checkpoint ran the held-out tasks (4 attempts each, avg@4) and Terminal-Ben
 | | step 64 | 58.3 (+8.6 [+2.3, +15.1]) | 20.4 (+2.2 [-0.4, +5.2]) |
 | | step 80 | 57.6 (+7.8 [+1.8, +14.1]) | 19.8 (+1.6 [-1.1, +4.3]) |
 | Seeds and Claude Code's variants, one run | step 16 | 53.1 (+3.4 [-1.6, +8.6]) | 19.6 (+1.3 [-2.2, +4.7]) |
+| | step 32 | 52.9 (+3.1 [-2.6, +8.9]) | 18.7 (+0.4 [-2.2, +3.1]) |
+| | step 48 | 56.0 (+6.2 [+0.5, +12.2]) | 17.3 (-0.9 [-4.7, +2.7]) |
 
-The held-out difference clears zero in run 1 at step 48, in run 2 at steps 64 and 80, and in the two seeds only runs pooled at step 48 (each task's mean over both runs), +5.9 [+0.8, +11.3]. Run 2 alone at step 48 does not clear zero, and the intervals are not corrected for the several steps each run was scored at. No Terminal-Bench 2.0 difference of a trained checkpoint clears zero, and each stays within the 2.9 points between two scorings of the base model. The run with variants is one run, and at step 16 no difference from seeds only clears zero: against the mean of both seeds only runs at step 16, +2.9 [-1.2, +7.2] on the held-out tasks and +0.1 [-2.8, +3.3] on Terminal-Bench 2.0.
+The held-out difference clears zero in run 1 at step 48, in run 2 at steps 64 and 80, in the two seeds only runs pooled at step 48 (each task's mean over both runs), +5.9 [+0.8, +11.3], and in the run with variants at step 48. Run 2 alone at step 48 does not clear zero, and the intervals are not corrected for the several steps each run was scored at. No Terminal-Bench 2.0 difference of a trained checkpoint clears zero, and each stays within the 2.9 points between two scorings of the base model.
+
+The run with variants is one run, and no difference from seeds only clears zero. Against the mean of both seeds only runs, the held-out difference is +2.9 [-1.2, +7.2] at step 16, +1.8 [-2.5, +6.2] at step 32 and +0.4 [-4.2, +4.8] at step 48. On Terminal-Bench 2.0 it is +0.1 [-2.8, +3.3] at step 16 and -1.0 [-3.8, +1.6] at step 32, and against run 2, the only seeds only run scored there, -3.1 [-7.2, +0.7] at step 48. Variants were 75 of the 384 tasks that trained through step 48 (20%), though `variant_share` is 0.5: the Designer varies each parent once, and calibration kept 84 of the 226 variants it measured in the first 38 generations (37%). The run restarted once from its step 37 checkpoint, on the same software.
 
 ## Layout
 
