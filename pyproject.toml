@@ -26,7 +26,7 @@ dependencies = [
     "huggingface_hub",
     # Harbor's environment contract backs reef.execution.sandbox; task directory rollouts, the task player and the
     # generator service play Harbor tasks with reef-eval.
-    "harbor>=0.25,<0.26",
+    "harbor>=0.25,<0.27",
     "pyyaml",
     "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
@@ -53,7 +53,7 @@ s3 = ["boto3"]
 # environment adds what its sandbox needs to build a task's image (dockerfile-parse). The e2b extra needs Harbor
 # 0.25: KillOnTimeoutE2BEnvironment in reef.execution.sandbox.e2b repeats the sandbox creation of that version's
 # E2B environment, and Harbor 0.24 lacks an attribute that it reads (_sandbox_timeout).
-e2b = ["harbor[e2b]>=0.25,<0.26", "e2b>=2.46", "connectrpc>=0.11.1,<0.14"]
+e2b = ["harbor[e2b]>=0.25,<0.27", "e2b>=2.46", "connectrpc>=0.11.1,<0.14"]
 modal = ["harbor[modal]", "modal>=1.6"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
