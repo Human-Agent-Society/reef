@@ -42,7 +42,10 @@ SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot
 
 
 class Scenario:
-    """Scenario aggregate owning one runtime binding, one snapshot chain, and one trainer per component."""
+    """Scenario aggregate owning one runtime binding, one snapshot chain, and one trainer per component.
+
+    ``store`` is one session that a ``ScenarioStorage`` opened. Each trainer of ``trainers`` must use its ``records``.
+    """
 
     def __init__(
         self,
@@ -328,7 +331,9 @@ class Scenario:
         reserved. News of a running job reads only the job's state, so it takes no commit lock. A submission of a
         lone trainer holds the commit lock. With several trainers it runs outside that lock. Without
         ``automatic_jobs``, the trainer submits only the jobs of requests: a training manager decides
-        (``reef.train.manager``).
+        (``reef.train.manager``). In ``auto`` mode with ``automatic_jobs``, the result is None while the selected
+        artifact does not serve (``selection_serves``). Manual training does not wait, since a request names its
+        samples.
         """
         trainer = self.trainer_for(component)
         # Automatic training waits until the selected artifact serves, so that it does not train the samples of the
@@ -465,7 +470,8 @@ class Scenario:
     def served_artifact_id(self) -> str | None:
         """The artifact that serves requests, or None before inference publishes a route.
 
-        Training uses this identity while a newly selected artifact still starts.
+        Also None for a scenario without serving routes (``ScenarioBinding.served_models``). Training uses this
+        identity while a newly selected artifact still starts.
         """
         routes = self._binding.served_models
         if routes is None:

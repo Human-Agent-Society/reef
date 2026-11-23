@@ -60,8 +60,9 @@ class LocalJobComponent(TrainingComponent):
     once the job ended, ``result.json`` (``{"state", "metrics", "error"?}``).
     A job's metrics and its checkpoints' metrics must encode as JSON. The job
     thread writes a job's last checkpoint before its result, so a job with a
-    result has its complete checkpoint list. The subclass calls
-    :meth:`start_jobs` once it can train; until then no job runs.
+    result has its complete checkpoint list. The process that runs the jobs
+    calls :meth:`start_jobs` (``reef.train.job_queue.TrainingJobWorker.start``);
+    until then no job runs.
     """
 
     def __init__(self, jobs_root: Path) -> None:

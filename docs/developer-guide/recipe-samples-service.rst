@@ -324,5 +324,5 @@ Both hooks default to doing nothing:
 The built-in generated-task recipe uses both hooks (see `Task generators
 <task-generators.rst>`__). A stage that saves tasks opens a store with
 ``context.task_storage.open(name)``; ``task_storage`` is ``None`` when the
-trainer has no scenario session (see `Task stores
-<../reference/python-api-data-stores.rst#task-stores>`__).
+trainer has no scenario session (see the docstring of
+``reef.storage.data.tasks.TaskStore``).

@@ -78,12 +78,20 @@ Parameters that Slime and Tinker take
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - ``objective``: the method, as an objective name or reference.
-- ``scheduling``: how the component trains the job's data. ``epochs`` is a
-  positive int (default 1), ``shuffle`` a bool (default ``false``),
-  ``remainder`` is ``"partial"`` (the default), ``"drop"`` or ``"error"``,
-  and ``packing_length`` is ``null`` (the default) or a token count. With
-  ``packing_length``, the component packs the rollouts into packs of at
-  most that many tokens, and one step trains batch-size packs.
+- ``scheduling``: how the component trains the job's data.
+
+  - ``epochs`` (default 1): the passes over the job's data, a positive int.
+  - ``shuffle`` (default ``false``): reorder the rollouts in every pass,
+    deterministically from the data's rows.
+  - ``remainder`` (default ``"partial"``): what to do with a last step
+    that has fewer rollouts, or packs, than the batch size. ``"partial"``
+    trains it as a smaller step, ``"drop"`` leaves it out, and ``"error"``
+    refuses the job's data.
+  - ``packing_length`` (default ``null``): pack the rollouts into packs of
+    at most this many tokens before the component cuts the steps. One step
+    then trains batch-size packs. A pack never splits a rollout, and a
+    longer rollout is a pack of its own. ``shuffle`` and ``remainder``
+    apply to the packs.
 - ``save_interval``: save a checkpoint after each ``save_interval``
   optimizer steps of the job.
 - ``learning_rate_schedule``: a ``LearningRateSchedule``, with ``name``,

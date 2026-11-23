@@ -35,7 +35,8 @@ class TrajectorySample:
     the training fields live in ``extra.reef``. A sample that a record-to-sample stage makes carries no tokens: the
     training component renders it (``reef.core.chat_rendering``) and writes the tokens into ``training``. A task
     rollout of a training component carries the exact tokens that its engine sampled. Full ATIF validation and
-    algorithm-required fields belong to the consumer.
+    algorithm-required fields belong to the consumer. A ``group_id`` names the comparison group of the trajectory
+    within the job's data (``trajectory_groups``); None means an independent trajectory.
     """
 
     trajectory: Mapping[str, Any]
@@ -59,7 +60,14 @@ class TrajectorySample:
 
     @property
     def metadata(self) -> Mapping[str, Any]:
-        """Reef's JSON metadata within the ATIF extension object."""
+        """Reef's JSON metadata within the ATIF extension object.
+
+        Among its fields: ``reward`` and ``feedback``, the supplied or computed training signal;
+        ``source_agent_record_id``, the primary source record; ``records``, the summary of each captured call
+        (``reef.core.trajectories.call_summary``); ``teacher`` and ``teacher_candidates``, the teacher requests of a
+        distillation stage (``reef.core.chat_rendering``); ``max_tokens``, the longest sample, in tokens, that a
+        stage lets train; and ``training``.
+        """
         extra = self.trajectory.get("extra") or {}
         if not isinstance(extra, Mapping):
             raise ValueError("ATIF extra must be an object")
@@ -71,7 +79,9 @@ class TrajectorySample:
     @property
     def training(self) -> Mapping[str, Any]:
         """The training fields: the tokens and the loss mask once the sample is rendered or rolled out, and the
-        fields that a recipe adds."""
+        fields that a recipe adds. A task rollout of a training component also carries ``rollout_log_probs`` and
+        ``artifact_id``, and the sampler's ``topk_indices`` and ``topk_log_probs`` when the component records them.
+        Arrays are JSON lists."""
         training = self.metadata.get("training", {})
         if not isinstance(training, Mapping):
             raise ValueError("ATIF extra.reef.training must be an object")
@@ -81,7 +91,8 @@ class TrajectorySample:
     def artifact_id(self) -> str | None:
         """The artifact that produced the trajectory: ``training.artifact_id``, which a rollout of a training component
         names, else the ``artifact_id`` of the last call that the trajectory recorded (``extra.reef.records``), or
-        None when it names none, as an upload does."""
+        None when it names none, as an upload does. The staleness check of the samples service reads it
+        (``reef.samples.staleness.lags_behind``)."""
         named = self.training.get("artifact_id")
         if isinstance(named, str) and named:
             return named
@@ -182,6 +193,10 @@ class JobData:
     (``TrainingJob.data``) or the harness backend reads it. The consuming
     algorithm decides which sample kinds it supports and refuses the others
     explicitly.
+
+    One job's data holds samples of one kind: ``Sample2Job.job_parameters`` and the job data directory refuse data
+    with both trajectories and tasks. The component reads the samples from that directory
+    (``reef.storage.data.job_data``), so they must hold only JSON values (``to_dict``).
     """
 
     data_id: str
@@ -274,7 +289,10 @@ class JobData:
 
 
 def trajectories(data: JobData) -> tuple[TrajectorySample, ...]:
-    """Read the ATIF trajectory samples in the data's order; task samples require a rollout-capable algorithm."""
+    """Read the ATIF trajectory samples in the data's order; task samples require a rollout-capable algorithm.
+
+    ``TypeError`` for a sample of another kind: the function does not filter mixed data.
+    """
     found: list[TrajectorySample] = []
     for index, sample in enumerate(data.samples):
         if not isinstance(sample, TrajectorySample):
@@ -286,7 +304,11 @@ def trajectories(data: JobData) -> tuple[TrajectorySample, ...]:
 
 
 def trajectory_groups(data: JobData) -> tuple[tuple[TrajectorySample, ...], ...]:
-    """Read explicit, contiguous comparison groups without reordering trajectory rows."""
+    """Read explicit, contiguous comparison groups without reordering trajectory rows.
+
+    ``ValueError`` for a trajectory without a ``group_id``, and for a group whose trajectories are not contiguous.
+    ``TypeError`` for a sample that is not a trajectory (``trajectories``).
+    """
     groups: dict[str, list[TrajectorySample]] = {}
     previous: str | None = None
     for item in trajectories(data):

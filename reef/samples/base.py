@@ -90,7 +90,9 @@ class Record2Sample(ABC, Plugin):
     ``push``, ``advance``, and ``make_samples`` run on the trainer thread and must not block on network or model
     calls. A stage with slow work runs it on a worker that it owns, forms sets when the work ends, and ``close``
     stops the worker. Raise on a broken training contract. The stage keeps only memory that a replay of the
-    retained records rebuilds, as pipeline memory does.
+    retained records rebuilds, as pipeline memory does. It keeps no state in a directory of its own, because a
+    scenario delete archives none for it: durable state goes in the scenario's stores
+    (``PipelineContext.task_storage``).
 
     A stage can also make samples from no record set, such as generated tasks (``made_samples``), and render an
     uploaded trajectory into its training sample (``uploaded_sample``).
@@ -103,7 +105,8 @@ class Record2Sample(ABC, Plugin):
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         """Build the stage of one scenario from its config.
 
-        ``environ`` holds the environment the deployment was read with.
+        ``environ`` holds the environment the deployment was read with. A setting that the stage reads is a key of
+        ``config``, not a recipe field, and the stage reads no deployment file.
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 
