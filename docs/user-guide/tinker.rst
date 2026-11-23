@@ -1,225 +1,268 @@
 Train with Tinker
 =================
 
-The optional ``tinker`` backend runs LoRA training and sampling through
+The optional ``tinker`` backend trains LoRA adapters and samples through
 `Tinker's SDK <https://tinker-docs.thinkingmachines.ai/>`__. Reef runs on a CPU
-host and retains ownership of requests, feedback, candidate selection, and the
-versioned snapshot chain. By default it launches no Ray cluster, no Slime and
-no inference engine; `Serve on inference engines`_ describes the option to
-serve the trained adapters on SGLang engines. The tested SDK interface is
-pinned to ``tinker==0.28.1``.
+host and keeps the requests, the feedback, candidate selection and the snapshot
+chain. By default it starts no Ray cluster, no Slime and no inference engine.
+The ``tinker`` extra pins the SDK (``tinker==0.39.0``).
+
+This page covers:
+
+- `Install and run`_: the hosted LoRA path.
+- `What the backend supports`_: requests, losses and job settings.
+- `Jobs, checkpoints, and recovery`_.
+- `Serve on inference engines`_: optional, Reef's SGLang engines serve the adapters.
+- `Train all the parameters on Spindle`_: optional, the ``spindle_full`` backend.
 
 Install and run
 ---------------
 
-Use Python 3.12 or newer on Linux or macOS, the version Reef itself requires.
+Use Python 3.12 or newer on Linux or macOS.
 
 .. code:: bash
 
    uv pip install -e '.[tinker]' -e ./third_party/reef-client
 
-Set ``TINKER_API_KEY`` in the service environment. Credentials are read only
-when the selected runtime starts; neither resolved configuration nor checkpoint
-manifests contain the key. ``training.options.api-key-env`` selects a different
-environment variable. An optional ``project-id`` selects the Tinker project.
+Then configure the deployment:
 
-``training.options.base-url`` selects another Tinker-compatible service, such
-as a `Spindle <https://modal.com/docs/guide/spindle>`__ deployment on Modal.
-Unset, Reef uses Thinking Machines' hosted Tinker. The trainer, its sampler and
-``inference.serving: trainer`` all use that service. A checkpoint path such as
-``tinker://<run>/weights/<name>`` resolves only on the service that made it, so
-each checkpoint manifest records the service, and the component refuses a
-checkpoint that another service holds. A service may lack some calls; Spindle,
-for example, serves no checkpoint archives, so Reef's own engines can serve
-only hosted Tinker's checkpoints (`Serve on inference engines`_). Reef makes a base-model sampling client only at its first use
-(a KL term, a task rollout or a request); on Spindle such a client starts a
-sampler pool.
+- Set ``training.backend: tinker``.
+- Set ``inference.model-path`` to a Tinker base model. It stays a remote
+  identifier: Reef downloads no weights, and the SDK fetches the tokenizer.
+- Set ``training.options.state-dir`` to a persistent directory. One runtime
+  owns it exclusively.
+- Set ``TINKER_API_KEY`` in the service environment.
+  ``training.options.api-key-env`` names another variable, and the optional
+  ``project-id`` selects the Tinker project. Reef reads the key when the
+  runtime starts. The resolved configuration and the checkpoint manifests do
+  not contain it.
 
-The `four-rollout smoke <../../tutorials/tinker/README.md>`__ includes a complete
-config and runner. It creates one adapter, generates four short responses, and
-performs one optimizer step with synthetic rewards. Running it uses Tinker
-credits; it is a mechanism check, not a benchmark or a model-quality claim.
+The `four-rollout smoke <../../tutorials/tinker/README.md>`__ has a complete
+config and runner. It creates one adapter, generates four short responses and
+runs one optimizer step with synthetic rewards. It uses Tinker credits. It
+checks the mechanism; it is not a benchmark.
 
-Choose ``training.backend: tinker``, an available Tinker base model in
-``inference.model-path``, and a persistent ``training.options.state-dir``.
-The model remains a remote identifier: deployment does not download its weight
-snapshot. The SDK obtains tokenizer resources for prompt rendering. The runtime
-requires exclusive ownership of its state directory. The Tinker training
-component lets several scenarios share it, because each job carries its own
-start. When Tinker samples (``inference.serving: trainer``, the default), a
-deployment still trains one scenario. When Reef's engines serve the exported
-adapters (`Serve on inference engines <#serve-on-inference-engines>`__),
-they serve each scenario its own adapter, so several scenarios can train on
-one deployment.
+**Another Tinker-compatible service.** ``training.options.base-url`` selects
+one, such as a `Spindle <https://modal.com/docs/guide/spindle>`__ deployment on
+Modal. Unset, Reef uses Thinking Machines' hosted Tinker. The trainer, its
+sampler and ``inference.serving: trainer`` all use that service.
 
-Supported inference and training
----------------------------------
+- A checkpoint path such as ``tinker://<run>/weights/<name>`` resolves only on
+  the service that made it. Each checkpoint manifest records the service, and
+  the component refuses a checkpoint that another service holds.
+- A service may lack some calls. Spindle serves no checkpoint archives, so
+  Reef's own engines can serve only hosted Tinker's checkpoints.
+- Reef makes a base-model sampling client at its first use (a KL term, a task
+  rollout or a request). On Spindle such a client starts a sampler pool.
 
-The backend supports ``/v1/chat/completions`` with textual system, user, and
-assistant messages, including a final assistant prefill. It accepts one output
-per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
-``top_p``, ``top_k``, ``seed``, and ``stop``. The supported template option is
-``chat_template_kwargs.enable_thinking``. Unknown options, tool calls,
-multimodal messages, and Anthropic routes fail explicitly.
+**Scenarios.** Several scenarios can share the training component, because each
+job carries its own start. When Tinker samples (``inference.serving: trainer``,
+the default), a deployment still trains one scenario. When Reef's engines serve
+the adapters, each scenario gets its own adapter, so several scenarios can
+train on one deployment.
 
-A request without ``max_tokens`` or ``max_completion_tokens`` may reply up to
-the rest of the model's context window, or 1024 tokens when the service states
-no window for the model. A prompt that fills the window gets a ``400`` whose
-message starts with ``context_length_exceeded``. A thinking model's reasoning
-comes in the message's ``reasoning_content``, and its answer in ``content``.
+What the backend supports
+-------------------------
 
-Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events. It does not provide token-by-token latency. A streamed
-answer carries only ``content``, so a streaming client gets no reasoning.
-Prompt IDs come from the tokenizer's chat template.
+Inference requests
+~~~~~~~~~~~~~~~~~~
 
-Serving returns and records no training tensors. The training component
-renders each recorded call with the base model's tokenizer and
-``training.options.chat_template_kwargs``, which must equal the chat template
-arguments of serving, for example ``{enable_thinking: false}``. It computes
-the rollout log probabilities with a forward pass at the job's start, before
-the first optimizer step. A sample that cannot render, or whose tokens after
-the first are more than the model's context window, does not train, and the
-job metric ``unrenderable_samples`` counts it: Tinker refuses a whole
-optimizer step for one such sample. A task job's own rollouts keep the sampled
-IDs and log probabilities that Tinker returns.
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
 
-Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
-one training component (``reef.train.tinker_backend``) and one inference
-runtime (``reef.inference.tinker``). Reef submits each job's ready data to the
-component as one training job. They share nothing in process: each saved
-checkpoint carries a ``tinker-checkpoint.json`` manifest that names its
-remote training state and sampler. The inference side serves the sampler that
-a snapshot names. Each job starts from the scenario's last saved checkpoint,
-which ``state-dir`` keeps across restarts.
+   * - Item
+     - Support
+   * - Route
+     - ``/v1/chat/completions`` only. Anthropic routes fail explicitly.
+   * - Messages
+     - Text ``system``, ``user`` and ``assistant`` messages, including a final
+       assistant prefill. Tool calls and multimodal messages fail explicitly.
+   * - Options
+     - One output per request; ``max_tokens`` or ``max_completion_tokens``,
+       ``temperature``, ``top_p``, ``top_k``, ``seed``, ``stop`` and
+       ``chat_template_kwargs.enable_thinking``. Unknown options fail
+       explicitly.
+   * - Reply length
+     - Without a token limit, up to the rest of the model's context window, or
+       1024 tokens when the service states no window. A prompt that fills the
+       window gets a ``400`` whose message starts with
+       ``context_length_exceeded``.
+   * - Reasoning
+     - A thinking model's reasoning is in ``reasoning_content`` and its answer
+       in ``content``.
+   * - Streaming
+     - Buffered: Reef emits the complete response as valid OpenAI SSE events,
+       without token-by-token latency. A streamed answer carries only
+       ``content``, so a streaming client gets no reasoning.
 
-A new scenario starts from a base root: a ``base.json`` file that names the
-model, the LoRA rank and the service. Control writes it from the
-configuration and calls no Tinker service for it. Serving it samples the base
-model. The first job from it makes a new LoRA from ``seed``. With
-``seed: null``, the training service saves one untrained adapter when the
-first such job runs, keeps its manifest in ``<state-dir>/base/``, and starts
-every such job from it.
+Serving records no training tensors. The training component renders each
+recorded call with the base model's tokenizer and
+``training.options.chat_template_kwargs``. This value must equal the chat
+template arguments of serving, for example ``{enable_thinking: false}``. The
+component computes the rollout log probabilities with a forward pass at the
+job's start weights. A sample does not train when it cannot render, or when its
+tokens after the first exceed the context window. The job metric
+``unrenderable_samples`` counts such samples. A task job's own rollouts keep
+the token IDs and log probabilities that Tinker sampled.
 
-``training.options.batch-size`` (default 1) is the batch size: the samples in
-one optimizer step. ``pipeline.sample2job.config.job_samples`` is the job size:
-the training pipeline submits a job when it holds this many samples. Set it
-to the batch size, so that one job is one optimizer step. Job data takes whole
-record sets, so it can hold more; the component then cuts it into optimizer
-steps of the batch size (see `Job size
-<../developer-guide/processors.rst#job-size>`__). A step keeps each rollout of
-the objective's ``rollout_unit`` whole: one sample, or one comparison set. A
-job's optional ``scheduling`` parameter sets the epochs, the shuffle, and the
-``partial``, ``drop`` or ``error`` policy for the last step.
+Losses
+~~~~~~
 
-Tinker computes the loss on its side from a built-in loss function and the
-per-sample inputs that function reads. The built-in ``importance_sampling``
-family places the trajectory advantage on every response token the loss mask
-selects. The built-in ``sft`` family trains Tinker's ``cross_entropy`` on the
-same tokens, so the `SFT recipe <recipes/sft.rst>`__ runs on Tinker; its
-samples need no rollout log probabilities. A method gives its own ``TinkerLoss`` a ``loss_family`` name and decorates the class with
-``@register_loss_family`` (``reef.train.tinker_backend.loss_families``), in the module of
-its ``TinkerObjective``; the class is imported when a job first names that objective. Its ``loss_fn`` names the Tinker built-in it trains with and
-``inputs`` shapes that function's ``loss_fn_inputs``. A ``TinkerCustomLoss``
-instead computes the loss on the Reef host from the token log probabilities
-Tinker returns, through ``forward_backward_custom``; that path needs torch
-locally and no shipped recipe uses it. The TTTD recipe's
-``recipes/tttd/tinker.py`` keeps its unmasked policy term and masked,
-centered frozen-base KL on ``importance_sampling``, matching its Slime
-objective. ``training.options.kl-coef`` controls that penalty. The base
-sampler scores the same token IDs, and those probabilities never replace
-the rollout log probabilities. SAO and OpenClaw-RL losses are
-not implemented by this integration; selecting an unregistered loss family
-fails before training.
+Tinker computes the loss from one of its built-in loss functions. Each job
+trains the Tinker loss of the objective that its recipe selected (`Train each
+kind of sample with its own method
+<../developer-guide/recipe-training-service.rst#job-parameters>`__).
 
-A job's data can also be Harbor tasks (a task job), as the `generated-task
-recipe <../reference/configuration.rst#generated-tasks>`__ makes. Before it
-trains, the component runs ``rollout.rollouts_per_task`` rollouts of each task
-on Tinker's sampler at the job's start weights, so the rollouts sample the
-weights that the job trains. The agent's model calls go to a sampler endpoint
-on this host, which answers Tinker's text chat with the training capture; the
-task's verifier scores each rollout. The component trains on each task's
-group of samples, keeps the rollouts in its job directory so a resumed job
-trains the same samples, and reports each task's rewards in the job's metrics.
-The ``rollout`` job parameter sets the rollouts, the agent and the sandbox.
-Reef's serving takes no part, so another runtime, such as an inference
-component, can serve the snapshots.
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
 
-Each job trains the Tinker loss of the objective that its recipe selected
-(`Train each kind of sample with its own method
-<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
-Tinker preparation needs one advantage per trajectory, so a supervised or
-distillation objective fails before training.
-``kl-coef`` applies to every job. When it is not zero, a job whose loss has no
-KL penalty, such as ``importance_sampling``, also fails before training.
+   * - Loss family
+     - Behavior
+   * - ``importance_sampling``
+     - Built in. Places the trajectory advantage on every response token that
+       the loss mask selects.
+   * - ``sft``
+     - Built in. Trains Tinker's ``cross_entropy`` on the same tokens, so the
+       `SFT recipe <recipes/sft.rst>`__ runs on Tinker. Its samples need no
+       rollout log probabilities.
+   * - TTTD (``recipes/tttd/tinker.py``)
+     - Keeps its unmasked policy term and its masked, centered frozen-base KL
+       on ``importance_sampling``, as its Slime objective does.
+       ``training.options.kl-coef`` sets the penalty. The base sampler scores
+       the same token IDs; its probabilities never replace the rollout log
+       probabilities.
+   * - SAO, OpenClaw-RL
+     - Not implemented. An unregistered loss family fails before training.
 
-``lora-rank``, ``seed``, and ``learning-rate`` configure adapter initialization
-and Adam updates. Other Adam settings currently use the pinned SDK's defaults
-(beta1 0.9, beta2 0.95, epsilon 1e-12, zero weight decay and gradient clipping).
-``learning-rate`` applies until a recipe selects a learning-rate schedule.
-``training.timeout-s`` bounds SDK futures and configures
-transport timeouts; ``inference.timeout-s`` bounds sampling. These timeouts do
-not cancel a remote update that the service has already accepted.
+Constraints:
+
+- Tinker preparation needs one advantage per trajectory. A supervised or
+  distillation objective fails before training.
+- ``kl-coef`` applies to every job. When it is not zero, a job whose loss has
+  no KL penalty, such as ``importance_sampling``, fails before training.
+
+To add a loss, a method gives its ``TinkerLoss`` a ``loss_family`` name and
+decorates the class with ``@register_loss_family``
+(``reef.train.tinker_backend.loss_families``), in the module of its
+``TinkerObjective``. Its ``loss_fn`` names the Tinker built-in and ``inputs``
+shapes that function's ``loss_fn_inputs``. A ``TinkerCustomLoss`` instead
+computes the loss on the Reef host from the token log probabilities that Tinker
+returns (``forward_backward_custom``). That path needs torch locally, and no
+shipped recipe uses it.
+
+Job settings
+~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 62
+
+   * - Setting
+     - Meaning
+   * - ``training.options.batch-size``
+     - Samples in one optimizer step. Default 1.
+   * - ``pipeline.sample2job.config.job_samples``
+     - Job size: the pipeline submits a job when it holds this many samples.
+       Set it to the batch size, so that one job is one optimizer step.
+   * - ``lora-rank``, ``seed``
+     - Adapter initialization.
+   * - ``learning-rate``
+     - Adam learning rate, until a recipe selects a learning-rate schedule.
+       Other Adam settings use the pinned SDK's defaults (beta1 0.9, beta2
+       0.95, epsilon 1e-12, no weight decay, no gradient clipping).
+   * - ``training.timeout-s``
+     - Bounds SDK futures and sets transport timeouts.
+   * - ``inference.timeout-s``
+     - Bounds sampling.
+
+Job data takes whole record sets, so a job can hold more samples than
+``job_samples``. The component cuts it into optimizer steps of the batch size
+(`Job size <../developer-guide/recipe-control-service.rst#job-size>`__). A step keeps each
+rollout of the objective's ``rollout_unit`` whole: one sample, or one
+comparison set. A job's optional ``scheduling`` parameter sets the epochs, the
+shuffle, and the ``partial``, ``drop`` or ``error`` policy for the last step.
+The timeouts do not cancel a remote update that the service already accepted.
+
+Task jobs
+~~~~~~~~~
+
+A job's data can be Harbor tasks, as the `generated-task recipe
+<../reference/configuration-generated-tasks.rst#generated-tasks>`__ makes. Before it trains,
+the component runs ``rollout.rollouts_per_task`` rollouts of each task on
+Tinker's sampler at the job's start weights. The agent's model calls go to a
+sampler endpoint on this host, and the task's verifier scores each rollout.
+The component trains on each task's group of samples and reports each task's
+rewards in the job's metrics. It keeps the rollouts in its job directory, so a
+resumed job trains the same samples. The ``rollout`` job parameter sets the
+rollouts, the agent and the sandbox. Reef's serving takes no part, so another
+runtime can serve the snapshots.
 
 Jobs, checkpoints, and recovery
 -------------------------------
 
-A job trains the optimizer steps of its data from the job's start checkpoint. It
-restores the saved weights **and optimizer state** in a new Tinker training
-session. It then saves the state (``save_state``) and the sampler weights
-(``save_weights_for_sampler``). Each save has one
-explicit unique name and no expiration. Then the session closes. The job
-parameter ``save_interval``, which ``recipe.config.job_parameters`` can set, gives the
-optimizer steps between two saved checkpoints. Without it, a job saves one checkpoint
-when it ends. Each saved checkpoint is a candidate. Candidate evaluation
+**Start.** A new scenario starts from a base root: a ``base.json`` file that
+names the model, the LoRA rank and the service. Control writes it from the
+configuration without a Tinker call, and serving it samples the base model. The
+first job makes a new LoRA from ``seed``. With ``seed: null``, the training
+service saves one untrained adapter when the first such job runs, keeps its
+manifest in ``<state-dir>/base/``, and starts every such job from it.
+
+**A job.** A job restores the weights and the optimizer state of its start
+checkpoint in a new Tinker training session and runs the optimizer steps of its
+data. It then saves the state (``save_state``) and the sampler weights
+(``save_weights_for_sampler``), each under a unique name without expiration,
+and closes the session. The job parameter ``save_interval``
+(``recipe.config.job_parameters``) gives the optimizer steps between two saved
+checkpoints. Without it, a job saves one checkpoint when it ends.
+
+**Candidates.** Each saved checkpoint is a candidate. Candidate evaluation
 decides whether Reef publishes it; a rejected candidate changes no served
 sampler. The next job starts from the last saved checkpoint, whether or not
 Reef selected it.
 
-An uncertain API result may leave an unreferenced remote checkpoint and consume
-credits. A retry starts from the same checkpoint in a fresh session; it cannot
-apply the uncertain gradient a second time to that model. A job that a restart
-interrupts continues after its last saved checkpoint. This favors recovery
-correctness over session reuse and training throughput.
+**The artifact.** Reef publishes a small ``tinker-checkpoint.json`` manifest:
+the schema version, base model, LoRA rank, training-state URI and sampler URI,
+and the progress of a learning-rate schedule when a recipe selects one. It
+holds references, not weight tensors. Restore, activation and train-from need
+continued access to both remote checkpoints in the originating account and
+project. Local retention does not remove remote files. Use Tinker's checkpoint
+management for remote retention, and keep every checkpoint that Reef
+references.
 
-Reef publishes a small local ``tinker-checkpoint.json`` artifact containing the
-schema version, base model, LoRA rank, training-state URI, and sampler URI.
-After a recipe selects a learning-rate schedule, it also records the schedule's
-progress. It contains references, not portable weight tensors. Restore,
-activation and train-from require continued access to both remote checkpoints
-in the originating account/project. Local disk retention does not remove remote
-files. Use Tinker's checkpoint management for remote retention, preserving all
-checkpoints referenced by Reef.
+**Failures and restarts.**
 
-Requests that are already admitted keep the sampler of the snapshot they
-started with. Restart creates a fresh runtime-load incarnation and serves the
-active selection. Train-from works: Reef imports the older artifact's manifest
-into the component, cancels the running job that continues the start before,
-and the next job that names no start begins from that artifact's weights and
-optimizer state.
+- An uncertain API result may leave an unreferenced remote checkpoint and
+  consume credits. A retry starts from the same checkpoint in a fresh session,
+  so it cannot apply the uncertain gradient twice.
+- A job that a restart interrupts continues after its last saved checkpoint.
+- Admitted requests keep the sampler of the snapshot they started with. A
+  restart serves the active selection under a new runtime load.
+- Train-from works. Reef imports the older artifact's manifest into the
+  component and cancels the running job that continues the previous start. The
+  next job that names no start begins from that artifact's weights and
+  optimizer state.
 
 Serve on inference engines
 --------------------------
 
-Reef's own SGLang engines can serve the adapters that Tinker trains, in place
-of Tinker's sampler. The engines run on an inference component
-(``python -m reef.inference.remote``), a service separate from the trainer.
-The Reef control plane starts the engines on the component and loads each
-saved adapter into them. Tinker still trains in the HTTP service's process,
-and the trainer never talks to the engines.
+Reef's SGLang engines can serve the adapters that Tinker trains, in place of
+Tinker's sampler. The engines run on an inference component
+(``python -m reef.inference.remote``), separate from the trainer. The control
+plane starts the engines on the component and loads each saved adapter into
+them. Tinker still trains in the HTTP service's process and never talks to the
+engines.
 
-Select ``inference.backend: sglang`` with
-the base model that Tinker trains in ``inference.model-path``,
-``inference.num-gpus`` and, for tensor-parallel engines,
-``inference.tensor-parallel-size``. Any engine setting selects
-``inference.serving: engines``:
+Select ``inference.backend: sglang`` with the base model that Tinker trains.
+Any engine setting selects ``inference.serving: engines``:
 
 .. code:: yaml
 
    inference:
      model-path: Qwen/Qwen3-8B
      backend: sglang
-     num-gpus: 2
+     num-gpus: 2                 # tensor-parallel-size for tensor-parallel engines
      max-loaded-adapters: 2
    training:
      backend: tinker
@@ -227,54 +270,53 @@ the base model that Tinker trains in ``inference.model-path``,
        state-dir: /var/lib/reef/tinker
        lora-rank: 32
 
-``reef serve`` then starts an inference component on this host before the
-HTTP service. The component listens on a free loopback port and starts its own
-Ray session; with ``training.ray-address`` it joins that cluster instead.
-``reef serve`` generates the two component tokens
-(``REEF_REMOTE_CONTROL_TOKEN`` and ``REEF_REMOTE_INFERENCE_TOKEN``) unless
-they are set, and both children inherit them. The HTTP service starts the
-engines before it serves, so its readiness deadline is at least
-``training.ready-timeout``.
+``reef serve`` then starts an inference component on this host before the HTTP
+service:
 
-The engines start with LoRA serving enabled: ``max-lora-rank`` is ``lora-rank`` and
-``lora-target-modules`` is ``all``. ``max-loaded-loras`` and
-``max-loras-per-batch`` come from ``inference.max-loaded-adapters``. The
-engines keep at most that many adapters resident. Each scenario keeps its
-served adapter resident, so this value must be at least the number of
-training scenarios; a scenario's new adapter replaces its own served adapter
-when no slot is free.
+- The component listens on a free loopback port and starts its own Ray session.
+  With ``training.ray-address`` it joins that cluster.
+- ``reef serve`` generates the two component tokens
+  (``REEF_REMOTE_CONTROL_TOKEN`` and ``REEF_REMOTE_INFERENCE_TOKEN``) unless
+  they are set.
+- The HTTP service starts the engines before it serves, so its readiness
+  deadline is at least ``training.ready-timeout``.
+- ``reef serve`` refuses ``training.colocate``: there are no training GPUs to
+  share.
 
-Each scenario trains its own adapter. A job runs the optimizer steps of its data
-on Tinker from the scenario's last saved checkpoint. A snapshot still holds only
-its manifest. When the control plane loads a snapshot, it downloads the adapter
-that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
-``weights.download`` does, and converts it into a PEFT adapter with
-``weights.build_lora_adapter``. It keeps the result under
-``<state-dir>/sampler-weights/``, one directory per sampler path, so a snapshot
-downloads once. A service that serves no checkpoint archives, such as Spindle,
-fails the load. The control plane loads the PEFT adapter into every engine under a
-new adapter name for the scenario. Requests reach that adapter through the
-scenario's ``served_models`` route. A rejected candidate loads nothing. A restart starts the
-engines again and loads each scenario's committed adapter before the scenario
-serves. The converter is pinned in the ``tinker`` extra; it brings torch and
-transformers.
+**Adapter slots.** The engines start with LoRA serving enabled:
+``max-lora-rank`` is ``lora-rank`` and ``lora-target-modules`` is ``all``.
+``inference.max-loaded-adapters`` sets ``max-loaded-loras`` and
+``max-loras-per-batch``. Each scenario keeps its served adapter resident, so
+this value must be at least the number of training scenarios. A scenario's new
+adapter replaces its own served adapter when no slot is free.
 
-The trajectories then come from Reef's engines while Tinker computes the loss,
-so the base model and tokenizer on both sides must match. Set
+**Loading a snapshot.** A snapshot still holds only its manifest. When the
+control plane loads one, it downloads the adapter that the manifest's
+``sampler_path`` names and converts it into a PEFT adapter. It keeps the result
+under ``<state-dir>/sampler-weights/``, one directory per sampler path, so a
+snapshot downloads once. It then loads the adapter into every engine under a
+new adapter name, and requests reach it through the scenario's
+``served_models`` route. A rejected candidate loads nothing. A restart starts
+the engines again and loads each scenario's committed adapter before the
+scenario serves. A service that serves no checkpoint archives, such as Spindle,
+fails the load. The converter is pinned in the ``tinker`` extra; it brings
+torch and transformers.
+
+**Matching both sides.** The trajectories come from Reef's engines while Tinker
+computes the loss, so the base model and tokenizer must match. Set
 ``training.options.chat_template_kwargs`` to the engines' chat template
-arguments, so that Tinker renders each sample as the engines served it. ``reef serve`` refuses ``training.colocate``:
-there are no training GPUs to share. Tinker's adapters also carry a LoRA on ``lm_head``,
-which the Slime configuration never targets; whether the installed SGLang
-accepts that module is checked only when the engines load the adapter.
+arguments. Tinker's adapters also carry a LoRA on ``lm_head``. Whether the
+installed SGLang accepts that module is checked only when the engines load the
+adapter. This topology is tested with stub engines only; real SGLang engines
+have not been run with it.
 
 Serve from a remote GPU host
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The component can also run on another host, such as a rented GPU machine or
-a managed GPU platform, while Reef and the Tinker trainer stay on a CPU host.
-No tensors cross the network: the control plane uploads each selected
-adapter directory to the component, and the component loads it into its
-engines.
+The component can run on another host, such as a rented GPU machine, while Reef
+and the Tinker trainer stay on a CPU host. The control plane uploads each
+selected adapter directory to the component, and the component loads it into
+its engines.
 
 On the GPU host, install Reef with SGLang. Set two different tokens and start
 the component:
@@ -286,14 +328,13 @@ the component:
    python -m reef.inference.remote --port 8000
 
 The component starts its own Ray session and no engines. Its control routes
-other than ``health`` answer ``409`` until a control plane starts the engines. It starts only the
-engine backend that ``--engine`` names (default ``sglang``) and refuses any
-other backend that a control plane asks for.
-``python -m reef.inference.remote --help`` lists the bind address, the upload
-directory and the Ray options.
+other than ``health`` answer ``409`` until a control plane starts the engines.
+It starts only the engine backend that ``--engine`` names (default ``sglang``)
+and refuses any other. ``python -m reef.inference.remote --help`` lists the
+bind address, the upload directory and the Ray options.
 
-On the Reef host, set the same two variables. Keep ``inference.backend:
-sglang`` and add an ``inference.remote`` section with the component's URL:
+On the Reef host, set the same two variables and add an ``inference.remote``
+section with the component's URL:
 
 .. code:: yaml
 
@@ -309,38 +350,32 @@ sglang`` and add an ``inference.remote`` section with the component's URL:
        state-dir: /var/lib/reef/tinker
        lora-rank: 32
 
-``reef serve`` then starts no local component. The control plane asks the
-remote component to start the engines with the settings described above. The
-GPU host downloads ``model-path``; the Reef host keeps it as a remote
-identifier.
+``reef serve`` then starts no local component. The GPU host downloads
+``model-path``; the Reef host keeps it as a remote identifier. `The inference
+section <../reference/configuration-inference.rst#the-inference-section>`__ lists the
+``inference.remote`` settings.
 
-The HTTP service sends inference requests to the component, and the
-component forwards each request and its answer unchanged. Version stamps
-therefore come from the engines. When the control plane stops,
-the component stops its engines and keeps running. When the component
-restarts, for example because its host replaced the container, it runs no
-engines. The control plane notices within 30 seconds, starts the engines
-again and loads each scenario's served adapter into them.
+Behavior to rely on:
 
-The control token gives its holder control of the GPU host. Its holder
-chooses the model, the engine options and the served weights, and the engines
-run a model's own code (``trust_remote_code``). Protect it like a login to
-that host: serve the component over HTTPS, keep the token out of logs and
-deployment files, and keep it separate from the inference token.
+- The HTTP service sends inference requests to the component, which forwards
+  each request and its answer unchanged. Version stamps come from the engines.
+- When the control plane stops, the component stops its engines and keeps
+  running.
+- When the component restarts, it runs no engines. The control plane notices
+  within 30 seconds, starts the engines again and loads each scenario's served
+  adapter.
+- The component serves one control plane at a time: a second start replaces
+  the first one's engines.
+- Each selected candidate uploads one adapter directory, so the upload time
+  grows with the adapter size and the network path.
 
-Each selected candidate uploads one adapter directory, so the upload time
-grows with the adapter size and the network path. The component serves one
-control plane at a time: a second start replaces the first one's engines.
-`The inference section <../reference/configuration.rst#the-inference-section>`__
-lists the ``inference.remote`` settings.
+.. warning::
 
-``tests/tinker_backend/test_tinker_local_engine_ray.py`` runs this topology on
-a CPU. The component runs a stub engine in its own process and Ray session, and
-the test process is the control plane with the Tinker SDK faked. It trains one
-TTTD step, checks that the component serves the adapter, restarts the control
-plane, and checks that the component serves the committed adapter again. With
-``REEF_TEST_TINKER_REAL=1`` and ``TINKER_API_KEY`` set, it trains, downloads
-and converts a real checkpoint.
+   The control token gives its holder control of the GPU host. Its holder
+   chooses the model, the engine options and the served weights, and the
+   engines run a model's own code (``trust_remote_code``). Protect it like a
+   login to that host: serve the component over HTTPS, keep the token out of
+   logs and deployment files, and keep it separate from the inference token.
 
 Train all the parameters on Spindle
 -----------------------------------
@@ -363,7 +398,7 @@ Prerequisites:
   token that can read the repo, such as ``HF_TOKEN``.
 - The service has Modal credentials (``uv pip install 'reef-infra[modal]'``,
   then ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` or a profile). In the
-  Spindle deployment's Modal environment, the Secret ``hf-secret`` names
+  Spindle deployment's Modal environment, the Secret that ``hf-secret`` names
   (default ``huggingface-secret``) holds an ``HF_TOKEN`` that can write
   ``release-repo`` and read the base.
 
@@ -381,30 +416,42 @@ Prerequisites:
        modal-environment: spindle            # where the deployment runs
        learning-rate: 1.0e-6
 
-The default start is a reference to the base revision (`Import an artifact
-<operate.rst#import-an-artifact>`__), which a new scenario's root snapshot
-holds. Control writes it from the configuration. A job from it starts a new
-model with the base's own weights.
+**Start.** A new scenario's root snapshot holds a reference to the base
+revision (`Import an artifact <operate.rst#import-an-artifact>`__). Control
+writes it from the configuration. A job from it starts a new model with the
+base's own weights.
 
-Every snapshot refers to its weights on Hugging Face. When Spindle saves a
-checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint
-Volume (``checkpoint-volume``, default ``spindle-checkpoints``). A Modal
-function then commits those weights, with the base's tokenizer, chat template
-and processor files, to ``release-repo``. Each saved checkpoint is one commit,
-which holds exactly that checkpoint's files. The snapshot holds two files:
+**Snapshots.** When Spindle saves a checkpoint, it writes the Hugging Face
+weights to its checkpoint Volume (``checkpoint-volume``, default
+``spindle-checkpoints``). A Modal function then commits those weights, with the
+base's tokenizer, chat template and processor files, to ``release-repo``. Each
+saved checkpoint is one commit that holds exactly that checkpoint's files. The
+snapshot holds two files:
 
 - ``hf-reference.json``, the commit with the weights. Any serving runtime can
   load it: Reef's engines (``inference.serving: engines``) download it, and a
   runtime that loads from the Hub reads the reference.
 - ``tinker-checkpoint.json``, a manifest with ``lora_rank: null``. A later job
-  restores its weights and optimizer state, and Spindle's sampler, the default
+  restores its weights and optimizer state. Spindle's sampler, the default
   serving (``inference.serving: trainer``), serves its sampler path.
 
-An import into a ``spindle_full`` scenario must be a full-parameter manifest of
-the base model on the same service beside a reference to full weights, or the
-base's own files, by reference or as a copy. The engine trains only its base, so other full weights are refused
-with HTTP 400. To train another checkpoint, deploy a Spindle engine for it and
-a scenario with it as ``base``. A component trains one base.
+**Imports.** An import into a ``spindle_full`` scenario must be one of:
+
+- a full-parameter manifest of the base model on the same service, beside a
+  reference to full weights;
+- the base's own files, by reference or as a copy.
+
+The engine trains only its base, so Reef refuses other full weights with HTTP
+400. A component trains one base. To train another checkpoint, deploy a Spindle
+engine for it and a scenario with it as ``base``.
+
+**Cost.** A full-parameter run is single tenant. Each job holds the engine's
+training GPUs while it runs, for example 8 H200 GPUs to train and 4 to sample
+for a 27B model. Each job starts a new model on the engine and unloads it when
+it ends, so each job pays the engine's start time. On one scoped Spindle run of
+a 4B model, the first job took about 6 minutes, a job from a saved checkpoint
+about 4, and the export of the weights (9 GB) about a minute. That run is the
+only live ``spindle_full`` run; it did not measure training quality.
 
 Score centering
 ~~~~~~~~~~~~~~~
@@ -427,9 +474,8 @@ task job, as Spindle's ``cispo`` loss with the centering term:
   temperature 1 without truncation. A model call that sets another
   ``temperature``, or a ``top_p`` or ``top_k``, gets HTTP 400. Harbor's
   ``terminus-2`` agent sets none of them by default.
-- Only a task job's rollouts record the sampler's top-k. Serving records
-  none, so a job of samples that serving recorded, or of uploaded
-  trajectories, fails with score centering on.
+- Only a task job's rollouts record the sampler's top-k. A job of samples that
+  serving recorded, or of uploaded trajectories, fails with score centering on.
 - ``sft`` jobs train as they are. A job of another policy-gradient loss family
   is refused, since the term must match the gradient it corrects. So is a
   nonzero ``kl-coef``.
@@ -447,38 +493,8 @@ task job, as Spindle's ``cispo`` loss with the centering term:
 
 The Spindle deployment must implement the sampler's ``topk_sample_logprobs``
 and score centering on ``cispo`` (``loss_fn_config.score_centering`` with the
-``sampler_topk_token_ids`` and ``sampler_topk_logprobs`` inputs). A
-deployment without them refuses the rollouts' sample requests or the training
-call, so the job fails. Spindle reports the term in each job's metrics, as
+``sampler_topk_token_ids`` and ``sampler_topk_logprobs`` inputs). A deployment
+without them refuses the rollouts' sample requests or the training call, so the
+job fails. Spindle reports the term in each job's metrics, as
 ``score_centering:sum``, ``score_centering_sampler_head_mass:mean`` and
 ``score_centering_trainer_head_mass:mean``.
-
-A full-parameter run is single tenant: each job holds the engine's training
-GPUs while it runs, for example 8 H200 GPUs to train and 4 to sample for a
-27B model. Each job also starts a new model on the engine, so it pays the
-engine's start time, and unloads the model when it ends, so the next job gets
-the engine. For a 4B model on a scoped Spindle run, the first job took about
-6 minutes and a job from a saved checkpoint about 4. The export of the 4B
-weights (9 GB) took about a minute.
-
-Verification scope
--------------------
-
-CPU tests exercise data alignment and loss math, SDK call ordering, rejected and
-uncertain candidates, commit admission, request capture and SSE, deployment,
-scenario commit/restart/activation/train-from, and serving on engines (per-scenario
-adapters, rejection, restart reload) against engine and SDK doubles. The
-component topology is tested with stub engines only; real SGLang engines have
-not been run with it. A live Tinker run is additionally needed
-to verify account model availability, remote persistence, and training quality.
-No live training or performance result is claimed by this implementation.
-``spindle_full`` ran live once, on a scoped Spindle run of Qwen3.5-4B's
-full-parameter engine:
-
-- two jobs: one from the base, one from the first saved checkpoint;
-- the import check of the second checkpoint;
-- activation and sampling of it;
-- the export of its weights to a private Hugging Face repo, run separately on
-  that checkpoint.
-
-The training-quality effect was not measured.

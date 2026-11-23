@@ -14,18 +14,18 @@ from tests.support.config_helpers import connect_training_objects
 from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import RunningEngines
 
+from reef.api.serving import serving_runtime_config
 from reef.artifact.artifact import Artifact
 from reef.core.errors import RuntimeConfigError
 from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
+from reef.deploy.config_utils import DeployConfigError
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
+from reef.deploy.training import local_model_required
 from reef.inference.interfaces import InferenceBackend, InferenceHandler
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.residency import adapter_name
 from reef.inference.serving import AdapterServingRuntime
-from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
-from reef.service.deploy.serving import serving_runtime_config
-from reef.service.deploy.training import local_model_required
 from reef.tinker.weights import TinkerSamplerWeights
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint

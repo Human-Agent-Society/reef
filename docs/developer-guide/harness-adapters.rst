@@ -3,15 +3,12 @@ Harness adapters
 
 :For: developers who connect a new agent to Reef
 :Before you start: the harness tree and the loop from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
-:You will have: an adapter that Reef can render, run in runs and Harbor tasks, and install on a person's machine
+:You will have: an adapter that Reef can render, run in evaluation runs and Harbor tasks, and install on a person's machine
 
 An adapter connects a harness tree to one agent. It is one file,
 ``reef/harness/adapters/<name>/adapter.yaml``, and an optional ``render.py``
-for what the file cannot state. For an agent that runs on a person's machine,
-the tree renders as the agent's own plugin in ``plugin/``: an evaluation
-run loads that plugin, and a person's machine installs it with the
-agent's own command. Reef renders the same tree with the adapter in three
-places:
+for what the file cannot state. Reef renders the same tree with the adapter
+in three places:
 
 .. figure:: ../assets/harness-adapter-modes-light.svg
    :alt: One adapter.yaml, three ways an agent runs: an evaluation run in Reef, a Harbor task in its container, and the agent's plugin on a person's machine
@@ -43,7 +40,7 @@ pi's ``adapter.yaml``, shortened:
    model:                                   # per API dialect: the config that binds the model
      openai: [{target: models, data: {...}}, {target: agent, data: {...}}]
    run:
-     run: {argv: ["--mode", "json", "-p", "{task}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
+     task: {argv: ["--mode", "json", "-p", "{task}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
      layer:                                 # a person's machine
        args: [["--model", "reef/{model}"]]
        register: [["install", "{root}/plugin"]]
@@ -91,12 +88,11 @@ pi's ``adapter.yaml``, shortened:
    * - ``renderer``
      - ``module:Class`` with the adapter's render steps (`Adapter steps`_)
 
-An agent that isolates its own runs, such as the Terminal-Bench
-campaign's ``terminus``, may also set ``self_isolating``,
-``execution_validator``, ``host_env``, ``is_root_bind_mounted`` and
-``takes_task_directory`` (see `descriptor.py
-<../../reef/harness/adapters/descriptor.py>`__). ``load_descriptor`` refuses
-an unknown key.
+An agent that isolates its own runs, such as the Terminal-Bench campaign's
+``terminus``, may also set ``self_isolating``, ``execution_validator``,
+``host_env``, ``is_root_bind_mounted`` and ``takes_task_directory`` (see
+`descriptor.py <../../reef/harness/adapters/descriptor.py>`__).
+``load_descriptor`` refuses an unknown key.
 
 How Reef runs an agent
 ----------------------
@@ -117,29 +113,34 @@ How Reef runs an agent
    * - Harbor task
      - Starts the task's container, puts the pinned agent in it, copies in the
        tree, runs ``run.task`` with the instruction, and scores the tests'
-       reward. Reef prepares an npm agent on its own host: npm installs the
-       package there for the container's CPU and C library, and Reef keeps the
-       result in ``~/.cache/reef/agents`` and uploads it. The container unpacks
-       it under ``/opt/reef`` and reaches no package registry, so a task can
-       break its network or keep the user's home small. Reef also uploads
-       Node (from ``nodejs.org``) into a glibc container; a musl container
-       uses the Node of its packages. Reef uploads uv the same way (a static
-       build from ``github.com/astral-sh/uv``); a git agent installs from its
-       checkout into a venv in the container. A task that sets ``environment.skills_dir``
-       needs an adapter with ``run.task.skills``: Reef copies the task's
-       skills there before the tree, so the tree's file wins on one path. A
-       task that sets ``environment.mcp_servers`` needs an adapter with
-       ``run.task.mcp`` (`Task MCP servers`_). The rollout of a task that
-       needs what the adapter does not give its agent fails with no retry,
-       and the other rollouts run. The verifier can read the run as ATIF in
-       ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
+       reward.
      - an npm, uv or git ``install``, ``run.task.skills``,
        ``run.task.mcp``
    * - A person's machine
      - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
-       Reef.
+       Reef (`A person's machine`_).
      - ``run.layer``
+
+In a Harbor task:
+
+- **Install.** The container reaches no package registry, so a task can
+  break its network or keep the user's home small. Reef installs an npm
+  agent on its own host for the container's CPU and C library, keeps the
+  result in ``~/.cache/reef/agents``, and uploads it. The container unpacks
+  it under ``/opt/reef``. Reef also uploads Node (from ``nodejs.org``) into
+  a glibc container; a musl container uses the Node of its packages. Reef
+  uploads uv the same way (a static build from ``github.com/astral-sh/uv``).
+  A git agent installs from its checkout into a venv in the container.
+- **Skills.** A task that sets ``environment.skills_dir`` needs an adapter
+  with ``run.task.skills``. Reef copies the task's skills there before the
+  tree, so the tree's file wins on one path.
+- **MCP servers.** A task that sets ``environment.mcp_servers`` needs an
+  adapter with ``run.task.mcp`` (`Task MCP servers`_).
+- **Failure.** The rollout of a task that needs what the adapter does not
+  give its agent fails with no retry, and the other rollouts run.
+- **Trajectory.** The verifier can read the run as ATIF in
+  ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
 
 Task MCP servers
 ~~~~~~~~~~~~~~~~
@@ -235,14 +236,15 @@ Codex's commands are skills:
    command: {renders: plugin/skills/{name}/SKILL.md, format: skill}
 
 Each part also has ``holds``, one line on what the file holds, which a method
-reads in ``material/host.json``, and optionally ``review: true``: the
+reads in ``material/host.json``. A part may set ``review: true``: the
 activation rule then leaves every kept tree that changes the part inactive
 until a person activates it, whatever the ``always`` rule's ``review_kinds``
-lists. Native's ``native_loop`` and Python's ``program`` are such kinds. Other settings and records
-name kinds too: the ``review_kinds`` of the ``always`` activation rule, the
-``changed_kinds`` of a kept tree, and the ``patch_parts`` of a step's commit
-metrics. The harness recipe refuses a ``review_kinds`` name that the adapter
-does not evolve.
+lists. Native's ``native_loop`` and Python's ``program`` are such kinds.
+
+Other settings and records name kinds too: the ``review_kinds`` of the
+``always`` activation rule, the ``changed_kinds`` of a kept tree, and the
+``patch_parts`` of a step's commit metrics. The harness recipe refuses a
+``review_kinds`` name that the adapter does not evolve.
 
 .. list-table::
    :header-rows: 1
@@ -264,8 +266,10 @@ does not evolve.
 Render paths
 ~~~~~~~~~~~~
 
-The four agents that run on a person's machine render their parts into the
-plugin in ``plugin/``; the others into the agent's own directory. A part
+The four agents that run on a person's machine (``pi``, ``opencode``,
+``claude``, ``codex``) render their parts into the agent's own plugin in
+``plugin/``. An evaluation run loads that plugin, and a person's machine
+installs it. The other adapters render into the agent's own directory. A part
 missing from a row is one the agent's plugin cannot carry, so a tree holds
 none: Codex's plugin carries no rules, and no plugin carries Claude Code's
 settings or memory.
@@ -351,7 +355,8 @@ Reef's runs.
    * - ``claude``
      - ``primary`` (``claude/settings.json``): nothing; the binding and
        Reef's defaults write it. ``hooks`` (``plugin/hooks/hooks.json``):
-       the plugin's hooks.
+       the plugin's hooks. ``mcp`` (``claude/.claude.json``): nothing; Reef
+       writes a task's MCP servers.
      - yes
    * - ``codex``
      - ``primary`` (``codex/config.toml``) and ``models``
@@ -378,68 +383,6 @@ Reef's runs.
        checks. ``model`` (``program/model.json``): nothing; the binding
        writes it.
      - no
-
-Bundled adapters
-----------------
-
-At startup, Reef installs the pinned binary for the runs unless
-``evolution.binary`` names one. Another package adds an adapter through the
-``reef.harness_adapters`` entry point, as the Meta-Harness Terminal-Bench
-campaign adds ``terminus`` (`its README
-<../../recipes/meta_harness/examples/terminal_bench/README.md#the-terminus-adapter>`__).
-
-.. list-table::
-   :header-rows: 1
-   :widths: 12 26 62
-
-   * - Adapter
-     - Pin and command
-     - What to know
-   * - ``pi``
-     - npm 0.84.2; ``pi --mode json -p``
-     - A pi package. Its settings admit only an empty ``defaultTools``, which
-       Reef's extension applies. A skill without frontmatter gets ``name`` and
-       ``description``.
-   * - ``opencode``
-     - npm 1.18.18; ``opencode run --format json --auto``
-     - An opencode plugin, whose config hook adds the parts and merges
-       ``config/primary.json``. Frontmatter must be a plain YAML mapping. A
-       command's ``agent`` must name an enabled agent.
-   * - ``claude``
-     - npm 2.1.257; ``claude -p --output-format json``
-     - A Claude Code plugin. A tree sets no settings key; an extension is a
-       script that ``config/hooks.json`` runs. Only the ``anthropic`` dialect.
-   * - ``codex``
-     - npm 0.158.0; ``codex exec --json``
-     - A Codex plugin of skills. A tree sets no rules and no config key. An
-       run's render writes the plugin into ``CODEX_HOME`` as ``codex
-       plugin add`` does. Runs pin ``approval_policy="never"`` and
-       ``web_search="disabled"``. Only the ``responses`` dialect. On a pin
-       change, update ``bundled_models.json`` and
-       ``default_instructions.md``.
-   * - ``dsh``
-     - npm 0.1.2-alpha.5; ``dsh --profile headless``
-     - The config is keyed by plugin id; ``!!js`` strings become
-       JavaScript. Commands never run on the model's own.
-   * - ``hermes``
-     - git ``v2026.8.31``; ``hermes chat -Q --oneshot -q``
-     - Rules follow Hermes's identity in ``SOUL.md``. An extension is a plugin
-       with ``register(ctx)``. Only the ``openai`` dialect.
-   * - ``native``
-     - ships with Reef; ``reef-native -p``
-     - Reef's own loop (`Native runner`_).
-   * - ``python``
-     - uv 0.13.4; ``uv run --script {root}/program/main.py``
-     - The tree is a Python program that owns its loop and every model
-       call. It gets the instruction as its argument and reads the binding
-       (``api``, ``base_url`` ending in ``/v1``, ``api_key``, ``model``) from
-       ``program/model.json``. It declares its dependencies as inline script
-       metadata (PEP 723). Only the ``openai`` dialect. To give a task's
-       verifier the run as ATIF, the program writes one JSONL line for each
-       model call under ``REEF_PROGRAM_SESSION_DIR``: the request body, with
-       the response body as ``response``.
-
-The comments in each ``adapter.yaml`` explain its defaults and checks.
 
 Config checks
 -------------
@@ -584,10 +527,10 @@ Prefer a check to a step for a rule on config values.
 A person's machine
 ------------------
 
-On a person's machine, the snapshot is the agent's own plugin, installed
-with the agent's own command. The agent then loads it in every session,
-beside the person's own configuration, which Reef never reads. A session
-that Reef starts also sends its model calls to Reef.
+On a person's machine, ``reef-client harness`` installs the snapshot as the
+agent's own plugin, with the agent's own command. The agent then loads it in
+every session, beside the person's own configuration, which Reef never
+reads. A session that Reef starts also sends its model calls to Reef.
 
 .. list-table::
    :header-rows: 1
@@ -625,6 +568,66 @@ Templates hold ``{root}``, ``{model}``, ``{base_url}`` and ``{token}``
 take effect both in a run and through the installed plugin: leave out
 of ``evolve``, or refuse in the checks, what the plugin cannot carry. An
 adapter without ``layer`` does not run on a person's machine.
+
+Bundled adapters
+----------------
+
+At startup, Reef installs the pinned binary for the runs unless
+``evolution.binary`` names one. Another package adds an adapter through the
+``reef.harness_adapters`` entry point, as the Meta-Harness Terminal-Bench
+campaign adds ``terminus`` (`its README
+<../../recipes/meta_harness/examples/terminal_bench/README.md#the-terminus-adapter>`__).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 12 26 62
+
+   * - Adapter
+     - Pin and command
+     - What to know
+   * - ``pi``
+     - npm 0.84.2; ``pi --mode json -p``
+     - A pi package. Reef's extension applies the settings. A skill without
+       frontmatter gets ``name`` and ``description``.
+   * - ``opencode``
+     - npm 1.18.18; ``opencode run --format json --auto``
+     - An opencode plugin, whose config hook adds the parts and merges
+       ``config/primary.json``. Frontmatter must be a plain YAML mapping. A
+       command's ``agent`` must name an enabled agent.
+   * - ``claude``
+     - npm 2.1.257; ``claude -p --output-format json``
+     - A Claude Code plugin. An extension is a script that
+       ``config/hooks.json`` runs. Only the ``anthropic`` dialect.
+   * - ``codex``
+     - npm 0.158.0; ``codex exec --json``
+     - A Codex plugin of skills. The render of an evaluation run writes the
+       plugin into ``CODEX_HOME`` as ``codex plugin add`` does. Runs pin
+       ``approval_policy="never"`` and ``web_search="disabled"``. Only the
+       ``responses`` dialect. On a pin change, update
+       ``bundled_models.json`` and ``default_instructions.md``.
+   * - ``dsh``
+     - npm 0.1.2-alpha.5; ``dsh --profile headless``
+     - The config is keyed by plugin id; ``!!js`` strings become
+       JavaScript. Commands never run on the model's own.
+   * - ``hermes``
+     - git ``v2026.8.31``; ``hermes chat -Q --oneshot -q``
+     - Rules follow Hermes's identity in ``SOUL.md``. An extension is a plugin
+       with ``register(ctx)``. Only the ``openai`` dialect.
+   * - ``native``
+     - ships with Reef; ``reef-native -p``
+     - Reef's own loop (`Native runner`_).
+   * - ``python``
+     - uv 0.13.4; ``uv run --script {root}/program/main.py``
+     - The tree is a Python program that owns its loop and every model
+       call. It gets the instruction as its argument and reads the binding
+       (``api``, ``base_url`` ending in ``/v1``, ``api_key``, ``model``) from
+       ``program/model.json``. It declares its dependencies as inline script
+       metadata (PEP 723). Only the ``openai`` dialect. For a task's
+       verifier to read the run as ATIF, the program writes one JSONL line
+       per model call under ``REEF_PROGRAM_SESSION_DIR``: the request body,
+       with the response body as ``response``.
+
+The comments in each ``adapter.yaml`` explain its defaults and checks.
 
 Connect a new agent
 -------------------
@@ -743,10 +746,12 @@ and ``step/end``, then ``turn/end`` with its reason (``completed``,
 characters goes to ``.reef/tool-output/``.
 
 Run and serve modes
-~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 
-``reef-native -p`` runs one turn; runs use it. ``reef-native serve`` is
-one resident process that follows the scenario's active harness artifact:
+``reef-native -p`` runs one turn; evaluation runs use it. ``reef-native
+serve`` is one resident process that follows the scenario's active harness
+artifact:
+
 
 - It mounts each new artifact between two steps, and keeps the current tree
   when a new one fails to load. With ``--follow pinned``, it mounts only the

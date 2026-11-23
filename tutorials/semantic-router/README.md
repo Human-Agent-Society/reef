@@ -194,7 +194,7 @@ SR's HTTP API is published on `127.0.0.1:50053` only, with two credentials that
 `reef serve` generates at each start: one allows only previews, the other only
 configuration and readiness. Reef's own lifecycle control uses a private Unix
 socket, never `reef.port`. See the
-[configuration reference](../../docs/reference/configuration.rst#managed-routing-lifecycle)
+[configuration reference](../../docs/reference/configuration-routing.rst#managed-routing-lifecycle)
 for every `routing_deployment` setting.
 
 ## 5. Send requests
@@ -435,7 +435,7 @@ uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 
 ```bash
-python -m reef.service.deploy.routing.cli validate --config /path/to/candidate-reef.yaml
+python -m reef.deploy.routing.cli validate --config /path/to/candidate-reef.yaml
 ```
 
 For a manifest that names no image it prints `"snapshot_version": null` and
@@ -451,8 +451,8 @@ killed, the SR container can remain until the next start or an explicit
 cleanup:
 
 ```bash
-python -m reef.service.deploy.routing.cli status --deployment-id opd-routing
-python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing
+python -m reef.deploy.routing.cli status --deployment-id opd-routing
+python -m reef.deploy.routing.cli cleanup --deployment-id opd-routing
 ```
 
 Both use the same per-user ownership registry as `reef serve`
@@ -466,7 +466,7 @@ the image as usual. Only after checking that Docker has finished a recorded
 operation, acknowledge it:
 
 ```bash
-python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing \
+python -m reef.deploy.routing.cli cleanup --deployment-id opd-routing \
   --acknowledge-unknown "<operation-id-from-status>"
 ```
 
@@ -478,7 +478,7 @@ The routing, preview client, lifecycle and policy-update tests use a fake SR
 preview listener and local providers, so they need neither Docker nor SR:
 
 ```bash
-python -m pytest tests/reef_service/routing -q
+python -m pytest tests/routing -q
 ```
 
 They check what Reef sends and records, not how the real SR answers.

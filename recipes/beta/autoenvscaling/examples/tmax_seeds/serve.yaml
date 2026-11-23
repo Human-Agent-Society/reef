@@ -38,7 +38,7 @@ generator:
   # The agent of the calibration rollouts: the training rollouts' agent, so both measure the same thing.
   agent:
     # A training rollout whose context fills ends and is scored; terminus-2 gives it no reward, which trains as 0.
-    import_path: reef.record2sample.generator.terminus:VerifiedTerminus2
+    import_path: reef.samples.generator.terminus:VerifiedTerminus2
     model_name: openai/{model}
     kwargs:
       api_base: "{base_url}/v1"
@@ -71,7 +71,7 @@ recipe:
         scaffold_tolerance: 8
         # The Reasoning Agent: the same agent as generator.agent.
         agent:
-          import_path: reef.record2sample.generator.terminus:VerifiedTerminus2
+          import_path: reef.samples.generator.terminus:VerifiedTerminus2
           model_name: openai/{model}
           kwargs:
             api_base: "{base_url}/v1"

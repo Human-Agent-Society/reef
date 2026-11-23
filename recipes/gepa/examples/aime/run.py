@@ -50,9 +50,12 @@ from recipes.gepa import GEPA
 from recipes.gepa.archive import Archive
 from recipes.gepa.components import texts_of
 from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
+from reef.api.app import create_app
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.core.records_types import RequestType
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects, harness_models
+from reef.core.records_types import SCENARIO_HEADER, RequestType
+from reef.deploy.config_utils import load_config
 from reef.evaluation.harness import History, evaluation_selection
 from reef.harness import run_task
 from reef.harness.adapters import get_adapter
@@ -64,13 +67,9 @@ from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, pro
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
-from reef.scenario.live_objects import LiveObjects, harness_models
-from reef.service.app import create_app
-from reef.service.deploy.config_utils import load_config
-from reef.service.wire import SCENARIO_HEADER
-from reef.storage.records import RecordStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.records import RecordStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.component import HISTORY_DIR, HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoopState

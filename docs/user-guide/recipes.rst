@@ -136,7 +136,7 @@ point deployments configured with different recipes at the same repository.
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
 Learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
-`Configuration <../reference/configuration.rst#recipe-configuration>`__
+`Configuration <../reference/configuration-recipe.rst#recipe-configuration>`__
 describes each spelling.
 
 Run the recipe you chose
@@ -149,54 +149,35 @@ Reef yet. For a harness recipe, follow `Evolve agent prompts, rules, and skills
 from agent feedback <evolve-your-model.rst>`__. Each recipe page above provides
 its own configuration and example.
 
+When no recipe fits, write your own: `Write a recipe
+<../developer-guide/write-a-recipe.rst>`__ shows the plug-in points of a
+weight method and of a harness method.
+
 Beta recipes
 ------------
 
-`CORAL TTT <../../recipes/beta/coral/README.md>`__ and its
-`coral_demo <../../recipes/beta/coral/examples/coral_demo/>`__ example are
-**beta** until complete, reproducible learning results are published. Both
-live under ``recipes/beta/coral/``. Integration and smoke tests validate the
-wiring but do not establish learning performance.
+A beta recipe joins the catalog when it publishes complete, reproducible
+learning results. Its integration and smoke tests validate the wiring; they
+do not establish learning performance.
 
-`SPADE <../../recipes/beta/spade/README.md>`__ (self play in adaptive
-synthetic executable environments, `arXiv:2608.19197
-<https://arxiv.org/abs/2608.19197>`__) is **beta** under
-``recipes/beta/spade/``: one policy plays an Environment Designer that writes
-executable environments and a Reasoning Agent that learns in them. Reef knows
-one task format, Harbor, and the Designer writes it directly: an instruction,
-a container, a verifier and a reference solution, a task any Harbor agent can
-run. SPADE is a task generator. The deployment selects it as the generator of
-the generated-task stages in its ``pipeline`` section, and the built-in
-generated-task recipe runs the tasks and trains on them (see `generated tasks
-<../reference/configuration.rst#generated-tasks>`__). Writing,
-checking and running tasks is Reef's (``reef.record2sample.generator``, the generator
-service ``reef serve`` starts beside the HTTP service). The package holds the
-method: the Designer's adversarial experience section, the hint arm each task
-asks for, and the hint based regret reported against the Designer's receipt.
-The Designer's own training follows.
+- `CORAL TTT <../../recipes/beta/coral/README.md>`__
+  (``recipes/beta/coral/``): test-time training, with the `coral_demo
+  <../../recipes/beta/coral/examples/coral_demo/>`__ example.
+- `SPADE <../../recipes/beta/spade/README.md>`__ (``recipes/beta/spade/``,
+  `arXiv:2608.19197 <https://arxiv.org/abs/2608.19197>`__): a task
+  generator. One policy plays an Environment Designer that writes Harbor
+  tasks and a Reasoning Agent that learns in them.
+- `AutoEnvScaling <../../recipes/beta/autoenvscaling/README.md>`__
+  (``recipes/beta/autoenvscaling/``): a task generator. A coding agent
+  rebuilds recorded coding-agent sessions as Harbor tasks.
+- `Reefine <../../recipes/beta/reefine/README.md>`__
+  (``recipes/beta/reefine/``): a harness method that turns a plain-language
+  request into a harness update. Start it from a checkout with ``reef serve
+  -c recipes/beta/reefine/examples/configs/serve.yaml``; its `example
+  <../../recipes/beta/reefine/examples/README.md>`__ runs three flows.
 
-`AutoEnvScaling <../../recipes/beta/autoenvscaling/README.md>`__ (preprint
-forthcoming) is **beta** under ``recipes/beta/autoenvscaling/``. It is a task
-generator: a coding agent rebuilds recorded coding-agent sessions as Harbor
-tasks. The agent, pi in an E2B sandbox, writes one task in its workspace from
-one session and the repository the session changed. It runs the task's oracle
-and nop check itself through the generator service, and revises until the check
-passes. A model call reviews each task's tests and refuses a task whose tests
-check what its instruction does not state. A pass-rate band marks the tasks the
-Reasoning Agent can reach. The deployment selects it as the generator of the
-generated-task stages in its ``pipeline`` section, and the built-in
-generated-task recipe runs the tasks and trains on them (see `generated tasks
-<../reference/configuration.rst#generated-tasks>`__). With ``designer: prompt``,
-the generator service's one-reply prompt Designer rebuilds the same sessions as
-the baseline.
-
-`Reefine <../../recipes/beta/reefine/README.md>`__ is **beta** under
-``recipes/beta/reefine/``. It turns a plain-language request into a harness
-update: skills, rules, agent commands, or pi extensions. The served model, or
-a pi coding agent where the host can isolate it, proposes the change. The
-evaluation checks only that the changed harness still works on a health task,
-and code extensions wait for a promote before they are served. Reefine does
-not ship with ``reef-infra``; start it from a checkout with
-``reef serve -c recipes/beta/reefine/examples/configs/serve.yaml``. Its
-`example <../../recipes/beta/reefine/examples/README.md>`__ runs a bug-fix
-flow, a research loop, and a measurement of which requests passed the checks.
+A task generator is not a recipe of its own. The deployment selects it as
+the generator of the built-in generated-task recipe, which runs the tasks
+and trains on them (see `generated tasks
+<../reference/configuration-generated-tasks.rst#generated-tasks>`__ and `Task generators
+<../developer-guide/task-generators.rst>`__).

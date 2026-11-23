@@ -16,7 +16,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-from reef.storage.commits import CommitRecord
+from reef.storage.scenario.commits import CommitRecord
 
 TUTORIAL = Path(__file__).resolve().parent.parent
 WORK = TUTORIAL / "work"

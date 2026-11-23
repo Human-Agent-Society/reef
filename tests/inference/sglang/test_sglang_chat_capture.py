@@ -12,12 +12,12 @@ from aiohttp.test_utils import TestServer
 from tests.support import tokenizers
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
+from reef.api.streaming import stream_record
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
 from reef.inference.chat import sse_json_events
 from reef.inference.interfaces import InferenceArtifact, full_weight_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
-from reef.service.streaming import stream_record
 
 
 class RecordingClient(SGLangGenerateClient):

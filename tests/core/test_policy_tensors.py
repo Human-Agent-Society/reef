@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from reef.api.inference_service import provider_response
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id, trajectory_reward
-from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
-from reef.service.inference_service import provider_response
+from reef.samples.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 
 
 def _inference(payload) -> AgentRecord:

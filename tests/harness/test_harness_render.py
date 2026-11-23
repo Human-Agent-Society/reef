@@ -711,7 +711,11 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
     """Without a provider list opencode also offers its own zen provider, so a model choice the check missed would
     leave Reef; the descriptor lists only the binding's provider. A run does not search the web, so the env
     does not register opencode's websearch tool."""
-    assert json.loads(render({}, OPENCODE)["opencode/opencode.json"])["enabled_providers"] == ["reef"]
+    files = render({}, OPENCODE)
+    assert json.loads(files["opencode/opencode.json"])["enabled_providers"] == ["reef"]
+    assert OPENCODE.env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
+    catalog = OPENCODE.env["OPENCODE_MODELS_PATH"].removeprefix("{root}/")
+    assert json.loads(files[catalog]) == {}
     assert "OPENCODE_ENABLE_EXA" not in OPENCODE.env
 
 

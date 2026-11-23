@@ -29,6 +29,7 @@ import io
 import logging
 import os
 import random
+import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -61,10 +62,15 @@ ORPHAN_BUILDING_GRACE_S = 4500.0
 #: AgentENV worker runs a fixed number of builds at once, and refuses another with 429 ("node concurrent build limit
 #: reached; retry later").
 TRANSIENT_STATUSES = (429, 502, 503, 504)
+#: The status that also counts as transient when a proxy in front of the AgentENV API answers it, with an HTML page.
+#: The API's own 500 has a JSON body and names a failure that a later request meets again, such as a full disk.
+PROXY_ERROR_STATUS = 500
 #: The statuses of an AgentENV template build, with E2B's names.
 BUILD_STATUSES = ("waiting", "building", "ready", "error")
 #: The part of ``aenv build``'s error when another build holds the alias (AgentENV's ``AliasConflict``).
 ALIAS_CONFLICT_TEXT = "already points to"
+#: The line that ``aenv build`` prints after it makes its template, before it asks for a builder.
+CREATED_TEMPLATE = re.compile(r"^Created template (\S+) \(build \S+\)$", re.MULTILINE)
 #: How much of ``aenv build``'s output an error keeps.
 BUILD_OUTPUT_TAIL_CHARS = 4000
 
@@ -96,7 +102,12 @@ def dockerfile_sets_start_command(dockerfile: str) -> bool:
 
 
 class AgentEnvBuildError(InternalError):
-    """``aenv build`` failed. The message has the tail of its output."""
+    """``aenv build`` failed. The message has the tail of its output. ``template_id`` is the template that the build
+    made before it failed, or None when it made none."""
+
+    def __init__(self, message: str, template_id: str | None = None) -> None:
+        super().__init__(message)
+        self.template_id = template_id
 
 
 class AliasConflictError(AgentEnvBuildError):
@@ -104,7 +115,8 @@ class AliasConflictError(AgentEnvBuildError):
 
 
 class TransientBuildError(AgentEnvBuildError):
-    """``aenv build`` failed on a status of ``TRANSIENT_STATUSES`` from the AgentENV API: a later build can pass."""
+    """``aenv build`` received a transient status from the AgentENV API, a ``PROXY_ERROR_STATUS`` page from a proxy
+    in front of it, or timed out connecting to it."""
 
 
 @dataclass(frozen=True)
@@ -205,7 +217,10 @@ class DockerfileBuild:
     alias. ``cpu_count`` and ``memory_mb`` are the template's resources, None for AgentENV's default.
     ``timeout_seconds`` is the build's deadline, from 1 to 86400 seconds as ``aenv build`` takes it.
     ``start_command`` is False when the template starts no command (``dockerfile_sets_start_command``).
-    Purpose: ``ensure_aenv_template`` runs it when the alias names no template.
+    With ``image`` true, the build makes no template: it publishes the image ``aenv/<alias>:latest`` in the
+    deployment's repository, and ``alias`` is an image name. The resources and ``start_command`` are then not read.
+    Purpose: ``ensure_aenv_template`` runs it when the alias names no template. ``KillOnTimeoutE2BEnvironment`` runs
+    an image build for the main service of a task's Compose project (``reef.execution.sandbox.agentenv_compose``).
     """
 
     context_dir: Path
@@ -215,6 +230,7 @@ class DockerfileBuild:
     memory_mb: int | None
     timeout_seconds: int
     start_command: bool
+    image: bool = False
 
     def __post_init__(self) -> None:
         if not self.alias:
@@ -227,6 +243,8 @@ class DockerfileBuild:
         command = ["aenv", "build", str(self.context_dir), "--file", str(self.dockerfile), "--name", self.alias]
         command += ["--progress", "plain"]
         command += ["--timeout", str(self.timeout_seconds)]
+        if self.image:
+            return [*command, "--image"]
         if self.cpu_count is not None:
             command += ["--cpu", str(self.cpu_count)]
         if self.memory_mb is not None:
@@ -237,9 +255,9 @@ class DockerfileBuild:
 
     async def run(self, templates: AgentEnvTemplates) -> None:
         """Run ``aenv build`` until the template is ready. ``aenv`` reads the deployment from a credentials file in a
-        new configuration directory. Raise ``AliasConflictError`` when another build holds the alias, and
-        ``AgentEnvBuildError`` for any other failure. A cancelled run kills the ``aenv`` process; the deployment then
-        ends the build at its deadline."""
+        new configuration directory. Raise ``AliasConflictError`` when another build holds the alias,
+        ``TransientBuildError`` for a temporary API failure, and ``AgentEnvBuildError`` for any other build failure.
+        A cancelled run kills the ``aenv`` process; the deployment then ends the build at its deadline."""
         with tempfile.TemporaryDirectory(prefix="reef-aenv-") as config_home:
             credentials = Path(config_home) / "aenv" / "credentials"
             credentials.parent.mkdir(mode=0o700)
@@ -263,12 +281,23 @@ class DockerfileBuild:
         if process.returncode == 0:
             return
         tail = text[-BUILD_OUTPUT_TAIL_CHARS:]
-        if ALIAS_CONFLICT_TEXT in text:
-            raise AliasConflictError(f"another build holds the alias {self.alias}: {tail}")
+        created = CREATED_TEMPLATE.search(text)
+        template_id = created.group(1) if created else None
         message = f"aenv build of {self.alias} failed with exit code {process.returncode}: {tail}"
-        if any(f"HTTP {status}" in text for status in TRANSIENT_STATUSES):
-            raise TransientBuildError(message)
-        raise AgentEnvBuildError(message)
+        # aenv prints its final error after the BuildKit output, which can contain its own HTTP errors.
+        error = ("\n" + text).rpartition("\nError: ")[2]
+        connect_timeout = (
+            error.startswith("error sending request for url (")
+            and "client error (Connect)" in error
+            and error.rstrip().endswith("operation timed out")
+        )
+        # aenv prints the message of the API's JSON error, and the whole body of any other answer.
+        proxy_error = error.startswith(f"HTTP {PROXY_ERROR_STATUS}: <")
+        if connect_timeout or proxy_error or any(error.startswith(f"HTTP {s}:") for s in TRANSIENT_STATUSES):
+            raise TransientBuildError(message, template_id)
+        if error.startswith("HTTP ") and ALIAS_CONFLICT_TEXT in error:
+            raise AliasConflictError(f"another build holds the alias {self.alias}: {tail}", template_id)
+        raise AgentEnvBuildError(message, template_id)
 
 
 def poll_interval() -> float:
@@ -277,9 +306,12 @@ def poll_interval() -> float:
 
 
 def is_transient(error: aiohttp.ClientError | asyncio.TimeoutError) -> bool:
-    """Whether ``error`` of a request to the AgentENV API can pass later: a status of ``TRANSIENT_STATUSES``, or no
-    answer at all."""
+    """Whether ``error`` of a request to the AgentENV API can pass later: a status of ``TRANSIENT_STATUSES``, a
+    ``PROXY_ERROR_STATUS`` with an HTML page, or no answer at all."""
     if isinstance(error, aiohttp.ClientResponseError):
+        if error.status == PROXY_ERROR_STATUS:
+            content_type = error.headers.get("Content-Type", "") if error.headers is not None else ""
+            return content_type.partition(";")[0].strip().lower() == "text/html"
         return error.status in TRANSIENT_STATUSES
     return isinstance(error, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
 
@@ -293,9 +325,9 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
     template ``building`` for more than ``build.timeout_seconds`` plus ``ORPHAN_BUILDING_GRACE_S``. Reef builds an alias
     with the deadline of its task, so the other trial's build has the same deadline. When the
     alias names no template, ``build`` runs; when another trial starts a build under the alias first, this waits for
-    that build. A failure of this trial's own build deletes the ``waiting`` template that it left. A build or a read
-    that the API refuses for a while (``is_transient``, ``TransientBuildError``) is tried again until the deadline; any
-    other failure of this trial's own build raises its ``AgentEnvBuildError``.
+    that build. A failed build of this trial deletes the ``waiting`` template that it made itself, and no other: the
+    alias can name the template of another trial's build by then. After a temporary API failure, this checks the alias
+    again until the deadline; any other failure of this trial's own build raises its ``AgentEnvBuildError``.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + build.timeout_seconds
@@ -323,11 +355,12 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
                 return
             except AliasConflictError:
                 logger.info("another trial builds the template %s; waiting for it", build.alias)
+            except TransientBuildError as error:
+                await delete_orphan(templates, build.alias, error.template_id)
+                logger.warning("could not build %s; checking its template again: %s", build.alias, error)
             except AgentEnvBuildError as error:
-                await delete_orphan(templates, build.alias)
-                if not isinstance(error, TransientBuildError):
-                    raise
-                logger.warning("the AgentENV API refused the build of %s; building it again: %s", build.alias, error)
+                await delete_orphan(templates, build.alias, error.template_id)
+                raise
             await asyncio.sleep(poll_interval())
             continue
         orphan_reason = ""
@@ -353,12 +386,36 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
         await asyncio.sleep(poll_interval())
 
 
-async def delete_orphan(templates: AgentEnvTemplates, alias: str) -> None:
-    """Delete the template that ``alias`` names when it is ``waiting``: a failed ``aenv build`` leaves it so. A read or a
-    delete that fails is logged, and the orphan check of a later wait deletes the template."""
+async def build_image(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+    """Run the image build ``build`` on ``templates``' deployment until the image is published. After a temporary
+    API failure, such as a worker with no free build slot, the build runs again until ``build.timeout_seconds`` passed
+    since the call; then its ``TransientBuildError`` is raised. Any other failure raises its ``AgentEnvBuildError``.
+    Two builds of one image name can run together: each publishes the name, and the later one keeps it."""
+    if not build.image:
+        raise ValueError("build_image runs an image build, not a template build")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + build.timeout_seconds
+    while True:
+        try:
+            await build.run(templates)
+            return
+        except TransientBuildError as error:
+            if loop.time() >= deadline:
+                raise
+            logger.warning("could not build the image %s; building it again: %s", build.alias, error)
+        await asyncio.sleep(poll_interval())
+
+
+async def delete_orphan(templates: AgentEnvTemplates, alias: str, template_id: str | None) -> None:
+    """Delete the template ``template_id`` that a failed ``aenv build`` of this trial made, when ``alias`` still names
+    it and it is ``waiting``: the build leaves it so. Do nothing when the build made no template (None): a ``waiting``
+    template under the alias is then another trial's. A read or a delete that fails is logged, and the orphan check
+    of a later wait deletes the template."""
+    if template_id is None:
+        return
     try:
         state = await templates.state(alias)
-        if state is not None and state.status == "waiting":
+        if state is not None and state.template_id == template_id and state.status == "waiting":
             await templates.delete(state.template_id)
     except (TimeoutError, aiohttp.ClientError) as error:
         logger.warning("could not delete the template %s that a failed build left: %s", alias, error)
@@ -373,6 +430,7 @@ __all__ = [
     "DockerfileBuild",
     "TemplateState",
     "TransientBuildError",
+    "build_image",
     "dockerfile_build",
     "dockerfile_sets_start_command",
     "ensure_aenv_template",

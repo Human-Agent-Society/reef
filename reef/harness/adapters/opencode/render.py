@@ -111,6 +111,8 @@ export const ReefHarness = async (input: any) => {
 };
 """
 PLUGIN_PACKAGE = {"name": "reef-harness", "type": "module", "main": "index.ts"}
+# OpenCode waits for npm before it loads Reef's plugin. The audit adds a registry request and uses more memory.
+CONFIG_NPMRC = "fetch-retries=0\nfetch-timeout=5000\naudit=false\n"
 
 #: What the model binding writes: one ``reef`` provider holding these keys, its options, and model entries that each
 #: hold only the model's ``limit``, with these keys.
@@ -503,6 +505,11 @@ class OpencodeAdapterRenderer(AdapterRenderer):
                 commands[command_name] = command_entry(where, text)
         return {
             **files,
+            "opencode/.npmrc": CONFIG_NPMRC,
+            "opencode/models.json": "{}\n",
+            "opencode/package.json": '{"private": true}\n',
+            "xdg-config/opencode/.npmrc": CONFIG_NPMRC,
+            "xdg-config/opencode/package.json": '{"private": true}\n',
             "plugin/index.ts": PLUGIN_ENTRY,
             "plugin/package.json": json.dumps(PLUGIN_PACKAGE, indent=2) + "\n",
             "plugin/commands.json": json.dumps(commands, indent=2, sort_keys=True) + "\n",

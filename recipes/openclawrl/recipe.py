@@ -8,7 +8,7 @@ from typing import Any
 
 from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLSamples
 from reef.recipe.base import WeightTrainingRecipe
-from reef.storage.samples import SAMPLE_KINDS, SampleKind
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 

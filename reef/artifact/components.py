@@ -256,7 +256,7 @@ class ComponentChecks(ABC):
     otherwise.
 
     Purpose: the job worker of the training service (``reef.train.job_queue.TrainingJobWorker``) checks each
-    checkpoint with it before it stores the checkpoint. ``reef.scenario.live_objects.RecipeChecks`` gives the checks
+    checkpoint with it before it stores the checkpoint. ``reef.control.scenario.live_objects.RecipeChecks`` gives the checks
     that a recipe declares.
     """
 

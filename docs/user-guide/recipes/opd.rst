@@ -7,11 +7,24 @@ publishes them before the next job's responses are sampled. The method follows
 `Thinking Machines Lab's write-up
 <https://thinkingmachines.ai/blog/on-policy-distillation/>`__.
 
-The recipe lives in ``recipes/opd/`` and uses Reef's Slime distillation
-backend. Inference runs on SGLang; training runs on Megatron.
++-------------+------------------------------------------------------------+
+| Evolves     | model weights                                              |
++-------------+------------------------------------------------------------+
+| Signal      | one report with an empty ``teacher_context`` per response  |
++-------------+------------------------------------------------------------+
+| Loss family | ``opd``                                                    |
++-------------+------------------------------------------------------------+
+| Package     | ``recipes/opd/``                                           |
++-------------+------------------------------------------------------------+
+| Pipeline    | reported feedback, singleton                               |
++-------------+------------------------------------------------------------+
+| Needs       | GPUs and the Slime training backend                        |
++-------------+------------------------------------------------------------+
+| Example     | ``recipes/opd/examples/math/``                             |
++-------------+------------------------------------------------------------+
 
-The learning loop
------------------
+How it works
+------------
 
 .. container:: flow
 
@@ -32,21 +45,24 @@ The learning loop
 
    :Loop: wait for publication before generating the next job's responses
 
-Teacher and student see identical token sequences. The record-to-sample stage
-(``OPDSamples``) makes each report's sample: the student's call as an ATIF
-trajectory, with a teacher request that names no messages. The training
-component renders the student's sequence with the model's chat template and
-gives the teacher that same sequence. Give it the serving engine's chat
+Teacher and student see identical token sequences. The record-to-sample stage,
+``OPDSamples``, makes one sample from each report. The training component
+renders the student's sequence with the model's chat template and gives the
+teacher that same sequence. Give the component the serving engine's chat
 template arguments (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__), so that the
-rendered sequence keeps the thinking switches of serving. The stage rejects a
-non-empty teacher context. A reported score is kept as metadata and does not
-enter the loss.
+<../../reference/configuration-inference.rst#chat-template-arguments>`__), so that the
+rendered sequence keeps the thinking switches of serving.
+
+The stage is on-policy: a response of an artifact that no longer serves does
+not train. Wait for each published update before you sample the next job's
+responses.
 
 Report contract
 ---------------
 
-Each report references exactly one inference receipt:
+Each report references exactly one inference receipt. The stage rejects a
+non-empty ``teacher_context``. A reported score is metadata only and does not
+enter the loss.
 
 .. code:: json
 
@@ -58,14 +74,14 @@ Each report references exactly one inference receipt:
 Configuration
 -------------
 
-Select ``recipes.opd.recipe:OPDRecipe``. The stage settings go in the deployment's top-level
-``pipeline`` section. The stage is on-policy: a response of an artifact that no
-longer serves does not train, so wait for each published update before sampling
-the next job's responses. ``job_samples`` is the responses of one job, and
-Slime's ``--global-batch-size`` is the responses of one optimizer step:
+The stage settings go in the deployment's top-level ``pipeline`` section.
+``job_samples`` is the responses of one job, and Slime's
+``--global-batch-size`` is the responses of one optimizer step:
 
 .. code:: yaml
 
+   recipe:
+     implementation: recipes.opd.recipe:OPDRecipe
    pipeline:
      record2sample:
        config:
@@ -115,19 +131,16 @@ The Slime options belong in ``training.options``:
 
 Also set ``loss-type: custom_loss`` and
 ``disable-compute-advantages-and-returns: true``. Slime refuses
-``use-rollout-logprobs``. Each report is one sample,
-so with ``job_samples`` equal to ``--global-batch-size`` a job holds exactly
-that many samples and trains one optimizer update. The shared backend's other divergences and
-representations are reachable through the inherited ``opd-*`` flags; changing
-them changes the method.
+``use-rollout-logprobs``. The inherited ``opd-*`` flags reach the shared
+backend's other divergences and representations; changing them changes the
+method.
 
 Set ``opd-advantage-clip: 1.0`` to bound each token's advantage to
 ``[-1, 1]`` before importance-sampling weights and sample weights are applied.
-Score centering uses the same bounded advantage. This option changes the
+Score centering uses the same bounded advantage. The option changes the
 gradient; the reported divergence remains the unclipped estimate. It requires
-``opd-divergence: reverse``, positive ``opd-top-k``, and
-``opd-top-k-distribution: renormalized``. The bound is fixed, rather than
-derived from running statistics.
+``opd-divergence: reverse``, a positive ``opd-top-k``, and
+``opd-top-k-distribution: renormalized``.
 
 The separate checkpoint is swapped into the actor's architecture for the
 teacher pass, so teacher and student must share the architecture, parallel
@@ -158,21 +171,36 @@ deployment's ``teacher`` section declares it and replaces
        opd-top-k: 1
        rollout-temperature: 1.0
 
-``num-gpus`` reserves the teacher's GPUs beyond the student's and sets its
-tensor parallel size, ``port`` is its internal endpoint, ``timeout`` bounds one
-scoring request, and ``options`` are native SGLang options. Before each
-optimizer step, Slime sends every rendered prompt and response to the
-engine and stores the teacher's log-probability of each sampled token, so the
-loss stays the sampled-token reverse KL. The engine path requires rollout
-temperature 1, because SGLang's input log-probs are not tempered, and the
-teacher-selected top-K representation; the teacher's tokenizer must map tokens
-to the student's ids, and its context limit must cover the longest rendered
-sequence. A scoring failure fails the step before it starts, so no partially
-scored job trains. ``perf/distill_teacher_time`` reports the scoring time of
-each step in seconds.
+.. container:: config
 
-Math example
-------------
+   ``teacher.num-gpus``
+       reserves the teacher's GPUs beyond the student's and sets its tensor parallel size.
+
+   ``teacher.port``
+       the teacher's internal endpoint.
+
+   ``teacher.timeout``
+       bounds one scoring request.
+
+   ``teacher.options``
+       native SGLang options.
+
+Before each optimizer step, Slime sends every rendered prompt and response to
+the engine and stores the teacher's log-probability of each sampled token, so
+the loss stays the sampled-token reverse KL. The engine path has these
+requirements:
+
+- Rollout temperature 1, because SGLang's input log-probs are not tempered.
+- The teacher-selected top-K representation.
+- A teacher tokenizer that maps tokens to the student's ids.
+- A teacher context limit that covers the longest rendered sequence.
+
+A scoring failure fails the step before it starts, so no partially scored job
+trains. ``perf/distill_teacher_time`` reports the scoring time of each step in
+seconds.
+
+Run the example
+---------------
 
 The `math example <../../../recipes/opd/examples/math/README.md>`__ distils
 Qwen3-32B into a Qwen3-8B-Base student fine-tuned on OpenThoughts3 math

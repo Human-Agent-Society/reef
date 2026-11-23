@@ -17,22 +17,22 @@ from dataclasses import dataclass, field
 from reef.core.errors import ConfigError, InternalError
 from reef.core.plugins import PluginConfigError
 from reef.execution.work_logs import capture_log
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 
-#: The services of a deployment. ``reef serve --component NAME`` runs one in a process; the one-process layout runs
+#: The services of a deployment. ``reef serve --service NAME`` runs one in a process; the one-process layout runs
 #: all of them in one process, on the same interfaces.
-SERVICE_COMPONENTS = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
+SERVICE_NAMES = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
 
 
-def service_components(names: object) -> frozenset[str]:
+def service_names(names: object) -> frozenset[str]:
     """``names`` as a set of service names; raise ``ValueError`` for an empty set or an unknown name."""
     if isinstance(names, str) or not isinstance(names, (set, frozenset, tuple, list)) or not names:
-        raise ValueError(f"name one or more services of {SERVICE_COMPONENTS}")
-    unknown = sorted(str(name) for name in names if name not in SERVICE_COMPONENTS)
+        raise ValueError(f"name one or more services of {SERVICE_NAMES}")
+    unknown = sorted(str(name) for name in names if name not in SERVICE_NAMES)
     if unknown:
-        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_COMPONENTS}")
+        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_NAMES}")
     return frozenset(names)
 
 
@@ -40,7 +40,7 @@ def service_components(names: object) -> frozenset[str]:
 class ServiceSet:
     """The services that one process runs.
 
-    Values: ``names`` is a non-empty subset of ``SERVICE_COMPONENTS`` (``service_components``). Each ``runs_*``
+    Values: ``names`` is a non-empty subset of ``SERVICE_NAMES`` (``service_names``). Each ``runs_*``
     property is whether ``names`` holds that service.
 
     Purpose: assembly makes it for a process (``ServiceSet.of``); the dispatcher, the routes and the apps read the
@@ -50,17 +50,17 @@ class ServiceSet:
     names: frozenset[str]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "names", service_components(self.names))
+        object.__setattr__(self, "names", service_names(self.names))
 
     @classmethod
     def of(cls, names: object) -> ServiceSet:
-        """The set of ``names``; ``ValueError`` as ``service_components``."""
-        return cls(service_components(names))
+        """The set of ``names``; ``ValueError`` as ``service_names``."""
+        return cls(service_names(names))
 
     @classmethod
     def every(cls) -> ServiceSet:
         """Every service: the one-process layout."""
-        return cls(frozenset(SERVICE_COMPONENTS))
+        return cls(frozenset(SERVICE_NAMES))
 
     @property
     def runs_control(self) -> bool:
@@ -382,12 +382,12 @@ class ServiceWorkers:
 
 
 __all__ = [
-    "SERVICE_COMPONENTS",
+    "SERVICE_NAMES",
     "ItemFailedError",
     "QueueWorker",
     "ServiceSet",
     "ServiceWorker",
     "ServiceWorkers",
     "WorkerStoppedError",
-    "service_components",
+    "service_names",
 ]
