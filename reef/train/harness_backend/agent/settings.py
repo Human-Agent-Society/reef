@@ -66,7 +66,8 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
     port but the gateway's, and refuses to start where bwrap or pasta is
     missing. ``sandbox: seatbelt`` does the same on macOS with a Seatbelt
     profile, and refuses to start where sandbox-exec is missing; the host's
-    LAN addresses stay reachable there. A cloud sandbox (``sandbox: e2b`` or ``sandbox: modal``, with
+    LAN addresses stay reachable there. A cloud sandbox (``sandbox: e2b``,
+    ``sandbox: modal`` or ``sandbox: boxd``, with
     that provider's options in the section; its image is the adapter's
     pinned binary, built on first use, unless an option names one) runs it
     where it reaches the gateway through a tunnel and nothing else of the

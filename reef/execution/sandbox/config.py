@@ -10,6 +10,7 @@ from pathlib import Path
 
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, resolve_plugin_class
+from reef.execution.sandbox.boxd import BoxdExecutor
 from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.e2b.executor import E2BExecutor
 from reef.execution.sandbox.modal.executor import ModalExecutor
@@ -18,7 +19,11 @@ from reef.execution.sandbox.remote import RemoteExecutor, deployment_owner
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
 #: The cloud sandbox providers, by the name a deployment selects.
-REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {"e2b": E2BExecutor, "modal": ModalExecutor}
+REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {
+    "e2b": E2BExecutor,
+    "modal": ModalExecutor,
+    "boxd": BoxdExecutor,
+}
 
 
 def host_sandbox() -> type[SandboxExecutor]:
@@ -68,7 +73,7 @@ def build_executor(
 ) -> ProgramExecutor:
     """Build the executor a deployment selected.
 
-    ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``). ``sandbox`` is the
+    ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``, ``boxd``). ``sandbox`` is the
     host's local sandbox (``host_sandbox``): bubblewrap on Linux, Seatbelt on macOS. Each executor reads its
     options from the ``sandbox`` section with its ``from_config``. The executor is
     preflighted at build so a hosted deployment that requires the sandbox

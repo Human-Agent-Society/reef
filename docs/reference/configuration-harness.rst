@@ -23,5 +23,7 @@ The coding agent uses the local sandbox unless you select another through ``agen
 The separate ``evolution.sandbox`` object configures the run when ``evolution.executor`` differs from ``local``.
 
 Use ``env_from`` to pass specific nonempty host variables. On the local sandbox executor, any ``egress_hosts`` entry opens the entire network.
-E2B and Modal allow outbound internet and reject nonempty ``egress_hosts`` or ``limits``.
+E2B, Modal and boxd allow outbound internet and reject nonempty ``egress_hosts`` or ``limits``.
+A boxd machine is always isolated: it has no boxd credentials and joins no private network.
+Secrets scoped to the machine still reach commands outside Reef's jail, so do not scope a secret there that a task may not read.
 See `Sandboxes <../developer-guide/sandboxes.rst>`__ for setup.

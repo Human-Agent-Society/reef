@@ -107,12 +107,12 @@ class EvolutionSettings(Settings):
             "evaluation do not count. 0 sets no limit."
         ),
     )
-    executor: str = config_option("local", help="Where tasks run: local, sandbox, e2b or modal.")
+    executor: str = config_option("local", help="Where tasks run: local, sandbox, e2b, modal or boxd.")
     sandbox: Mapping[str, Any] | None = config_option(
         None,
         help=(
             "The sandbox settings of the run executor: egress_hosts, limits and env_from for sandbox; the"
-            " e2b or modal options, forward_ports and env_from for a cloud sandbox."
+            " e2b, modal or boxd options, forward_ports and env_from for a cloud sandbox."
         ),
     )
     agent: Mapping[str, Any] | None = config_option(

@@ -201,10 +201,10 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
     assert unset is not None and isinstance(unset.executor, LocalExecutor)
     monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: BwrapExecutor)
-    with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none' on this host"):
+    with pytest.raises(ValueError, match="one of 'bwrap', 'boxd', 'e2b', 'modal', 'none' on this host"):
         agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
     # Each host runs one local sandbox: the other host's name is refused at startup, not at preflight.
-    with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none' on this host"):
+    with pytest.raises(ValueError, match="one of 'bwrap', 'boxd', 'e2b', 'modal', 'none' on this host"):
         agent_settings({"sandbox": "seatbelt"}, {}, state_dir=state_dir)
     with pytest.raises(ValueError, match="positive number"):
         agent_settings({"timeout_s": 0}, {}, state_dir=state_dir)
