@@ -41,7 +41,18 @@ Every ``InferenceRuntime`` implements three members:
    * - ``served_artifact``
      - Reports the route of a binding that already holds: a verified load, or an immutable revision. It loads nothing. It returns ``None`` for an unknown artifact and for an unavailable or uncertain binding; Reef then publishes no route.
 
-Every other member has a default. Override one only for a capability that the runtime has: engines of its own, takeover of a retained endpoint, several artifacts at the same time, any artifact on request, or snapshots without weights. `Runtime responsibilities <../reference/python-api-inference.rst#runtime-responsibilities>`__ gives each member's signature, default, result and errors.
+Every other member has a default. Override one only for a capability that the runtime has:
+
+- Engines of its own: ``open``, ``shutdown``, ``set_owner_sequence``.
+- Takeover of a retained endpoint: ``adopt``.
+- Several artifacts at the same time: ``serve_artifact``, ``served_artifact_capacity``, ``stop_serving``, ``release_unreferenced_artifacts``, ``handler_for``.
+- Any artifact on request: ``serves_any_artifact``, ``artifact_model``.
+- Snapshots without weights: ``endpoint_model_name``.
+- Adapters: ``served_weight_kind``, ``per_scenario_adapters``, ``shared_by_training_scenarios``.
+
+The docstring of each member in ``reef.inference.interfaces`` gives its default, its result and its errors.
+
+Automatic weight training waits while the selected artifact has no served route. Manual training does not wait, because a request names its samples.
 
 When a binding is in doubt, the runtime must fail safely:
 
