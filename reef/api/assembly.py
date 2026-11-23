@@ -756,6 +756,7 @@ def build_app(
     inference request; the caller owns it and releases it after the app stops.
     An embedding application adds its middleware and routes to the returned
     app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
+    The service tokens protect the added routes too.
 
     With ``reef.routing_manifest``, ``lifecycle`` is required: ``reef serve`` starts this service as the
     closed child of a managed routing deployment and hands it the router's selection credential.

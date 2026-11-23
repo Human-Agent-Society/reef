@@ -41,6 +41,7 @@ class RecordRetention:
 
     Retry metadata, indexes and database overhead are outside the body budget.
     Capacity alone triggers automatic eviction; records do not expire by age.
+    A sweep applies the budget (``DataStore.prune_records``), so the bodies can exceed it between two sweeps.
     """
 
     max_bytes: int = 20 * 1024**3
@@ -78,6 +79,7 @@ class RecordStore(ABC):
         Any conflict rolls back the entire batch. Identical retries retain
         the same semantics as append_result.
         Adapters without atomic batch support must reject before writing.
+        The default raises ``NotImplementedError``. The route ``POST /reef/records/batch`` needs this method.
         """
         raise NotImplementedError("this record store does not support atomic batch append")
 
@@ -119,7 +121,8 @@ class RecordStore(ABC):
 
     @abstractmethod
     def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
-        """Read a retained record with its append sequence."""
+        """Read a retained record with its append sequence. ``None`` means that ``scenario`` retains no such record:
+        retention deleted it, or the store never held it."""
 
     @abstractmethod
     def audit_page(
@@ -130,11 +133,18 @@ class RecordStore(ABC):
         limit: int = 256,
         request_type: RequestType | None = None,
     ) -> tuple[StoredRecord, ...]:
-        """Read retained records with the same sequence bounds as ``replay_page``, optionally of one type."""
+        """Read retained records with the same sequence bounds as ``replay_page``, optionally of one type. The
+        entries are in append order. Give the last entry's ``sequence`` as the next ``after_sequence``."""
 
     def trajectory(self, scenario: str, agent_record_id: str) -> tuple[str, ...]:
         """The record IDs of the trajectory that the record ends, oldest first (RFC #1054); ``()`` when the record is
-        not stored. A store that keeps no trajectories treats each record as a trajectory of one call."""
+        not stored. A store that keeps no trajectories treats each record as a trajectory of one call.
+
+        The trajectory is the earlier calls with the same API format and tools whose messages the record's messages
+        extend, and then the record (``reef.core.trajectory_index``). A retry with the same messages takes the place
+        of the call that it retries. A call that retention deleted is left out. A record without a message list is a
+        trajectory of one call.
+        """
         return () if self.read_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
 
     def loss(self, scenario: str) -> RecordLoss:

@@ -565,6 +565,8 @@ class DataStore(Plugin, JobDataReader, ABC):
     * ``create(owner, items)`` stores each item, all or none. An item whose ID the owner stores with the same
       digest is unchanged; with another digest it is an ``ItemConflictError``, and nothing is stored. Bad metadata or
       content is a ``ValueError``, and nothing is stored.
+      The store copies the directory of a task into the owner's task file partition (``task_partition``). A
+      ``TaskFilesReference`` that the partition does not hold is a ``TaskFilesNotFoundError``.
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
@@ -578,7 +580,8 @@ class DataStore(Plugin, JobDataReader, ABC):
       string there when ``value`` is None. ``benchmark`` keeps only the task items whose ``benchmarks`` metadata has
       that name, and ``trajectory_set`` only the trajectory items whose ``trajectory_sets`` metadata has it.
       ``id_prefix``, a non-empty string, keeps only the items whose ID starts with it. Without
-      ``content``, each item's ``content`` is None, and the store does not read it.
+      ``content``, each item's ``content`` is None, and the store does not read it. ``limit`` is from 1 to
+      ``MAX_QUERY_LIMIT``.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
     * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,

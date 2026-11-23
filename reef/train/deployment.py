@@ -46,6 +46,9 @@ class TrainingDeployment(ABC):
     ``default_serving`` is the serving of a deployment that names none and
     sets no engine setting: ``engines`` or ``trainer``. A subclass that sets
     another value is refused when the class is defined.
+    ``requires_local_model`` is whether the host needs the model on disk when
+    no local engine serves it. A hosted integration sets False, and deployment
+    resolution then keeps the model identifier as written.
     """
 
     requires_local_model: bool = True

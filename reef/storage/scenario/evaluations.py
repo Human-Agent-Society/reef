@@ -226,6 +226,8 @@ class KeyedEvaluationStore(EvaluationStore):
 
     Each start ID in this scenario maps to one evaluation ID, its request fingerprint,
     and its pending work until the queue accepts that work.
+    A scenario whose store is only an ``EvaluationStore`` takes the requests without a start ID, and refuses a
+    request with one (``NotImplementedError``).
     """
 
     @abstractmethod

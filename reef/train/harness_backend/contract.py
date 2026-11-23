@@ -108,7 +108,9 @@ class Services(ABC):
     def models(self) -> ModelBindings:
         """The model bindings: ``served`` (the model under test) and every ``evolution.models`` entry.
 
-        Every call spends from the job's budget and lands in the job's call record.
+        Every call spends from the job's budget
+        (``evolution.max_model_calls_per_step``) and lands in the job's call
+        record (``calls.json``).
         """
 
     @property
@@ -144,7 +146,8 @@ class Services(ABC):
         A run in the history that did not fail is reused, so asking again
         costs nothing; ask for more repeats to get new samples. Raise
         ``RuntimeError`` when the deployment configured no scorer, or when the
-        call needs more runs than the job's budget has left; the whole
+        call needs more runs than the job's budget
+        (``evolution.max_runs_per_step``) has left; the whole
         call is refused. Raise ``ValueError`` when ``tree`` fails ``check``, and
         ``TypeError`` when ``tasks`` is one string. A refused call adds nothing
         to the history.

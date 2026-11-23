@@ -167,10 +167,12 @@ class TrainingJob:
 
     @property
     def data_id(self) -> str:
+        """The ``JobData.data_id`` of the job's data. Reading it copies nothing."""
         return self.data.data_id
 
     @property
     def sample_count(self) -> int:
+        """The number of the job's samples. Reading it copies nothing."""
         return self.data.sample_count
 
     @property
@@ -580,7 +582,8 @@ class TrainingComponent(ABC):
 
         The training service calls it for control before control adds the job to the jobs queue
         (``reef.train.job_queue.TrainingCheckWorker``), so a refused job never waits in the queue and consumes no
-        sample. ``submit`` checks the job again.
+        sample. ``submit`` checks the job again. A component that cannot roll out tasks refuses a job of
+        ``TaskSample`` values here.
         """
         return
 

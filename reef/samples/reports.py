@@ -69,7 +69,7 @@ class ReportContext:
         return tuple(by_id[reference] for reference in self.report.references if reference in by_id)
 
     def require_score(self) -> float:
-        """Read a finite reward for a training method that needs one."""
+        """Read a finite reward for a training method that needs one. Raise ``ValueError`` when the report has none."""
         if self.score is None or not math.isfinite(self.score):
             raise ValueError("training data requires a finite report score")
         return self.score
@@ -120,12 +120,17 @@ class ReportGrouping:
 
         These coordinates belong to the stage, separately from an item's
         comparison group. For example, TTTD trains a whole step containing
-        several comparison groups. A None slot uses the report ID.
+        several comparison groups. A None slot uses the report ID. A group
+        keeps the first report of a slot: a later report of that slot ends
+        without training.
         """
         return None, None
 
     def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
-        """Decide whether the group's reports, in arrival order, are ready, incomplete, or invalid."""
+        """Decide whether the group's reports, in arrival order, are ready, incomplete, or invalid.
+
+        A ready group trains as it is: later reports of its key form a new group.
+        """
         raise NotImplementedError(f"{type(self).__name__} placed a report in a group without a decide override")
 
     def status(self) -> Mapping[str, Any]:
