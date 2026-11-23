@@ -44,13 +44,14 @@ No checkpoint differs from the base model by more than the noise, so this run do
 
 On Slime, Qwen3.5-9B trained all its weights with the training settings of `examples/tmax_seeds/serve.yaml`. The runs trained on 6,748 of the 6,844 TMax v1.1 seeds and held out the other 96. Two runs trained the seeds only: they imported them as train tasks and ran no generator (`rounds: 0`). One run gave the seeds to the example's generator, so Claude Code's variants trained too. Each run kept one GPU for the evaluation, so Slime had 2 rollout engines, not 3.
 
-Each checkpoint ran the held-out tasks (4 attempts each, avg@4) and Terminal-Bench 2.0 (89 tasks, 5 attempts each, avg@5) in E2B, on an SGLang engine of its own, with the training agent and sampling. In parentheses is the difference to the base model, paired over tasks, with a bootstrap 95% interval over tasks. The base model, scored twice more, shows the noise between evaluations of the same weights: up to 2.9 points on Terminal-Bench 2.0. Run 1 stopped after step 50, before the Terminal-Bench 2.0 evaluation of its step 48.
+Each checkpoint ran the held-out tasks (4 attempts each, avg@4) and Terminal-Bench 2.0 (89 tasks, 5 attempts each, avg@5) in E2B, on an SGLang engine of its own, with the training agent and sampling. In parentheses is the difference to the base model, paired over tasks, with a bootstrap 95% interval over tasks. The base model, scored three more times, shows the noise between evaluations of the same weights: up to 4.7 points on the held-out tasks and 2.9 points on Terminal-Bench 2.0. Run 1 stopped after step 50, before the Terminal-Bench 2.0 evaluation of its step 48.
 
 | Run | Checkpoint | Held-out tasks, avg@4 | Terminal-Bench 2.0, avg@5 |
 | --- | --- | --- | --- |
 | Base model | base | 49.7 | 18.2 |
 | Base model, scored again during the seeds only runs | base | 50.3 (+0.5 [-4.9, +6.0]) | 21.1 (+2.9 [+0.0, +5.8]) |
 | Base model, scored again before the run with variants | base | 50.3 (+0.5 [-4.9, +6.2]) | 18.7 (+0.4 [-3.1, +3.8]) |
+| Base model, scored again after step 48 of the run with variants | base | 45.6 (-4.2 [-9.1, +0.8]) | 20.7 (+2.5 [-0.7, +5.6]) |
 | Seeds only, run 1 (50 steps) | step 16 | 50.0 (+0.3 [-4.9, +5.5]) | 19.1 (+0.9 [-2.2, +4.0]) |
 | | step 32 | 53.1 (+3.4 [-1.8, +8.9]) | 19.1 (+0.9 [-2.2, +4.0]) |
 | | step 48 | 57.3 (+7.6 [+1.8, +13.5]) | not run |
@@ -64,6 +65,8 @@ Each checkpoint ran the held-out tasks (4 attempts each, avg@4) and Terminal-Ben
 | | step 48 | 56.0 (+6.2 [+0.5, +12.2]) | 17.3 (-0.9 [-4.7, +2.7]) |
 
 The held-out difference clears zero in run 1 at step 48, in run 2 at steps 64 and 80, in the two seeds only runs pooled at step 48 (each task's mean over both runs), +5.9 [+0.8, +11.3], and in the run with variants at step 48. Run 2 alone at step 48 does not clear zero, and the intervals are not corrected for the several steps each run was scored at. No Terminal-Bench 2.0 difference of a trained checkpoint clears zero, and each stays within the 2.9 points between two scorings of the base model.
+
+Against the mean of the two scorings of the base model inside its own run, the run with variants at step 48 is +8.1 [+3.5, +12.5] on the held-out tasks (41 tasks up, 16 down, sign test p = 0.001) and -2.4 [-6.2, +1.1] on Terminal-Bench 2.0.
 
 The run with variants is one run, and no difference from seeds only clears zero. Against the mean of both seeds only runs, the held-out difference is +2.9 [-1.2, +7.2] at step 16, +1.8 [-2.5, +6.2] at step 32 and +0.4 [-4.2, +4.8] at step 48. On Terminal-Bench 2.0 it is +0.1 [-2.8, +3.3] at step 16 and -1.0 [-3.8, +1.6] at step 32, and against run 2, the only seeds only run scored there, -3.1 [-7.2, +0.7] at step 48. Variants were 75 of the 384 tasks that trained through step 48 (20%), though `variant_share` is 0.5: the Designer varies each parent once, and calibration kept 84 of the 226 variants it measured in the first 38 generations (37%). The run restarted once from its step 37 checkpoint, on the same software.
 
