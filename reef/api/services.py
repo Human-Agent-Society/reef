@@ -55,7 +55,7 @@ from reef.execution.workers import SERVICE_NAMES
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
-from reef.recipe.deployment import harness_adapter
+from reef.recipe.deployment import harness_adapter, refuses_images
 from reef.storage.coordination.store import Coordination, instance_id
 from reef.storage.data.store import DataStore
 from reef.storage.data.tasks import TaskFileStore
@@ -114,6 +114,7 @@ class InferenceApp(ServiceApp):
             evaluation_tokens=evaluation_token_for(settings.tokens),
             timeout_seconds=timeout_seconds,
             for_codex=harness_adapter(recipe) == "codex",
+            refuses_images=refuses_images(recipe),
         )
         if settings.routing_manifest is not None:
             try:

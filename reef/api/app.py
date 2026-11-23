@@ -39,7 +39,7 @@ from reef.control.operations.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
-from reef.recipe.deployment import harness_adapter
+from reef.recipe.deployment import harness_adapter, refuses_images
 from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
 from reef.routing.preview import PreviewSettings, RoutingPreviewClient
 from reef.storage.scenario.records import RecordRetention
@@ -361,6 +361,7 @@ def create_app(
             ),
             timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
             for_codex=harness_adapter(dispatcher.recipe) == "codex",
+            refuses_images=refuses_images(dispatcher.recipe),
         )
         register_routes(
             app,
