@@ -50,6 +50,7 @@ from harbor.environments.dind_compose import DinDComposeOps
 
 from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv_build import BUILD_OUTPUT_TAIL_CHARS, TRANSIENT_STATUSES, AgentEnvTemplates
+from reef.execution.sandbox.process import SandboxCapacityError
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +81,8 @@ class ImageNotFoundError(ComposeStartError):
     """``aenv compose up`` found no image under a name of the deployment's own repository."""
 
 
-class TransientStartError(ComposeStartError):
-    """``aenv compose up`` received a status of ``TRANSIENT_STATUSES`` from the AgentENV API."""
+class TransientStartError(ComposeStartError, SandboxCapacityError):
+    """``aenv compose up`` received a status of ``TRANSIENT_STATUSES`` from the AgentENV API: it has no capacity now."""
 
 
 def compose_mode(environ: Mapping[str, str]) -> str:

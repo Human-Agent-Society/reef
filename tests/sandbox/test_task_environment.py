@@ -11,8 +11,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from reef.execution.sandbox.agentenv_compose import TransientStartError
+from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SandboxCapacityError
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import (
     HARBOR_TASK_ENVIRONMENTS,
@@ -233,6 +236,35 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
     assert harbor_call["timeout"] == 120 + 900 + 300 + 3600 and "lifecycle" not in harbor_call
     # Every argument of Harbor's call, and one more: delete the sandbox at its timeout, never pause it.
     assert calls["reef"][-1] == {**harbor_call, "lifecycle": {"on_timeout": "kill"}}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal", ["busy", "rate", "gateway", "client"])
+def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_sandbox_capacity_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    errors = {
+        "busy": e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available"),
+        "rate": e2b.RateLimitException("429: too many requests"),
+        # A gateway's 504 answer has an HTML body, which the SDK cannot read as JSON.
+        "gateway": json.JSONDecodeError("Expecting value", "<html>504 Gateway Time-out</html>", 0),
+        "client": httpx.ReadTimeout("timed out"),
+    }
+
+    async def create(**options: object) -> object:
+        raise errors[refusal]
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    with pytest.raises(SandboxCapacityError) as raised:
+        asyncio.run(environment._create_sandbox())
+    assert raised.value.__cause__ is errors[refusal]
+    # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it.
+    assert type(raised.value).__name__ in SANDBOX_CAPACITY_ERRORS
+    assert TransientStartError.__name__ in SANDBOX_CAPACITY_ERRORS and issubclass(
+        TransientStartError, SandboxCapacityError
+    )
 
 
 @pytest.mark.unit

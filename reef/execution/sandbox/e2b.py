@@ -28,6 +28,7 @@ requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import math
 import os
@@ -79,6 +80,7 @@ from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
     ProgramTimeoutError,
+    SandboxCapacityError,
     SandboxProgram,
     SandboxUnavailableError,
     parse_env_from,
@@ -775,21 +777,37 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     # Harbor's create call with one more argument, and the decorator is Harbor's retry policy, because Harbor's
     # decorator wraps its own method and not this one. When Harbor adds an argument to the call, add it here too: the
     # parity test in tests/sandbox/test_task_environment.py compares the two calls.
+    # A refusal for want of capacity becomes ``SandboxCapacityError``, so that an evaluation waits for capacity
+    # instead of failing the rollout.
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
     @override
     async def _create_sandbox(self) -> None:
-        # Keep this optional SDK import inside sandbox creation.
-        from e2b import AsyncSandbox
+        # Keep these optional SDK imports inside sandbox creation.
+        import httpx
+        from e2b import AsyncSandbox, RateLimitException, ServiceBusyException
 
-        self._sandbox = await AsyncSandbox.create(
-            template=self._template_name,
-            metadata={"environment_name": self.environment_name, "session_id": self.session_id},
-            envs=self._startup_env(),
-            timeout=self._sandbox_timeout,
-            allow_internet_access=self.network_policy.network_mode != NetworkMode.NO_NETWORK,
-            network=self._sandbox_create_network_options(),
-            lifecycle={"on_timeout": "kill"},
-        )
+        try:
+            self._sandbox = await AsyncSandbox.create(
+                template=self._template_name,
+                metadata={"environment_name": self.environment_name, "session_id": self.session_id},
+                envs=self._startup_env(),
+                timeout=self._sandbox_timeout,
+                allow_internet_access=self.network_policy.network_mode != NetworkMode.NO_NETWORK,
+                network=self._sandbox_create_network_options(),
+                lifecycle={"on_timeout": "kill"},
+            )
+        except (ServiceBusyException, RateLimitException) as exc:
+            raise SandboxCapacityError(f"the sandbox service has no capacity now: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            # The service holds the create call while it places the sandbox. A service that adds workers can place
+            # it later than the SDK waits.
+            raise SandboxCapacityError(f"the sandbox service did not place the sandbox in time: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            # The SDK reads each answer of the create call as JSON. A gateway that timed out before the service placed
+            # the sandbox answers 504 with an HTML body, and the SDK then fails here.
+            raise SandboxCapacityError(
+                "the sandbox service gave no JSON answer, as its gateway does when it times out"
+            ) from exc
 
 
 async def build_task_template(task_path: Path) -> str:

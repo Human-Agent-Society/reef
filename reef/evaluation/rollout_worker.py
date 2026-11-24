@@ -58,11 +58,12 @@ from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
+from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS
+from reef.execution.workers import ItemDeferredError, ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
-from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner, trial_exception_type
 from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
@@ -934,8 +935,11 @@ class EvaluationRolloutWorker(QueueWorker):
             )
             if not calls.answered:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
-                # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
-                # the rollout is retried as any other failed attempt.
+                # trial whose sandbox did not start makes no call either. When the sandbox service had no capacity,
+                # the rollout waits in the queue for it, and the attempt does not count. Otherwise the attempt fails
+                # with the reason, and the rollout is retried as any other failed attempt.
+                if trial_exception_type(result.trial_uri) in SANDBOX_CAPACITY_ERRORS:
+                    raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
                 raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
             score = runner.rollout_score(result)
             if score.is_failed:

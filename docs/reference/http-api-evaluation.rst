@@ -125,11 +125,12 @@ Use ``score_levels=true`` when reading one evaluation to add ``score_levels`` to
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts`` answers ``{scenario, evaluation_id, rollouts}``, also while the evaluation runs: each rollout in task and repeat order, as ``{task, task_index, repeat, state, attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting`` while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also when a retry runs the rollout again. On ``e2b``, it is also ``waiting`` while the task's sandbox templates build.
+- A rollout whose sandbox the sandbox service refused for want of capacity (HTTP 503 or 429, or no placement before a gateway's 504 or the request's timeout) goes back to ``queued``, and its ``error`` starts with ``waiting for sandbox capacity``. The attempt does not count toward the retry limit or the evaluation's failures. The rollout waits 30 seconds, and twice as long after each later refusal, at most 10 minutes. In that time its worker starts no other rollout, so the service can add capacity. After 24 such waits, a refusal counts as a failed attempt.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at`` when it finished or failed, in epoch seconds. Each is null until then.
 - ``score`` is the rollout's score once it finished, else null.
 - ``rewards`` holds every finite reward that the rollout's verifier wrote, by name, for example ``{"reward": 0.9, "rule": 1.0, "judge": 0.8}``. The score is the primary reward among them. It is null for a rollout that has not finished, that failed, whose verifier wrote no reward, or that finished before Reef kept rewards. Reef keeps at most 64. Nothing else reads them.
-- ``error`` is why a failed rollout failed, else null.
+- ``error`` is why a failed rollout failed, or what a queued rollout waits for, else null.
 - ``calls`` holds the totals of the agent's model calls over all attempts of the rollout: ``{count, failed, prompt_tokens, completion_tokens}``. ``failed`` counts the calls whose status is not 200. The token totals add the known counts only. It is null when Reef kept no call of the rollout.
 - ``verifier_calls`` holds the same totals of the calls that the rollout's verifier wrote (`Calls that a verifier writes <http-api-evaluation-calls.rst#calls-that-a-verifier-writes>`__), or null.
 
