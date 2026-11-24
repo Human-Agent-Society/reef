@@ -1,15 +1,16 @@
 """What the Slime backend states from its options alone, without Slime's parser or a component.
 
-``SlimeFacts`` reads four of Slime's options: the model, and the LoRA rank, alpha and target modules. The
-component answers the same members from the value of its parsed arguments (``SlimeFacts.from_parsed``), and it
-refuses to start when the options as written give another value (``SlimeFacts.from_arguments``). The facts also read
-the rollout options that bound the delayed samples of a task job (``SlimeRolloutOptions``); the training service
-checks those against the parsed arguments when it checks the recipe's task jobs. The module imports no Slime,
-Megatron, Ray or torch module, so control and inference read it in an environment without them.
+``SlimeFacts`` reads the model and the LoRA rank, alpha and target modules from Slime's options. The component
+answers the same members from the value of its parsed arguments (``SlimeFacts.from_parsed``), and it refuses to start
+when the options as written give another value (``SlimeFacts.from_arguments``). The facts also read the rollout
+options that bound the delayed samples of a task job (``SlimeRolloutOptions``); the training service checks those
+against the parsed arguments when it checks the recipe's task jobs. The module imports no Slime, Megatron, Ray or
+torch module, so control and inference read it in an environment without them.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,12 +90,18 @@ def option_number(arguments: Sequence[str], flag: str, kind: type[int] | type[fl
 class SlimeRolloutOptions:
     """The rollout options of Slime that bound the delayed samples of a task job.
 
-    Values: ``temperature``, ``top_p`` and ``top_k`` are ``--rollout-temperature``, ``--rollout-top-p`` and
-    ``--rollout-top-k``, with Slime's defaults 1.0, 1.0 and -1. ``batch_size`` is ``--rollout-batch-size``, the
-    prompts of one rollout, and ``samples_per_prompt`` is ``--n-samples-per-prompt``, 1 by default.
-    ``global_batch_size`` is the samples of one optimizer step: ``--global-batch-size``, or the value that Slime
-    computes from ``--num-steps-per-rollout``. ``batch_size`` and ``global_batch_size`` are None when the options
-    give none.
+    Values, each the option that the engines and Slime's parser accept:
+
+    - ``temperature`` is ``--rollout-temperature``, a finite number that is at least 0 (Slime's default 1.0).
+    - ``top_p`` is ``--rollout-top-p``, a number in (0, 1] (default 1.0).
+    - ``top_k`` is ``--rollout-top-k``: -1, for no limit, or a positive int (default -1).
+    - ``batch_size`` is ``--rollout-batch-size``, the prompts of one rollout: a positive int, or None when the options
+      give none.
+    - ``samples_per_prompt`` is ``--n-samples-per-prompt``, a positive int (default 1).
+    - ``global_batch_size`` is the samples of one optimizer step: ``--global-batch-size``, or the value that Slime
+      computes from ``--num-steps-per-rollout``. It is a positive int, or None when the options give none.
+
+    The constructor refuses other values, bools included, with a ``ValueError`` that names the field and the option.
 
     Purpose: ``SlimeFacts`` holds the value of its options, and ``delayed_sample_limit`` computes the limit from it,
     so control (``SlimeFacts.delayed_sample_limit``) and the training service
@@ -108,10 +115,48 @@ class SlimeRolloutOptions:
     samples_per_prompt: int = 1
     global_batch_size: int | None = None
 
+    def __post_init__(self) -> None:
+        temperature, top_p, top_k = self.temperature, self.top_p, self.top_k
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not (math.isfinite(temperature) and temperature >= 0)
+        ):
+            raise ValueError(
+                "SlimeRolloutOptions.temperature (--rollout-temperature) must be a finite number of at least 0, "
+                f"got {temperature!r}"
+            )
+        if isinstance(top_p, bool) or not isinstance(top_p, (int, float)) or not 0 < top_p <= 1:
+            raise ValueError(f"SlimeRolloutOptions.top_p (--rollout-top-p) must be in (0, 1], got {top_p!r}")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or not (top_k == -1 or top_k > 0):
+            raise ValueError(
+                f"SlimeRolloutOptions.top_k (--rollout-top-k) must be -1 or a positive int, got {top_k!r}"
+            )
+        for name, option, value, may_be_none in (
+            ("batch_size", "--rollout-batch-size", self.batch_size, True),
+            ("samples_per_prompt", "--n-samples-per-prompt", self.samples_per_prompt, False),
+            (
+                "global_batch_size",
+                "--global-batch-size, or the value of --num-steps-per-rollout",
+                self.global_batch_size,
+                True,
+            ),
+        ):
+            if value is None and may_be_none:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                domain = "a positive int or None" if may_be_none else "a positive int"
+                raise ValueError(f"SlimeRolloutOptions.{name} ({option}) must be {domain}, got {value!r}")
+
     @classmethod
     def from_arguments(cls, arguments: Sequence[str]) -> Self:
         """The rollout options of the Slime argument list ``arguments``, read as written, with Slime's defaults.
-        ``ValueError``: an option is no number of its kind."""
+
+        With ``--num-steps-per-rollout`` and ``--rollout-batch-size``, ``global_batch_size`` is
+        ``--rollout-batch-size * --n-samples-per-prompt // --num-steps-per-rollout``, as Slime computes it.
+        ``ValueError``: an option is no number of its kind, ``--num-steps-per-rollout`` is below 1, or a value is
+        outside the domain of its field.
+        """
         temperature = option_number(arguments, "--rollout-temperature", float)
         top_p = option_number(arguments, "--rollout-top-p", float)
         top_k = option_number(arguments, "--rollout-top-k", int)
@@ -120,7 +165,9 @@ class SlimeRolloutOptions:
         global_batch_size = option_number(arguments, "--global-batch-size", int)
         steps = option_number(arguments, "--num-steps-per-rollout", int)
         samples = 1 if samples_per_prompt is None else int(samples_per_prompt)
-        if steps is not None and batch_size is not None and steps > 0:
+        if steps is not None and steps < 1:
+            raise ValueError(f"--num-steps-per-rollout must be a positive int, got {steps}")
+        if steps is not None and batch_size is not None:
             # Slime's own rule: the steps of one rollout split its samples.
             global_batch_size = int(batch_size) * samples // int(steps)
         return cls(
@@ -151,8 +198,8 @@ class SlimeRolloutOptions:
         delayed samples, which keeps the delayed groups and a task in the first rollout and the samples in its first
         optimizer step. Each sample comes from Slime's rollout distribution (``--rollout-temperature``,
         ``--rollout-top-p``, ``--rollout-top-k``), so that its recorded log-probs are those of the sampler that the
-        workers' log-probs stand for. ``ValueError`` for a greedy rollout distribution, or for options that give no
-        rollout or optimizer step size.
+        workers' log-probs stand for. ``ValueError`` for a greedy rollout distribution, for options that give no
+        rollout or optimizer step size, or for a rollout of fewer than two prompts.
         """
         distribution = sampling_distribution(
             {"temperature": self.temperature, "top_p": self.top_p, "top_k": self.top_k}
@@ -166,6 +213,11 @@ class SlimeRolloutOptions:
             raise ValueError(
                 "a task job that carries samples needs --rollout-batch-size, and --global-batch-size or "
                 "--num-steps-per-rollout, in Slime's options"
+            )
+        if self.batch_size < 2:
+            raise ValueError(
+                "a task job that carries samples needs --rollout-batch-size of at least 2: its first rollout leads "
+                "with a delayed group, even an empty one, and needs a task beside it"
             )
         return DelayedSampleLimit(
             min(self.global_batch_size, (self.batch_size - 1) * self.samples_per_prompt), distribution

@@ -291,6 +291,30 @@ def test_the_facts_state_the_limit_of_the_options_as_written() -> None:
         SlimeFacts.from_arguments(unstepped).delayed_sample_limit(carrying)
     with pytest.raises(ValueError, match="sampled rollout distribution"):
         SlimeFacts.from_arguments([*written, "--rollout-temperature", "0"]).delayed_sample_limit(carrying)
+    with pytest.raises(ValueError, match="--rollout-batch-size of at least 2"):
+        SlimeFacts.from_arguments([*written, "--rollout-batch-size", "1"]).delayed_sample_limit(carrying)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (["--rollout-temperature", "-3"], r"temperature \(--rollout-temperature\) must be a finite number"),
+        (["--rollout-temperature", "nan"], r"temperature \(--rollout-temperature\) must be a finite number"),
+        (["--rollout-top-p", "7"], r"top_p \(--rollout-top-p\) must be in \(0, 1\]"),
+        (["--rollout-top-p", "0"], r"top_p \(--rollout-top-p\) must be in \(0, 1\]"),
+        (["--rollout-top-k", "0"], r"top_k \(--rollout-top-k\) must be -1 or a positive int"),
+        (["--rollout-batch-size", "0"], r"batch_size \(--rollout-batch-size\) must be a positive int or None"),
+        (["--n-samples-per-prompt", "0"], r"samples_per_prompt \(--n-samples-per-prompt\) must be a positive int"),
+        (["--global-batch-size", "-1"], r"global_batch_size \(--global-batch-size"),
+        # 1 prompt of 1 sample split into 8 steps: Slime would compute a global batch of 0 samples.
+        (["--rollout-batch-size", "1", "--num-steps-per-rollout", "8"], r"global_batch_size \(--global-batch-size"),
+        (["--num-steps-per-rollout", "0"], "--num-steps-per-rollout must be a positive int"),
+    ],
+)
+def test_rollout_options_outside_their_domain_are_refused_by_name(options: list[str], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SlimeFacts.from_arguments(["--hf-checkpoint", "/models/m", *options])
 
 
 class RuleBreaker(SlimeObjective):
