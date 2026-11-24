@@ -19,6 +19,7 @@ from pathlib import Path
 from reef.artifact.components import ComponentChecks, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
+from reef.core.job_data import DelayedSampleLimit
 from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.interfaces import InferenceRuntime
@@ -180,8 +181,8 @@ def check_recipe_objects(recipe: Recipe, live: LiveObjects) -> None:
     (``WeightTrainingRecipe.trains_task_jobs``) needs a training component that takes the recipe's task parameters
     (``TrainingComponent.check_task_jobs``); a process that holds the facts and no component runs no job and leaves
     that check to the training service, which holds the component. A weight recipe whose task jobs carry delayed
-    samples (``WeightTrainingRecipe.carries_delayed_samples``) needs facts that give a delayed sample limit for its
-    task parameters (``TrainingBackendFacts.delayed_sample_limit``). Raise ``RecipeConfigError`` otherwise.
+    samples needs facts that give a delayed sample limit for its task parameters (``task_delayed_sample_limit``).
+    Raise ``RecipeConfigError`` otherwise.
     """
     for _, one in component_recipes(recipe):
         if not isinstance(one, WeightTrainingRecipe):
@@ -198,21 +199,35 @@ def check_recipe_objects(recipe: Recipe, live: LiveObjects) -> None:
                     f"{type(one).__name__} trains task jobs, whose recipe.config.job_parameters name the "
                     f"objective, the rollouts of each task and the agent that runs them: {exc}"
                 ) from exc
-        if one.carries_delayed_samples():
-            try:
-                limit = live.training_facts.delayed_sample_limit(one.parameters_by_kind()["task"])
-            except ValueError as exc:
-                raise RecipeConfigError(
-                    f"{type(one).__name__}'s task jobs carry delayed samples, which the {live.training_facts.name} "
-                    f"training component cannot train: {exc}"
-                ) from exc
-            if limit is None:
-                raise RecipeConfigError(
-                    f"{type(one).__name__}'s task jobs carry delayed samples, but the "
-                    f"{live.training_facts.name} training component trains none with the task objective of "
-                    "recipe.config.job_parameters; name an objective that carries samples, or set the stage's "
-                    "delay to 0"
-                )
+        task_delayed_sample_limit(one, live.training_facts)
+
+
+def task_delayed_sample_limit(recipe: WeightTrainingRecipe, facts: TrainingBackendFacts) -> DelayedSampleLimit | None:
+    """The delayed samples that a task job of ``recipe`` trains, as ``facts`` state them for the recipe's task
+    parameters (``TrainingBackendFacts.delayed_sample_limit``); None for a recipe whose task jobs carry no delayed
+    samples (``WeightTrainingRecipe.carries_delayed_samples``).
+
+    ``check_recipe_objects`` calls it when the deployment loads, and the scenario factory when it builds a scenario's
+    trainer, whose record-to-sample config can be the scenario's own (``read_trainer_spec``). Raise
+    ``RecipeConfigError`` when the task jobs carry delayed samples and ``facts`` refuse the task parameters or state
+    no limit for them.
+    """
+    if not recipe.carries_delayed_samples():
+        return None
+    try:
+        limit = facts.delayed_sample_limit(recipe.parameters_by_kind()["task"])
+    except ValueError as exc:
+        raise RecipeConfigError(
+            f"the record-to-sample stage's designer_delay above 0 makes {type(recipe).__name__}'s task jobs carry "
+            f"delayed samples, which the {facts.name} training component cannot train: {exc}"
+        ) from exc
+    if limit is None:
+        raise RecipeConfigError(
+            f"the record-to-sample stage's designer_delay above 0 makes {type(recipe).__name__}'s task jobs carry "
+            f"delayed samples, but the {facts.name} training component trains none with the task objective of "
+            "recipe.config.job_parameters; name an objective that carries samples, or set designer_delay to 0"
+        )
+    return limit
 
 
 def declared_components(recipe: Recipe, scenario: str) -> ScenarioComponents:
@@ -381,5 +396,6 @@ __all__ = [
     "harness_models",
     "harness_served_model",
     "scenario_components",
+    "task_delayed_sample_limit",
     "weight_component_name",
 ]

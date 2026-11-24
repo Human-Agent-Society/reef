@@ -34,7 +34,13 @@ from reef.artifact.repository import (
 )
 from reef.artifact.sources import SourceFiles
 from reef.control.scenario.binding import ScenarioBinding
-from reef.control.scenario.live_objects import LiveObjects, check_root_start, default_start, scenario_components
+from reef.control.scenario.live_objects import (
+    LiveObjects,
+    check_root_start,
+    default_start,
+    scenario_components,
+    task_delayed_sample_limit,
+)
 from reef.control.scenario.scenario import Scenario
 from reef.control.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.core.artifact_selection import ArtifactSelection
@@ -254,11 +260,12 @@ def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
     - Any other recipe only reads records.
 
     The trainer writes the data of each job to ``live.data_store``. A weight recipe whose task jobs carry delayed
-    samples (``WeightTrainingRecipe.carries_delayed_samples``) gives its stages the delayed sample limit that the
-    facts of its training backend state (``TrainingBackendFacts.delayed_sample_limit``).
+    samples gives its stages the delayed sample limit that the facts of its training backend state
+    (``task_delayed_sample_limit``).
 
     Raise ``TypeError`` for a weight recipe whose class declares no ``sample2job`` stage. Raise
-    ``RecipeConfigError`` for a harness recipe or a weight recipe when ``live`` has no component for its jobs.
+    ``RecipeConfigError`` for a harness recipe or a weight recipe when ``live`` has no component for its jobs, and for
+    a weight recipe whose task jobs carry delayed samples that the facts refuse.
     """
     job_component = None
     job_parameters = None
@@ -281,8 +288,8 @@ def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
         # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
         job_component = live.training_component
         job_parameters = recipe.parameters_by_kind()
-        if recipe.carries_delayed_samples() and live.training_facts is not None:
-            delayed_sample_limit = live.training_facts.delayed_sample_limit(job_parameters["task"])
+        if live.training_facts is not None:
+            delayed_sample_limit = task_delayed_sample_limit(recipe, live.training_facts)
     return TrainerSpec(
         name=recipe.name,
         stages=recipe.stages(),

@@ -852,6 +852,10 @@ def test_the_recipe_refuses_a_designer_delay_that_the_training_component_cannot_
     check_recipe_objects(recipe, LiveObjects(runtime=runtime, training_facts=StubFacts(CarryingComponent())))
     with pytest.raises(RecipeConfigError, match=r"carry delayed samples, but the stub training component trains none"):
         check_recipe_objects(recipe, LiveObjects(runtime=runtime, training_facts=StubFacts(StubTrainingComponent())))
+    # A scenario's own config can turn the replies on after the load: its trainer refuses them the same way, so
+    # the scenario registry keeps the stored config (set_record2sample_config).
+    with pytest.raises(RecipeConfigError, match=r"designer_delay above 0 .* stub training component cannot train"):
+        read_trainer_spec(recipe, training_live(RefusingComponent()))
 
 
 @pytest.mark.unit
