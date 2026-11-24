@@ -41,6 +41,7 @@ from reef.control.operations.artifact_evaluations import (
     NewArtifacts,
     StoredCalls,
     attempt_trajectories,
+    iter_attempt_trajectories,
     rollout_work,
 )
 from reef.control.operations.data import DataAccess
@@ -2230,6 +2231,42 @@ def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_with
     assert [record["agent_record_id"] for record in first["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:3"]
     assert [trajectory["extra"]["reef"]["evaluation"]["conversation"] for trajectory in (first, second)] == [0, 1]
     assert first["extra"]["reef"]["reward"] == second["extra"]["reef"]["reward"] == 0.5
+
+
+@pytest.mark.unit
+def test_streaming_releases_finished_conversations_and_preserves_shared_branches() -> None:
+    rollout = EvaluationRollout("s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {}, "docker", {})
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.5},
+    )
+    question = [{"role": "user", "content": "question"}]
+    shared = [*question, {"role": "assistant", "content": "shared reply"}]
+    calls = [
+        chat_call(1, 0, question, "shared reply"),
+        chat_call(1, 1, [*shared, {"role": "user", "content": "left"}], "answer left"),
+        chat_call(1, 2, [*shared, {"role": "user", "content": "right"}], "answer right"),
+        *(chat_call(1, i, [{"role": "user", "content": f"unrelated {i}"}], "answer") for i in range(3, 70)),
+    ]
+    counted = CountedCalls(calls)
+    documents = iter_attempt_trajectories("s", "e1", item, counted)
+    left, right = next(documents), next(documents)
+    assert [s["message"] for s in left["steps"]] == ["question", "shared reply", "left", "answer left"]
+    assert [s["message"] for s in right["steps"]] == ["question", "shared reply", "right", "answer right"]
+    assert [r["agent_record_id"] for r in left["extra"]["reef"]["records"]] == ["e1:2:0:1:1"]
+    assert [r["agent_record_id"] for r in right["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:2"]
+    for ordinal, doc in enumerate(documents, start=2):
+        assert doc["extra"]["reef"]["evaluation"]["conversation"] == ordinal
+        assert doc["extra"]["reef"]["reward"] == 0.5
+    assert counted.most <= 4
 
 
 class TreeCallingLab(TaskLab):

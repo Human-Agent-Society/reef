@@ -19,7 +19,7 @@ import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -736,6 +736,16 @@ class DataStore(Plugin, JobDataReader, ABC):
         The store checks each ID that the owner holds: the same digest leaves the item unchanged, and another
         digest is an ``ItemConflictError``. It never replaces an item.
         """
+
+    def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous: Sequence[str]) -> None:
+        """Atomically publish the new trajectory IDs and delete the disjoint IDs of their previous revision.
+
+        An existing new ID must have the same digest. Missing previous IDs are ignored, so a caller can retry
+        after a successful publication. An error while reading the input preserves the previous revision.
+        The SQLite and PostgreSQL stores support this operation. Other storage plugins can implement it
+        alongside ``create``.
+        """
+        raise NotImplementedError("the data store does not support atomic trajectory publication")
 
     @abstractmethod
     def scenario_generation(self, owner: str, scenario: str) -> str: ...

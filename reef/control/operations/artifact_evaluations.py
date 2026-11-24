@@ -464,52 +464,74 @@ def attempt_trajectories(
     ``{evaluation_id, task, task_index, repeat, attempt, caller, conversation, scored}``, where ``conversation``
     counts from 0 in its attempt.
 
-    It reads ``calls`` twice, in order: once to link the calls, and once to add each call to its conversation
-    (``TrajectoryBuilder``). It keeps no call between two reads. So with ``StoredCalls`` it holds the bodies of one
-    batch of calls at a time, and the trajectories that it returns.
+    For incremental consumption use ``iter_attempt_trajectories``.
     """
+    return list(
+        iter_attempt_trajectories(scenario, evaluation_id, item, calls, caller, include_records=include_records)
+    )
+
+
+def iter_attempt_trajectories(
+    scenario: str,
+    evaluation_id: str,
+    item: WorkItem,
+    calls: Sequence[EvaluationCall],
+    caller: Caller = "agent",
+    *,
+    include_records: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Yield each conversation in attempt order, then first-call order. Link the successful calls first, keeping
+    their positions. Read the bodies of one conversation at a time to stitch it with ``TrajectoryBuilder``."""
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"]).value if finished else None
     indexes: dict[int, TrajectoryIndex] = {}
     record_ids: dict[int, list[str]] = {}
-    for call in calls:
+    positions: dict[str, int] = {}
+    for position, call in enumerate(calls):
         if call.summary.status != 200:
             continue
         record = call_record(scenario, evaluation_id, call)
         indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record)
         record_ids.setdefault(call.summary.attempt, []).append(record.agent_record_id)
-    # Each conversation of each attempt, by the ID of each of its calls; a call that a retry replaced is in none.
-    builders: dict[tuple[int, int], TrajectoryBuilder] = {}
-    conversation_of: dict[str, tuple[int, int]] = {}
+        positions[record.agent_record_id] = position
     for attempt in sorted(record_ids):
-        for conversation, linked in enumerate(indexes[attempt].conversations(record_ids[attempt])):
-            builders[attempt, conversation] = TrajectoryBuilder(include_records)
-            conversation_of.update(dict.fromkeys(linked, (attempt, conversation)))
-    for call in calls:
-        if call.summary.status != 200:
-            continue
-        record = call_record(scenario, evaluation_id, call)
-        place = conversation_of.get(record.agent_record_id)
-        if place is not None:
-            builders[place].add(record)
-    trajectories = []
-    for (attempt, conversation), builder in builders.items():
-        scored = caller == "agent" and finished and attempt == item.attempt_count
-        trajectory = builder.sample(reward=score if scored else None).trajectory
-        evaluation = {
-            "evaluation_id": evaluation_id,
-            "task": rollout.task_name,
-            "task_index": rollout.task_index,
-            "repeat": rollout.repeat,
-            "attempt": attempt,
-            "caller": caller,
-            "conversation": conversation,
-            "scored": scored,
-        }
-        extra = trajectory["extra"]
-        trajectories.append({**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}})
-    return trajectories
+        ids = record_ids[attempt]
+        conversation_of: dict[str, int] = {}
+        groups: list[list[int]] = []
+        # A retry replaces its earlier call. A prefix shared by branches belongs to the last branch, as in the
+        # recorded rollout. The first remaining call of each earlier branch still has its full request history.
+        for conversation, linked in enumerate(indexes[attempt].iter_conversations(ids)):
+            groups.append([])
+            conversation_of.update(dict.fromkeys(linked, conversation))
+        for record_id in ids:
+            group = conversation_of.get(record_id)
+            if group is not None:
+                groups[group].append(positions[record_id])
+        ordered = (pos for group_positions in groups for pos in group_positions)
+        if isinstance(calls, StoredCalls):
+            # Read originals in bounded batches, even when a rollout has hundreds of single-call conversations.
+            members = iter(replace(calls, items=tuple(calls.items[pos] for pos in ordered)))
+        else:
+            members = (calls[pos] for pos in ordered)
+        for conversation, group_positions in enumerate(groups):
+            builder = TrajectoryBuilder(include_records)
+            for _ in group_positions:
+                builder.add(call_record(scenario, evaluation_id, next(members)))
+            scored = caller == "agent" and finished and attempt == item.attempt_count
+            trajectory = builder.sample(reward=score if scored else None).trajectory
+            evaluation = {
+                "evaluation_id": evaluation_id,
+                "task": rollout.task_name,
+                "task_index": rollout.task_index,
+                "repeat": rollout.repeat,
+                "attempt": attempt,
+                "caller": caller,
+                "conversation": conversation,
+                "scored": scored,
+            }
+            extra = trajectory["extra"]
+            yield {**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}}
 
 
 def verifier_trajectory(item: StoredItem, rollout: EvaluationRollout) -> dict[str, Any]:
@@ -1877,10 +1899,26 @@ class ArtifactEvaluations:
         """The trajectories of the rollout of ``item`` (``attempt_trajectories``): of each attempt when
         ``every_attempt``, else of its last attempt only, without ``extra.reef.records`` when ``include_records`` is
         false. It reads the bodies of this one rollout's calls, one call at a time."""
+        return list(
+            self.iter_rollout_trajectories(
+                scenario, evaluation_id, item, every_attempt=every_attempt, include_records=include_records
+            )
+        )
+
+    def iter_rollout_trajectories(
+        self,
+        scenario: str,
+        evaluation_id: str,
+        item: WorkItem,
+        *,
+        every_attempt: bool,
+        include_records: bool = True,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield the same rollout trajectories in order, keeping one conversation in memory."""
         rollout = EvaluationRollout.from_item(item)
         attempt = None if every_attempt else item.attempt_count
         calls = self.rollout_calls(scenario, evaluation_id, rollout.task_index, rollout.repeat, attempt=attempt)
-        return attempt_trajectories(scenario, evaluation_id, item, calls, include_records=include_records)
+        return iter_attempt_trajectories(scenario, evaluation_id, item, calls, include_records=include_records)
 
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None."""

@@ -19,7 +19,7 @@ if their ``i``-th prefix hashes are equal.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -300,9 +300,14 @@ class TrajectoryIndex:
     def conversations(self, record_ids: Sequence[str]) -> list[tuple[str, ...]]:
         """The trajectories that end at a record of ``record_ids`` now (``is_end``), each as the IDs of its calls
         (``trajectory``), in the order of their first calls in ``record_ids``. Each ID of ``record_ids`` was added."""
+        return list(self.iter_conversations(record_ids))
+
+    def iter_conversations(self, record_ids: Sequence[str]) -> Iterator[tuple[str, ...]]:
+        """Yield the same conversations one path at a time. Branches may share a long initial path."""
         order = {record_id: position for position, record_id in enumerate(record_ids)}
-        ends = (self.trajectory(record_id) for record_id in record_ids if self.is_end(record_id))
-        return sorted(ends, key=lambda calls: order[calls[0]])
+        ends = (record_id for record_id in record_ids if self.is_end(record_id))
+        for end in sorted(ends, key=lambda record_id: order[self.trajectory(record_id)[0]]):
+            yield self.trajectory(end)
 
     def forget(self, record_ids: Iterable[str]) -> None:
         """Drop released records that no other call names as parent. Others stay as links of later calls."""
