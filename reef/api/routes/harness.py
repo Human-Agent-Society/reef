@@ -5,7 +5,7 @@ import asyncio
 from aiohttp import web
 
 from reef.api.auth import page_query
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
 from reef.api.wire import scenario_header
 from reef.control.operations.harness import harness_artifacts, harness_manifest
@@ -14,11 +14,13 @@ from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 
 
-def register_harness_routes(app: web.Application, *, request_service: RequestService, imports: HarnessImports) -> None:
+def register_harness_routes(
+    app: web.Application, *, request_handling: RequestHandling, imports: HarnessImports
+) -> None:
     """The routes that a harness client calls: the active tree, the snapshots, the import of a person's files, and the
     adapters. Control's app and the harness service's app both serve them; ``imports`` commits an import."""
 
-    dispatcher = request_service.dispatcher
+    dispatcher = request_handling.dispatcher
 
     async def manifest(request: web.Request) -> web.Response:
         form = request.query.get("form", "rendered")
@@ -32,7 +34,7 @@ def register_harness_routes(app: web.Application, *, request_service: RequestSer
             service_url,
             root,
             artifact_id=request.query.get("artifact_id") or None,
-            inference_url=request_service.inference_url,
+            inference_url=request_handling.inference_url,
         )
         return web.json_response(answer, headers={"x-reef-artifact-id": answer["artifact_id"]})
 

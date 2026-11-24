@@ -4,13 +4,13 @@ import asyncio
 
 from aiohttp import web
 
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
 from reef.control.operations.artifact_imports import ArtifactImports
 
 
 def register_artifact_import_routes(
-    app: web.Application, *, request_service: RequestService, imports: ArtifactImports
+    app: web.Application, *, request_handling: RequestHandling, imports: ArtifactImports
 ) -> None:
     async def import_artifact(request: web.Request) -> web.Response:
         payload = await read_object(request)
@@ -29,11 +29,11 @@ def register_artifact_import_routes(
         scenario, component = request.match_info["scenario"], request.query.get("component")
         if key == "source":
             receipt = await asyncio.to_thread(
-                imports.import_source, request_service.dispatcher, scenario, component, value.strip()
+                imports.import_source, request_handling.dispatcher, scenario, component, value.strip()
             )
         else:
             receipt = await asyncio.to_thread(
-                imports.import_item, request_service.dispatcher, scenario, component, value
+                imports.import_item, request_handling.dispatcher, scenario, component, value
             )
         return web.json_response(receipt, status=201)
 

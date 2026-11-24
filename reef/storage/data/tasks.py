@@ -145,7 +145,7 @@ class GenerationState:
 
     @property
     def pending_indices(self) -> tuple[int, ...]:
-        """The indices of the candidates that have no outcome."""
+        """The indices of the candidates that have no outcome. The stage validates these, also after a restart."""
         return tuple(index for index, candidate in enumerate(self.candidates or ()) if candidate.is_pending)
 
 
@@ -321,7 +321,10 @@ class TaskStorage(ABC):
 
     @abstractmethod
     def open(self, name: str) -> TaskStore:
-        """Open the task store ``name``. A store that holds nothing yet is empty."""
+        """Open the task store ``name``. A store that holds nothing yet is empty.
+
+        Each record-to-sample stage uses its own ``name``.
+        """
 
 
 class TaskFileStore(Plugin, ABC):
@@ -331,6 +334,10 @@ class TaskFileStore(Plugin, ABC):
     It keeps the files of each scenario apart, so that ``archive`` retires
     them with the scenario. The scenario storage owns the store and closes
     it.
+
+    The store keeps its files in partitions: one for each scenario, under the scenario's name, and
+    ``data/<owner>`` (``reef.storage.data.item_kinds.task_partition``) for the task items of each data owner.
+    The ``scenario`` argument of ``write`` and ``path`` names a partition of either kind.
     """
 
     @classmethod
@@ -346,6 +353,10 @@ class TaskFileStore(Plugin, ABC):
     @abstractmethod
     def write(self, scenario: str, source: Path) -> str:
         """Save a copy of the task directory ``source`` and return the digest of its files.
+
+        The digest is ``files_digest(source)``. A store that already holds the same files, with the same executable
+        flags, under their legacy digest (``FilesDigest``) can return that digest instead. Read the copy by the
+        digest that the method returns.
 
         The copy is durable when the method returns. Raises ``TaskStoreError``
         if ``source`` holds an entry that is not a file or a directory.
@@ -489,7 +500,11 @@ class TaskDirectoryDigest:
 
 
 def files_digest(source: Path) -> str:
-    """Return the SHA-256 digest of a task directory's name, file paths, bytes, and executable flags."""
+    """Return the SHA-256 digest of a task directory's name, file paths, bytes, and executable flags.
+
+    The digest is 64 lowercase hexadecimal digits. A directory adds nothing, so an empty directory does not change
+    it. Raises ``TaskStoreError`` if ``source`` holds a symbolic link or a special file.
+    """
     return task_directory_digest(source).hexdigest()
 
 

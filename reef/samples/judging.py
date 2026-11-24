@@ -34,6 +34,7 @@ class RecordJudging(BackgroundJobRunner, ABC):
     ``observe`` and ``expire`` run on the trainer thread and must not block.
     ``judge`` runs on the worker thread, so it may call models and take
     minutes. State that it shares with the trainer thread must be safe to use from both threads.
+    A replay of the records must rebuild the correlation state that it keeps.
     """
 
     @abstractmethod
@@ -46,7 +47,10 @@ class RecordJudging(BackgroundJobRunner, ABC):
 
     @abstractmethod
     async def judge(self, job: SupportsReceipt) -> SupportsReceipt:
-        """The method's judgment for one job. It carries the ``receipt`` of the record that it judges."""
+        """The method's judgment for one job. It carries the ``receipt`` of the record that it judges.
+
+        A judgment that raises retires its record and fails no training step.
+        """
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
         """Run one job on the worker: the method's ``judge``."""

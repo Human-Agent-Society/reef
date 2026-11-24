@@ -447,8 +447,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     clients that requested a stream still receive a valid one.
     """
 
-    # A harness that parses raw thinking tags itself opts out by overriding
-    # this class attribute.
+    #: A harness that parses raw thinking tags itself opts out by overriding
+    #: this class attribute with False, which keeps the tags in the content.
     SPLIT_REASONING = True
     # Set when the chat template pre-opens ``<think>``: the sample then
     # carries only the closing tag, so a sample with no ``</think>`` is

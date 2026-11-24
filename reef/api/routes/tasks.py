@@ -4,14 +4,14 @@ import asyncio
 
 from aiohttp import web
 
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.control.operations.tasks import list_imported_tasks
 
 
-def register_task_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_task_routes(app: web.Application, *, request_handling: RequestHandling) -> None:
     async def tasks(request: web.Request) -> web.Response:
         listing = await asyncio.to_thread(
-            list_imported_tasks, request_service.dispatcher, request.match_info["scenario"]
+            list_imported_tasks, request_handling.dispatcher, request.match_info["scenario"]
         )
         return web.json_response(listing)
 

@@ -199,21 +199,21 @@ def test_an_ordinary_deployment_never_installs_a_sighup_handler(
     assert signal.SIGHUP not in installed
 
 
-@pytest.mark.parametrize("component", ["control", "inference"])
-def test_managed_routing_refuses_standalone_components(
-    tmp_path: Path, component: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("service", ["control", "inference"])
+def test_managed_routing_refuses_one_service_on_its_own(
+    tmp_path: Path, service: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = write_managed_config(tmp_path)
 
     def refuse_start(*args, **kwargs) -> NoReturn:
-        pytest.fail("a managed deployment started a standalone component")
+        pytest.fail("a managed deployment started one service on its own")
 
-    monkeypatch.setattr(SERVICE_APPS[component], "build", refuse_start)
+    monkeypatch.setattr(SERVICE_APPS[service], "build", refuse_start)
     settings = ServiceSettings(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
-    with pytest.raises(ValueError, match="requires reef serve without --component"):
-        build_service_app(component, settings)
-    with pytest.raises(orchestrator.DeployConfigError, match="requires reef serve without --component"):
-        orchestrator.run_component(str(path), None, component)
+    with pytest.raises(ValueError, match="requires reef serve without --service"):
+        build_service_app(service, settings)
+    with pytest.raises(orchestrator.DeployConfigError, match="requires reef serve without --service"):
+        orchestrator.run_one_service(str(path), None, service)
 
 
 def test_managed_object_config_prepares_controller_and_private_child(

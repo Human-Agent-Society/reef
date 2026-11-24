@@ -21,7 +21,7 @@ from reef.storage.coordination.work_queue import JsonValue, LeaseExtender, WorkI
 
 logger = logging.getLogger(__name__)
 
-#: The services of a deployment. ``reef serve --component NAME`` runs one in a process; the one-process layout runs
+#: The services of a deployment. ``reef serve --service NAME`` runs one in a process; the one-process layout runs
 #: all of them in one process, on the same interfaces.
 SERVICE_NAMES = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
 

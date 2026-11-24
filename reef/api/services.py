@@ -1,4 +1,4 @@
-"""``reef serve --component NAME``: one service of a deployment in one process.
+"""``reef serve --service NAME``: one service of a deployment in one process.
 
 Each service reads and writes the shared store of the deployment (``storage.record_backend``): PostgreSQL for
 processes on several hosts, SQLite for processes on one host. The services are:
@@ -15,7 +15,7 @@ processes on several hosts, SQLite for processes on one host. The services are:
 - ``harness``: the routes that a harness client calls (``reef.api.routes.harness``); control commits each
   import (``reef.control.operations.harness_imports``). It needs no control lease.
 
-A service that only takes work from a queue answers ``/healthz`` alone. ``reef serve`` without ``--component`` runs
+A service that only takes work from a queue answers ``/healthz`` alone. ``reef serve`` without ``--service`` runs
 all of them in one process, on the same interfaces.
 """
 
@@ -64,7 +64,7 @@ from reef.train.job_queue import TrainingCheckWorker, TrainingJobWorker
 
 
 class ServiceApp(ABC):
-    """How ``reef serve --component NAME`` builds the app of one service.
+    """How ``reef serve --service NAME`` builds the app of one service.
 
     Values: ``build(settings, environ)`` returns the app of the service, which owns what it opens and closes it at
     cleanup. Purpose: ``SERVICE_APPS`` holds one per service; ``build_service_app`` calls it.
@@ -358,7 +358,7 @@ def build_service_app(
     if builder is None:
         raise ValueError(f"unknown service {service!r}; the services are {SERVICE_NAMES}")
     if settings.routing_manifest is not None and settings.routing_deployment.lifecycle == "managed":
-        raise ValueError("managed routing requires reef serve without --component")
+        raise ValueError("managed routing requires reef serve without --service")
     if service != "inference":
         settings = replace(settings, routing_manifest=None)
     return builder.build(settings, os.environ if environ is None else environ)

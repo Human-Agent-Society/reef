@@ -882,18 +882,25 @@ class CandidateSelector(ABC):
     """
 
     @abstractmethod
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision: ...
+    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
+        """The decision on ``candidate``. It must carry ``evaluation``, the result that the method was given."""
 
 
 class CandidateEvaluator(ABC):
     """Measure a candidate without deciding whether to publish it."""
 
     @abstractmethod
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult: ...
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        """The measurements of ``candidate``. Make the evaluation idempotent by ``candidate.candidate_id``: recovery
+        can repeat an evaluation whose result no commit recorded."""
 
 
 class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
-    """Measure a candidate and decide whether Reef serves it."""
+    """Measure a candidate and decide whether Reef publishes it.
+
+    An exception from ``evaluate`` or ``decide`` publishes nothing. The activation rule, not the plugin, decides
+    whether a published candidate serves.
+    """
 
     def evaluate_and_decide(self, candidate: UpdateCandidate) -> SelectionDecision:
         """Evaluate ``candidate`` and decide on that evaluation.

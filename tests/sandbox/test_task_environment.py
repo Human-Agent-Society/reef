@@ -995,3 +995,24 @@ def test_a_compose_trial_moves_files_through_the_guest_to_and_from_main(
     assert stat.S_IMODE((tmp_path / "back" / "bin" / "run.sh").stat().st_mode) == 0o755
     # Nothing stays in the guest.
     assert list((guest_root / "tmp").iterdir()) == []
+
+
+@pytest.mark.unit
+def test_a_compose_command_as_root_names_root_by_its_uid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent can overwrite /etc/passwd in main. Docker then finds no user named root, but it still runs UID 0."""
+    import shlex
+
+    from harbor.environments.base import ExecResult
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    commands: list[list[str]] = []
+
+    async def host_exec(command: str, timeout_sec: int | None = None) -> ExecResult:
+        commands.append(shlex.split(command))
+        return ExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(environment, "host_exec", host_exec)
+    for user in ("root", "agent", 1000):
+        asyncio.run(environment.exec("true", user=user))
+    users = [command[command.index("-u") + 1] for command in commands]
+    assert users == ["0", "agent", "1000"]

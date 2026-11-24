@@ -8,7 +8,8 @@ submission, which consumes the records of the job's data. While the job runs, th
 trainer commits each checkpoint that it saves as an artifact. Training never
 activates an artifact: the scenario's activation rule decides whether it
 serves. The training component only trains; it evaluates no artifact. When the
-job ends, the trainer commits its outcome.
+job ends, the trainer commits its outcome. A failed job ends like a finished
+one, so the records of its data do not train again.
 
 A job continues the trainer's training start unless its request names another start (``train_from``, RFC #1324).
 A job that continues the training start begins there and moves it to each checkpoint that it saves, so the next such

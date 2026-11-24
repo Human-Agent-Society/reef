@@ -1,6 +1,6 @@
 """The generator service: the slow, container bound steps of task generation behind a small HTTP API.
 
-A processor that generates tasks runs inside the Reef service and must not block the trainer; it also
+A record-to-sample stage that generates tasks runs inside the Reef service and must not block the trainer; it also
 must not need Docker, the ``harbor`` command line or reef-eval in that process. So the steps that need
 them run here, in a process ``reef serve`` starts beside the HTTP service (see ``reef.deploy``):
 

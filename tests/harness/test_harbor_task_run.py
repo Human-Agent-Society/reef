@@ -25,6 +25,7 @@ from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
 from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import (
+    CONTAINER_INSTRUCTION,
     CONTAINER_ROOT,
     MUSL_CHECK,
     NPM_AGENT_PATH,
@@ -240,20 +241,41 @@ def test_the_relay_runs_on_the_python_of_the_image_or_on_a_python_from_an_upload
     assert '{ [ -d "${SSL_CERT_DIR:-/}" ] || unset SSL_CERT_DIR; }; "$HOME/.local/bin/uv" python install' in install
 
 
-@pytest.mark.parametrize("name", ["opencode", "codex"])
 def test_an_instruction_that_starts_with_a_dash_reaches_the_agent_after_the_end_of_its_options(
-    tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A Markdown list item is a common first line of a task. Without "--", opencode and codex read it as an option
-    # and print their usage.
+    # A Markdown list item is a common first line of a task. Without "--", codex reads it as an option and prints
+    # its usage.
     monkeypatch.setattr("reef.harness.harbor.agent.node_archive", lambda name, cache: tmp_path / "node.tar.gz")
     (tmp_path / "node.tar.gz").write_text("node")
-    adapter = get_adapter(name)
+    adapter = get_adapter("codex")
     (tmp_path / "logs").mkdir()
     agent = AdapterAgent(tmp_path / "logs", **adapter_agent_kwargs(adapter, adapter.install, tmp_path / "files", 60.0))
     environment = RecordingEnvironment()
     asyncio.run(agent.run("- You are given a state dictionary.", environment, AgentContext()))
     assert " -- '- You are given a state dictionary.' </dev/null" in environment.commands[-2]
+
+
+def test_an_agent_that_reads_its_task_from_stdin_gets_an_instruction_longer_than_an_argument_may_be(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The decompilation tasks of a benchmark carry a contract's assembly: 135 KB, over Linux's 128 KiB argument limit.
+    monkeypatch.setattr("reef.harness.harbor.agent.node_archive", lambda name, cache: tmp_path / "node.tar.gz")
+    (tmp_path / "node.tar.gz").write_text("node")
+    opencode = get_adapter("opencode")
+    (tmp_path / "logs").mkdir()
+    agent = AdapterAgent(
+        tmp_path / "logs", **adapter_agent_kwargs(opencode, opencode.install, tmp_path / "files", 60.0)
+    )
+    environment = RecordingEnvironment()
+    instruction = "- Decompile this.\n" + "PUSH1 0x80\n" * 15000
+    asyncio.run(agent.run(instruction, environment, AgentContext()))
+    command = next(command for command in environment.commands if '"$agent" run' in command)
+    assert environment.uploads[CONTAINER_INSTRUCTION] == instruction
+    assert command.endswith(f'"$agent" run --format json --auto -- <{CONTAINER_INSTRUCTION}') and len(command) < 4096
+    position = environment.commands.index(command)
+    assert environment.commands.index(f"set -o pipefail; chmod a+r {CONTAINER_INSTRUCTION}") < position
+    assert environment.commands[position + 1] == f"set -o pipefail; rm -f {CONTAINER_INSTRUCTION}"
 
 
 def test_the_hermes_adapter_installs_its_pinned_checkout_editable_and_runs_its_binary(
@@ -598,6 +620,52 @@ def test_a_bridged_agent_answers_the_relayed_calls_from_the_proxy_port_while_its
     assert json.loads(base64.b64decode(piece["data"])) == {"answer": "42?"}
     assert piece["headers"]["X-Model"] == "m"
     assert any(command.endswith("c1 /tmp/reef-relay/replies/c1.json") for command in container.exchanges)
+
+
+def test_the_bridge_starts_one_idle_exchange_and_expands_while_the_first_answer_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class IdleBridge(RecordingEnvironment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: asyncio.Queue[str] = asyncio.Queue()
+            self.polling = asyncio.Event()
+            self.exchanges = 0
+
+        async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+            result = await super().exec(command, user=user, env=env, cwd=cwd, timeout_sec=timeout_sec)
+            if "client.py" not in command or command.endswith(" ready"):
+                return result
+            self.exchanges += 1
+            self.polling.set()
+            return SimpleNamespace(return_code=0, stdout=await self.requests.get(), stderr="")
+
+    async def run() -> None:
+        container = IdleBridge()
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=8901, **kwargs)
+        concurrent = asyncio.Event()
+        requests: list[str] = []
+
+        async def answer(local: ClientSession, request: Mapping[str, str]) -> dict[str, object]:
+            requests.append(request["id"])
+            if len(requests) == 4:
+                concurrent.set()
+            await concurrent.wait()
+            return {"status": 200, "end": True, "sequence": 0}
+
+        monkeypatch.setattr(agent, "answer", answer)
+        async with agent.bridged(container):
+            await asyncio.wait_for(container.polling.wait(), 5)
+            assert container.exchanges == 1
+            for index in range(4):
+                container.requests.put_nowait(json.dumps({"id": f"call-{index}"}))
+            await asyncio.wait_for(concurrent.wait(), 5)
+            assert len(set(requests)) == 4
+
+    (tmp_path / "logs").mkdir()
+    asyncio.run(run())
 
 
 def test_a_bridged_agent_refuses_a_relayed_target_that_is_not_a_path_of_the_proxy_port(tmp_path: Path) -> None:

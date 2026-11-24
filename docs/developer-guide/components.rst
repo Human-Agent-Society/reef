@@ -87,29 +87,29 @@ Declare components
            prompt = ComponentSpec(validator=PromptValidator(), files=TextFileTree())
            return ScenarioComponents({"prompt": prompt})
 
-A recipe whose scenario serves two components declares both:
+The declaration of a scenario that serves two components has both:
 
 .. code:: python
 
-   class AgentRecipe(Recipe):
-       def build_components(self, scenario: str) -> ScenarioComponents:
-           return ScenarioComponents(
-               {
-                   "weights": ComponentSpec(kind="model_adapter"),
-                   "harness": ComponentSpec(files=TextFileTree()),
-               }
-           )
+   ScenarioComponents(
+       {
+           "weights": ComponentSpec(kind="model_adapter"),
+           "harness": ComponentSpec(files=TextFileTree()),
+       }
+   )
 
+- Only a ``CompositeRecipe`` (``reef.recipe.composite``) makes such a
+  declaration. It builds the declaration from a mapping of component name to
+  recipe, and runs each recipe's trainer as its own worker (see `Recipe
+  configuration
+  <../reference/configuration-recipe.rst#recipe-configuration>`__). Another
+  recipe has one trainer, so Reef refuses it when it declares two components.
 - A training step publishes one component and names it in
   ``TrainingCommit.component``. Reef carries the other components forward
   from the previous snapshot.
 - A snapshot of at most one component is flat. A snapshot of several
   components has one directory per component (``weights/``, ``harness/``).
 - Each artifact keeps its own ``artifact_id``.
-- ``CompositeRecipe`` (``reef.recipe.composite``) builds such a declaration
-  from a mapping of component name to recipe, and runs each recipe's trainer
-  as its own worker (see `Recipe configuration
-  <../reference/configuration-recipe.rst#recipe-configuration>`__).
 
 Admission checks
 ----------------

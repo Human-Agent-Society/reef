@@ -5,47 +5,56 @@ This page says which package owns a change, and maps the packages to the seven s
 
 Each package's ``__init__`` docstring states the boundaries that it holds and how to extend it. There are no READMEs under ``reef/``. Read the docstring of the package that you change; this page only helps you find it.
 
-Packages
---------
+Layers
+------
 
-Reef is organized around an application kernel and three capability domains, not a strict stack of top-level packages. The arrows show the primary composition and use paths; they are not an exhaustive import graph:
+Reef has four layers. A package imports from its own layer and from the layers below it. It imports from no layer above it. `Package import direction`_ gives the imports of each package.
 
 .. code:: mermaid
 
    flowchart TD
-       accTitle: Reef application kernel, capability domains, and adapters
+       accTitle: The four layers of Reef and the direction of imports
 
-       Methods("<b>Method plug-ins</b><br/><code>recipes/*</code>")
-       Entry("<b>Entrypoints</b><br/>HTTP · CLI")
-       Policy("<b>Policy</b><br/><code>reef/recipe</code>")
-       Service("<b>Delivery &amp; composition</b><br/><code>reef/api</code> · <code>reef/deploy</code>")
-       Kernel(["<b>Application kernel</b><br/><code>reef/control</code>"])
+       Methods("<b>Method packages</b><br/><code>recipes/*</code>")
 
-       subgraph Domains["Capability domains"]
+       subgraph Entry["Entry layer: how a request or a command reaches Reef"]
            direction LR
-           Serving("<b>Serving</b><br/><code>inference</code> · <code>routing</code>")
-           Evolution("<b>Evolution</b><br/><code>train</code> · <code>evaluation</code> · <code>harness</code>")
-           State("<b>State</b><br/><code>artifact</code> · <code>storage</code>")
+           Deploy("<b>deploy</b><br/><code>reef serve</code>")
+           Api("<b>api</b><br/>HTTP process of each service")
        end
 
-       subgraph Adapters["Concrete adapters"]
-           direction LR
-           ServingAdapters("inference backends")
-           EvolutionAdapters("training backends<br/>harness adapters")
-           StateAdapters("Git/LFS repositories<br/>SQLite · PostgreSQL")
+       subgraph ControlLayer["Control layer: the loaded scenarios"]
+           Control("<b>control</b><br/>scenarios · workers · operations")
        end
 
-       Observability(["<b>Cross-cutting</b><br/><code>reef/observability</code>"])
-       Core(["<b>Shared kernel</b><br/><code>reef/core</code>"])
+       subgraph Domain["Domain layer: one package for each capability"]
+           direction LR
+           Recipe("<b>recipe</b><br/>method contract")
+           Train("<b>train</b><br/>training jobs")
+           Samples("<b>samples</b><br/>records to samples")
+           Evaluation("<b>evaluation</b><br/>candidate evaluation")
+           Harness("<b>harness</b><br/>harness tree and runs")
+           Routing("<b>routing</b><br/>Semantic Router")
+           Inference("<b>inference</b><br/>model requests")
+       end
 
-       Methods --> Policy --> Kernel
-       Entry --> Service --> Kernel
-       Kernel --> Serving & Evolution & State
-       Serving --> ServingAdapters
-       Evolution --> EvolutionAdapters
-       State --> StateAdapters
-       Kernel -. telemetry .-> Observability
-       ServingAdapters & EvolutionAdapters & StateAdapters --> Core
+       subgraph Foundation["Foundation layer: shared mechanisms"]
+           direction LR
+           Observability("<b>observability</b>")
+           Execution("<b>execution</b>")
+           Storage("<b>storage</b>")
+           Artifact("<b>artifact</b>")
+           Tinker("<b>tinker</b>")
+           Core("<b>core</b>")
+       end
+
+       Entry --> ControlLayer --> Domain --> Foundation
+       Methods -. "implement the recipe contract" .-> Domain
+
+Packages
+--------
+
+The table says which package owns a change.
 
 .. list-table::
    :header-rows: 1
@@ -114,10 +123,15 @@ Reef is organized around an application kernel and three capability domains, not
 
 Nothing under ``reef/`` imports a method package. A weight method keeps its objective and loss family in a ``slime/`` subpackage that only the training service imports. A harness method holds its ``Method``, its prompts, and a scorer when it needs its own.
 
+Two parts look as if they belong to another package. Each stays for a reason.
+
+- **The training pipeline stays in ``train``.** ``TrainingPipeline`` (``reef/train/pipeline.py``) stores the samples that the record-to-sample stage makes, and it selects the samples of the next job. The two halves share the sample store and its state under the trainer's lock, and ``reef`` exports the class. A split of the class changes that interface, so it needs an RFC (`Changes that need an RFC <../../CONTRIBUTING.md#changes-that-need-an-rfc>`__).
+- **The generated-task recipe stays in ``recipe``.** ``reef/recipe/generated_tasks/`` holds the recipe that trains on generated Harbor tasks, and ``TaskGenerator``, the base class of a task generator. A generator, such as SPADE in ``recipes/beta/``, is a plugin of this recipe. The ``recipes/`` tree does not ship in the Reef wheel, so the base class and its recipe must be in ``reef/``.
+
 Services and the shared store
 -----------------------------
 
-A deployment runs seven services (``SERVICE_NAMES`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --component NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
+A deployment runs seven services (``SERVICE_NAMES`` in ``reef/execution/workers.py``). ``reef serve`` runs all of them in one process, and ``reef serve --service NAME`` runs one. No service calls another: each reads and writes the shared store. `Run the services in separate processes <../user-guide/split-services.rst>`__ describes the layout for operators.
 
 ``reef/api/services.py`` holds one app builder per service (``SERVICE_APPS``). Control, data, harness, samples and evaluation each build a ``Dispatcher`` (``build_dispatcher`` in ``reef/api/assembly.py``) that runs only that service's workers. Inference and training build no dispatcher.
 
@@ -272,34 +286,32 @@ Concrete integrations may depend on shared contracts. Shared contracts never imp
      - ``storage``, ``core``
    * - ``observability``
      - ``artifact``, ``storage``, ``core``
-   * - ``pipeline_context``
-     - ``observability``, ``storage``, ``core``
    * - ``inference``
      - ``tinker``, ``execution``, ``artifact``, ``core``
+   * - ``routing``
+     - ``inference``, ``storage``, ``core``
    * - ``harness``
      - ``inference``, ``execution``, ``artifact``, ``core``
-   * - ``record2sample``
-     - ``harness``, ``pipeline_context``, ``execution``, ``storage``, ``core``
-   * - ``sample2job``
-     - ``record2sample``, ``pipeline_context``, ``observability``, ``storage``, ``core``
+   * - ``samples``
+     - ``harness``, ``observability``, ``execution``, ``storage``, ``core``
    * - ``evaluation``
      - ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``core``
    * - ``train``
-     - ``evaluation``, ``sample2job``, ``record2sample``, ``harness``, ``tinker``, ``pipeline_context``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``samples``, ``harness``, ``tinker``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``sample2job``, ``record2sample``, ``harness``, ``pipeline_context``, ``execution``, ``artifact``, ``storage``, ``core``
-   * - ``scenario``
-     - ``recipe``, ``train``, ``evaluation``, ``sample2job``, ``record2sample``, ``inference``, ``harness``, ``artifact``, ``storage``, ``observability``, ``core``
-   * - ``dispatcher``
-     - ``scenario``, ``recipe``, ``train``, ``evaluation``, ``record2sample``, ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
-   * - ``service``
-     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``evaluation``, ``record2sample``, ``inference``, ``harness``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``samples``, ``harness``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``control``
+     - ``recipe``, ``train``, ``evaluation``, ``samples``, ``inference``, ``harness``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``api``
+     - ``control``, ``recipe``, ``train``, ``evaluation``, ``inference``, ``routing``, ``harness``, ``observability``, ``execution``, ``artifact``, ``storage``, ``core``
+   * - ``deploy``
+     - ``api``, ``recipe``, ``samples``, ``inference``, ``routing``, ``execution``, ``artifact``, ``core``
    * - ``cli``
-     - ``service``, ``core``
+     - ``deploy``, ``core``
 
 Three rules follow from the graph:
 
-- **Training and inference never import each other.** ``train/`` never imports ``inference/``, and ``inference/`` never imports ``train/``. The values that both read are in ``reef/core/``: the weight layout (``core/weight_layout.py``), chat rendering (``core/chat_rendering.py``) and the reasoning split (``core/reasoning.py``). ``execution/executor/`` owns worker launch and control RPC for both sides. No training backend builds serving: ``service/deploy/serving.py`` selects it from the ``inference`` section and the component's snapshot format.
+- **Training and inference never import each other.** ``train/`` never imports ``inference/``, and ``inference/`` never imports ``train/``. The values that both read are in ``reef/core/``: the weight layout (``core/weight_layout.py``), chat rendering (``core/chat_rendering.py``) and the reasoning split (``core/reasoning.py``). ``execution/executor/`` owns worker launch and control RPC for both sides. No training backend builds serving: ``api/serving.py`` selects it from the ``inference`` section and the component's snapshot format.
 - **The inference contracts import no integration.** The modules at the root of ``inference/`` are the contracts: ``interfaces.py`` (``InferenceRuntime``, ``InferenceBackend``, runtime load IDs), ``deployment.py``, ``registry.py``, ``serving.py``, ``recovery.py`` and ``residency.py``. Engines live in ``inference/sglang/``, ``inference/vllm/`` and ``inference/remote/``.
 - **The execution base stays small.** ``execution/lifecycle.py`` uses only the standard library. ``execution/processes.py`` and ``execution/jobs.py`` add only ``reef.core.errors``. None of them imports ``execution.sandbox``.
 
@@ -319,13 +331,13 @@ Deployment modules
    * - ``config_utils.py``
      - Reads YAML, expands environment and config references, and locates recipe source packages. It downloads no model and validates no process graph.
    * - ``service_config.py``
-     - Declares the shared HTTP, storage and runtime fields, and converts effective values into ``ServiceSettings`` for app assembly.
+     - Converts the effective values of a deployment into ``ServiceSettings`` for app assembly. ``reef/api/settings.py`` declares the shared HTTP, storage and runtime fields.
    * - ``deployment_config.py``
      - Declares the ``DeploymentSettings`` defaults, loads the selected recipe and runtime declarations, translates the versioned public layout, and validates component values.
    * - ``cli.py``
      - Builds help and applies dotted command-line overrides before the shared type conversion. CLI values take precedence over YAML.
-   * - ``inference.py``, ``training.py``, ``serving.py``
-     - Assemble the inference processes, the training deployment that ``training.backend`` names, and the serving runtime.
+   * - ``inference.py``, ``training.py``
+     - Assemble the inference processes and the training deployment that ``training.backend`` names. They read the serving mode and the training backend from ``reef/api/serving.py`` and ``reef/api/training.py``.
    * - ``execution.py``, ``process.py``, ``guard.py``
      - Validate process definitions and dependency order, select executors, own worker processes, and clean up a remote process group when its Ray owner disappears.
    * - ``diagnostics.py``

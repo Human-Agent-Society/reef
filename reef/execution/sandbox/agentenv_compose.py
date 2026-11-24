@@ -296,6 +296,21 @@ class AgentEnvComposeOps(DinDComposeOps):
         self.host = host
 
     @override
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+        *,
+        service: str | None = None,
+    ) -> ExecResult:
+        # Docker finds a user name in the container's /etc/passwd, which the agent can change. Root goes by its UID.
+        user = 0 if user == "root" else user
+        return await super().exec(command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user, service=service)
+
+    @override
     async def _compose_exec(self, subcommand: list[str], timeout_sec: int | None = None) -> ExecResult:
         command = ["docker", "compose", "--project-name", PROJECT_NAME, *subcommand]
         return await self.host.host_exec(shlex.join(command), timeout_sec=timeout_sec)

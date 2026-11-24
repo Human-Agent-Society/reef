@@ -51,9 +51,10 @@ what they mean.
 Recipe
 ------
 
-The method that a deployment runs. It binds a processor, a training
-objective, an inference runtime and the components of its snapshots; a weight
-recipe also binds a training component. The core ``recipe`` records without
+The method that a deployment runs. It names the stages of its training
+pipeline, its training objective and the components of its snapshots. A recipe
+is configuration only: the process that runs a service builds the inference
+runtime and the training component. The core ``recipe`` records without
 producing updates. See `Choose a recipe <../user-guide/recipes.rst>`__.
 
 Recipe reference
@@ -177,17 +178,23 @@ stage shapes the samples into one job's data. See `Training pipeline
 Reported and computed feedback
 ------------------------------
 
-Two ways a signal reaches a processor. **Reported** feedback arrives
-in a ``POST /reef/report``. **Computed** feedback is derived from recorded
-traffic alone, with no report. The choice picks the processor engine.
+Two ways a signal reaches the record-to-sample stage. **Reported** feedback
+arrives in a ``POST /reef/report``. **Computed** feedback is derived from
+recorded traffic alone, with no report. The choice picks the base class of the
+stage: ``ReportSamples`` for reported feedback, ``JudgedSamples`` for computed
+feedback.
 
 Sample
 ------
 
 One item of job data, a ``Sample`` (``reef.core.job_data``): a
 ``TrajectorySample`` that trains as it is, or a ``TaskSample``, a Harbor task
-that the training component rolls out. ``job_samples`` and ``buffer_size``
-count samples. A sample is not a sampling call to a model.
+that the training component rolls out. The trajectory of a
+``TrajectorySample`` is an `ATIF document
+<https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__,
+and a ``TaskSample`` names a `Harbor task directory
+<https://www.harborframework.com/docs/tasks>`__. ``job_samples`` and
+``buffer_size`` count samples. A sample is not a sampling call to a model.
 
 Staleness
 ---------
@@ -226,7 +233,7 @@ Training objective
 A backend's objective (``SlimeObjective`` or ``TinkerObjective``). It declares
 its loss family and prepares a job's data: advantages, metrics and algorithm
 state. A recipe selects it through the job parameter ``objective``. See
-`Training objective <python-api-training.rst#training-objective>`__.
+`The objective <../developer-guide/recipe-training-service.rst#the-objective>`__.
 
 Loss family
 -----------

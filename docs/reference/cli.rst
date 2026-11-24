@@ -31,8 +31,8 @@ Options
    ``--model [PROVIDER/]MODEL``
        the upstream model. See `Selecting the model`_.
 
-   ``--component NAME``
-       run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` or ``harness``. See `Running one service`_.
+   ``--service NAME``
+       run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` or ``harness``. See `Running one service`_. ``--component`` is the older name of this option and gives the same result.
 
    ``--print-config``
        print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
@@ -101,15 +101,15 @@ editing its config. Bare and ``reef.*`` aliases remain accepted.
 Running one service
 -------------------
 
-Without ``--component``, one process runs all seven services. With it, the
+Without ``--service``, one process runs all seven services. With it, the
 process runs one service and starts no other child. All processes of a
 deployment take the same config, so they find the same shared store:
 
 .. code:: bash
 
-   reef serve -c deploy.yaml --component control --reef.port 8901
-   reef serve -c deploy.yaml --component inference --reef.port 8902
-   reef serve -c deploy.yaml --component samples --reef.port 8903
+   reef serve -c deploy.yaml --service control --reef.port 8901
+   reef serve -c deploy.yaml --service inference --reef.port 8902
+   reef serve -c deploy.yaml --service samples --reef.port 8903
 
 `Run the services in separate processes
 <../user-guide/split-services.rst>`__ describes

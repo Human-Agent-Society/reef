@@ -192,6 +192,7 @@ class InferenceStream:
 
     ``chunks`` must end only after capture finalization and transport validation. When
     ``record_response_pending`` is true, a successful stream supplies ``record_response`` before that end.
+    Reef records ``record_response`` in place of the forwarded bytes, and records those bytes when it is None.
     A terminal frame alone is not successful completion. ``close`` releases transport resources.
     """
 
@@ -336,7 +337,10 @@ class InferenceHandler(Plugin, ABC):
         timeout_s: float,
         **config: Any,
     ) -> InferenceHandler:
-        """Construct a configured handler; direct injection needs only inference()."""
+        """Construct a configured handler; direct injection needs only inference().
+
+        Reef passes the options of ``inference.handler-config`` in ``config``.
+        """
         raise ValueError(f"{cls.__name__} does not support deployment configuration")
 
     @abstractmethod
@@ -613,8 +617,8 @@ class InferenceRuntime(ABC):
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds
-        for it. A value the runtime does not know is no error. The default holds nothing per value: a runtime that
-        loads full weights in place replaced them at the next activation."""
+        for it. The engines may stay allocated. A value the runtime does not know is no error. The default holds
+        nothing per value: a runtime that loads full weights in place replaced them at the next activation."""
         return
 
     def release_unreferenced_artifacts(self, retained: Collection[ServedArtifact]) -> None:
@@ -626,8 +630,9 @@ class InferenceRuntime(ABC):
         its model name, whatever its artifact ID is (as ``ServedModels.is_referenced``). So the call releases only
         what a serving work loaded and did not publish, because the work failed or stopped, and what waits for its
         scheduled stop stays. Only the inference worker that owns the runtime calls it, between two serving works,
-        while none runs. A release that fails raises, and the next call tries it again. The call adds no way to
-        serve an artifact that is not deployed (``serves_any_artifact``).
+        while none runs. A runtime with more than one serving slot (``serving_slots``) gets no call. A release that
+        fails raises, and the next call tries it again. The call adds no way to serve an artifact that is not
+        deployed (``serves_any_artifact``).
         """
         return
 

@@ -51,20 +51,20 @@ No service calls another. Each one reads and writes the deployment's shared stor
 Start the services
 ------------------
 
-Start each service with the same config and ``--component``:
+Start each service with the same config and ``--service``:
 
 .. code:: bash
 
    export REEF_TOKEN="$(openssl rand -hex 16)"
-   reef serve -c deploy.yaml --component control --reef.port 8901
-   reef serve -c deploy.yaml --component inference --reef.port 8902
-   reef serve -c deploy.yaml --component samples --reef.port 8903
-   reef serve -c deploy.yaml --component training --reef.port 8904
-   reef serve -c deploy.yaml --component evaluation --reef.port 8905
-   reef serve -c deploy.yaml --component data --reef.port 8906
-   reef serve -c deploy.yaml --component harness --reef.port 8907
+   reef serve -c deploy.yaml --service control --reef.port 8901
+   reef serve -c deploy.yaml --service inference --reef.port 8902
+   reef serve -c deploy.yaml --service samples --reef.port 8903
+   reef serve -c deploy.yaml --service training --reef.port 8904
+   reef serve -c deploy.yaml --service evaluation --reef.port 8905
+   reef serve -c deploy.yaml --service data --reef.port 8906
+   reef serve -c deploy.yaml --service harness --reef.port 8907
 
-A ``--component`` process starts no other Reef service. Start the external engines and training backends that the config requires yourself.
+A ``--service`` process starts no other Reef service. Start the external engines and training backends that the config requires yourself.
 
 Every process must reach the same stores:
 

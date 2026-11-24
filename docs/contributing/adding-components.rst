@@ -151,7 +151,7 @@ Implementation
   ``trainer_serving_config``.
 - Implement ``facts(config, model_path, environ)`` on the factory (`Backend
   facts <../developer-guide/training-backends.rst#backend-facts>`__). Only
-  ``reef serve --component training`` builds the component; every other
+  ``reef serve --service training`` builds the component; every other
   service reads the facts.
 
   - Define the facts type in the integration's own package, from its own
@@ -301,8 +301,8 @@ snapshot chain in the `State model <../advanced_topics/state-model.rst#the-snaps
   archived the scenario in any process that shares the store, and never false
   again after that, because a deleted scenario's ID is never used again. A
   delete archives the registration first, so ``discard_all_content`` must
-  find the content of a scenario that has no registration. See `Artifact
-  backends <../reference/python-api-artifacts.rst#artifact-backends>`__.
+  find the content of a scenario that has no registration. See the docstrings
+  of ``reef.artifact.repository``.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
   ``reef/inference/``, and client-pull delivery in a
   ``FileTree`` (``reef/artifact/components.py``). Reef does not change a model
@@ -332,7 +332,7 @@ current request contract.
 - Import and call it from ``reef/api/routes/__init__.py`` in
   ``register_routes``.
 - Keep parsing and response adaptation in the route. Put reusable request or
-  domain behavior in ``reef/api/request_service.py`` or the package that
+  domain behavior in ``reef/api/request_handling.py`` or the package that
   owns the concept.
 - Raise domain errors. If a new error needs a non-default HTTP status, add it
   to ``ERROR_STATUS_TABLE`` in ``reef/api/errors.py`` instead of adding a

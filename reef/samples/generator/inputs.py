@@ -22,6 +22,8 @@ class TaskGenerationRequest:
     contents, not both. Construction validates fields but performs no I/O.
     Consumers own file reads, transport limits, and generation settings.
     Description-only generation uses an empty source_records tuple.
+    The source records have distinct IDs and belong to one scenario, and
+    ``description`` is non-empty text.
     ``generation`` numbers the request among the requests of one recipe; the
     recipe sends the results of the request's tasks back under this number.
     """

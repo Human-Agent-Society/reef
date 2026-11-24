@@ -148,7 +148,7 @@ To serve or train an artifact that was made outside Reef, import it by a URI tha
    * - ``file:///absolute/path``
      - A directory on the service's machine. To import a directory from your own machine, upload it to one of these places first.
 
-``storage.artifact-sources`` adds readers for other schemes (`Python API <../reference/python-api-artifacts.rst#artifact-imports>`__). A reader can read whatever the service can read, so give import access only to callers that may train the scenario.
+``storage.artifact-sources`` adds readers for other schemes (`Python API <../reference/python-api.rst#integrations-and-plugins>`__). A reader can read whatever the service can read, so give import access only to callers that may train the scenario.
 
 The directory must have the layout of the scenario's component: the training component's weight files, a Tinker manifest whose saved state is on the configured service, or a harness tree of UTF-8 text files that pass the adapter's validation. Otherwise Reef answers HTTP 400 and changes nothing. `Import an artifact <../reference/http-api-artifacts.rst#import-an-artifact>`__ in the HTTP API lists each layout and status.
 
@@ -420,7 +420,7 @@ A step that fails stays for the next sweep, an hour later. The first sweep after
 Run the services in separate processes
 --------------------------------------
 
-A deployment has seven services: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` and ``harness``. By default, ``reef serve`` runs all of them in one process. To keep inference up while control restarts, or to run more replicas of one service, start each service in its own process with ``reef serve --component NAME``. `Run the services in separate processes <split-services.rst>`__ describes the layout, the routes of each service, and what happens while control restarts.
+A deployment has seven services: ``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data`` and ``harness``. By default, ``reef serve`` runs all of them in one process. To keep inference up while control restarts, or to run more replicas of one service, start each service in its own process with ``reef serve --service NAME``. `Run the services in separate processes <split-services.rst>`__ describes the layout, the routes of each service, and what happens while control restarts.
 
 Import Harbor tasks
 -------------------

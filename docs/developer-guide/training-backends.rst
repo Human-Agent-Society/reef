@@ -156,9 +156,9 @@ A component never learns the scenario. Per-scenario state, such as one adapter p
 
 The inference runtime must also serve each scenario its own weights.
 
-**A base class for local jobs.** ``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in components. It keeps each job in a directory under the component's job root: ``job.json``, ``checkpoints.json`` and, once the job ended, ``result.json``. It runs jobs one at a time in a thread; with ``concurrent_jobs``, every submitted job runs in its own thread. A subclass implements ``check_job`` and ``run``, and calls ``start_jobs()`` once it can train. Until then no job runs. After a restart, ``start_jobs()`` resumes the unfinished jobs in submission order.
+**A base class for local jobs.** ``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in components. It keeps each job in a directory under the component's job root: ``job.json``, ``checkpoints.json`` and, once the job ended, ``result.json``. It runs jobs one at a time in a thread; with ``concurrent_jobs``, every submitted job runs in its own thread. A subclass implements ``check_job`` and ``run``. The training service calls ``start_jobs()`` when it starts, and until then no job runs. After a restart, ``start_jobs()`` resumes the unfinished jobs in submission order.
 
-`Tinker integration <../reference/python-api-training.rst#tinker-integration>`__ in the Python API describes the Tinker component.
+`Train with Tinker <../user-guide/tinker.rst>`__ describes the Tinker component.
 
 Backend facts
 -------------

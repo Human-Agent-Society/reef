@@ -10,15 +10,15 @@ import asyncio
 from aiohttp import web
 
 from reef.api.auth import add_signed_download, signed_download_url
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.data import download_seconds
 from reef.control.operations.scenario_files import artifact_file, artifact_files
 from reef.core.errors import ScenarioNotFoundError
 from reef.train.job_queue import scenario_jobs
 
 
-def register_scenario_file_routes(app: web.Application, *, request_service: RequestService) -> None:
-    dispatcher = request_service.dispatcher
+def register_scenario_file_routes(app: web.Application, *, request_handling: RequestHandling) -> None:
+    dispatcher = request_handling.dispatcher
 
     async def files(request: web.Request) -> web.Response | web.FileResponse:
         """The artifact's file list, with the backend's URL of each file when it signs them; with ``path``, that file;
