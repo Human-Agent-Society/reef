@@ -10,7 +10,7 @@ generator's method:
   ``TaskValidationResult`` and ``GeneratedTaskResult``, one of
   ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
-  (``reef.record2sample.generator.inputs``).
+  (``reef.samples.generator.inputs``).
 - ``processor``: the two stages. ``GeneratedTaskSamples`` holds the source
   sessions, starts each task-generation round when it is due, and hands the saved train tasks
   to the sample store; and
@@ -29,7 +29,7 @@ generator's method:
 - ``recipe``: the report contract. The deployment names the objective in the
   recipe's ``job_parameters``, as a dotted reference to a method that it provides.
 
-The generator service (``reef.record2sample.generator``) writes and checks the tasks; the training component
+The generator service (``reef.samples.generator``) writes and checks the tasks; the training component
 runs their training rollouts.
 """
 

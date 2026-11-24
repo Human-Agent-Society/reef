@@ -19,9 +19,9 @@ from reef.core.trajectory_index import (
     shadow_request_id,
     trajectory_calls,
 )
-from reef.storage.record_items import ItemRecordStore, record_item
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import ItemRecordStore, record_item
+from reef.storage.sql.data import SQLiteDataStore
 
 SYSTEM = {"role": "system", "content": "be brief"}
 USER = {"role": "user", "content": "海 🐟"}

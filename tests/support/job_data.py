@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 
 from reef.core.job_data import JobData, TaskFiles, TaskSample
-from reef.storage.data import MemoryDataStore
-from reef.storage.job_data import JobDataRef
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.job_data import JobDataRef
+from reef.storage.data.store import MemoryDataStore
+from reef.storage.data.tasks import LocalTaskFileStore
 
 #: The partition of the task file store that keeps the tasks of a test's job data.
 PARTITION = "test-tasks"

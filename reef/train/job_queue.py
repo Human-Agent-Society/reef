@@ -64,7 +64,7 @@ stores when the job ends and which stays for the pages of control. A scenario's 
 are moved aside by the training service, when control asks (``archive``).
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
-(``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
+(``reef.storage.data.job_data``) before it adds the item, and the training worker opens the directory from the data
 store before the component runs the job.
 """
 
@@ -95,9 +95,9 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.storage.data import DataStore
-from reef.storage.job_data import JobDataKind
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.data.job_data import JobDataKind
+from reef.storage.data.store import DataStore
 from reef.train.component import (
     JobCheckPendingError,
     JobStatus,
@@ -240,10 +240,11 @@ def scenario_checks_key(scenario: str) -> str:
     return f"scenario:{scenario}"
 
 
-def checkpoint_content(job_id: str, step: int) -> str:
-    """The name of the stored content of the checkpoint that the job ``job_id`` saved at ``step``. It is the same
-    for every attempt of the job, so a worker that stores the checkpoint again replaces the content."""
-    return f"{job_id}:{step}"
+def checkpoint_content(job_id: str, step: int, *, attempt: int | None = None) -> str:
+    """Name the stored checkpoint for this step and attempt. Omit the attempt for the legacy name."""
+    if attempt is None:
+        return f"{job_id}:{step}"
+    return f"{job_id}:{step}:{attempt}:checkpoint"
 
 
 def job_records_content(job_id: str) -> str:
@@ -826,14 +827,11 @@ class TrainingJobWorker(QueueWorker):
         not hold yet, the worker first runs the admission check of the job's component on the checkpoint's
         ``artifact_path`` (``ComponentChecks.validate``). A refusal (``ValueError`` or ``ReefError``) cancels the
         component's run, the worker stores the job's record files, and the job fails for good with the refusal's
-        message; the job's earlier checkpoints stay recorded. Then the worker writes the name of its content (``checkpoint_content``) into the item's
-        metadata, then stores the files of its ``artifact_path`` under that name in the artifact store of the
-        job's scenario, and then appends the progress entry, which names that content and the parts that the
-        checkpoint changed from the start (``TrainingComponent.changed_parts``). A worker that stops after it
-        stored and before it recorded leaves no progress entry: the worker that continues the job stores the same
-        name again, and when nobody continues the job, the sweep finds the name in the metadata. A worker that
-        lost the job while it stored discards the content itself. The worker also copies the component's
-        ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
+        message. Earlier checkpoints stay recorded. The worker tracks each content name in metadata before
+        storing the files. Each attempt uses its own name. The worker then appends the checkpoint reference and
+        changed parts under the same lease. If it loses the lease, it discards only the content it staged. A
+        worker that stops between the store and the append leaves the name for the sweep. The worker also copies
+        the component's ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
         (``job_records``) under ``job_records_content`` when the job ends. At each poll the worker
         reads the item: a job that control cancelled, or that another worker took, ends here, and the component
         cancels its local run. A worker that continues a job reports only the checkpoints
@@ -879,15 +877,17 @@ class TrainingJobWorker(QueueWorker):
                         raise ItemFailedError(
                             f"the scenario's check refused checkpoint {checkpoint.step} of job {job.job_id}: {exc}"
                         ) from exc
-                    content = checkpoint_content(item.id, checkpoint.step)
-                    if content not in stored_names:
-                        stored_names.append(content)
-                        named = self.queue.write_metadata(
-                            JOBS_QUEUE, item.id, STORED_CONTENT_KEY, cast(JsonValue, list(stored_names))
-                        )
-                        if named is None:
-                            raise WorkLeaseLostError(f"job {item.id} left the queue")
-                    self.backends(job.scenario).store_content(content, Path(checkpoint.artifact_path))
+                    content = checkpoint_content(item.id, checkpoint.step, attempt=item.attempt_count)
+                    stored_names.append(content)
+                    self.queue.write_metadata(
+                        JOBS_QUEUE,
+                        item.id,
+                        STORED_CONTENT_KEY,
+                        cast(JsonValue, list(stored_names)),
+                        lease=(self.worker_id, item.attempt_count),
+                    )
+                    backend = self.backends(job.scenario)
+                    backend.store_content(content, Path(checkpoint.artifact_path))
                     if self.refuses_deleted_scenario(item):
                         raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
                     stored = replace(
@@ -898,11 +898,15 @@ class TrainingJobWorker(QueueWorker):
                     )
                     try:
                         self.queue.append_progress(
-                            JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(stored), number=progress_count
+                            JOBS_QUEUE,
+                            item.id,
+                            self.worker_id,
+                            checkpoint_json(stored),
+                            number=progress_count,
+                            attempt=item.attempt_count,
                         )
                     except WorkLeaseLostError:
-                        # The job was cancelled or taken while the files were stored: nobody commits this content.
-                        self.backends(job.scenario).discard_content(content)
+                        backend.discard_content(content)
                         raise
                     reported.add(checkpoint.step)
                     progress_count += 1

@@ -27,7 +27,7 @@ from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.record2sample.traces import InferenceSamples
+from reef.samples.traces import InferenceSamples
 from reef.train.harness_backend import MethodJob, Workspace
 from reef.train.harness_backend.workspace import JobOutput
 

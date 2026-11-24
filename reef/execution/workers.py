@@ -2,7 +2,8 @@
 
 A service that takes work from a queue (the training, sample and evaluation services) runs one or more workers
 on background threads. A process registers the workers of the services it runs in one ``ServiceWorkers`` group,
-which starts them with the process and stops them, in reverse order, before the process closes what they use.
+which starts them with the process and stops them, in reverse order, before the process closes what they use. Every
+worker begins to stop (``ServiceWorker.begin_stop``) before the group waits for any of them.
 """
 
 from __future__ import annotations
@@ -16,22 +17,22 @@ from dataclasses import dataclass, field
 from reef.core.errors import ConfigError, InternalError
 from reef.core.plugins import PluginConfigError
 from reef.execution.work_logs import capture_log
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 
-#: The services of a deployment. ``reef serve --component NAME`` runs one in a process; the one-process layout runs
+#: The services of a deployment. ``reef serve --service NAME`` runs one in a process; the one-process layout runs
 #: all of them in one process, on the same interfaces.
-SERVICE_COMPONENTS = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
+SERVICE_NAMES = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
 
 
-def service_components(names: object) -> frozenset[str]:
+def service_names(names: object) -> frozenset[str]:
     """``names`` as a set of service names; raise ``ValueError`` for an empty set or an unknown name."""
     if isinstance(names, str) or not isinstance(names, (set, frozenset, tuple, list)) or not names:
-        raise ValueError(f"name one or more services of {SERVICE_COMPONENTS}")
-    unknown = sorted(str(name) for name in names if name not in SERVICE_COMPONENTS)
+        raise ValueError(f"name one or more services of {SERVICE_NAMES}")
+    unknown = sorted(str(name) for name in names if name not in SERVICE_NAMES)
     if unknown:
-        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_COMPONENTS}")
+        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_NAMES}")
     return frozenset(names)
 
 
@@ -39,7 +40,7 @@ def service_components(names: object) -> frozenset[str]:
 class ServiceSet:
     """The services that one process runs.
 
-    Values: ``names`` is a non-empty subset of ``SERVICE_COMPONENTS`` (``service_components``). Each ``runs_*``
+    Values: ``names`` is a non-empty subset of ``SERVICE_NAMES`` (``service_names``). Each ``runs_*``
     property is whether ``names`` holds that service.
 
     Purpose: assembly makes it for a process (``ServiceSet.of``); the dispatcher, the routes and the apps read the
@@ -49,17 +50,17 @@ class ServiceSet:
     names: frozenset[str]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "names", service_components(self.names))
+        object.__setattr__(self, "names", service_names(self.names))
 
     @classmethod
     def of(cls, names: object) -> ServiceSet:
-        """The set of ``names``; ``ValueError`` as ``service_components``."""
-        return cls(service_components(names))
+        """The set of ``names``; ``ValueError`` as ``service_names``."""
+        return cls(service_names(names))
 
     @classmethod
     def every(cls) -> ServiceSet:
         """Every service: the one-process layout."""
-        return cls(frozenset(SERVICE_COMPONENTS))
+        return cls(frozenset(SERVICE_NAMES))
 
     @property
     def runs_control(self) -> bool:
@@ -94,12 +95,18 @@ class ServiceWorker(ABC):
     """A worker that a service runs in the background until it stops.
 
     Purpose: ``ServiceWorkers`` starts it with the process (``start``) and stops it before the process ends
-    (``stop``). ``stop`` waits for the worker's thread and releases what the worker owns.
+    (``begin_stop``, then ``stop``). ``stop`` waits for the worker's thread and releases what the worker owns.
     """
 
     @abstractmethod
     def start(self) -> None:
         """Start working on a background thread."""
+
+    def begin_stop(self) -> None:
+        """Begin to stop, and return without waiting. A worker that does this takes no new work from then on, and
+        each call after the first changes nothing. ``stop`` still stops the worker. The default does nothing, so
+        ``stop`` alone stops the worker."""
+        return
 
     @abstractmethod
     def stop(self) -> None:
@@ -224,12 +231,17 @@ class QueueWorker(ServiceWorker):
 
     def run_once(self) -> bool:
         """Take one item and run it; return whether there was one. With more than one slot, start the item on a
-        thread of its own and return at once; return False when every slot is busy."""
-        if not self.free_slots.acquire(blocking=False):
+        thread of its own and return at once; return False when every slot is busy. A stopped worker takes no
+        item, and gives back an item that it took while it began to stop (``WorkQueue.give_back``)."""
+        if self.stopped.is_set() or not self.free_slots.acquire(blocking=False):
             return False
         try:
             self.requeue_expired()
             item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
+            if item is not None and self.stopped.is_set():
+                # The stop began during the take: the item has not started, so another worker runs it at once.
+                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+                item = None
         except BaseException:
             self.free_slots.release()
             raise
@@ -315,7 +327,8 @@ class ServiceWorkers:
     Values: ``workers`` in the order they were added; ``started`` is whether the group runs.
 
     Purpose: assembly adds the workers of the services this process runs; the process starts the group once it
-    can serve and stops it before it closes the stores the workers use.
+    can serve, lets it begin to stop as soon as the process begins to stop, and stops it before it closes the stores
+    the workers use.
     """
 
     workers: list[ServiceWorker] = field(default_factory=list)
@@ -338,14 +351,30 @@ class ServiceWorkers:
             for worker in self.workers:
                 worker.start()
 
+    def begin_stop(self) -> None:
+        """Let every worker begin to stop (``ServiceWorker.begin_stop``), the last added first, without waiting. A
+        process calls it as soon as it begins to stop, before it calls ``stop``. A failure is logged, and the next
+        worker still begins to stop; ``stop`` begins each worker again and raises the error."""
+        with self.lock:
+            workers = list(self.workers)
+        for worker in reversed(workers):
+            try:
+                worker.begin_stop()
+            except Exception:
+                # A shutdown hook calls this, and a hook that raises would skip the cleanup that stops the workers.
+                logger.exception("a service worker could not begin to stop")
+
     def stop(self) -> None:
-        """Stop every worker, the last added first, and empty the group. Raise the first stop error after all attempts."""
+        """Stop every worker and empty the group. Every worker begins to stop first, the last added first; then each
+        one stops in the same order. So a worker whose stop waits does not delay ``begin_stop`` of a worker added
+        before it. Raise the first error after all attempts."""
         with self.lock:
             workers, self.workers, self.started = list(self.workers), [], False
         errors: list[BaseException] = []
-        for worker in reversed(workers):
+        steps = [worker.begin_stop for worker in reversed(workers)] + [worker.stop for worker in reversed(workers)]
+        for step in steps:
             try:
-                worker.stop()
+                step()
             except BaseException as exc:
                 errors.append(exc)
         if errors:
@@ -353,12 +382,12 @@ class ServiceWorkers:
 
 
 __all__ = [
-    "SERVICE_COMPONENTS",
+    "SERVICE_NAMES",
     "ItemFailedError",
     "QueueWorker",
     "ServiceSet",
     "ServiceWorker",
     "ServiceWorkers",
     "WorkerStoppedError",
-    "service_components",
+    "service_names",
 ]

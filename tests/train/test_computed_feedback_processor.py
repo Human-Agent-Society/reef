@@ -25,11 +25,11 @@ from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, JobContext, SupportsReceipt
 from reef.execution.sandbox.process import LocalExecutor, ProgramLaunchError
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import JudgedSamples, RecordJudging
-from reef.record2sample.staleness import ServedArtifacts
-from reef.sample2job import Sample2Job
+from reef.samples import JudgedSamples, RecordJudging
+from reef.samples.context import PipelineContext
+from reef.samples.staleness import ServedArtifacts
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job
 from reef.train.types import JobData, Sample, TrajectorySample
 
 pytestmark = pytest.mark.unit

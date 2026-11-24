@@ -91,8 +91,14 @@ run:
   task:
     # "--" ends the options: an instruction that starts with "-" is the message, not an option.
     argv: ["run", "--format", "json", "--auto", "--", "{task}"]
+    # opencode run takes its message from stdin when the message argument is absent, and a Harbor run hands the
+    # instruction that way: an instruction over 128 KiB is longer than Linux lets one argument be.
+    stdin: true
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
+      # The Reef binding supplies the only enabled provider and its model metadata.
+      OPENCODE_MODELS_PATH: "{root}/opencode/models.json"
+      OPENCODE_DISABLE_MODELS_FETCH: "1"
     # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
     skills: opencode/skills
     # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the

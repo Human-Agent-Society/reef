@@ -63,7 +63,7 @@ beta/autoenvscaling/
   examples/tmax_seeds/serve.yaml                 on Slime, the same seed tasks: all weights of the policy train, on one node of 8 GPUs
 ```
 
-AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks).
 
 ## The generator
 
@@ -213,7 +213,7 @@ By default, the band does not decide what trains. The recipe trains each valid t
 
 ## The training pool review
 
-By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration.rst#generated-tasks) explains each key, its default and the reasons a review gives:
+By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks) explains each key, its default and the reasons a review gives:
 
 ```yaml
 pipeline:
@@ -471,7 +471,7 @@ Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Sl
 
 The examples need each of these settings, on Tinker and on Slime:
 
-- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
+- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.samples.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
 - **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Tinker takes a prompt whose length plus `max_tokens` passes the context, so on Tinker the cap does not shorten a rollout's history. SGLang refuses such a prompt, so on Slime a rollout ends at a history of 65536 - 16384 = 49152 tokens. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
 - **No compaction, no thinking.** `enable_summarize: false`, as the official solver, and `enable_thinking: false`. Reef trains a rollout as one sample: a summarized history does not assemble into one, and in a thinking history only the last turn trains.
 - **No recording.** `record_terminal_session: false`: the tasks have no network, and on `e2b` the recorder's install hangs the rollout.
@@ -493,13 +493,13 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
    from pathlib import Path
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
-   from reef.pipeline_context import PipelineContext
+   from reef.samples.context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings, StoredGeneratorState
    from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, GenerationJob, next_generation
-   from reef.storage.samples import SampleStore
-   from reef.storage.sql_data import SQLiteDataStore
-   from reef.storage.sqlite import SQLiteScenarioStorage
-   from reef.storage.tasks import LocalTaskFileStore
+   from reef.storage.scenario.samples import SampleStore
+   from reef.storage.sql.data import SQLiteDataStore
+   from reef.storage.sql.sqlite import SQLiteScenarioStorage
+   from reef.storage.data.tasks import LocalTaskFileStore
 
 
    async def save_tasks(generator_config: dict[str, object], rounds: int, state_dir: str) -> None:
