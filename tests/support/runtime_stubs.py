@@ -13,6 +13,7 @@ from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import Sample
 from reef.core.served_models import ServedArtifact
+from reef.core.values import JsonValue
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import HttpInferenceHandler
@@ -239,7 +240,9 @@ class StubInferenceRuntime(InferenceRuntime):
             raise ReefError("the stub runtime answers only from the snapshot that it activated")
         return PolicyModel("base", artifact.ref.revision)
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact:
         """Deploy ``artifact`` under its own model name, ``sampler:<artifact_id>``.
 
         Raise ``ReefError`` at a capacity of 1."""

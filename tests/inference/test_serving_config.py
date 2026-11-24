@@ -219,9 +219,19 @@ def test_another_service_reads_the_training_mode_that_control_changed(serving, t
 
 
 @pytest.mark.unit
-def test_an_evaluation_serves_an_artifact_with_the_config_of_the_newest_request_before_it_publishes(serving):
+def test_an_evaluation_serves_an_artifact_with_the_config_of_the_newest_request_before_it_publishes(
+    serving, monkeypatch
+):
     control_of, worker, runtime = serving[0], serving[1], serving[2]
     runtime.answers_each_artifact = True
+    configs = []
+    serve = runtime.serve_artifact
+
+    def serve_artifact(artifact, *, scenario, serving_config):
+        configs.append(dict(serving_config))
+        return serve(artifact, scenario=scenario, serving_config=serving_config)
+
+    monkeypatch.setattr(runtime, "serve_artifact", serve_artifact)
     control = control_of()
     try:
         control.create_scenario("math")
@@ -240,7 +250,9 @@ def test_an_evaluation_serves_an_artifact_with_the_config_of_the_newest_request_
             )
         )
         worker.serve_artifact(candidate, runtime)
-        assert runtime.applied == [("math", {"min_replicas": 2})]
+        assert configs == [{"min_replicas": 2}]
+        # The evaluation does not change the config of what serves the scenario.
+        assert runtime.applied == []
     finally:
         worker.stop()
         control.close()
