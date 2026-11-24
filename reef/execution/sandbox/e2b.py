@@ -782,7 +782,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
     @override
     async def _create_sandbox(self) -> None:
-        # Keep this optional SDK import inside sandbox creation.
+        # Keep these optional SDK imports inside sandbox creation.
+        import httpx
         from e2b import AsyncSandbox, RateLimitException, ServiceBusyException
 
         try:
@@ -797,6 +798,10 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
             )
         except (ServiceBusyException, RateLimitException) as exc:
             raise SandboxCapacityError(f"the sandbox service has no capacity now: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            # The service holds the create call while it places the sandbox. A service that adds workers can place
+            # it later than the SDK waits.
+            raise SandboxCapacityError(f"the sandbox service did not place the sandbox in time: {exc}") from exc
         except json.JSONDecodeError as exc:
             # The SDK reads each answer of the create call as JSON. A gateway that timed out before the service placed
             # the sandbox answers 504 with an HTML body, and the SDK then fails here.

@@ -71,8 +71,8 @@ class SandboxUnavailableError(ReefError):
 
 class SandboxCapacityError(ReefError):
     """A sandbox service refused a new sandbox for want of capacity now: no node or no memory for it (HTTP 503), too
-    many requests (HTTP 429), or a gateway timeout before the service placed it (HTTP 504). The service adds capacity
-    for the demand that it refused, so a later try can pass."""
+    many requests (HTTP 429), or no placement before a gateway or the client stopped waiting (HTTP 504, or a request
+    timeout). The service adds capacity for the demand that it refused, so a later try can pass."""
 
 
 #: The class names of the errors that say that a sandbox service has no capacity now: ``SandboxCapacityError`` and

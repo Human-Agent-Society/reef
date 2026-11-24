@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from reef.execution.sandbox.agentenv_compose import TransientStartError
@@ -238,7 +239,7 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("refusal", ["busy", "rate", "gateway"])
+@pytest.mark.parametrize("refusal", ["busy", "rate", "gateway", "client"])
 def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_sandbox_capacity_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
 ) -> None:
@@ -249,6 +250,7 @@ def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_
         "rate": e2b.RateLimitException("429: too many requests"),
         # A gateway's 504 answer has an HTML body, which the SDK cannot read as JSON.
         "gateway": json.JSONDecodeError("Expecting value", "<html>504 Gateway Time-out</html>", 0),
+        "client": httpx.ReadTimeout("timed out"),
     }
 
     async def create(**options: object) -> object:
