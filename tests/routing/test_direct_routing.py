@@ -69,15 +69,18 @@ def write_manifest(
     default: str = "student",
     shadow: str | None = None,
     target_urls: Mapping[str, str] | None = None,
+    api_key_envs: Mapping[str, str] | None = None,
 ) -> Path:
     """Two Scenarios sharing a teacher; the coding Scenario also lists a disabled target.
 
     With ``domain``, each Scenario also has a ``math_request`` domain rule for the teacher, after any keyword
     rule. Its classifier names a directory that does not exist: serving requests never reads it. ``shadow``
     names the coding Scenario's shadow target; ``target_urls`` gives some targets their own endpoint, and the
-    shadow-only target ``observer`` is in the catalog exactly when it names it.
+    shadow-only target ``observer`` is in the catalog exactly when it names it. ``api_key_envs`` gives some
+    targets the environment variable of their provider credential.
     """
     urls = dict(target_urls or {})
+    key_variables = dict(api_key_envs or {})
     models = {**PROVIDER_MODELS, **({"observer": "observer-v1"} if "observer" in urls else {})}
     targets = {
         target_id: {
@@ -85,6 +88,7 @@ def write_manifest(
             "revision": "r1",
             "url": urls.get(target_id, provider_url),
             "enabled": target_id != "retired",
+            **({"api_key_env": key_variables[target_id]} if target_id in key_variables else {}),
         }
         for target_id, model in models.items()
     }
@@ -206,11 +210,14 @@ async def routed_service(
     target_urls: Mapping[str, str] | None = None,
     shadow_limits: ShadowLimits | None = None,
     close_dispatcher: bool = False,
+    api_key_envs: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> AsyncIterator[RoutedService]:
     """Start a provider, a fake router and a routed Reef; ``managed`` adds the private lifecycle control.
 
-    ``shadow`` and ``target_urls`` go to ``write_manifest``; ``shadow_limits`` and ``close_dispatcher`` to
-    ``create_app``. The dispatcher is closed at the end either way; closing it again does nothing.
+    ``shadow``, ``target_urls`` and ``api_key_envs`` go to ``write_manifest``; ``shadow_limits`` and
+    ``close_dispatcher`` to ``create_app``. ``environ`` holds the provider credentials that the adapter reads
+    (default: none). The dispatcher is closed at the end either way; closing it again does nothing.
     """
     provider = Provider()
     # Pinned requests may exceed the router's 10 MiB preview limit; the provider accepts them like Reef does.
@@ -227,8 +234,9 @@ async def routed_service(
             default=default,
             shadow=shadow,
             target_urls=target_urls,
+            api_key_envs=api_key_envs,
         )
-        adapter = RoutingAdapter.from_manifest(path, router_config_hash=ROUTER_HASH, environ={})
+        adapter = RoutingAdapter.from_manifest(path, router_config_hash=ROUTER_HASH, environ=dict(environ or {}))
         dispatcher = routing_dispatcher(tmp_path)
         lifecycle = None
         if managed:
@@ -1146,12 +1154,14 @@ def test_the_tutorial_fake_provider_serves_auto_pin_json_sse_and_feedback(tmp_pa
 class EchoProvider:
     """A provider whose every answer names the model that answered it.
 
-    ``received`` lists each request body in arrival order. A call to a model in ``held`` is appended to
-    ``waiting`` and then waits until ``release`` is set. ``aborts`` gives, per model, how many of its calls
-    first answer with an engine abort. ``replies`` replaces the answer of a model with its handler.
+    ``received`` lists each request body in arrival order, and ``headers`` the request's headers, with lowercase
+    names, in the same order. A call to a model in ``held`` is appended to ``waiting`` and then waits until
+    ``release`` is set. ``aborts`` gives, per model, how many of its calls first answer with an engine abort.
+    ``replies`` replaces the answer of a model with its handler.
     """
 
     received: list[dict[str, object]] = field(default_factory=list)
+    headers: list[dict[str, str]] = field(default_factory=list)
     held: set[str] = field(default_factory=set)
     waiting: list[str] = field(default_factory=list)
     release: asyncio.Event = field(default_factory=asyncio.Event)
@@ -1161,6 +1171,7 @@ class EchoProvider:
     async def chat(self, request: web.Request) -> web.StreamResponse:
         payload = await request.json()
         self.received.append(payload)
+        self.headers.append({name.lower(): value for name, value in request.headers.items()})
         model = str(payload["model"])
         if model in self.held:
             self.waiting.append(model)
@@ -1228,7 +1239,12 @@ def test_a_shadow_target_also_answers_but_only_the_primary_reaches_the_client(
     async def run() -> None:
         provider = EchoProvider()
         async with routed_service(
-            tmp_path, default="teacher", shadow="student", provider_chat=provider.chat
+            tmp_path,
+            default="teacher",
+            shadow="student",
+            provider_chat=provider.chat,
+            api_key_envs={"teacher": "TEACHER_KEY", "student": "STUDENT_KEY"},
+            environ={"TEACHER_KEY": "teacher-secret", "STUDENT_KEY": "student-secret"},
         ) as service:
             append_record = ingest.append_record
             # Each record's purpose and whether its write belongs to inference finalization (read in its thread).
@@ -1263,6 +1279,12 @@ def test_a_shadow_target_also_answers_but_only_the_primary_reaches_the_client(
             assert (served_routing["target_id"], served_routing["client_visible"]) == (primary, True)
             assert "primary_request_id" not in served_routing
             primary_body = {**body, "model": PROVIDER_MODELS[primary]}
+            # Each call, primary or shadow, carries its own target's credential and no Reef artifact identity:
+            # an external target is no Reef artifact, and the client's service token stays with Reef.
+            for sent, sent_headers in zip(provider.received, provider.headers, strict=True):
+                target = {"teacher-v2": "teacher", "student-v1": "student"}[str(sent["model"])]
+                assert sent_headers["authorization"] == f"Bearer {target}-secret"
+                assert not sent_headers.keys() & {"x-reef-artifact-id", "x-reef-served-model", "x-reef-artifact-path"}
             if not shadowed:
                 # A shadow target that is the request's primary target is called once.
                 assert provider.received == [primary_body] and shadows == []
@@ -1482,6 +1504,8 @@ def test_old_primary_and_shadow_outputs_keep_their_policy_while_a_shadow_only_up
             ) as service,
         ):
             moved_url = str(moved_server.make_url("")).rstrip("/")
+            # V1: the policy the app started with, which the old request binds.
+            startup_version = service.adapter.snapshot.version
             old = await service.client.post(
                 "/v1/chat/completions",
                 headers=routing_headers(),
@@ -1504,14 +1528,18 @@ def test_old_primary_and_shadow_outputs_keep_their_policy_while_a_shadow_only_up
                     target_urls={"student": moved_url, "math-student": moved_url},
                 )
                 version = RoutingSnapshot.load(path).version
+                assert version != startup_version
                 activation = {
                     "manifest_path": str(path),
                     "snapshot_version": version,
                     "router_config_hash": ROUTER_HASH,
-                    "expected_snapshot_version": service.adapter.snapshot.version,
+                    "expected_snapshot_version": startup_version,
                 }
                 activated = await service.lifecycle(command("activate", 2, policy_close_revision=1, **activation))
                 assert activated.status == 200, await activated.text()
+                # New requests now bind V2, while the old stream and its shadow still run under V1.
+                published = service.client.app[REQUEST_HANDLING_KEY].routing
+                assert published is not None and published.snapshot.version == version
                 service.router.snapshot = RoutingSnapshot.load(path)
                 opened = await service.lifecycle(command("open", 3, policy_close_revision=1))
                 assert opened.status == 200, await opened.text()
@@ -1524,27 +1552,39 @@ def test_old_primary_and_shadow_outputs_keep_their_policy_while_a_shadow_only_up
                 provider.release.set()
             rest = await old.read()
             assert b"last" in rest and rest.endswith(b"data: [DONE]\n\n")
+            old_receipt = stream_receipt((first + rest).decode())
             await shadows_finished(service)
             served, shadows = records_by_purpose(service)
-            # Each old branch keeps the policy it bound; each new branch has the new one.
-            seen = set()
-            for record in [*served, *shadows]:
-                routing = record.payload["metadata"]["routing"]
-                sent = record.payload["messages"][-1]["content"]
-                seen.add((sent, routing["purpose"], routing["target_id"]))
-                expected = service.adapter.snapshot.version if sent == "old" else version
-                assert (routing["snapshot_version"], routing["router_config_hash"]) == (expected, ROUTER_HASH)
-            assert seen == {
-                ("old", "serve", "teacher"),
-                ("old", "shadow", "student"),
-                ("new", "serve", "teacher"),
-                ("new", "shadow", "math-student"),
+            # Join by receipts and request IDs, never by message text or record order: each receipt names its
+            # primary record, and each shadow names its primary's request ID.
+            primaries = {record.agent_record_id: record for record in served}
+            assert set(primaries) == {old_receipt, new_receipt}
+            shadow_of = {record.payload["metadata"]["routing"]["primary_request_id"]: record for record in shadows}
+            assert len(shadow_of) == len(shadows) == 2
+            old_request = primaries[old_receipt].payload["metadata"]["routing"]["request_id"]
+            new_request = primaries[new_receipt].payload["metadata"]["routing"]["request_id"]
+            assert old_request != new_request and set(shadow_of) == {old_request, new_request}
+            # The old receipt names the stream that completed after the update.
+            assert "last" in primaries[old_receipt].payload["response"]["body"]
+            # Each old branch keeps V1, the policy it bound; each new branch has V2.
+            expected = {
+                old_receipt: ("old", startup_version, "student", "student-v1 answered"),
+                new_receipt: ("new", version, "math-student", "math-v1 answered"),
             }
-            new_served = next(record for record in served if record.agent_record_id == new_receipt)
-            new_shadow = next(record for record in shadows if record.payload["messages"] == user_message("new"))
-            assert new_shadow.payload["metadata"]["routing"]["primary_request_id"] == (
-                new_served.payload["metadata"]["routing"]["request_id"]
-            )
+            for receipt, (message, bound_version, shadow_target, shadow_answer) in expected.items():
+                primary = primaries[receipt]
+                primary_routing = primary.payload["metadata"]["routing"]
+                shadow = shadow_of[primary_routing["request_id"]]
+                shadow_routing = shadow.payload["metadata"]["routing"]
+                assert primary.payload["messages"] == shadow.payload["messages"] == user_message(message)
+                assert primary_routing["target_id"] == "teacher" and shadow_routing["target_id"] == shadow_target
+                assert primary_routing["execution_outcome"] == shadow_routing["execution_outcome"] == "completed"
+                assert (primary_routing["client_visible"], shadow_routing["client_visible"]) == (True, False)
+                assert shadow_routing["request_id"] != primary_routing["request_id"]
+                assert shadow.agent_record_id not in primaries
+                assert shadow_answer in json.dumps(shadow.payload["response"])
+                for routing in (primary_routing, shadow_routing):
+                    assert (routing["snapshot_version"], routing["router_config_hash"]) == (bound_version, ROUTER_HASH)
             # Each call reached the endpoint of the policy it bound: the old student shadow stayed on endpoint A
             # although V2 moved the student to B, and the new math-student shadow went to B.
             calls = {
