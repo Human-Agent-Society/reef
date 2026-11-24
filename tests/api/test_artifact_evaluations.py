@@ -121,6 +121,7 @@ class ArtifactRuntime(InferenceRuntime):
         #: The scenario of each served artifact, and each serving config that inference applied.
         self.serve_scenarios: list[str] = []
         self.applied: list[str] = []
+        self.serve_configs: list[dict] = []
         self.serve_error: str | None = None
         self.any_artifact = any_artifact
 
@@ -145,8 +146,9 @@ class ArtifactRuntime(InferenceRuntime):
     def apply_serving_config(self, scenario, override):
         self.applied.append(scenario)
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
+    def serve_artifact(self, artifact: Artifact, *, scenario: str, serving_config) -> ServedArtifact:
         self.served.append(artifact.artifact_id)
+        self.serve_configs.append(dict(serving_config))
         self.serve_scenarios.append(scenario)
         if self.serve_error is not None:
             raise ValueError(self.serve_error)
@@ -465,9 +467,10 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
+            newest = dispatcher.coordination.served_models.current_request("s").payload.get("serving_config", {})
             assert (
-                runtime.serve_scenarios == ["s"] * 10 and runtime.applied.count("s") >= 10
-            ), "inference serves the candidate with the scenario's serving config"
+                runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10
+            ), "inference serves the candidate with the config of the scenario's newest request"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",

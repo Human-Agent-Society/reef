@@ -432,7 +432,8 @@ class ServingWorker(QueueWorker):
         # The runtime reports each artifact's startup phases to the item's progress (RFC #1283).
         reporter = QueueStartupReporter(self.queue, item, self.worker_id)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
-        runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
+        serving_config = serving_config_of(item.payload)
+        runtime.apply_serving_config(item.scenario, serving_config)
         has_weight_component = components.loaded_component is not None
         aliases = item.payload.get("aliases")
         beside = item.payload.get("beside")
@@ -471,7 +472,9 @@ class ServingWorker(QueueWorker):
 
         def serve_beside(name: str) -> ServedArtifact:
             with reporting_startup(reporter, name):
-                served = runtime.serve_artifact(beside_artifacts[name], scenario=item.scenario)
+                served = runtime.serve_artifact(
+                    beside_artifacts[name], scenario=item.scenario, serving_config=serving_config
+                )
             if served is None:
                 raise ValueError("the inference runtime provides no route for a beside artifact")
             return served
@@ -533,14 +536,14 @@ class ServingWorker(QueueWorker):
         components = scenario_components(self.recipe, self.live, item.scenario)
         artifact = components.component_artifact(self.repository(item.scenario).select(selection), component)
         # The newest request of the scenario carries the config that a person set last. The published config is
-        # older until that request publishes its routes, and an artifact's engine must not start with it.
+        # older until that request publishes its routes, and an artifact's engine must not start with it. The config
+        # goes to this call only: an evaluation does not change what serves the scenario.
         request = self.routes.current_request(item.scenario)
         if request is not None and request.payload:
             config = serving_config_of(request.payload)
         else:
             config = dict(self.routes.read_serving_config(item.scenario))
-        runtime.apply_serving_config(item.scenario, config)
-        served = runtime.serve_artifact(artifact, scenario=item.scenario)
+        served = runtime.serve_artifact(artifact, scenario=item.scenario, serving_config=config)
         return {"served": None if served is None else dict(served.to_json())}
 
     def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:

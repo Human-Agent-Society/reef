@@ -589,9 +589,8 @@ class InferenceRuntime(ABC):
     def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
         """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
         engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
-        set takes the deployment's value again. The inference worker calls it before each activation and each
-        ``serve_artifact``, and when only the override changed, so a second call with the same values changes
-        nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
+        set takes the deployment's value again. The inference worker calls it before each activation, and when only
+        the override changed, so a second call with the same values changes nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
         the scenario to another engine. The default has no engine field and does nothing; the handler applies
         request fields to each request."""
         return
@@ -712,10 +711,16 @@ class InferenceRuntime(ABC):
         """
         raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
         """Make an engine answer for ``artifact`` of ``scenario``, and return the value that reaches it: the engine's
         URL and the model name that samples that artifact. None when the engine has no address that another process
-        can call. The inference worker applies ``scenario``'s serving config (``apply_serving_config``) first.
+        can call.
+
+        ``serving_config`` is the override that the engine of ``artifact`` starts with, as ``serving_config``
+        accepted it: the inference worker gives the config of the scenario's newest serving request. The call reads
+        no other config, and it does not change the config of what serves the scenario now (``apply_serving_config``).
 
         Return only when the engine is ready. A second call for a served artifact starts nothing. Only the inference
         owner calls it, one call at a time.

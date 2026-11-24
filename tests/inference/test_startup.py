@@ -843,7 +843,7 @@ def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, mo
     selection = routes.current_request("math").payload["selection"]
     control.set_served("math", {})
     if standalone:
-        monkeypatch.setattr(runtime, "serve_artifact", lambda artifact, scenario: served)
+        monkeypatch.setattr(runtime, "serve_artifact", lambda artifact, scenario, serving_config: served)
         worker.queue.append(
             NewWork(
                 SERVING_QUEUE,
@@ -919,7 +919,7 @@ def test_a_cancelled_serve_item_stops_the_start_of_its_artifact(tmp_path, monkey
     )
     started, stopped = threading.Event(), threading.Event()
 
-    def serve_artifact(artifact, scenario):
+    def serve_artifact(artifact, scenario, serving_config):
         started.set()
         while not stopping():
             time.sleep(0.02)
