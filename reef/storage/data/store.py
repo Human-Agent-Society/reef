@@ -737,8 +737,8 @@ class DataStore(Plugin, JobDataReader, ABC):
         digest is an ``ItemConflictError``. It never replaces an item.
         """
 
-    def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous: Sequence[str]) -> None:
-        """Publish new trajectories and remove the previous items in one transaction.
+    def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous_ids: Sequence[str]) -> None:
+        """Replace the items listed in ``previous_ids`` with the new trajectories in one transaction.
 
         The new and previous IDs must be disjoint. Removing an item removes it from every set that contains it.
         A retry can reuse a new ID with the same digest or name a previous ID that was already removed.

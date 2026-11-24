@@ -171,7 +171,7 @@ def test_trajectory_publication_preserves_the_previous_revision_on_interruption_
         assert ids() == ["old"]
         yield b
 
-    store.replace_trajectories("acme", revision(), ["old"])
+    store.replace_trajectories("acme", revision(), previous_ids=["old"])
     assert ids() == ["a", "b"]
     store.replace_trajectories("acme", iter([a, b]), ["old"])
     assert ids() == ["a", "b"] and store.read("acme", "old") is None

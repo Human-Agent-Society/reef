@@ -1162,12 +1162,12 @@ class SQLDataStore(DataStore):
             raise ReefError("the transaction of this create stopped before it wrote the items")
         return pending.outcome
 
-    def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous: Sequence[str]) -> None:
+    def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous_ids: Sequence[str]) -> None:
         """Prepare each trajectory without locking readers or retaining the other documents. Write the prepared
-        rows and remove the previous IDs in one transaction. Segment files from an interrupted preparation are
+        rows and remove the previous items in one transaction. Segment files from an interrupted preparation are
         reclaimed by the store's ordinary unused-segment cleanup."""
         check_owner(owner)
-        old = {check_item_id(item_id) for item_id in previous}
+        old = {check_item_id(item_id) for item_id in previous_ids}
         seen: set[str] = set()
 
         def input_sizes() -> Iterator[tuple[NewItem, int]]:
