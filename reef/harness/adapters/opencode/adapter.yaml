@@ -91,6 +91,9 @@ run:
   task:
     # "--" ends the options: an instruction that starts with "-" is the message, not an option.
     argv: ["run", "--format", "json", "--auto", "--", "{task}"]
+    # opencode run takes its message from stdin when the message argument is absent, and a Harbor run hands the
+    # instruction that way: an instruction over 128 KiB is longer than Linux lets one argument be.
+    stdin: true
     env:
       OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
       # The Reef binding supplies the only enabled provider and its model metadata.
