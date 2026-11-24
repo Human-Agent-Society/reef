@@ -114,7 +114,7 @@ The win rate is the task's mean plain reward. `plateau` is 1 on [`plateau_low`, 
 
 The advantage of a reply is `scale * (score - mean)`. `mean` is the mean score of the generation's replies of the same skill. `scale` is the number of training rollouts of the generation's measured tasks divided by the number of those tasks, at most `max_designer_scale`. Only the replies whose train task ran rollouts get an advantage: refused proposals, eval proposals and tasks that could not run get none. The generation report keeps the advantages, so the recipe reads the same values after a restart.
 
-Each reply trains from the sample that its served call kept, so the Designer must be the served model under training (no `generator.designer-url`). The Designer's calls must name `temperature`, `top_p` and `top_k`, in the request or in the serving engine's `sampling_defaults`, and set no `min_p`, penalty or logit bias, so that the record names the distribution of the sample. The Slime example has not run end to end yet.
+Each reply trains from the sample that its served call kept, so the Designer must be the served model under training (no `generator.designer-url`). The Designer's calls must name `temperature`, `top_p` and `top_k`, in the request (`generator.designer-options`) or in the scenario's serving config, and set no `min_p`, penalty or logit bias, so that the record names the distribution of the sample. The serving engine's `sampling_defaults` do not count: the inference service refuses a recorded call that leaves a key to them. The Slime example has not run end to end yet.
 
 ### On Slime
 

@@ -16,6 +16,7 @@ from recipes.beta.spade import ScoreSettings, SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
+from reef.core.training_capture import DISTRIBUTION_KEYS
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
@@ -469,9 +470,13 @@ def test_from_config_reads_the_score_settings_the_scale_cap_and_train_designer(t
 def test_the_slime_example_trains_the_designer_with_the_paper_score_settings(tmp_path: Path) -> None:
     example = Path(__file__).parents[3] / "recipes/beta/spade/examples/slime/serve.yaml"
     text = example.read_text().replace("${endpoints.generator}", "http://127.0.0.1:8910")
-    stage_config = yaml.safe_load(text)["pipeline"]["record2sample"]
+    deployment = yaml.safe_load(text)
+    stage_config = deployment["pipeline"]["record2sample"]
     settings = GeneratedTaskSettings.parse(stage_config["config"], plugin_class=GeneratedTaskSamples)
     assert (settings.designer_delay, settings.jobs_per_round, settings.max_artifact_lag) == (1, 1, 2)
+    # A recorded Designer call names its whole distribution, as the inference service requires.
+    options = deployment["generator"]["designer-options"]
+    assert {key: options[key] for key in DISTRIBUTION_KEYS} == {"temperature": 0.6, "top_p": 1.0, "top_k": -1}
     generator = SpadeTaskGenerator.from_config(
         stage_config["config"]["generator"]["config"], scenario="s", environ={}, state=generator_state(tmp_path, "s")
     )

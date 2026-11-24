@@ -35,8 +35,12 @@ inference:
 generator:
   tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
   concurrency: 8
+  # A recorded Designer call names its whole distribution: the inference service refuses one that leaves top_p or
+  # top_k to the engine's sampling_defaults.
   designer-options:
     temperature: 0.6
+    top_p: 1.0
+    top_k: -1
   # The agent of the generator service's own rollouts, the hint plays.
   agent:
     name: terminus-2
