@@ -617,14 +617,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         captured = self._client.parse(native)
         response = self._response_from_capture(call, captured, call.tool_parser)
         provider = anthropic_response(call.payload, response) if call.anthropic else response
-        runtime_load_id = bound_runtime_load_id(artifact.served_model) if with_sample else None
-        if runtime_load_id is None or not captured.output_ids:
+        # Only a route that binds one weight load keeps the sample; the record names the artifact, not the load.
+        if not with_sample or bound_runtime_load_id(artifact.served_model) is None or not captured.output_ids:
             return response, provider
         sample = sample_training(
             prompt_ids=call.prompt_ids,
             output_ids=captured.output_ids,
             rollout_log_probs=captured.rollout_log_probs,
-            runtime_load_id=runtime_load_id,
             finish_reason=captured.finish_reason,
             distribution=sampling_distribution(call.sampling_params),
         )

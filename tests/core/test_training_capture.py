@@ -60,16 +60,15 @@ def test_a_training_block_needs_one_log_prob_per_sampled_token() -> None:
         prompt_ids=[1, 2],
         output_ids=[3],
         rollout_log_probs=[-0.5],
-        runtime_load_id="e:1",
         finish_reason="length",
         distribution=None,
     )
     assert block["tokens"] == [1, 2, 3] and block["loss_mask"] == [1] and "distribution" not in block
+    assert "runtime_load_id" not in block, "a record names the artifact that answered, never the engine's load"
     named = sample_training(
         prompt_ids=[1],
         output_ids=[3],
         rollout_log_probs=[-0.5],
-        runtime_load_id="e:1",
         finish_reason="stop",
         distribution=SamplingDistribution(0.6, 1.0, -1),
     )
@@ -79,7 +78,6 @@ def test_a_training_block_needs_one_log_prob_per_sampled_token() -> None:
             prompt_ids=[1],
             output_ids=[3, 4],
             rollout_log_probs=[-0.5],
-            runtime_load_id="e:1",
             finish_reason="stop",
             distribution=SamplingDistribution(0.6, 1.0, -1),
         )

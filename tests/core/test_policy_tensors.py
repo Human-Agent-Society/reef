@@ -79,7 +79,6 @@ def test_a_served_call_that_recorded_its_sample_trains_as_a_delayed_sample() -> 
                     "tokens": [10, 11, 20, 21],
                     "loss_mask": [1, 1],
                     "rollout_log_probs": [-0.25, -0.5],
-                    "runtime_load_id": "e:3",
                     "distribution": distribution,
                 },
             },

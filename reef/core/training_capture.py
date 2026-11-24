@@ -96,15 +96,14 @@ def sample_training(
     prompt_ids: Sequence[int],
     output_ids: Sequence[int],
     rollout_log_probs: Sequence[float],
-    runtime_load_id: str,
     finish_reason: str,
     distribution: SamplingDistribution | None,
 ) -> dict[str, JsonValue]:
     """The training block of one exact sample: ``tokens`` (the prompt IDs then the sampled IDs), ``loss_mask`` (1 for
     each sampled token), ``rollout_log_probs`` (the sampled tokens' log-probs), ``prompt_length``,
-    ``response_length``, ``runtime_load_id`` (the weights that drew every token), ``finish_reason``, and
-    ``distribution`` when it is known (``sampling_distribution``).
+    ``response_length``, ``finish_reason``, and ``distribution`` when it is known (``sampling_distribution``).
 
+    The block names no weights: a record names the artifact that answered by its ``artifact_id``.
     ``ValueError`` when ``rollout_log_probs`` does not hold one value per sampled token.
     """
     if len(rollout_log_probs) != len(output_ids):
@@ -118,7 +117,6 @@ def sample_training(
         "rollout_log_probs": log_probs,
         "prompt_length": len(prompt_ids),
         "response_length": len(output_ids),
-        "runtime_load_id": runtime_load_id,
         "finish_reason": finish_reason,
     }
     if distribution is not None:

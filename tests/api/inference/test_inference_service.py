@@ -451,7 +451,6 @@ SAMPLE = {
     "rollout_log_probs": [-0.25, -0.5],
     "prompt_length": 2,
     "response_length": 2,
-    "runtime_load_id": "e:3",
     "finish_reason": "stop",
     "distribution": {"temperature": 0.6, "top_p": 1.0, "top_k": -1},
 }

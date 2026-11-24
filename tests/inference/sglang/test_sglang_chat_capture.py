@@ -1369,7 +1369,6 @@ def test_a_call_that_records_its_sample_gets_the_exact_ids_log_probs_and_distrib
         "rollout_log_probs": [-0.25, -0.5],
         "prompt_length": 2,
         "response_length": 2,
-        "runtime_load_id": "e:3",
         "finish_reason": "stop",
         "distribution": {"temperature": 0.6, "top_p": 1.0, "top_k": -1},
     }
@@ -1377,13 +1376,15 @@ def test_a_call_that_records_its_sample_gets_the_exact_ids_log_probs_and_distrib
 
 
 @pytest.mark.unit
-def test_a_recorded_sample_names_the_load_of_its_route_and_none_without_one(tmp_path) -> None:
+def test_a_sample_is_recorded_only_on_a_route_that_names_one_weight_load(tmp_path) -> None:
     request = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 2, "temperature": 0.6}
     meta_info = {"output_token_logprobs": [[-0.1, 20], [-0.2, 21]]}
     adapter = InferenceArtifact("artifact-B", served_model=adapter_name("spade", "e:4"))
 
     assert "distribution" not in asyncio.run(answer_with_sample(PINNED, meta_info, request))["training"]
-    assert asyncio.run(answer_with_sample(adapter, meta_info, request))["training"]["runtime_load_id"] == "e:4"
+    # An adapter name binds one load too. The block names no load: the record names the artifact that answered.
+    adapted = asyncio.run(answer_with_sample(adapter, meta_info, request))["training"]
+    assert adapted["rollout_log_probs"] == [-0.1, -0.2] and "runtime_load_id" not in adapted
     # A route that names no load binds no weights: no single policy is known to have drawn the reply.
     assert "training" not in asyncio.run(answer_with_sample(local_artifact(tmp_path), meta_info, request))
     plain = InferenceArtifact("artifact-C", served_model="model")

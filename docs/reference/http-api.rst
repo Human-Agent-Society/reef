@@ -347,17 +347,23 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-record-training: 1``     | optional on inference: the record keeps the call's      |
 |                                   | exact sample as ``response.training``: the prompt and   |
-|                                   | reply token IDs, the sampled log-probs and the sampling |
-|                                   | distribution. The response does not change. ``true``    |
-|                                   | also asks for it; ``0``, ``false`` or no header keeps   |
-|                                   | no sample. HTTP 400 for another value, for a call that  |
-|                                   | keeps no record (one with ``x-reef-rollout`` or to an   |
-|                                   | ``/evaluation/v1/{route}`` route), for a call that      |
-|                                   | streams, that names no ``temperature``, ``top_p`` or    |
-|                                   | ``top_k`` in the request or the scenario's serving      |
-|                                   | config, or whose engine gives no exact sample with its  |
-|                                   | distribution. The route must name one weight load (a    |
-|                                   | full-weight or adapter name).                           |
+|                                   | reply token IDs, the sampled log-probs, the finish      |
+|                                   | reason and the sampling distribution. The record names  |
+|                                   | the answering artifact by ``artifact_id``, not the      |
+|                                   | engine's weight load. The response does not change.     |
+|                                   | ``true`` also asks for it; ``0``, ``false`` or no       |
+|                                   | header keeps no sample. HTTP 400 for another value, for |
+|                                   | a call that keeps no record (one with                   |
+|                                   | ``x-reef-rollout`` or to an ``/evaluation/v1/{route}``  |
+|                                   | route), for a call that streams, for a call whose       |
+|                                   | ``temperature``, ``top_p`` or ``top_k`` neither the     |
+|                                   | request nor the scenario's serving config names, and    |
+|                                   | for an engine that gives no exact sample with its       |
+|                                   | distribution. An exact sample needs a token-native chat |
+|                                   | engine, a route that names one weight load (a           |
+|                                   | full-weight or adapter name), and no ``min_p``, penalty |
+|                                   | or logit bias. A routed deployment refuses the header   |
+|                                   | (HTTP 400, ``unsupported_record_training``).            |
 +-----------------------------------+---------------------------------------------------------+
 
 Client artifact tags
