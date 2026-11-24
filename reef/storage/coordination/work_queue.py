@@ -351,11 +351,20 @@ class WorkQueue(ABC):
         left, else ``failed``, ended at ``now``. ``WorkLeaseLostError`` when ``worker_id`` does not hold it."""
 
     @abstractmethod
-    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        """End the held attempt because the worker stops: the item becomes ``queued`` with the error
-        ``"the worker stopped"`` and one more ``stopped_attempt_count``, so another worker continues it at once.
-        The attempt does not count toward the attempts that the queue allows. ``WorkLeaseLostError`` when ``worker_id``
-        does not hold it."""
+    def give_back(
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        *,
+        now: float | None = None,
+        available_at: float | None = None,
+        error: str = "the worker stopped",
+    ) -> WorkItem:
+        """End the held attempt without a result: the item becomes ``queued`` with ``error``, a non-empty text, and one
+        more ``stopped_attempt_count``. A worker takes it again from ``available_at``, a finite time, or at once when
+        it is None. The attempt does not count toward the attempts that the queue allows. A worker that stops gives
+        an item back with the defaults. ``WorkLeaseLostError`` when ``worker_id`` does not hold it."""
 
     @abstractmethod
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:

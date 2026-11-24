@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import threading
+import time
 import urllib.request
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -174,6 +175,32 @@ def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing
     assert exception == "SandboxError: the image did not build"
     failed = "the trial observer failed on rollout evaluation_rollout:e1:00002:00000"
     assert (failed in caplog.text) == failing
+
+
+class NoCapacityLab(NoSandboxLab):
+    """A lab whose trial ends as Harbor records a sandbox that the service refused for want of capacity."""
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        row = await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        (self.root / key / "result.json").write_text(json.dumps(result))
+        return row
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_sandbox_found_no_capacity_waits_in_the_queue_and_keeps_its_attempts(tmp_path):
+    queue = memory_coordination().work_queue
+    value = rollout()
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=NoCapacityLab(tmp_path / "t"))
+    taken_at = time.time()
+    assert worker.run_once()
+    waiting = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (waiting.state, waiting.error) == ("queued", "waiting for sandbox capacity: the sandbox did not start")
+    assert waiting.available_at >= taken_at + worker.first_deferral_seconds
+    assert waiting.stopped_attempt_count == waiting.attempt_count == 1
+    # The worker starts no other rollout while the service adds capacity.
+    assert not worker.run_once()
 
 
 class AnsweringEndpoints(OpenEndpoints):

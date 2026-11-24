@@ -69,6 +69,17 @@ class SandboxUnavailableError(ReefError):
     """A deployment requires the sandbox executor but it cannot isolate."""
 
 
+class SandboxCapacityError(ReefError):
+    """A sandbox service refused a new sandbox for want of capacity now: no node or no memory for it (HTTP 503), too
+    many requests (HTTP 429), or a gateway timeout before the service placed it (HTTP 504). The service adds capacity
+    for the demand that it refused, so a later try can pass."""
+
+
+#: The class names of the errors that say that a sandbox service has no capacity now: ``SandboxCapacityError`` and
+#: its subclasses. A trial keeps only the class name of the error that ended it, so an evaluation reads these.
+SANDBOX_CAPACITY_ERRORS = frozenset({"SandboxCapacityError", "TransientStartError"})
+
+
 @dataclass(frozen=True)
 class ProcessOutcome:
     """What a launched run process produced."""
