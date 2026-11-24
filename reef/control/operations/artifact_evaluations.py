@@ -451,20 +451,15 @@ def attempt_trajectories(
     *,
     include_records: bool = True,
 ) -> list[dict[str, Any]]:
-    """The ATIF trajectories of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in
-    attempt order. ``calls`` are kept calls of ``caller`` of that rollout, in attempt and then index order.
+    """Return one ATIF trajectory per conversation, ordered by attempt and then by the conversation's first call.
 
-    Each 200 call of an attempt is one ``AgentRecord`` (``call_record``). ``TrajectoryIndex`` links the calls of one
-    attempt into conversations, as it links the records of training samples: an agent that plays several roles, each
-    with its own messages, has one conversation for each. ``TrajectoryBuilder`` stitches each conversation, without the
-    calls that a retry replaced; the conversations are in the order of their first calls. With ``include_records``
-    false, a trajectory has no ``extra.reef.records``. The attempt that the rollout's score came from is the last
-    attempt of a finished rollout: each of its agent trajectories has the score's value as its reward, null for a
-    failed score, and every other trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``:
-    ``{evaluation_id, task, task_index, repeat, attempt, caller, conversation, scored}``, where ``conversation``
-    counts from 0 in its attempt.
+    Supply the rollout's calls for one caller in attempt and call-index order. Only HTTP 200 responses contribute.
+    Each conversation excludes calls that a retry replaced. Set ``include_records=False`` to omit ``extra.reef.records``.
 
-    For incremental consumption use ``iter_attempt_trajectories``.
+    Only the agent trajectories from a finished rollout's final attempt carry its reward, which is null if scoring failed.
+    Each trajectory's ``extra.reef.evaluation`` identifies the evaluation, task, task index, repeat, attempt, caller,
+    conversation and scoring status. Conversation numbers start at zero within each attempt.
+    Use ``iter_attempt_trajectories`` to read one conversation at a time.
     """
     return list(
         iter_attempt_trajectories(scenario, evaluation_id, item, calls, caller, include_records=include_records)
@@ -480,8 +475,7 @@ def iter_attempt_trajectories(
     *,
     include_records: bool = True,
 ) -> Iterator[dict[str, Any]]:
-    """Yield each conversation in attempt order, then first-call order. Link the successful calls first, keeping
-    their positions. Read the bodies of one conversation at a time to stitch it with ``TrajectoryBuilder``."""
+    """Yield the trajectories described by ``attempt_trajectories``, assembling one conversation at a time."""
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"]).value if finished else None
@@ -1896,9 +1890,7 @@ class ArtifactEvaluations:
         every_attempt: bool,
         include_records: bool = True,
     ) -> list[dict[str, Any]]:
-        """The trajectories of the rollout of ``item`` (``attempt_trajectories``): of each attempt when
-        ``every_attempt``, else of its last attempt only, without ``extra.reef.records`` when ``include_records`` is
-        false. It reads the bodies of this one rollout's calls, one call at a time."""
+        """Return the trajectories from ``iter_rollout_trajectories`` as a list."""
         return list(
             self.iter_rollout_trajectories(
                 scenario, evaluation_id, item, every_attempt=every_attempt, include_records=include_records
@@ -1914,7 +1906,11 @@ class ArtifactEvaluations:
         every_attempt: bool,
         include_records: bool = True,
     ) -> Iterator[dict[str, Any]]:
-        """Yield the same rollout trajectories in order, keeping one conversation in memory."""
+        """Yield one conversation at a time, in the order defined by ``attempt_trajectories``.
+
+        Set ``every_attempt=True`` to include earlier attempts. Otherwise, read only the last attempt.
+        Set ``include_records=False`` to omit ``extra.reef.records``.
+        """
         rollout = EvaluationRollout.from_item(item)
         attempt = None if every_attempt else item.attempt_count
         calls = self.rollout_calls(scenario, evaluation_id, rollout.task_index, rollout.repeat, attempt=attempt)

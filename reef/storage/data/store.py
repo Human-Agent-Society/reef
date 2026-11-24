@@ -738,12 +738,13 @@ class DataStore(Plugin, JobDataReader, ABC):
         """
 
     def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous: Sequence[str]) -> None:
-        """Atomically publish the new trajectory IDs and delete the disjoint IDs of their previous revision.
+        """Publish new trajectories and remove the previous items in one transaction.
 
-        An existing new ID must have the same digest. Missing previous IDs are ignored, so a caller can retry
-        after a successful publication. An error while reading the input preserves the previous revision.
-        The SQLite and PostgreSQL stores support this operation. Other storage plugins can implement it
-        alongside ``create``.
+        The new and previous IDs must be disjoint. Removing an item removes it from every set that contains it.
+        A retry can reuse a new ID with the same digest or name a previous ID that was already removed.
+        If reading the input fails, the previous items stay visible.
+
+        SQLite and PostgreSQL support this operation. Other storage plugins can implement it alongside ``create``.
         """
         raise NotImplementedError("the data store does not support atomic trajectory publication")
 

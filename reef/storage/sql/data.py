@@ -152,7 +152,7 @@ HOLDS_LOCK = "\x00benchmark-holds"
 
 
 def trajectory_batches[T](values: Iterable[tuple[T, int]]) -> Iterator[list[T]]:
-    """Group trajectories or their prepared rows into writes with bounded bytes and item count."""
+    """Yield a batch when it reaches the byte or item limit. Keep each trajectory in one batch."""
     batch: list[T] = []
     size = 0
     for value, length in values:

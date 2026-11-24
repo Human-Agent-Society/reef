@@ -303,7 +303,7 @@ class TrajectoryIndex:
         return list(self.iter_conversations(record_ids))
 
     def iter_conversations(self, record_ids: Sequence[str]) -> Iterator[tuple[str, ...]]:
-        """Yield the same conversations one path at a time. Branches may share a long initial path."""
+        """Yield each conversation's call IDs in first-call order. Branched conversations can share earlier calls."""
         order = {record_id: position for position, record_id in enumerate(record_ids)}
         ends = (record_id for record_id in record_ids if self.is_end(record_id))
         for end in sorted(ends, key=lambda record_id: order[self.trajectory(record_id)[0]]):
