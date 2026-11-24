@@ -8,6 +8,7 @@ import math
 import threading
 import urllib.request
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +49,7 @@ from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
+from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError, WorkQueue
 from reef.storage.sql.coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 
@@ -285,6 +287,41 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
+
+
+@pytest.mark.unit
+def test_the_rollouts_of_one_candidate_ask_inference_to_serve_it_one_at_a_time():
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None))
+    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    served = ServedArtifact("artifact-1", "http://engine", "sampler:artifact-1")
+    lease_lost = threading.Event()
+    with ThreadPoolExecutor(2) as pool:
+        waits = [pool.submit(worker.served_candidate, rollout(repeat), lease_lost) for repeat in (0, 1)]
+        wait_until(lambda: len(queue.items(SERVING_QUEUE)) == 2)
+        first = queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND])
+        # The second item waits for the first, so inference has a free slot for other work.
+        assert first is not None and queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
+        queue.finish(SERVING_QUEUE, first.id, "inference", {"served": served.to_json()})
+        second = queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND])
+        assert second is not None
+        queue.finish(SERVING_QUEUE, second.id, "inference", {"served": served.to_json()})
+        assert [wait.result(5) for wait in waits] == [served, served]
+
+
+@pytest.mark.unit
+def test_a_rollout_that_stops_waiting_for_its_candidate_cancels_its_serve_item():
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None))
+    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    lease_lost = threading.Event()
+    with ThreadPoolExecutor(1) as pool:
+        wait = pool.submit(worker.served_candidate, rollout(), lease_lost)
+        wait_until(lambda: len(queue.items(SERVING_QUEUE)) == 1)
+        lease_lost.set()
+        with pytest.raises(WorkLeaseLostError):
+            wait.result(5)
+    (item,) = queue.items(SERVING_QUEUE)
+    assert item.state == "failed" and "stopped waiting" in item.error
+    assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
 
 
 class ServingRefusedWorker(EvaluationRolloutWorker):

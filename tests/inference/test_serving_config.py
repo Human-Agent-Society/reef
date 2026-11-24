@@ -17,6 +17,8 @@ from reef.control.dispatcher import Dispatcher
 from reef.control.workers.serving import ServingWorker
 from reef.core.values import JsonValue
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
+from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
+from reef.storage.coordination.work_queue import NewWork
 from reef.storage.sql.coordination import memory_coordination
 from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
@@ -213,4 +215,32 @@ def test_another_service_reads_the_training_mode_that_control_changed(serving, t
     finally:
         worker.stop()
         data.close()
+        control.close()
+
+
+@pytest.mark.unit
+def test_an_evaluation_serves_an_artifact_with_the_config_of_the_newest_request_before_it_publishes(serving):
+    control_of, worker, runtime = serving[0], serving[1], serving[2]
+    runtime.answers_each_artifact = True
+    control = control_of()
+    try:
+        control.create_scenario("math")
+        control.set_serving_config("math", {"weights": {"min_replicas": 2}})
+        routes = control.coordination.served_models
+        request = routes.current_request("math")
+        # No request has published routes, so the published config is still empty.
+        assert routes.read_serving_config("math") == {}
+        candidate = worker.queue.append(
+            NewWork(
+                SERVING_QUEUE,
+                "evaluation-candidate",
+                "math",
+                SERVE_ARTIFACT_KIND,
+                {"selection": request.payload["selection"], "component": "weights"},
+            )
+        )
+        worker.serve_artifact(candidate, runtime)
+        assert runtime.applied == [("math", {"min_replicas": 2})]
+    finally:
+        worker.stop()
         control.close()
