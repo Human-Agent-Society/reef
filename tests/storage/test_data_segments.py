@@ -126,6 +126,27 @@ def test_small_new_trajectory_items_wait_in_the_database_for_one_segment(open_st
         assert waiting_rows(store) == (0, 0) and len(segment_files(tmp_path)) == 2
 
 
+def test_a_failed_revision_releases_only_its_unpublished_segments(open_store, monkeypatch, tmp_path):
+    old, new = trajectory("old", "first"), trajectory("new", "second")
+    with closing(open_store()) as store:
+        store.create("acme", [old])
+        committed = segment_files(tmp_path)
+
+        def interrupted():
+            yield new
+            assert len(segment_files(tmp_path)) == 2
+            assert [item.item_id for item in store.query("acme")] == ["old"]
+            raise RuntimeError("source interrupted")
+
+        with pytest.raises(RuntimeError, match="source interrupted"):
+            store.replace_trajectories("acme", interrupted(), ["old"])
+        monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+        store.maintain()
+        assert segment_files(tmp_path) == committed
+        assert store.read("acme", "old").content == old.content
+        assert store.read("acme", "new") is None
+
+
 def test_a_read_of_many_items_reads_their_segment_lines_together(open_store, monkeypatch):
     with closing(open_store()) as store:
         created = [trajectory(f"t{number}", str(number)) for number in range(5)]

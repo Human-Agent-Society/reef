@@ -145,6 +145,105 @@ def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_
     assert [item.item_id for item in store.query("acme")] == ["t1"]
 
 
+@pytest.mark.parametrize("store", ["sqlite-memory", "sqlite", "postgres"], indirect=True)
+def test_trajectory_publication_preserves_the_previous_revision_on_interruption_or_conflict(store):
+    def ids():
+        return [item.item_id for item in store.query("acme", trajectory_set="tests", content=False)]
+
+    old = trajectory("old", trajectory_sets=["tests"])
+    a = trajectory("a", trajectory_sets=["tests"])
+    b = trajectory("b", trajectory_sets=["tests"])
+    store.create("acme", [old, trajectory("conflict", "other")])
+
+    def interrupted():
+        yield a
+        assert ids() == ["old"]
+        raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        store.replace_trajectories("acme", interrupted(), ["old"])
+    with pytest.raises(ItemConflictError):
+        store.replace_trajectories("acme", iter([a, trajectory("conflict", "changed")]), ["old"])
+    assert ids() == ["old"] and store.read("acme", "a") is None
+
+    def revision():
+        yield a
+        assert ids() == ["old"]
+        yield b
+
+    store.replace_trajectories("acme", revision(), previous_ids=["old"])
+    assert ids() == ["a", "b"]
+    store.replace_trajectories("acme", iter([a, b]), ["old"])
+    assert ids() == ["a", "b"] and store.read("acme", "old") is None
+    store.replace_trajectories("acme", iter(()), ["a", "b"])
+    assert ids() == []
+
+
+def test_a_store_without_atomic_publication_keeps_its_existing_api(tmp_path):
+    with closing(LocalTaskFileStore(tmp_path)) as files, closing(MemoryDataStore(files)) as store:
+        store.create("acme", [trajectory("existing")])
+        with pytest.raises(NotImplementedError, match="atomic trajectory publication"):
+            store.replace_trajectories("acme", iter([trajectory("new")]), ["existing"])
+        assert [item.item_id for item in store.query("acme")] == ["existing"]
+
+
+def test_a_concurrent_unrelated_write_survives_trajectory_publication(open_durable_store):
+    with closing(open_durable_store()) as writer, closing(open_durable_store()) as other:
+        writer.create("acme", [trajectory("old")])
+        staged, resume = threading.Event(), threading.Event()
+
+        def revision():
+            yield trajectory("new")
+            staged.set()
+            assert resume.wait(5)
+
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(writer.replace_trajectories, "acme", revision(), ["old"])
+            try:
+                assert staged.wait(5)
+                other.create("acme", [trajectory("independent")])
+            finally:
+                resume.set()
+            job.result(timeout=5)
+        assert [item.item_id for item in other.query("acme")] == ["independent", "new"]
+
+
+def test_a_reader_sees_only_whole_trajectory_revisions(open_durable_store, monkeypatch):
+    with closing(open_durable_store()) as writer, closing(open_durable_store()) as reader:
+        writer.create("acme", [trajectory("old")])
+        inserted, resume = threading.Event(), threading.Event()
+        original = writer.write_new_items
+
+        def wait_after_first_insert(connection, values):
+            result = original(connection, values)
+            if not inserted.is_set():
+                inserted.set()
+                assert resume.wait(5)
+            return result
+
+        monkeypatch.setattr(writer, "write_new_items", wait_after_first_insert)
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(
+                writer.replace_trajectories, "acme", iter([trajectory("one"), trajectory("two")]), ["old"]
+            )
+            try:
+                assert inserted.wait(5)
+                if isinstance(reader, SQLiteDataStore):
+                    # SQLiteDataStore serializes API operations with BEGIN IMMEDIATE. A plain WAL reader
+                    # can inspect the previous committed revision while that writer is still running.
+                    table = reader.items_table
+                    with reader.engine.connect() as connection:
+                        assert list(connection.scalars(select(table.c.item_id).where(table.c.owner == "acme"))) == [
+                            "old"
+                        ]
+                else:
+                    assert [r.item_id for r in reader.query("acme", content=False)] == ["old"]
+            finally:
+                resume.set()
+            job.result(timeout=5)
+        assert [r.item_id for r in reader.query("acme", content=False)] == ["one", "two"]
+
+
 def test_each_owner_sees_only_its_own_items(store):
     store.create("acme", [trajectory("t1", "acme")])
     store.create("globex", [trajectory("t1", "globex")])
