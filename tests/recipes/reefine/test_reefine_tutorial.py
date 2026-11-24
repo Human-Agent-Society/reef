@@ -16,17 +16,19 @@ from types import ModuleType
 
 import pytest
 from tests.support.config_helpers import load_harness_deployment as load_config
+from tests.support.harness_jobs import configured_component
 
 from recipes.beta import reefine
 from recipes.beta.reefine import AnswerScorer, ReefineMethod, ReefineRecipe
 from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import grade_text
-from reef.dispatcher.ingest import training_request_refusal
+from reef.control.ingest import training_request_refusal
+from reef.control.scenario.live_objects import LiveObjects, harness_models
+from reef.deploy.service_config import service_config_from_mapping
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.service.deploy.service_config import service_config_from_mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TUTORIAL = REPO_ROOT / "recipes" / "beta" / "reefine" / "examples"
@@ -63,8 +65,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     """The demos use the built-in recipe with tutorial-local state, no agent, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
     so a change publishes when the tree still works and an extension still waits."""
-    from reef.recipe.registry import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
+    from reef.api.assembly import _upstream_runtime, load_named_recipe
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
@@ -99,7 +100,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     assert config["reef"]["port"] == 8901 and config["reef"]["token"] == "reef-local"
 
     service = service_config_from_mapping(config)
-    built = build_named_recipe(
+    built, runtime = load_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(TUTORIAL / "configs")},
         default_runtime=_upstream_runtime(service),
@@ -108,10 +109,13 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
     # No agent: the method answers each request in text.
-    assert isinstance(built.method, ReefineMethod) and built.agent is None and built.training_mode == "manual"
+    live = LiveObjects(runtime=runtime)
+    component = configured_component(built, live)
+    assert isinstance(component.method, ReefineMethod) and component.agent is None
+    assert built.training_mode == "manual"
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
-    assert isinstance(built.scorer, AnswerScorer)
-    assert built.model_binding().model == "provider/model-a"
+    assert isinstance(component.scorer, AnswerScorer)
+    assert harness_models(built, live).served().model == "provider/model-a"
     # No seed in the deployment: the first tree is the recipe's own, the starter skill.
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 
@@ -171,7 +175,7 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
 def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> None:
     patch = {"rules.md": None, "extensions/speak.ts": "export default function (pi) {}", "notes.txt": "x"}
     parts = {"rules.md": "rules", "extensions/speak.ts": "extension"}
-    base = {"release_id": "rel-1", "artifact_id": "rel-1", "active": False, "activated": True, "checkpoint": False}
+    base = {"artifact_id": "rel-1", "active": False, "activated": True, "checkpoint": False}
     inactive = {
         **base,
         "checkpoint": True,
@@ -263,12 +267,12 @@ def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_
     models = json.loads((rendered / "models.json").read_text())
     assert run_module.SERVICE_URL in models["providers"]["reef"]["baseUrl"]
     assert models["providers"]["reef"]["headers"] == {"x-reef-scenario": run_module.SCENARIO}
-    record = json.loads((tmp_path / "harness" / run_module.RELEASE_FILE).read_text())
+    record = json.loads((tmp_path / "harness" / run_module.SNAPSHOT_FILE).read_text())
     assert record["artifact_id"] == "r1" and "plugin/rules.md" in record["files"]
     assert "release_id" not in record
     assert run_module.installed_artifact() == "r1"
     # An older install names no artifact: it reads as nothing installed, and the next install replaces it.
-    (tmp_path / "harness" / run_module.RELEASE_FILE).write_text(json.dumps({"release_id": "storage:old"}))
+    (tmp_path / "harness" / run_module.SNAPSHOT_FILE).write_text(json.dumps({"release_id": "storage:old"}))
     assert run_module.installed_artifact() is None
     monkeypatch.delenv("REEF_DEMO_PHONE", raising=False)
     manifest["requires"] = [{"name": "REEF_DEMO_PHONE", "kind": "env", "prompt": "The phone number to text"}]

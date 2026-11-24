@@ -22,10 +22,10 @@ from reef.inference.process import (
     ports_in_use,
 )
 from reef.inference.sglang import launch as sglang_launch
-from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
-from reef.inference.sglang.launch import SGLangCluster, SGLangEngineGroup, SGLangModel
+from reef.inference.sglang.config import SGLangSettings
+from reef.inference.sglang.launch import SGLangCluster, SGLangEngineGroup
 from reef.inference.vllm import engine as vllm_engine
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.engine import ReefVLLMEngine
 from reef.inference.vllm.launch import VLLMEngineGroup
 from reef.inference.vllm.worker import VLLMWorker
@@ -114,13 +114,12 @@ class Engines:
         )
 
 
-def sglang_group(gpus=2, gpus_per_engine=1, gpus_per_node=2):
-    config = SGLangConfig("model", gpus, gpus_per_engine, gpus_per_node)
-    return SGLangEngineGroup(config, SGLangGroupConfig("regular", gpus, gpus_per_engine), None, 0, ("router", 3000))
+def sglang_group():
+    return SGLangEngineGroup(SGLangSettings("model", 2, 1, 2), None, ("router", 3000))
 
 
 def vllm_group():
-    return VLLMEngineGroup(VLLMConfig("model", 2, 1, 2, router_url="http://router"), placement=None)
+    return VLLMEngineGroup(VLLMSettings("model", 2, 1, 2, router_url="http://router"), placement=None)
 
 
 def start(group):
@@ -173,7 +172,6 @@ def test_port_held_through_the_window_relaunches_only_that_engine_past_its_ports
     assert engines.events[2:] == [("shutdown", 0), *[("check", 0)] * 4, relaunched]
     assert [event[:2] for event in engines.events[:2]] == [("init", 0), ("init", 1)]
     assert engines.now == RELEASE_SECONDS
-    assert group.num_new_engines == 2
 
 
 @pytest.mark.parametrize("make_group,held_port", [(sglang_group, 15003), (vllm_group, 15000)])
@@ -238,42 +236,6 @@ def test_server_answered_by_another_process_relaunches_without_a_port_check(
         start(make_group())
 
 
-def test_multinode_engine_relaunches_every_rank_at_a_new_root_address(monkeypatch):
-    engines = Engines(monkeypatch, ["node-a", "node-b"])
-    engines.failures[0] = [NOT_READY]
-    engines.hold("node-a", 15003)
-    start(sglang_group(gpus=8, gpus_per_engine=8, gpus_per_node=4))
-    assert engines.events == [
-        ("init", 0, 15000, "node-a:15003"),
-        ("init", 1, 15000, "node-a:15003"),
-        ("shutdown", 0),
-        ("shutdown", 1),
-        *[("check", 0), ("check", 1)] * 4,
-        ("init", 0, 15105, "node-a:15108"),
-        ("init", 1, 15105, "node-a:15108"),
-    ]
-    # A rank other than the root returns once its process starts, so its failure is never a port conflict.
-    engines.events.clear()
-    engines.failures[1] = [NOT_READY]
-    engines.hold("node-b", 15003)
-    with pytest.raises(RayTaskError):
-        start(sglang_group(gpus=8, gpus_per_engine=8, gpus_per_node=4))
-    assert [event[0] for event in engines.events] == ["init", "init"]
-
-
-def test_recovery_raises_an_external_engine_failure_unchanged(monkeypatch):
-    engines = Engines(monkeypatch, ["ext"])
-    incompatible = ValueError("external SGLang engine has incompatible enable_memory_saver")
-    engines.failures[0] = [incompatible]
-    external = {"url": "http://ext:30000", "host": "ext", "port": 30000, "worker_type": "regular", "num_gpus": 1}
-    config = SGLangConfig("model", 1, 1, 1)
-    group = SGLangEngineGroup(config, SGLangGroupConfig("regular", 1, 1), None, 0, ("router", 3000), external)
-    with pytest.raises(RayTaskError) as raised:
-        SGLangModel([group]).recover()
-    assert raised.value.cause is incompatible
-    assert [event[0] for event in engines.events] == ["init"]
-
-
 @pytest.mark.parametrize("site", ["sglang start", "sglang recover", "vllm start", "vllm recover"])
 def test_startup_and_recovery_relaunch_on_port_conflicts(monkeypatch, site):
     engines = Engines(monkeypatch, ["node-a", "node-a"])
@@ -281,12 +243,12 @@ def test_startup_and_recovery_relaunch_on_port_conflicts(monkeypatch, site):
     width = 35 if site.startswith("sglang") else 1
     engines.hold("node-a", 15003 if width == 35 else 15000)
     if site == "sglang start":
-        monkeypatch.setattr(SGLangCluster, "_router", lambda self, index, pd: ("router", 3000))
-        SGLangCluster(SGLangConfig("model", 2, 1, 2), None).start()
+        monkeypatch.setattr(SGLangCluster, "_router", lambda self: ("router", 3000))
+        SGLangCluster(SGLangSettings("model", 2, 1, 2), None).start()
     elif site == "sglang recover":
-        SGLangModel([sglang_group()]).recover()
+        sglang_group().recover()
     elif site == "vllm start":
-        VLLMWorker(VLLMConfig("model", 2, 1, 2, router_url="http://router"), None)
+        VLLMWorker(VLLMSettings("model", 2, 1, 2, router_url="http://router"), None)
     else:
         vllm_group().recover()
     _, relaunched = [event[2] for event in engines.events if event[:2] == ("init", 0)]
@@ -349,22 +311,18 @@ class Routers:
 
 
 @pytest.mark.parametrize(
-    "index, router_port, port, metrics_port",
+    "router_port, port, metrics_port",
     [
-        (0, None, 3000, 4000),
+        (None, 3000, 4000),
         # The port above a configured router port can be another stack's router port.
-        (0, 30000, 30000, 4000),
-        (0, 4000, 4000, 4001),
-        # Only the first model's router uses the configured port.
-        (1, 30000, 3000, 4000),
+        (30000, 30000, 4000),
+        (4000, 4000, 4001),
     ],
 )
-def test_router_probes_its_metrics_port_from_4000_on_the_node_address(
-    monkeypatch, index, router_port, port, metrics_port
-):
+def test_router_probes_its_metrics_port_from_4000_on_the_node_address(monkeypatch, router_port, port, metrics_port):
     routers = Routers(monkeypatch)
-    cluster = SGLangCluster(SGLangConfig("model", 1, 1, 1, router_port=router_port), None)
-    assert cluster._router(index, pd=False) == ("10.0.0.5", port)
+    cluster = SGLangCluster(SGLangSettings("model", 1, 1, 1, router_port=router_port), None)
+    assert cluster._router() == ("10.0.0.5", port)
     (options,) = routers.options
     # Without prometheus_host, the router serves metrics on loopback. The probe cannot see that port, so every stack
     # on the host would pick the same one.
@@ -387,8 +345,8 @@ def test_router_whose_ports_another_process_holds_starts_again_on_new_ports(
 ):
     routers = Routers(monkeypatch, held_ports)
     routers.failures = [failure]
-    cluster = SGLangCluster(SGLangConfig("model", 1, 1, 1, router_port=router_port), None)
-    host, port = cluster._router(0, pd=False)
+    cluster = SGLangCluster(SGLangSettings("model", 1, 1, 1, router_port=router_port), None)
+    host, port = cluster._router()
     _, second = routers.options
     assert (host, port) == ("10.0.0.5", second["port"])
     assert second["port"] == (3002 if router_port is None else router_port)
@@ -416,18 +374,18 @@ def test_router_whose_ports_another_process_holds_starts_again_on_new_ports(
 def test_router_failure_stops_the_launch(monkeypatch, router_port, held_ports, failures, message):
     routers = Routers(monkeypatch, held_ports)
     routers.failures = list(failures)
-    cluster = SGLangCluster(SGLangConfig("model", 1, 1, 1, router_port=router_port), None)
+    cluster = SGLangCluster(SGLangSettings("model", 1, 1, 1, router_port=router_port), None)
     with pytest.raises(RuntimeError, match=message):
-        cluster._router(0, pd=False)
+        cluster._router()
     assert all(router.stopped for router in routers.processes)
     assert len(routers.options) == len(failures) and cluster.routers == []
 
 
-class AccessDenied(Exception):
+class AccessDenied(Exception):  # noqa: N818 - the name that psutil gives
     pass
 
 
-class NoSuchProcess(Exception):
+class NoSuchProcess(Exception):  # noqa: N818 - the name that psutil gives
     pass
 
 
@@ -507,7 +465,7 @@ def test_vllm_engine_checks_the_listener_once_its_server_answers(monkeypatch, ow
     install_psutil(monkeypatch, [("10.0.0.5", 18900, owner, "LISTEN")])
     monkeypatch.setattr(vllm_engine, "launch_server", lambda *args: SimpleNamespace(pid=SERVER_PID))
     monkeypatch.setattr(vllm_engine, "wait_ready", lambda *args, **kwargs: None)
-    engine = ReefVLLMEngine(VLLMConfig("model", 1, 1, 1), rank=0, gpu_ids=(0,))
+    engine = ReefVLLMEngine(VLLMSettings("model", 1, 1, 1), rank=0, gpu_ids=(0,))
     if owner == SERVER_PID:
         engine.init("10.0.0.5", 18900)
     else:

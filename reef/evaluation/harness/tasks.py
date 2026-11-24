@@ -1,8 +1,8 @@
-"""The tasks each harness step evaluates on.
+"""The tasks each harness job evaluates on.
 
-A step evaluates the candidate and the head tree on the same tasks: the
+A job evaluates the candidate and the head tree on the same tasks: the
 configured tasks (``evolution.evaluation.tasks``, or a task manifest), or the
-eval split of the scenario's imported tasks as the step reads it, then the prompts collected
+eval split of the scenario's imported tasks as the job reads it, then the prompts collected
 from failing traffic. Collection is off by default. When it is on, a
 ``TaskCollector`` picks the prompts (every trace's user prompt without one), and
 Reef screens out credentials and instruction overrides, skips duplicates, and
@@ -24,16 +24,16 @@ from reef.harness.tree.checks import directive_shaped, secret_shaped
 class TaskCollector(ConfiguredPlugin, ABC):
     """Choose which trace prompts become permanent evaluation tasks.
 
-    ``collect`` receives a step's trace samples and returns the prompts to
+    ``collect`` receives a job's trace samples and returns the prompts to
     collect. Reef still removes duplicates, screens for credentials and
     instruction overrides, and caps them.
     Purpose: a deployment names the class in ``evolution.evaluation.collector``;
-    ``EvaluationTasks`` calls it in a step that collects failures.
+    ``EvaluationTasks`` calls it in a job that collects failures.
     """
 
     @abstractmethod
     def collect(self, samples: tuple[TrajectorySample, ...]) -> Sequence[str]:
-        """The prompts this step should collect into the evaluation tasks."""
+        """The prompts this job should collect into the evaluation tasks."""
 
 
 def prompt_of(sample: TrajectorySample) -> str | None:
@@ -68,15 +68,15 @@ def client_of(sample: TrajectorySample) -> str:
 
 
 @dataclass(frozen=True)
-class StepTasks:
-    """The tasks one step evaluates, and the collection state that goes with them.
+class JobTasks:
+    """The tasks one job evaluates, and the collection state that goes with them.
 
-    Values: ``tasks`` is the step's seed tasks, then every collected prompt not
+    Values: ``tasks`` is the job's seed tasks, then every collected prompt not
     among them, without duplicates. ``collected_tasks`` are the collected
-    prompts after this step, in collection order, and ``collected_clients``
+    prompts after this job, in collection order, and ``collected_clients``
     counts them per tagged client. ``screened`` ≥ 0 counts the candidate
     prompts the screens refused.
-    Purpose: ``EvaluationTasks.for_step`` makes it; the backend evaluates on
+    Purpose: ``EvaluationTasks.for_job`` makes it; the backend evaluates on
     ``tasks`` and carries the rest into its state.
     """
 
@@ -87,10 +87,10 @@ class StepTasks:
 
 
 class EvaluationTasks:
-    """The source of every step's evaluation tasks.
+    """The source of every job's evaluation tasks.
 
-    ``seed_tasks`` are the configured tasks, which a step evaluates when its
-    job names no seed tasks of its own. With ``collect_failures``, a step collects up to
+    ``seed_tasks`` are the configured tasks, which a job evaluates when its
+    job names no seed tasks of its own. With ``collect_failures``, a job collects up to
     ``max_collected`` prompts in total and ``max_collected_per_client`` per
     tagged client, chosen by ``collector`` (every trace's prompt without one).
     """
@@ -112,18 +112,18 @@ class EvaluationTasks:
         self.max_collected = max_collected
         self.max_collected_per_client = max_collected_per_client
 
-    def for_step(
+    def for_job(
         self,
         samples: tuple[TrajectorySample, ...],
         collected_tasks: Sequence[str],
         collected_clients: Mapping[str, int],
         *,
         seed: tuple[str, ...] | None = None,
-    ) -> StepTasks:
-        """The tasks this step evaluates, after collecting this step's prompts when collection is on.
+    ) -> JobTasks:
+        """The tasks this job evaluates, after collecting this job's prompts when collection is on.
 
-        ``collected_tasks`` and ``collected_clients`` are the collection state the previous step committed.
-        ``seed`` is the step's seed tasks, such as the eval split that its job names; ``None`` is ``seed_tasks``.
+        ``collected_tasks`` and ``collected_clients`` are the collection state the previous job committed.
+        ``seed`` is the job's seed tasks, such as the eval split that its job names; ``None`` is ``seed_tasks``.
         """
         seed = self.seed_tasks if seed is None else seed
         collected = list(collected_tasks)
@@ -154,7 +154,7 @@ class EvaluationTasks:
                 collected.append(prompt)
                 seen.add(prompt)
         tasks = (*seed, *(task for task in collected if task not in frozenset(seed)))
-        return StepTasks(tasks, tuple(collected), counts, screened)
+        return JobTasks(tasks, tuple(collected), counts, screened)
 
 
-__all__ = ["EvaluationTasks", "StepTasks", "TaskCollector", "client_of", "prompt_of"]
+__all__ = ["EvaluationTasks", "JobTasks", "TaskCollector", "client_of", "prompt_of"]

@@ -3,7 +3,7 @@
 A deployment selects one :class:`TaskGenerator` in its
 ``pipeline.record2sample.config.generator`` setting. The recipe asks the
 generator for tasks with a ``TaskGenerationRequest``
-(:mod:`reef.record2sample.generator.inputs`), validates each one, runs the
+(:mod:`reef.samples.generator.inputs`), validates each one, runs the
 valid ones, and sends the results back to the generator. A generator keeps
 what it must read again after a restart in its :class:`GeneratorState`. This
 module holds the values, their field validation, and the generator
@@ -21,7 +21,7 @@ from typing import Any, Self
 
 from reef.core.plugins import Plugin
 from reef.core.tasks import HarborTask
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.generator.inputs import TaskGenerationRequest
 
 
 @dataclass(frozen=True)

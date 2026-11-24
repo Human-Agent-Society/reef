@@ -8,21 +8,21 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
+from reef.core.tasks import HarborTask, HarborTaskConflictError, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.harness.harbor.rollouts import RolloutTurn, TaskRollout
 from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, StoredGeneratorState
-from reef.record2sample.generator import (
+from reef.samples.generator import (
     DesignerRequest,
-    DuplicateTask,
+    DuplicateTaskError,
     Generator,
     GeneratorError,
     OracleResult,
     ProposedTask,
-    TaskNameConflict,
+    TaskNameConflictError,
     WrittenTask,
     content_hash,
 )
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 DOCUMENT = {
     "instruction": (
@@ -54,12 +54,16 @@ def task_for(name: str, record_id: str, port: int, *, skill: str | None = None, 
     )
     if skill is not None:
         metadata["skill"] = skill
+    files = {"instruction.md": document["instruction"] + "\n"}
+    for directory, tree in (
+        ("tests", document["tests"]),
+        ("environment", document["environment"]),
+        ("solution", solution),
+    ):
+        files.update({f"{directory}/{path}": text for path, text in tree.items()})
     return HarborTask(
         name=name,
-        instruction=document["instruction"] + "\n",
-        tests=document["tests"],
-        environment=document["environment"],
-        solution=solution,
+        files=files,
         metadata=metadata,
         source_agent_record_ids=(record_id,),
     )
@@ -175,13 +179,13 @@ class StandInGenerator(Generator):
             else set()
         )
         if content_hash(task) in known:
-            raise DuplicateTask("duplicate of a task already under the root")
+            raise DuplicateTaskError("duplicate of a task already under the root")
         if task.name in self.taken:
-            raise TaskNameConflict(f"a different task holds the name {task.name}: it is not a task reef wrote")
+            raise TaskNameConflictError(f"a different task holds the name {task.name}: it is not a task reef wrote")
         try:
             path = write_harbor_task(task, self.root)
-        except HarborTaskConflict as exc:
-            raise TaskNameConflict(f"a different task holds the name {task.name}: {exc}") from exc
+        except HarborTaskConflictError as exc:
+            raise TaskNameConflictError(f"a different task holds the name {task.name}: {exc}") from exc
         return WrittenTask(path=path, name=task.name, digest=task.digest)
 
     async def delete_task(self, name: str) -> None:
@@ -191,7 +195,7 @@ class StandInGenerator(Generator):
     async def check(self, task_path: Path) -> OracleResult:
         self.checks.append(task_path)
         if self.check_fail_after is not None and len(self.checks) > self.check_fail_after:
-            raise GeneratorError("job 7 failed: OracleUnavailable: the harbor command line is not installed")
+            raise GeneratorError("job 7 failed: OracleUnavailableError: the harbor command line is not installed")
         if self.is_solvable:
             return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
         return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)

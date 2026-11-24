@@ -9,6 +9,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from threading import RLock
 
+from reef.core.errors import InternalError
+
 
 @dataclass(frozen=True)
 class ExecutorFailure:
@@ -19,7 +21,7 @@ class ExecutorFailure:
     rank: int | None = None
 
 
-class ExecutorFailedError(RuntimeError):
+class ExecutorFailedError(InternalError, RuntimeError):
     """Raised by every pending or later RPC once an executor has failed."""
 
     def __init__(self, failure: ExecutorFailure):

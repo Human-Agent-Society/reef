@@ -8,7 +8,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "reef/core/**"
-          - "reef/scenario/**"
+          - "reef/control/scenario/**"
 
 "area: docs":
   - changed-files:
@@ -34,8 +34,8 @@
           - "reef/artifact/components.py"
           - "tutorials/evolve-your-harness/**"
           - "recipes/gepa/**"
-          - "tests/reef_service/test_harness*.py"
-          - "tests/reef_service/test_*recipe*.py"
+          - "tests/api/**/test_harness*.py"
+          - "tests/api/**/test_*recipe*.py"
           - "tests/smoke/**"
 
 "area: packaging":
@@ -49,25 +49,26 @@
   - changed-files:
       - any-glob-to-any-file:
           - "reef/cli.py"
-          - "reef/service/**"
-          - "tests/reef_service/**"
+          - "reef/api/**"
+          - "tests/api/**"
 
 "area: training":
   - changed-files:
       - any-glob-to-any-file:
           - "reef/artifact/**"
-          - "reef/dispatcher/**"
+          - "reef/control/*.py"
+          - "reef/control/workers/**"
           - "reef/execution/executor/**"
           - "reef/train/**"
           - "recipes/*/examples/*/serve.yaml"
-          - "tests/reef_service/test_async*.py"
-          - "tests/reef_service/test_*artifact*.py"
-          - "tests/reef_service/test_*checkpoint*.py"
-          - "tests/reef_service/test_*runtime*.py"
-          - "tests/reef_service/test_sao*.py"
-          - "tests/reef_service/test_slime*.py"
-          - "tests/reef_service/test_*training*.py"
-          - "tests/reef_service/test_*weight*.py"
+          - "tests/api/test_async*.py"
+          - "tests/api/**/test_*artifact*.py"
+          - "tests/api/test_*checkpoint*.py"
+          - "tests/api/**/test_*runtime*.py"
+          - "tests/api/test_sao*.py"
+          - "tests/api/test_slime*.py"
+          - "tests/api/**/test_*training*.py"
+          - "tests/api/**/test_*weight*.py"
           - "tests/slime_backend/**"
 
 dependencies:

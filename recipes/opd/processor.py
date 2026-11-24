@@ -10,10 +10,10 @@ from reef.core.chat_rendering import TeacherRequest
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import ReportContext, ReportSamples
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.distill import student_sample
+from reef.samples import ReportContext, ReportSamples
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.samples.distill import student_sample
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class OPDSamples(ReportSamples):
     """
 
     def __init__(self, context: PipelineContext, settings: OPDSettings) -> None:
-        super().__init__(context, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, exclusive_sources=True)
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
 

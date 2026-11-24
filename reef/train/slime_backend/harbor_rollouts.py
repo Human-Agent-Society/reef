@@ -44,13 +44,13 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from reef.core.job_data import DelayedSample, DelayedSampleLimit, TrajectorySample
-from reef.core.training_capture import sampling_distribution
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
-from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
 from reef.train.slime_backend.engine_chat import EngineChat
+from reef.train.slime_backend.facts import SlimeRolloutOptions
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SLIME_DEFAULT_SOURCE_PATH
 from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -211,25 +211,10 @@ def check_delayed_task_job(args: SlimeArguments, objective: SlimeObjective) -> N
 
 
 def delayed_sample_limit(args: SlimeArguments) -> DelayedSampleLimit:
-    """The delayed samples that a task job that carries samples trains with Slime's parsed ``args``.
-
-    The job trains at most ``min(--global-batch-size, (--rollout-batch-size - 1) * --n-samples-per-prompt)``
-    delayed samples, which keeps the delayed groups and a task in the first rollout and the samples in its first
-    optimizer step. Each sample comes from Slime's rollout distribution (``--rollout-temperature``,
-    ``--rollout-top-p``, ``--rollout-top-k``), so that its recorded log-probs are those of the sampler that the
-    workers' log-probs stand for. ``ValueError`` for a greedy rollout distribution.
-    """
-    distribution = sampling_distribution(
-        {"temperature": args.rollout_temperature, "top_p": args.rollout_top_p, "top_k": args.rollout_top_k}
-    )
-    if distribution is None:
-        raise ValueError(
-            "a task job that carries samples needs a sampled rollout distribution: a positive --rollout-temperature "
-            "and a --rollout-top-p in (0, 1]"
-        )
-    return DelayedSampleLimit(
-        min(args.global_batch_size, (args.rollout_batch_size - 1) * args.n_samples_per_prompt), distribution
-    )
+    """The delayed samples that a task job that carries samples trains with Slime's parsed ``args``: the limit of
+    their rollout options (``SlimeRolloutOptions.delayed_sample_limit``), which the backend's facts state to control.
+    ``ValueError`` for a greedy rollout distribution."""
+    return SlimeRolloutOptions.from_parsed(args).delayed_sample_limit()
 
 
 @dataclass(frozen=True)

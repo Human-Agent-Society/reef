@@ -17,10 +17,10 @@ from typing import Any, Self
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import trajectory_reward
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TTTDSettings(SampleAssemblySettings):
-    """The config of ``TTTDSamples``: the step grid, the sample assembly, and the staleness limit.
+    """The config of ``TTTDSamples``: the step grid and the sample assembly.
 
     Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two; the other keys
     are as in ``SampleAssemblySettings``. The constructor refuses other values.
@@ -53,7 +53,7 @@ class TTTDGrouping(ReportGrouping):
 
     A step is ready when every one of its ``groups_per_step`` x
     ``rollouts_per_group`` slots is filled. A complete step whose reports span
-    releases is discarded wholesale, because mixed-version rewards are not
+    artifacts is discarded wholesale, because mixed-version rewards are not
     comparable.
     """
 
@@ -116,7 +116,6 @@ class TTTDSamples(ReportSamples):
             context,
             TTTDGrouping(settings.groups_per_step, settings.rollouts_per_group),
             exclusive_sources=True,
-            max_staleness=settings.max_staleness,
         )
         #: The comparison groups in one step.
         self.groups_per_step = settings.groups_per_step

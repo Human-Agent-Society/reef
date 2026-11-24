@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import data_storage, made_task, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
+from tests.support.threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support.trajectories import policy_trajectory
 from tests.train.test_record_stage_job_data_parity import counting_jobs, inference, report
 
 from reef.artifact import SnapshotRef
@@ -23,7 +23,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.record2sample import (
+from reef.samples import (
     GroupDecision,
     InferenceRecordSamples,
     NoSamples,
@@ -36,12 +36,16 @@ from reef.record2sample import (
     SingleRecordSet,
     SkippedReport,
 )
-from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.storage.commits import CommitRecord
-from reef.storage.data import MAX_QUERY_LIMIT, NewItem
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.samples.service import Selection
+from reef.samples.staleness import ServedArtifacts
+from reef.samples.traces import TraceSamples
+from reef.storage.coordination.work_queue import WorkLeaseLostError
+from reef.storage.data.store import MAX_QUERY_LIMIT, NewItem
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 
@@ -341,20 +345,85 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     assert not processor.record2sample.set_samples
 
 
+class LostLease(Selection):
+    """A selection whose worker lost its item once ``lost`` is True: as a worker whose lease ran out while another
+    worker took the trainer's next selection."""
+
+    def __init__(self) -> None:
+        super().__init__("selection")
+        self.lost = False
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+    def check_lease(self) -> None:
+        if self.lost:
+            raise WorkLeaseLostError("lost")
+
+
 @pytest.mark.unit
-def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
+def test_a_samples_step_whose_worker_lost_its_lease_writes_nothing() -> None:
+    """Two workers overlap on one trainer: the first started at artifact e:1, and the second judged e:2. The first
+    must not store samples that it judged against e:1, nor a judgment, once its lease is gone."""
     processor = threshold_pipeline(PipelineContext("s"))
-    processor.observe_serving_artifact_id("e:1")
+    selection = LostLease()
+    processor.selection = selection
+    processor.mark_stale(ServedArtifacts(("e:1",), commit_number=1))
+    selection.lost = True
+    processor.push(inference("i1", version="e:1"))
+    with pytest.raises(WorkLeaseLostError):
+        processor.push(report("r1", "i1"))
+    assert processor.store.page() == ()
+    with pytest.raises(WorkLeaseLostError):
+        processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=2))
+    assert processor.store.judged_commit(processor.staleness_rule) == 1
+
+
+@pytest.mark.unit
+def test_a_stage_that_never_goes_stale_is_judged_without_reading_the_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context, record2sample=TraceSamples(context), sample2job=UploadJobData(context, 1, None)
+    )
     processor.push(inference("i1", version="e:1"))
     processor.push(report("r1", "i1"))
-    processor.observe_serving_artifact_id("e:2")
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a stage that never goes stale reads no listing")
+
+    monkeypatch.setattr(SampleStore, "listing", refused)
+    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=1))
+    assert processor.judged(ServedArtifacts(("e:1", "e:2"), commit_number=1))
+    assert [stored.stale for stored in processor.store.page()] == [False]
+
+
+@pytest.mark.unit
+def test_a_sample_that_the_samples_service_marks_stale_stays_stored_and_never_trains_automatically() -> None:
+    processor = threshold_pipeline(PipelineContext("s"))
+    processor.push(inference("i1", version="e:1"))
+    processor.push(report("r1", "i1"))
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
+    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
     batch = processor.build_job_data(1)
     assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
-    # The stale report ended with the inference that it owns, and its tasks are gone.
+    # The stale sample stays in the store with its mark, and the records that made it stay consumed.
+    assert [(stored.sample_id, stored.stale) for stored in processor.store.page()] == [
+        (stage_item_id("s", "r1:0"), True),
+        (stage_item_id("s", "r2:0"), False),
+    ]
     assert {"r1", "i1"} <= processor.record2sample.releasable_record_ids()
-    assert "r1" not in processor.record2sample.set_samples
+    # The judgment is stored once; judging again against the same artifacts changes nothing.
+    assert processor.store.judged_commit(processor.staleness_rule) == 3
+    assert not processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
+    # A sample stored after the judgment is judged as it is stored: no reader sees it unmarked.
+    processor.push(inference("i3", version="e:1"))
+    processor.push(report("r3", "i3"))
+    assert [stored.stale for stored in processor.store.read([stage_item_id("s", "r3:0")])] == [True]
+    # A request can still name the stale sample: the client chose it.
+    assert [
+        stored.sample_id for stored, _ in processor.request_entries(training_request(stage_item_id("s", "r1:0")))
+    ] == [stage_item_id("s", "r1:0")]
 
 
 @pytest.mark.unit
@@ -472,12 +541,12 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
     session = storage.open("s")
     samples = sample_store(storage, "s", session)
     upload(samples, "t1", "t2")
-    session.commit_step(
-        expected_step=0,
+    session.append_commit(
+        expected_commit_number=0,
         commit=CommitRecord(
             scenario="s",
-            step=1,
-            snapshot=SnapshotRef("release:1", "base"),
+            commit_number=1,
+            snapshot=SnapshotRef("snapshot:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=0,
@@ -557,11 +626,10 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     assert len(processor.store.page()) == 2
     assert processor.record2sample.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing artifact become stale once the served artifact is known.
-    processor.observe_serving_artifact_id("e:1")
-    processor.advance()
+    processor.mark_stale(ServedArtifacts(("e:1",)))
+    assert not processor.ready(1)
     assert processor.status()["ready_samples"] == 0
     assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
-    assert not processor.ready(1)
 
 
 @pytest.mark.unit
@@ -574,12 +642,11 @@ def test_the_records_of_an_artifact_served_beside_train_while_it_serves() -> Non
         "i1", SampleResult.ready((policy_trajectory("i1", [1], [1], [0.0], 1.0, artifact_id="beside"),))
     )
     processor.produce()
-    processor.observe_serving_artifact_id("active")
-    assert auto_ids(processor) == (), "an artifact outside the served history is stale"
-    processor.served_artifacts.restore_beside(("beside",))
-    assert len(auto_ids(processor)) == 1
-    processor.served_artifacts.restore_beside(())
-    assert auto_ids(processor) == ()
+    processor.mark_stale(ServedArtifacts(("active",), frozenset({"beside"}), commit_number=1))
+    assert processor.ready(1) and len(auto_ids(processor)) == 1
+    # Once the artifact no longer serves beside the active one, its sample is stale.
+    processor.mark_stale(ServedArtifacts(("active",), commit_number=2))
+    assert not processor.ready(1) and auto_ids(processor) == ()
 
 
 @pytest.mark.unit
@@ -806,7 +873,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert restored.advance_job() is None
     assert "later-report" in restored.skipped_record_ids
     # Consumption changes training eligibility, not the stored diagnostic payload.
-    assert records.get("s", "aborted") == aborted
+    assert records.read("s", "aborted") == aborted
 
 
 @pytest.mark.unit
@@ -814,8 +881,8 @@ def test_a_request_names_stored_samples_of_one_kind_that_the_trainer_can_train()
     context = PipelineContext("s", training_mode="manual")
     processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
     upload(processor.store.store, "upload")
-    processor.store.add_record_samples(None, ("r1",), (("r1:0", named_task("task")),))
-    processor.store.store.for_trainer("other").add_record_samples(None, ("r2",), (("other:r2:0", TRAJECTORY),))
+    processor.store.write_record_samples(None, ("r1",), (("r1:0", named_task("task")),))
+    processor.store.store.for_trainer("other").write_record_samples(None, ("r2",), (("other:r2:0", TRAJECTORY),))
     processor.check_request(training_request("upload"))
     with pytest.raises(ValueError, match="one kind"):
         processor.check_request(training_request("upload", "s.r1:0"))
@@ -847,13 +914,13 @@ def test_a_request_reads_its_samples_in_batches_and_a_poll_does_not_read_them_ag
         return read_many(owner, item_ids, **options)
 
     monkeypatch.setattr(data, "read_many", counted)
-    get, held = SampleStore.get, []
+    read, held = SampleStore.read, []
 
-    def counted_get(store: SampleStore, sample_ids: Any) -> Any:
+    def counted_read(store: SampleStore, sample_ids: Any) -> Any:
         held.append(len(sample_ids))
-        return get(store, sample_ids)
+        return read(store, sample_ids)
 
-    monkeypatch.setattr(SampleStore, "get", counted_get)
+    monkeypatch.setattr(SampleStore, "read", counted_read)
     request = training_request(*names)
     processor.check_request(request)
     assert reads == [MAX_QUERY_LIMIT, 1]
@@ -878,7 +945,7 @@ def test_the_data_of_a_failed_request_holds_no_sample_and_reads_none(monkeypatch
     def refuse(store: SampleStore, sample_ids: Any) -> Any:
         raise AssertionError("a failed request reads no sample")
 
-    monkeypatch.setattr(SampleStore, "get", refuse)
+    monkeypatch.setattr(SampleStore, "read", refuse)
     # The queue gives the failure of a request that a client cancelled, or whose step failed.
     processor.queue_requests([request], {request.id: "cancelled by request"})
     assert processor.holds_job_data(None)

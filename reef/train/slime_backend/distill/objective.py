@@ -1,6 +1,6 @@
 """The worker side of a distillation family: the divergences over the vocabulary shards, the loss and the teacher hook.
 
-A recipe's ``objective.py`` forwards its ``@objective``-registered entry
+A recipe's ``objective.py`` forwards its ``@worker_hook``-registered entry
 points to :func:`distill_loss` and :func:`distill_actor_pre_train`. The
 loss follows ``distil_trainer.py`` of the SDFT reference
 (idanshen/Self-Distillation at ``d77573212fa0``): at every response
@@ -48,7 +48,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
-from reef.train.slime_backend.distill.algorithm import DIVERGENCES, DistillSettings, settings_from_args
+from reef.train.slime_backend.distill.algorithm import DIVERGENCES, DistillAlgorithmSettings, settings_from_args
 from reef.train.slime_backend.distill.teacher_engine import ENGINE_TEACHER_BATCH_KEYS
 from reef.train.slime_backend.score_centering import settings_from_args as centering_settings_from_args
 from reef.train.slime_backend.score_centering.term import score_centering_term
@@ -286,7 +286,7 @@ def sequence_importance_weight(
 
 
 def _exact_divergences(
-    settings: DistillSettings, args: Namespace, batch: dict[str, Any], student_rows_per_sample: Any
+    settings: DistillAlgorithmSettings, args: Namespace, batch: dict[str, Any], student_rows_per_sample: Any
 ) -> list[torch.Tensor]:
     """Per sample, the per-token divergence against the teacher's whole distribution."""
     from megatron.core import mpu
@@ -318,7 +318,7 @@ def _exact_divergences(
 
 
 def _topk_divergences(
-    settings: DistillSettings, batch: dict[str, Any], student_rows_per_sample: Any
+    settings: DistillAlgorithmSettings, batch: dict[str, Any], student_rows_per_sample: Any
 ) -> list[torch.Tensor]:
     """Per sample, the per-token divergence on the selected top-K ids, or the reverse KL at the sampled token."""
     from megatron.core import mpu

@@ -23,7 +23,7 @@ recipe:
     evolution:
       adapter: pi
       # The first tree: base rules that the agent reads from the first
-      # release. The method adds its playbook block below them and keeps
+      # snapshot. The method adds its playbook block below them and keeps
       # them unchanged.
       seed: recipes/ace/examples/seed
       # One reported session is one trace. The default job_samples of 1 makes one trace one step.

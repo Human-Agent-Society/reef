@@ -3,7 +3,7 @@
 from reef.core.tasks.harbor import (
     TASK_CONFIG_VERSION,
     HarborTask,
-    HarborTaskConflict,
+    HarborTaskConflictError,
     HarborTaskError,
     primary_reward,
     read_harbor_task,
@@ -21,7 +21,7 @@ from reef.core.tasks.split import (
 __all__ = [
     "TASK_CONFIG_VERSION",
     "HarborTask",
-    "HarborTaskConflict",
+    "HarborTaskConflictError",
     "HarborTaskError",
     "TaskSplit",
     "TaskSplitError",

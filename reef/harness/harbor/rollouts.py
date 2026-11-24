@@ -22,7 +22,6 @@ import math
 import os
 import re
 import sys
-import tomllib
 import urllib.parse
 import urllib.request
 import uuid
@@ -35,9 +34,11 @@ from typing import Any
 
 from reef_client.client import ReefClient, ReefClientError
 
+from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.task_environment import environment_config
 from reef.harness.capture import CaptureObserver, CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
@@ -52,16 +53,9 @@ PLACEHOLDER_API_KEY = "reef"
 #: A label rides every call as an ``x-reef-tag-<name>`` header; the service keeps the name in lower case.
 LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 RESERVED_LABELS = ("task", "rollout")
-#: Harbor's time limits for a task whose ``task.toml`` names none, in seconds.
-HARBOR_BUILD_TIMEOUT_S = 600
-HARBOR_VERIFIER_TIMEOUT_S = 600
-#: What a Modal sandbox lives beyond its task's time limits: the agent's install and the trial's file transfers.
-MODAL_SANDBOX_MARGIN_S = 3600
-#: Harbor's default lifetime of a Modal sandbox, in seconds.
-MODAL_SANDBOX_MAX_S = 24 * 60 * 60
 
 
-class TaskRolloutError(RuntimeError):
+class TaskRolloutError(InternalError, RuntimeError):
     """A task's rollout could not run, or could not be reported."""
 
 
@@ -220,38 +214,6 @@ def task_identity(task_path: Path) -> dict[str, str]:
     return identity
 
 
-def environment_config(environment: str, task_path: Path) -> dict[str, object]:
-    """The Harbor environment config of a rollout of ``task_path`` in the Harbor environment type ``environment``.
-
-    It is ``{"type": environment}``, plus these Harbor kwargs when ``environment`` is ``modal``:
-
-    - ``modal_vm_runtime`` is True when the task has ``environment/docker-compose.yaml`` and its ``task.toml`` asks
-      for no GPU. Modal's default runtime puts each Compose service on the host network, and Compose refuses that
-      for a service that names its networks. The VM runtime keeps the task's networks and their DNS aliases, but it
-      has no GPUs.
-    - ``sandbox_timeout_secs`` is the lifetime of the sandbox when ``task.toml`` gives the agent a time limit: the
-      task's build, agent, and verifier time limits plus ``MODAL_SANDBOX_MARGIN_S``, at most Harbor's default of one
-      day. Harbor stops the sandbox when the trial ends. This lifetime ends the sandbox of a trial whose process was
-      killed, which no one stops. A task with no agent time limit keeps Harbor's default.
-    """
-    if environment != "modal":
-        return {"type": environment}
-    task = tomllib.loads((task_path / "task.toml").read_text())
-    task_environment = task.get("environment", {})
-    kwargs: dict[str, object] = {}
-    if (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
-        kwargs["modal_vm_runtime"] = True
-    agent_timeout_seconds = task.get("agent", {}).get("timeout_sec")
-    if agent_timeout_seconds is not None:
-        trial_seconds = (
-            task_environment.get("build_timeout_sec", HARBOR_BUILD_TIMEOUT_S)
-            + agent_timeout_seconds
-            + task.get("verifier", {}).get("timeout_sec", HARBOR_VERIFIER_TIMEOUT_S)
-        )
-        kwargs["sandbox_timeout_secs"] = min(math.ceil(trial_seconds) + MODAL_SANDBOX_MARGIN_S, MODAL_SANDBOX_MAX_S)
-    return {"type": environment, "kwargs": kwargs} if kwargs else {"type": environment}
-
-
 def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
     """Why no model call got a receipt: the count of failed calls and what the service answered the first one."""
     failed = [turn for turn in turns if turn.get("status") != 200 or not turn.get("receipt")]
@@ -351,6 +313,14 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
     ``concurrency`` rollouts at a time. ``capture_observer``, when set, gets each model call of each rollout as it
     lands, failed calls too (``CaptureObserver``).
+
+    An unrecorded rollout (``is_unrecorded``) keeps the bodies of its answered calls as its ``turns`` while
+    ``keeps_turns``. Without ``keeps_turns``, its proxy keeps no request body and no answered response body, its
+    ``turns`` are empty, and a call counts as answered when it answered 200. ``keeps_turns`` changes nothing for a
+    recorded rollout.
+
+    ``builds_templates`` false makes each trial and each environment build of an ``e2b`` runner start only from
+    templates that exist (``environment_config``); a runner on another environment refuses it.
     """
 
     def __init__(
@@ -373,6 +343,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         verifier_timeout_reward: float | None = None,
         concurrency: int = 1,
         capture_observer: CaptureObserver | None = None,
+        keeps_turns: bool = True,
+        builds_templates: bool = True,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -388,6 +360,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             raise TaskRolloutError("an unrecorded rollout reports nothing")
         if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
             raise TaskRolloutError("agent_host must be a non-empty host name or address")
+        if not builds_templates and environment != "e2b":
+            raise TaskRolloutError(f"only an e2b runner can refuse to build templates, not a {environment!r} runner")
         self.reef_url = reef_url.rstrip("/")
         self.scenario = scenario
         self.model = model
@@ -409,10 +383,12 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.is_reporting = is_reporting
         # An unrecorded rollout: Reef keeps no record of its calls, and the rollout keeps their turns.
         self.is_unrecorded = is_unrecorded
+        self.keeps_turns = keeps_turns
         # The reward for a rollout whose verifier ran past its timeout; None leaves such a rollout unscored.
         self.verifier_timeout_reward = verifier_timeout_reward
         self.concurrency = concurrency
         self.capture_observer = capture_observer
+        self.builds_templates = builds_templates
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -493,13 +469,18 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
 
     async def build_task_environment(self, task_path: Path, slots: asyncio.Semaphore) -> str:
-        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try."""
+        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try.
+
+        The build gets the environment config of the task's rollouts, which holds the time limits of this runner's
+        agent (``environment_config``).
+        """
         error = ""
+        environment = environment_config(
+            self.environment, task_path, self.agent, builds_templates=self.builds_templates
+        )
         for _ in range(2):
             async with slots:
-                error = await self.lab.build_environment(
-                    task_path, overrides={"environment": environment_config(self.environment, task_path)}
-                )
+                error = await self.lab.build_environment(task_path, overrides={"environment": environment})
             if not error:
                 break
         return error
@@ -525,12 +506,19 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             listen_host=listen_host,
             is_unrecorded=self.is_unrecorded,
             observer=self.capture_observer,
+            keeps_bodies=self.keeps_turns or not self.is_unrecorded,
         )
         proxy.start()
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
-            overrides: dict[str, object] = {"environment": environment_config(self.environment, task_path)}
+            # The environment config reads the agent's own time limits, so a cloud sandbox lives for them. They are
+            # numbers, which bound_agent leaves as they are, so the task's build gets the same config.
+            overrides: dict[str, object] = {
+                "environment": environment_config(
+                    self.environment, task_path, self.agent, builds_templates=self.builds_templates
+                )
+            }
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)
@@ -539,7 +527,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             proxy.stop()
         receipts: tuple[str, ...] = ()
         answered: tuple[RolloutTurn, ...] = ()
-        if self.is_unrecorded:
+        if self.is_unrecorded and self.keeps_turns:
             answered = tuple(
                 RolloutTurn(turn["request"], turn["response"])
                 for turn in turns
@@ -549,6 +537,9 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             )
             failed_calls = len(turns) - len(answered)
             error = row.error or ("" if answered else unrecorded_call_failure(turns))
+        elif self.is_unrecorded:
+            failed_calls = sum(turn.get("status") != 200 for turn in turns)
+            error = row.error or ("" if failed_calls < len(turns) else unrecorded_call_failure(turns))
         else:
             receipts = tuple(
                 str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200

@@ -16,7 +16,7 @@ Starting Reef
 
 **A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits that service's ``ready_timeout`` before giving up. The default is 30 seconds for the Reef HTTP service and 3600 seconds for a managed engine or a training stack, which download weights. Read that service's log under ``reef.run-dir``. For a training stack, the usual causes are a model that is still downloading, serving engines that fail to start on the inference component (read ``inference.log``), or GPUs already in use.
 
-**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; a harness evolution recipe reads its settings from ``recipe.config.evolution`` (`Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__).
+**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; a harness evolution recipe reads its settings from ``recipe.config.evolution`` (`Harness evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__).
 
 **Boot fails naming a credential in the tree.** A harness evolution seed whose config holds a literal key (``apiKey``, ``token``, and their plural and list forms), or whose other files hold a credential-shaped string, refuses startup: the seed becomes the scenario's first snapshot, and every snapshot stores its tree in git. A proposed patch that holds one is refused the same way. Rotate the key, remove it from the file, and keep credentials in ``inference.upstream-api-key`` or an ``api_key_env``.
 
@@ -26,7 +26,7 @@ Requests
 An inference request reaches Reef on ``/v1/chat/completions``, ``/v1/responses``
 or ``/v1/messages``; all three take the provider's own request body. Reef
 answers it from the scenario's row in ``served_models``, as `Run the services in
-separate processes <operate.rst#run-the-services-in-separate-processes>`__
+separate processes <split-services.rst>`__
 describes.
 
 **401 invalid service token.** The ``Authorization: Bearer`` value (or ``x-api-key``, when no Authorization header is sent) is not one of ``reef.token`` / ``reef.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.
@@ -37,14 +37,14 @@ describes.
 
 **409 on an inference request.** The engine answered under another model name, or aborted the request, on two attempts. Reef reads the scenario's row again before the second attempt, so a single change of the served model does not cause it. A repeated 409 means that the engine does not serve the model name that the row names. Check the model names that the engine serves.
 
-**502 the engine failed.** The engine returned an error status or could not be reached. The response body carries the engine's status and message; read it. For a 4xx status, the request body is usually the problem.
+**502 the engine failed.** The engine returned a 5xx status, answered with something that is not a JSON object, or could not be reached. The response body carries the engine's message; read it. An engine that refuses the request with a 4xx, for example a prompt longer than the model's context, answers the client with that status and its message.
 
 **404 on a deployment that runs no inference engine.** The deployment sets
 ``inference.backend: none``, so it trains without an engine and its scenarios
 serve no model. This is expected. Serve a published checkpoint from a separate
 deployment, or select an engine with ``inference.backend``. See `Train without
 an inference engine
-<../reference/configuration.rst#train-without-an-inference-engine>`__.
+<../reference/configuration-training.rst#train-without-an-inference-engine>`__.
 
 **504 the engine did not answer in time.** One inference took longer than
 ``inference.timeout-s`` (300 seconds by default). If one valid generation can
@@ -58,7 +58,7 @@ request timeout:
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``pipeline.sample2job.config.job_samples`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether job data is ready (``job_data_ready``), and its ``processor`` entry compares ``ready_samples`` with ``job_samples``. A sample whose data is more than ``pipeline.record2sample.config.max_staleness`` artifacts behind the served artifact stays untrained.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``pipeline.sample2job.config.job_samples`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether job data is ready (``job_data_ready``), and its ``processor`` entry compares ``ready_samples`` with ``job_samples``. A sample that the samples service marked stale (item metadata ``stale``), because its data is of an artifact that the scenario no longer serves, stays untrained.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
@@ -85,9 +85,9 @@ Harness evolution
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 
-**No step publishes a change.** A step ran and its candidate was not selected. Read the step's ``candidate_rollouts`` in its snapshots row, and each rollout's record under the scenario's history (``<evolution.state_dir>/<scenario>/<component>/history/rollouts/``, where ``<component>`` is ``harness`` for ``HarnessEvolutionRecipe``; see `History <evolve-your-harness.rst#history>`__). Both sides scoring nothing means the rollouts could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeded ``evolution.evaluation.task_timeout_s`` (600 seconds by default). Both sides scoring the same means the patch did not change the outcome; ``evolution.evaluation.policy: none`` publishes every valid candidate if that is what you want.
+**No step publishes a change.** A step ran and its candidate was not selected. Read the step's ``candidate_runs`` in its snapshots row, and each rollout's record under the scenario's history (``<evolution.state_dir>/<scenario>/<component>/history/runs/``, where ``<component>`` is ``harness`` for ``HarnessEvolutionRecipe``; see `History <evolve-your-harness.rst#history>`__). Execution can fail if the adapter binary cannot be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejects ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeds ``evolution.evaluation.task_timeout_s`` (600 seconds by default). Both sides scoring the same means the patch did not change the outcome; ``evolution.evaluation.policy: none`` publishes every valid candidate if that is what you want.
 
-**GET /reef/harness returns 404.** No request has named the scenario yet, the recipe's seed is empty and no step has published a tree, or the scenario's recipe serves no files; the answer's message says which. An inference call that names the scenario creates it, with the seed as its first snapshot, unless ``reef.allow_implicit_scenario_creation`` is false; then create it with ``POST /reef/scenarios``. The catalog at ``GET /reef/harness/artifacts`` lists what exists.
+**GET /reef/harness returns 404.** The scenario does not exist, the recipe's seed is empty and no step has published a tree, or the scenario's recipe serves no files; the answer's message says which. An inference call never creates a scenario. Create it with ``POST /reef/scenarios``; its first snapshot holds the seed. The catalog at ``GET /reef/harness/artifacts`` lists what exists.
 
 **A client captures no receipts, so a report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -19,8 +20,7 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
-from tests.support._strategies import resolve_method, resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_jobs import build_harness_backend, head_of, with_harness_component
 from tests.support.harness_render import (
     NATIVE_SEED_FILES,
     NATIVE_SEED_TOOLS,
@@ -29,10 +29,12 @@ from tests.support.harness_render import (
     native_tool,
     write_rendered,
 )
-from tests.support.harness_steps import build_harness_backend, head_of
+from tests.support.trajectories import recorded_trajectory
 
+from reef.control.scenario.live_objects import LiveObjects
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
-from reef.execution.sandbox.process import SandboxExecutor
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.runners.native import (
     _DEFAULTS,
@@ -59,8 +61,9 @@ from reef.harness.tasks.trajectory import reader_for
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
@@ -248,14 +251,17 @@ PASS_THROUGH_BWRAP = "import os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]
 def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...]) -> HarnessBackend:
     """A native backend over the launcher, bound to ``model``, whose head is the seed's native files."""
     recipe = HarnessEvolutionRecipe(
-        method=resolve_method(method),
         evolution=EvolutionSettings(adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")),
         evaluation=EvaluationSettings(tasks=tasks),
-        scorer=resolve_task_scorer(score),
         seed=HarnessTree(NATIVE_SEED_FILES),
-        runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
     )
-    return build_harness_backend(recipe, "demo")
+    live = with_harness_component(
+        recipe,
+        method,
+        score=score,
+        live=LiveObjects(runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy")),
+    )
+    return build_harness_backend(recipe, live, "demo")
 
 
 def _events(trajectory, type_):
@@ -694,13 +700,13 @@ def test_native_harness_runs_through_the_evaluation(tmp_path: Path, fake_model) 
         ("put hello in notes.txt and read it back",),
     )
     batch = JobData("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(batch, HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_tree.files
     assert "native/hooks/loop_guard.py" in prepared.candidate.candidate_tree.files
     policy = ComparePolicy(backend)
     decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
-    result = backend.settle_step(prepared, decision)
+    result = backend.settle_job(prepared, decision)
     # Both trees complete the scripted task, so the comparison is a tie and nothing publishes.
     assert result.metrics["wins"] == 0 and result.metrics["losses"] == 0 and result.metrics["ties"] == 1
     assert result.metrics["selected"] is False
@@ -1024,13 +1030,13 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_comparison(tmp_pat
             ),
         )
         batch = JobData("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-        prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
+        prepared = backend.prepare_job(batch, HarnessState().to_json(), 0, head=head_of(backend))
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_tree.files["native/graphs/main.json"]) == SEED_GRAPH
         assert "check" in json.loads(prepared.candidate.candidate_tree.files["native/graphs/main.json"])["stages"]
         policy = ComparePolicy(backend)
         decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
-        settled = backend.settle_step(prepared, decision)
+        settled = backend.settle_job(prepared, decision)
         assert (settled.metrics["wins"], settled.metrics["losses"], settled.metrics["ties"]) == (1, 0, 0)
         assert settled.metrics["selected"] is True
 
@@ -1460,8 +1466,8 @@ def test_a_sandboxed_run_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) ->
         files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **probe}), NATIVE, binding.config_overlays(NATIVE))
         # The launcher and the checkout live outside the run root, so the jail binds them like a base path.
         checkout = Path(__file__).resolve().parents[2]
-        executor = SandboxExecutor(
-            egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
+        executor = BwrapExecutor(
+            egress_hosts=(model.base_url,), base_paths=(*BwrapExecutor.base_paths, str(tmp_path), str(checkout))
         )
         result = run_task(
             NATIVE, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
@@ -1477,6 +1483,33 @@ def test_a_sandboxed_run_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) ->
     # The loop keeps the model endpoint while the probe, one jail deeper, sees only loopback, a read only
     # workspace and no shell; the file still round trips through two jails that declare write and read.
     assert json.loads(results[0]["content"]) == {"exec": "FileNotFoundError", "network": "lo only", "write": "EROFS"}
+    assert results[2]["content"] == "hello"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or shutil.which("sandbox-exec") is None, reason="needs macOS")
+def test_a_seatbelt_run_runs_tool_calls_under_the_run_profile(tmp_path: Path) -> None:
+    with _ProbingModel() as model:
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        probe = native_tool("probe", PROBE, description="probe")
+        files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **probe}), NATIVE, binding.config_overlays(NATIVE))
+        checkout = Path(__file__).resolve().parents[2]
+        interpreter = (sys.prefix, sys.base_prefix, str(Path(sys.executable).resolve().parent))
+        executor = SeatbeltExecutor(
+            egress_hosts=(model.base_url,),
+            base_paths=(*SeatbeltExecutor.base_paths, str(tmp_path), str(checkout), *interpreter),
+        )
+        result = run_task(
+            NATIVE, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
+        )
+    assert result.exit_code == 0, result.stderr
+    # Seatbelt profiles do not nest, so every call runs under the run's profile and nothing is narrowed per tool.
+    assert result.trajectory[0]["data"]["enforcement"] == "none"
+    results = [event["data"] for event in result.trajectory if event["type"] == "tool/result"]
+    assert [(r["name"], r["is_error"]) for r in results] == [
+        ("probe", False),
+        ("write_file", False),
+        ("read_file", False),
+    ]
     assert results[2]["content"] == "hello"
 
 
@@ -1889,10 +1922,10 @@ def test_the_binding_rides_in_the_run_render_and_the_published_tree_is_the_sourc
     task_run = backend.evaluator.render(HarnessTree(NATIVE_SEED_FILES))
     assert json.loads(task_run["native/models.json"])["base_url"] == fake_model.base_url
     batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(batch, HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     policy = NoEvaluationPolicy()
-    settled = backend.settle_step(prepared, policy.decide(prepared.candidate, policy.evaluate(prepared.candidate)))
+    settled = backend.settle_job(prepared, policy.decide(prepared.candidate, policy.evaluate(prepared.candidate)))
     assert settled.metrics["selected"] is True and settled.artifact is not None
     published = settled.artifact.local_path
     assert published is not None

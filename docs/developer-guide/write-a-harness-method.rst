@@ -1,33 +1,48 @@
 Write a harness method
 ======================
 
-:For: authors of a harness evolution method
-:Before you start: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
-:You will have: a method that runs in Reef's steps, the scorer it needs, and a deployment that names it
-
 A method decides how the harness tree changes. It is one class with one
-operation, and a deployment names it in ``evolution.method``. GEPA, ACE and
-Meta-Harness in ``recipes/`` are methods.
+operation, and a deployment names it in ``evolution.method``. The training
+service runs it. GEPA, ACE and Meta-Harness in ``recipes/`` are methods.
+
+:For: authors of a harness evolution method
+:Before you start: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__, and the plug-in map in `Write a recipe <write-a-recipe.rst>`__
+:You will have: a method that runs in Reef's jobs, the scorer it needs, and a deployment that names it
 
 .. code:: python
 
-   from reef.train.harness_backend import Method, StepContext
+   from reef.train.harness_backend import Method, MethodJob
 
 
    class MyMethod(Method):
-       def step(self, context: StepContext) -> None: ...
+       def run(self, job: MethodJob) -> None: ...
 
-Reef calls ``step`` once per training step. ``context.workspace`` holds a
-copy of the head tree, the component's training start, and the step's
-material; ``context.services`` are what Reef does for the method. The tree
-that the method leaves is the candidate: Reef checks it and evaluates it
-under the publication policy. A selected candidate becomes a new snapshot, and
-the deployment's activation rule decides whether that snapshot serves.
+A method needs no recipe class. The deployment selects the built-in
+``HarnessEvolutionRecipe``, which holds only configuration. The training
+service builds the method, the scorer and the collector from the
+``evolution`` section, and runs each job on its ``harness`` training
+component:
+
+- ``Method.run(job)`` (``evolution.method``): once for each job.
+- ``TaskScorer`` (``evolution.evaluation.scorer``): once for each run of a
+  task, in ``services.evaluate`` and in the job's evaluation.
+- ``TaskCollector`` (``evolution.evaluation.collector``): for each job, with
+  ``collect_failures: true``.
+- The publication policy (``evolution.evaluation.policy``): once for each
+  candidate that passed validation.
+
+``job.workspace`` holds a copy of the head tree, the component's training
+start, and the job's material. ``job.services`` are what Reef does for the
+method. The tree that the method leaves is the candidate: Reef checks it and
+evaluates it under the publication policy. A selected candidate becomes a
+new snapshot. On control, the deployment's `activation rule
+<recipe-control-service.rst#activation-rule>`__ decides whether that
+snapshot serves.
 
 .. figure:: ../assets/harness-method-step-light.svg
-   :alt: One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule
+   :alt: One training job from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule
 
-   Reef writes the workspace, calls step(context) once, and reads back the
+   Reef writes the workspace, calls run(job) once, and reads back the
    tree, the state and the output that the method left. Then Reef checks the
    candidate and evaluates it; a selected candidate becomes a snapshot, which
    the activation rule activates or leaves inactive.
@@ -43,7 +58,7 @@ the tool only when it scores better than the head:
 
    from reef.core.prompts import untrusted_text
    from reef.harness.tree import TreePatch
-   from reef.train.harness_backend import Method, StepContext
+   from reef.train.harness_backend import Method, MethodJob
 
    PROMPT = (
        "The agent failed the requests below. Write one pi extension that registers a tool that would have "
@@ -53,13 +68,13 @@ the tool only when it scores better than the head:
 
 
    class AddTool(Method):
-       """Each step: write one tool for the failing traces, and keep it when it scores better."""
+       """Each job: write one tool for the failing traces, and keep it when it scores better."""
 
-       def step(self, context: StepContext) -> None:
-           workspace, services = context.workspace, context.services
+       def run(self, job: MethodJob) -> None:
+           workspace, services = job.workspace, job.services
            failing = [trace for trace in workspace.traces() if trace.score is not None and trace.score < 1.0]
            if not failing:
-               workspace.write_output("no failing trace")  # the tree stays the same, so the step skips
+               workspace.write_output("no failing trace")  # the tree stays the same, so the job skips
                return
            shown = "\n\n".join(f"task: {trace.task}\nreply: {trace.reply}" for trace in failing)
            code = services.models.served.chat([{"role": "user", "content": f"{PROMPT}\n\n{untrusted_text(shown)}"}])
@@ -89,7 +104,7 @@ It uses each piece a method has:
   to compare trees. A scored run is reused, so the head's scores are
   usually free.
 - **Result**: ``write_tree`` for the candidate, ``write_output`` for what
-  the step did.
+  the job did.
 
 A tool is code from client traffic, so the deployment leaves it inactive
 until a person activates it, with the activation rule's ``review_kinds:
@@ -97,80 +112,47 @@ until a person activates it, with the activation rule's ``review_kinds:
 adapter takes code in another form: ``workspace.host()["parts"]`` says what
 each part holds.
 
-What Reef does with the step
+What Reef does with the job
 ----------------------------
 
-.. list-table::
-   :header-rows: 1
-   :widths: 40 60
+Reef acts on what ``run`` leaves:
 
-   * - The method leaves
-     - Reef
-   * - the head tree, unchanged
-     - skips the step
-   * - a tree that fails validation
-     - skips the step and names the problems in ``skipped``; no retry
-   * - any other tree
-     - evaluates it as the candidate
-   * - an exception
-     - fails the step; nothing publishes, and the calls stay in the record
+- The head tree, unchanged: Reef skips the job.
+- A tree that fails validation: Reef skips the job and names the problems
+  in ``skipped``. It does not retry.
+- Any other tree: Reef evaluates it as the candidate.
+- An exception: Reef fails the job. Nothing publishes, Reef commits none of
+  the job's state, and the calls stay in the record.
 
 The workspace
 -------------
 
-Each step has one directory,
+Each job has one directory,
 ``<evolution.state_dir>/<scenario>/<component>/steps/<step>``, kept as the
-step record.
+job record.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 18 14 68
-
-   * - Directory
-     - Access
-     - Holds
-   * - ``harness/``
-     - read-write
-     - a copy of the head tree; the tree here at the end is the candidate
-       (``tree()``, ``write_tree(tree)``)
-   * - ``material/``
-     - read-only
-     - the step's traces (``traces()``), its evaluation tasks and repeats
-       (``tasks()``, ``evaluation_repeats()``), and the adapter's parts
-       (``host()``)
-   * - ``state/``
-     - read-write
-     - the method's own files, carried to the next step (`Keep state between steps`_)
-   * - ``scratch/``
-     - read-write
-     - temporary files, removed when the step ends
-   * - ``output/``
-     - read-write
-     - what the step did (`What the method says`_)
+- ``harness/`` (read-write): a copy of the head tree. The tree here at the
+  end is the candidate (``tree()``, ``write_tree(tree)``).
+- ``material/`` (read-only): the job's traces (``traces()``), its evaluation
+  tasks and repeats (``tasks()``, ``evaluation_repeats()``), its training
+  request (``request()``), and the adapter's parts (``host()``).
+- ``state/`` (read-write): the method's own files, carried to the next job
+  (`Keep state between jobs`_).
+- ``scratch/`` (read-write): temporary files, removed when the job ends.
+- ``output/`` (read-write): what the job did (`What the method says`_).
 
 A ``Trace`` is a client's request (``source`` is ``traffic``) or a run
-of an offline step (``run``):
+of an offline job (``run``):
 
-.. list-table::
-   :header-rows: 1
-   :widths: 18 82
-
-   * - Field
-     - Value
-   * - ``task``
-     - the last user prompt, or the run's instruction; ``None`` without one
-   * - ``reply``
-     - the final assistant text, else ``None``
-   * - ``score``
-     - the report's or the scorer's score, else ``None``
-   * - ``feedback``
-     - the report's feedback as text, else ``None``
-   * - ``failure``
-     - why a run failed, else ``None``
-   * - ``record``, ``client``
-     - the agent record or run id; the client's tag, else ``untagged``
-   * - ``trajectory()``
-     - a traffic trace's ATIF trajectory, else ``None``
+- ``task``: the last user prompt, or the run's instruction; ``None``
+  without one.
+- ``reply``: the final assistant text, else ``None``.
+- ``score``: the report's or the scorer's score, else ``None``.
+- ``feedback``: the report's feedback as text, else ``None``.
+- ``failure``: why a run failed, else ``None``.
+- ``record`` and ``client``: the agent record or run ID, and the client's
+  tag, else ``untagged``.
+- ``trajectory()``: a traffic trace's ATIF trajectory, else ``None``.
 
 ``host()["parts"]`` gives each part's tree ``path``, ``format``, render path
 and what it ``holds``. A file at a path that no part takes fails validation.
@@ -178,31 +160,27 @@ and what it ``holds``. A file at a path that no part takes fails validation.
 The services
 ------------
 
-.. list-table::
-   :header-rows: 1
-   :widths: 38 62
+- ``models.served`` and ``models["<name>"]``: the model under test, or an
+  ``evolution.models`` entry. ``chat(messages)`` returns the text, and
+  ``complete(body)`` the raw response.
+- ``check(tree)``: the ``ValidationResult``, with ``passed``, ``problems``
+  and ``message()``.
+- ``evaluate(tree, tasks, repeats=1)``: scored ``RunRecord`` values
+  (``task``, ``repeat``, ``score``, ``reply``, ``failure``), run like the
+  job's evaluation. ``score`` is a ``RolloutScore``. ``score.value`` is the
+  scorer's value, or 0 when the tree gave no answer. It is ``None`` for a
+  failed run, which the environment could not run; ``failure`` says why.
+- ``run_agent(prompt, tree=, model=)``: one run of the deployment's coding
+  agent (`Run a coding agent`_).
+- ``agent``: the deployment's coding agent itself, an ``AgentExecution``,
+  or ``None`` (`Run a coding agent`_).
+- ``calls``: the job's call meter, with ``spend()``, ``record(entry)`` and
+  ``note(...)``.
 
-   * - Service
-     - Does
-   * - ``models.served``, ``models["<name>"]``
-     - the model under test, or an ``evolution.models`` entry:
-       ``chat(messages)`` returns the text, ``complete(body)`` the raw
-       response
-   * - ``check(tree)``
-     - the ``ValidationResult``: ``passed``, ``problems``, ``message()``
-   * - ``evaluate(tree, tasks, repeats=1)``
-     - scored ``RunRecord`` values (``task``, ``repeat``, ``score``,
-       ``reply``, ``failure``), run like the step's evaluation. ``score`` is
-       a ``RolloutScore``: ``score.value`` is the scorer's value, or 0 when
-       the tree gave no answer; it is ``None`` for a failed run, which the
-       environment could not run, and then ``failure`` says why
-   * - ``run_agent(prompt, tree=, model=)``
-     - one run of the deployment's coding agent (`Run a coding agent`_)
-   * - ``calls``
-     - the step's call meter: ``spend()``, ``record(entry)``, ``note(...)``
+Limits:
 
 - Each model call counts against ``evolution.max_model_calls_per_step`` and
-  lands in the step record's ``calls.json``.
+  lands in the job record's ``calls.json``.
 - ``evaluate`` refuses the whole call, and runs nothing, without a scorer,
   past ``evolution.max_runs_per_step`` (reused runs are free), for a
   tree that fails ``check`` (``ValueError``), and for one string as ``tasks``
@@ -214,17 +192,32 @@ Run a coding agent
 A method whose class sets ``runs_agent = True`` gets the deployment's coding
 agent (``evolution.agent``: adapter, binary, sandbox). The agent works in the
 workspace and holds no credential: its model calls go through a loopback
-gateway at ``$REEF_AGENT_URL``, which spends from the step's budget. The
+gateway at ``$REEF_AGENT_URL``, which spends from the job's budget. The
 same address checks and scores trees: ``GET /tools``, ``POST /check`` with
 ``{"tree": "harness"}``, and ``POST /evaluate`` with ``{"tree": "harness",
 "tasks": [...]}``. ``run_agent`` returns an ``AgentOutcome`` (``exit_code``,
 ``timed_out``, ``error``, ``seconds``).
 
+A method that needs more than one run with Reef's gateway reads
+``services.agent``: the ``AgentExecution`` that Reef bound for the scenario,
+with the agent's adapter (``descriptor``), its isolation (``executor``), its
+``binary`` and the limit of one run (``timeout_s``). The method then starts
+the agent itself, for example behind its own gateway. A method that sets
+``runs_agent`` is refused at startup when the deployment has no
+``evolution.agent``. A method that also sets ``runs_without_agent = True``
+starts without one and reads ``services.agent`` as ``None``; Reefine does
+this to answer in text where no agent runs.
+
+A method receives every service through ``job.services``. Its constructor
+receives only its own settings (`Method settings`_): Reef builds the method
+from ``evolution.method.config`` before any scenario exists, so a model, an
+agent or a key cannot be a constructor argument.
+
 A method made of prompts
 ------------------------
 
 ``reef.train.harness_backend:AgentMethod`` runs the coding agent once per
-step on a folder of prompts:
+job on a folder of prompts:
 
 .. list-table::
    :header-rows: 1
@@ -233,7 +226,7 @@ step on a folder of prompts:
    * - File
      - Holds
    * - ``START.md``
-     - the prompt of a step (required); ``{step}`` and ``{history}`` are
+     - the prompt of a job (required); ``{step}`` and ``{history}`` are
        filled in
    * - ``RESUME.md``
      - the prompt when ``state/`` holds earlier files (optional)
@@ -254,16 +247,16 @@ What the method says
 --------------------
 
 ``workspace.write_output(summary, notes)`` writes ``output/summary.md``
-(plain text, shown on the step pages, kept as ``method_summary``) and
+(plain text, shown on the job's pages, kept as ``method_summary``) and
 ``output/notes.json`` (a JSON object, kept as ``method_notes``). Reef never
 decides by them.
 
-Keep state between steps
+Keep state between jobs
 ------------------------
 
 Files in ``state/`` (an archive, a playbook, counters) are committed with the
-step and written back into the next step's ``state/``, so they survive a
-restart. A failed step commits none of its state. The files must be UTF-8
+job and written back into the next job's ``state/``, so they survive a
+restart. A failed job commits none of its state. The files must be UTF-8
 text, at most 16 MiB together.
 
 Read the history
@@ -289,7 +282,7 @@ Read the history
      - the latest score per task and repeat, ``None`` where none ran or the
        latest failed
    * - ``decision(step)``
-     - the decision on that step's candidate
+     - the decision on that job's candidate
 
 .. code:: python
 
@@ -298,8 +291,8 @@ Read the history
    if decision is not None:
        scores = history.scores(decision.tree, workspace.tasks())
 
-``workspace.step`` is one more than the steps that ended, failed steps
-included. A step that runs again, after a restart before it settled, reuses its
+``workspace.step`` is one more than the jobs that ended, failed jobs
+included. A job that runs again, after a restart before it settled, reuses its
 number, so skip records whose ``step`` is ``workspace.step`` or more.
 
 Evaluation
@@ -312,10 +305,10 @@ Runs that the method already ran through ``services.evaluate`` count:
 the evaluation reuses them.
 
 Score a run
-~~~~~~~~~~~~~~~~
+~~~~~~~~~~~
 
-An ``TaskScorer`` returns a finite score for one finished run;
-higher is better:
+A ``TaskScorer`` (``reef.evaluation.harness``) returns a finite score for
+one finished run; higher is better:
 
 .. code:: python
 
@@ -331,15 +324,21 @@ higher is better:
            text = final_assistant_text(result.trajectory) or ""
            return 1.0 if text.strip().endswith(EXPECTED[task.split()[0]]) else 0.0
 
-A judge that calls a model overrides ``score_with_models(task, result,
-models)``. ``VerifierRewardScorer`` takes a Harbor task's reward.
+- A judge that calls a model overrides ``score_with_models(task, result,
+  models)``. ``score`` stays abstract, so the judge implements it too.
+- A scorer that loads a local GPU model overrides
+  ``execution_requirements()`` and loads the model lazily in the worker.
+- ``VerifierRewardScorer`` takes a Harbor task's reward.
+- A non-finite score is an error.
 
 Collect traffic prompts
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-With ``collect_failures: true``, a ``TaskCollector`` in
-``evolution.evaluation.collector`` returns the prompts of a step's traces to
-keep as evaluation tasks. Without one, Reef keeps every trace's prompt.
+With ``collect_failures: true``, Reef adds prompts of a job's traces to the
+evaluation tasks. A ``TaskCollector`` in ``evolution.evaluation.collector``
+chooses them: ``collect(samples)`` receives the job's trace samples and
+returns the prompts to keep. Without a collector, Reef keeps every trace's
+prompt.
 
 Configure a deployment
 ----------------------
@@ -368,7 +367,7 @@ Configure a deployment
 
 Start ``reef serve -c`` where Reef can import ``methods``.
 ``tutorials/evolve-your-harness/configs/`` has working examples, and `Harness
-evolution keys <../reference/configuration.rst#harness-evolution-keys>`__
+evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__
 lists every key.
 
 Method settings
@@ -407,8 +406,19 @@ Package a method
 
 A method in this repository is one package under ``recipes/<name>/``:
 ``method.py`` with the method and its settings, prompts as ``*.md`` files,
-``README.md``, and runnable deployments in ``examples/``. It needs no recipe
-of its own.
+``README.md``, and runnable deployments in ``examples/``.
+
+Configuration failures
+----------------------
+
+- ``RecipeConfigError`` when the deployment loads: no ``evolution``
+  section, an unknown adapter, a seed that fails validation, or a
+  ``review_kinds`` name that the tree does not have.
+- The training service refuses to start: no ``evolution.method``, no scorer
+  with a policy other than ``none``, or a method that ``runs_agent`` without
+  ``evolution.agent``.
+- ``PluginConfigError`` from ``Settings.parse``: an unknown key in the
+  method's ``config``.
 
 Untrusted input
 ---------------
@@ -419,7 +429,7 @@ Untrusted input
 - Client text can shape code parts (``extension``, ``native_tool``,
   ``native_hook``). Name them in the ``always`` activation rule's
   ``review_kinds`` (`Configuration
-  <../reference/configuration.rst#the-activation-section>`__). A
+  <../reference/configuration-recipe.rst#the-activation-section>`__). A
   ``native_loop`` change always waits for a person.
 
 .. warning::

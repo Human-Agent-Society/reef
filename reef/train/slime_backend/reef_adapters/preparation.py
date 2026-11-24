@@ -11,11 +11,11 @@ import bisect
 from collections.abc import Mapping
 from typing import Any
 
-from reef.train.algos.schedule import MaterializedSchedule, StepScheduling, schedule_job_data
-from reef.train.algos.signals import PreparedJob
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
+from reef.train.slime_backend.schedule import MaterializedSchedule, StepScheduling, schedule_job_data
 from reef.train.slime_backend.score_centering import sampler_topk_columns
+from reef.train.slime_backend.signals import PreparedJob
 from reef.train.types import JobData, trajectories
 
 
@@ -36,7 +36,7 @@ def prepare_slime_job(
     ``sampler_topk`` adds each row's recorded sampler top-K, which score
     centering reads.
     """
-    objective = resolve_slime_objective(objective_reference)
+    objective = resolve_objective(objective_reference)
     signal = objective.prepare(data, algorithm_state)
     if signal.action == "skip":
         return PreparedJob(

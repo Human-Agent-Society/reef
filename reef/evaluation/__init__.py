@@ -1,6 +1,6 @@
 """Candidate evaluation and the activation rules: contracts, built-ins, and plugin loading.
 
-A harness recipe builds a publication policy from ``evolution.evaluation``, a
+The harness training component builds a publication policy from ``evolution.evaluation``, a
 :class:`CandidateEvaluationPlugin`. :class:`reef.train.Trainer` runs it between
 prepare and settle to decide which candidate tree the search keeps. The activation rule decides whether an
 artifact that training makes serves; ``activation`` holds the built-in rules
@@ -28,12 +28,10 @@ from reef.core.evaluation import (
     UpdateCandidate,
 )
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate
-from reef.evaluation.evaluators import AlwaysSelectMixin, RegressionCheckMixin
 
 __all__ = [
     "ActivationRule",
     "AlwaysActivate",
-    "AlwaysSelectMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
@@ -41,7 +39,6 @@ __all__ = [
     "EvaluationResult",
     "MadeArtifact",
     "NeverActivate",
-    "RegressionCheckMixin",
     "SelectionDecision",
     "UpdateCandidate",
 ]

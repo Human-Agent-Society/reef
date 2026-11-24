@@ -1,14 +1,13 @@
 GEPA: reflective agent harness optimization
 ===========================================
 
-GEPA (`arXiv:2507.19457 <https://arxiv.org/abs/2507.19457>`__) is reflective prompt
-evolution. Instead of training weights, it improves the words an agent is given.
-It keeps an archive of candidate prompts. On each round it picks one of them as
-a parent, looks at how that parent actually did on a handful of problems, and
-asks a stronger model to read those transcripts and write a better version. The
-new candidate is kept only if it does better than its parent on the same
-problems. Reef runs that search over a whole harness tree rather than over a
-single string, so what improves over time is the tree the deployment serves.
+GEPA (`arXiv:2507.19457 <https://arxiv.org/abs/2507.19457>`__) is reflective
+prompt evolution. It trains no weights; it improves the text that an agent is
+given. It keeps an archive of candidates. In each round it picks one candidate
+as the parent, reads how the parent did on a few problems, and asks a stronger
+model to write a better version. It keeps the new candidate only if it scores
+higher than its parent on the same problems. Reef runs that search over a
+whole harness tree, so the tree that the deployment serves improves over time.
 
 +-------------+--------------------------------------------------------------+
 | Evolves     | the text files of the harness tree: rules, skills, commands  |
@@ -27,76 +26,53 @@ single string, so what improves over time is the tree the deployment serves.
 | Example     | ``recipes/gepa/examples/aime/``                              |
 +-------------+--------------------------------------------------------------+
 
-What it does
+How it works
 ------------
 
-One round of the search is one reflection.
-
-It begins by choosing which candidate to improve. The choice is not simply the
-best one so far. Each candidate is weighted by how many individual problems it
-is the best at, so a candidate that is mediocre overall but unusually good at
-one kind of problem still gets its turn as a parent. This is what keeps the
-search exploring instead of hill-climbing into the first thing that worked.
-
-The parent is then run on a small batch of training problems, and those
-transcripts, together with a sentence about what went wrong in each one, are
-handed to the reflection model. That model rewrites one component of the
-tree, one evolvable file, and hands back a new version. The child is run on
-exactly the same problems as its parent, and only a child that scores
-strictly better survives. A child that fails costs only those few runs,
-which is what makes the search affordable; a child that wins is then measured
-properly, on the full validation set.
-
-The archive is the method's memory, and it holds rather more than the prompts
-themselves. Alongside each candidate it keeps the parent it came from, the
-score it got on every individual validation problem, which problems it is
-currently the best at, which component should be rewritten next, and how much
-of the metric-call budget has been spent. The archive is a file in the
-method's state directory, which Reef commits with each step, so a search that
-is interrupted picks up from the last commit rather than starting again, and a
-step that fails or is never committed cannot advance it.
-
-How Reef implements it
-----------------------
-
-gepa is a method on the harness evolution engine: ``recipes.gepa:GEPA`` is a
-``Method``, and a deployment runs it with the harness evolution recipe
+GEPA is a method on the harness evolution engine: ``recipes.gepa:GEPA`` is a
+``Method``, and a deployment runs it with
 ``reef.recipe.harness:HarnessEvolutionRecipe``. `Evolve your harness
-<../evolve-your-harness.rst>`__ describes the mechanism it runs on.
+<../evolve-your-harness.rst>`__ describes the engine. One step is one
+reflection round:
 
-Each step runs the reflection round described above: pick a parent, rewrite
-one component, test the child on the same problems the parent saw, and write
-the child into the step's harness tree only when the child actually won. A
-round that ends without a winner leaves the tree unchanged, so the step
-publishes nothing, but the method's state keeps the iteration it spent.
+1. **Pick a parent.** Each candidate is weighted by the number of validation
+   problems on which it is the best. A candidate that is mediocre overall but
+   best at one kind of problem still becomes a parent, which keeps the search
+   exploring.
+2. **Run a minibatch.** The parent runs on a small batch of training
+   problems. When the parent is the served tree, the minibatch is free: the
+   engine already holds that tree's real traffic and scores. Any other parent
+   runs on the evaluation's worker pool.
+3. **Reflect.** The reflection model reads the transcripts, with one sentence
+   of feedback about each, and rewrites one component of the tree: one
+   evolvable file.
+4. **Test the child.** The child runs on the same problems as its parent.
+   Only a child that scores strictly higher goes into the step's harness
+   tree. Otherwise the tree is unchanged and the step publishes nothing, but
+   the method's state keeps the iteration.
+5. **Validate.** The step's evaluation scores the candidate on every problem
+   in ``evolution.evaluation.tasks`` with the ``compare`` policy on the mean.
+   Reef publishes the candidate only when its mean is strictly higher than
+   the served tree's. Thus the served tree is the best candidate in the
+   archive.
 
-The step's evaluation is the validation pass. It scores the candidate on every
-problem in ``evolution.evaluation.tasks`` with the ``compare`` policy on the
-mean, and publishes the candidate only when its mean is strictly better than
-the served tree's. The served tree's per-problem scores come from the score
-cache, so they are the scores it was validated with, which keeps the tree being
-served equal to the best candidate the archive holds. A run that could not
-run is the exception: the cache does not keep it, so the next evaluation runs
-that problem again. The next step reads the per-problem scores and the
-decision from the evolution history and folds them into the archive before it
-samples the next parent.
-
-Nothing in Reef imports the upstream package at runtime. The reflection prompt
-is copied word for word under its MIT licence into
-``recipes/gepa/reflection_prompt.md``, and ``recipes/gepa/reflection.py`` names
-its source. The two rules that have to match exactly, which are how a parent is
-sampled and how the per-problem fronts are updated, are reimplemented here and
-checked against the real upstream code by a test described under Results.
-
-One detail is worth knowing because it affects cost. When the parent happens to
-be the tree currently being served, its minibatch is free: the engine has
-already collected that tree's real traffic, scores included, so there is nothing
-to re-run. Any other parent, and every child, runs as runs on the
-evaluation's worker pool, because no traffic was ever served from it. Every
-run goes through the score cache, so a tree that already scored on a
-problem is not run on it again; a run that could not complete runs again. The
-method still counts each evaluation as GEPA does, so the metric-call budget
+Every run goes through the score cache. A tree that already scored on a
+problem does not run on it again; a run that could not complete runs again.
+The method still counts each evaluation as GEPA does, so ``max_metric_calls``
 means what it means upstream.
+
+The archive is a file in the method's state directory. It holds each
+candidate with its parent, its score on every validation problem, the
+problems on which it is the best, the component to rewrite next, and the
+metric calls spent. Reef commits the state with each step. An interrupted
+search resumes from the last commit, and a step that fails cannot advance the
+archive. The next step reads the per-problem scores and the publication
+decision from the evolution history before it samples the next parent.
+
+Reef does not import the upstream package at runtime. The reflection prompt
+is copied under its MIT licence into ``recipes/gepa/reflection_prompt.md``.
+The parent sampling rule and the per-problem front update are reimplemented
+and tested against upstream (`Results`_).
 
 Configuration
 -------------
@@ -134,24 +110,25 @@ sets the step's traces to GEPA's minibatch:
        config:
          job_samples: 3                  # the third report closes the minibatch
 
-Four of these deserve a note. ``feedback`` names a ``Feedback`` class whose
-sentence the reflection model reads about each example, and it is the entire
-signal the reflection gets, so a benchmark that can explain why an answer was
-wrong should say so here rather than leaving the default, which only restates
-the score. ``components`` names the parts of the adapter's tree whose files
-the search may rewrite, ``[rules, skill]`` by default; the files of every
-other part stay fixed. Each name must be a part whose format is ``text``,
-``skill`` or ``command``, such as ``rules``, ``skill`` and ``command``: GEPA
-never rewrites config, code or native files. ``trainset_size`` makes each
-iteration draw its parent from the seeded generator that also orders the
-training problems, in GEPA's own order: a driver that draws the same plan
-from the committed archive sends the problems the plan names, and the method
-reads them as the step's traffic.
-``statistic: mean`` is what makes the evaluation GEPA's: the default,
-``wins``, counts task pairings instead. If no reflection model is declared,
-the method reflects using the model under test; ``reflection_model`` names
-another one. The engine's own configuration keys are documented in `Recipe
-configuration <../../reference/configuration.rst#recipe-configuration>`__.
+.. container:: config
+
+   ``evolution.method.config.components`` : [rules, skill]
+       the parts of the adapter's tree whose files the search may rewrite. Each must be a part whose format is ``text``, ``skill`` or ``command``. GEPA never rewrites config, code or native files, and the files of every other part stay fixed.
+
+   ``evolution.method.config.feedback`` : the score restated
+       a ``Feedback`` class. Its sentence about each example is the only signal that the reflection model reads. If the benchmark can explain why an answer was wrong, say so here.
+
+   ``evolution.method.config.trainset_size`` : optional
+       makes each iteration draw its parent from the seeded generator that also orders the training problems, in GEPA's own order. A driver that draws the same plan from the committed archive sends the problems that the plan names, and the method reads them as the step's traffic.
+
+   ``evolution.method.config.reflection_model`` : reflection
+       the name, under ``evolution.models``, of the model that reflects. When no model has this name, the method reflects with the model under test.
+
+   ``evolution.evaluation.statistic`` : wins
+       set ``mean`` for GEPA's rule. The default, ``wins``, counts task pairings.
+
+`Recipe configuration <../../reference/configuration-recipe.rst#recipe-configuration>`__
+documents the engine's own keys.
 
 Run the example
 ---------------
@@ -159,27 +136,25 @@ Run the example
 `recipes/gepa/examples/aime <../../../recipes/gepa/examples/aime/README.md>`__
 has the prerequisites and the full walkthrough. The driver embeds a Reef
 service and runs every minibatch problem as a real run against the served
-tree, which means the method reflects on traffic the tree genuinely produced
-rather than on a simulation of it. At the end it seals two passes over a
-held-out split, one on the tree it started with and one on the tree it
-finished with, so the two are directly comparable. ``--seed``
-picks the search seed, and ``--dry-run`` boots the recipe and prints the plan
-without making a single model call.
+tree. At the end it runs two passes over a held-out split, one on the first
+tree and one on the last, so that the two are comparable. ``--seed`` picks
+the search seed. ``--dry-run`` boots the recipe and prints the plan without a
+model call.
 
 Results
 -------
 
-The example's README records four runs against upstream GEPA, two of each,
-and the records are kept beside it.
+The example's README records four runs, two of this method and two of
+upstream GEPA. The records are kept beside it.
 
 ``tests/recipes/gepa/test_gepa_fidelity.py`` checks the two exact rules. It
-runs upstream ``gepa.optimize`` and this method side by side on a synthetic
-task from the same seed, the method through whole steps of the engine, and
-requires the same candidates, parents, minibatches and validation means at
-every iteration. It runs where the upstream package is installed.
+runs upstream ``gepa.optimize`` and this method on a synthetic task from the
+same seed, the method through whole steps of the engine. It requires the same
+candidates, parents, minibatches and validation means at every iteration. The
+test runs where the upstream package is installed.
 
-See also
---------
+Related guides
+--------------
 
 - `Evolve your harness <../evolve-your-harness.rst>`__: the mechanism this method plugs into.
-- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling and pinning a published tree.
+- `HTTP API <../../reference/http-api-harness.rst#harness-artifacts>`__: pulling and pinning a published tree.

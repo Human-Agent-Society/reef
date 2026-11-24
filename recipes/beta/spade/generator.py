@@ -1,7 +1,7 @@
 """The SPADE task generator: the Environment Designer's generations, with the hint based regret as its signal.
 
 One ``generate`` call is one generation: ``count`` proposals across the configured ``skills``, each a
-Designer call through the generator service (``reef.record2sample.generator``), with the last generation's
+Designer call through the generator service (``reef.samples.generator``), with the last generation's
 results in the prompt as SPADE's experience section.
 
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
@@ -65,17 +65,17 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.record2sample.generator.client import (
-    DuplicateTask,
+from reef.samples.generator.client import (
+    DuplicateTaskError,
     Generator,
     GeneratorError,
     HttpGenerator,
     ProposedTask,
-    TaskNameConflict,
+    TaskNameConflictError,
     WrittenTask,
 )
-from reef.record2sample.generator.designer import DIFFICULTIES, DesignerRequest
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.generator.designer import DIFFICULTIES, DesignerRequest
+from reef.samples.generator.inputs import TaskGenerationRequest
 
 logger = logging.getLogger(__name__)
 
@@ -240,11 +240,6 @@ class SpadeTaskGenerator(TaskGenerator):
     def from_config(
         cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
     ) -> Self:
-        if "state_dir" in config:
-            raise PluginConfigError(
-                "SpadeTaskGenerator does not take state_dir: the generator keeps its state in the scenario's task "
-                "store (RFC #1370). Remove the key; state under an old state_dir is not read."
-            )
         unknown = sorted(str(key) for key in config if key not in CONFIG_KEYS)
         if unknown:
             raise PluginConfigError(f"SpadeTaskGenerator does not take {', '.join(unknown)}")
@@ -357,7 +352,7 @@ class SpadeTaskGenerator(TaskGenerator):
         """Harbor's oracle and nop agents on a written copy: the reference solution scores 1, doing nothing below 1."""
         try:
             written = await self.write(task)
-        except (DuplicateTask, TaskNameConflict) as exc:
+        except (DuplicateTaskError, TaskNameConflictError) as exc:
             return TaskValidationResult((f"refused: {exc}",))
         try:
             oracle = await self.service.check(written.path)
@@ -390,7 +385,7 @@ class SpadeTaskGenerator(TaskGenerator):
         """Write a task; only a description-based generation's rerun may replace a conflicting name."""
         try:
             return await self.service.write_task(task)
-        except TaskNameConflict:
+        except TaskNameConflictError:
             if "designer_record_id" in task.metadata:
                 raise
             # A reload cancelled this generation's earlier attempt; what it wrote under the name gives way.
@@ -427,18 +422,19 @@ class SpadeTaskGenerator(TaskGenerator):
                 continue
             plain = result.rollout_rewards
             hint: tuple[float, ...] = ()
-            if self.hint_plays and HINT_NAME in result.task.solution:
+            if self.hint_plays and f"solution/{HINT_NAME}" in result.task.files:
                 try:
                     hint = await self.hint_rewards(result.task, generation=open_generation.number)
                 except GeneratorError as exc:
                     error = error or f"the hint plays of {result.task.name} failed: {exc}"
                     logger.error("SPADE hint plays of %s failed: %s", result.task.name, exc)
+            instruction = result.task.files.get("instruction.md")
             play_record = PlayRecord(
                 name=result.task.name,
                 skill=pending.skill,
                 return_without_hint=mean_reward(plain),
                 return_with_hint=mean_reward(hint) if hint else mean_reward(plain),
-                instruction_excerpt=result.task.instruction[:RECORDED_EXCERPT_CHARS],
+                instruction_excerpt=(instruction if isinstance(instruction, str) else "")[:RECORDED_EXCERPT_CHARS],
             )
             measure = TaskMeasure(
                 name=result.task.name,

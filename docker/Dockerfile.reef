@@ -10,12 +10,12 @@
 #
 # One image serves every role (pick by command):
 #   sglang         python -m sglang.launch_server --model-path <M> ...
-#   reef           python -m reef.service (internal config-driven child;
+#   reef           python -m reef.deploy.service_process (internal config-driven child;
 #                  Slime trains in this process)
 #   inference      python -m reef.inference.remote (the serving engines)
 #   ray-head       ray start --head --block ...
 #   basic-example  python -m recipes.basic
-#   tests          pytest tests/reef_service -q
+#   tests          pytest tests/api -q
 #
 # Build:   docker build -f docker/Dockerfile.reef -t reef .
 # Deploy:  reef serve -c recipes/basic/local-sglang.yaml
@@ -42,7 +42,7 @@ RUN python -c "import transformers, peft; assert transformers.__version__ == '5.
 # opencode CLI — AI coding agent available inside the container.
 # Pinned GitHub release, x86_64 build (verified against the base image).
 # Kept above COPY so repo changes don't bust this layer's cache.
-ARG OPENCODE_VERSION=1.18.4
+ARG OPENCODE_VERSION=1.18.18
 RUN curl -fsSL "https://github.com/sst/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
       | tar -xzf - -C /usr/local/bin \
     && opencode --version
@@ -82,6 +82,10 @@ COPY . .
 RUN pip uninstall -y slime && \
     PIP_CONSTRAINT= pip install --no-cache-dir --no-deps --group runtime && \
     pip install --no-cache-dir -e .
+
+# Count only active loss tokens in Slime's optimizer step. An empty step reports zero loss.
+RUN SLIME_SITE=$(python -c "from importlib.metadata import distribution; print(distribution('slime').locate_file(''))") && \
+    git -C "$SLIME_SITE" apply "$PWD/docker/patch/slime_active_token_count.patch"
 
 # The base installs SGLang, Megatron-Core (with megatron.training) and Slime
 # editable into its environment, so nothing goes on PYTHONPATH: an entry

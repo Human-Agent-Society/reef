@@ -3,32 +3,32 @@
 A ``SlimeObjective`` owns a method's data preparation and its choice of Slime
 loss family. A job names one by a registered name or by a dotted
 ``package.module:Objective`` reference. Slime's built-in objectives are ``sft``
-and ``slime_dataset``. A method package refers to its own in its
-public half (``reef.train.algos.registry.register_objective_ref``) and defines it
-in its ``slime`` subpackage. This module imports no torch, Ray or Slime, so a
+and ``slime_dataset``. A method package
+registers its own by reference in its public half, with
+``register_objective(name, "package.module:Objective")``, and defines it in a
+module that only this backend imports. This module imports no torch, Ray or Slime, so a
 service validates a job without the GPU stack.
 """
 
 from __future__ import annotations
 
-import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, overload
+from typing import Any
 
 from reef.core.job_data import JobData, trajectories
-from reef.train.algos.group_advantages import GroupAdvantageRule
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.registry import objective_refs, register_loss_family_ref
-from reef.train.algos.schedule import RolloutUnit, StepScheduling
-from reef.train.algos.signals import TrainingSignal
+from reef.core.plugins import import_plugin_class
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule
+from reef.train.slime_backend.schedule import RolloutUnit, StepScheduling, next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 
 
 class SlimeObjective(ABC):
     """A method's data preparation and its Slime loss family.
 
-    Values: a subclass declares a non-empty ``name`` and ``loss_family``, the
-    name of a loss family that ``resolve_loss_family`` resolves.
+    Values: a subclass declares a non-empty ``name``, the registered name that
+    a job's ``objective`` gives, and ``loss_family``, the name of a loss
+    family that ``resolve_loss_family`` resolves.
     ``supports_multiple_epochs`` is whether the loss stays valid when a job
     trains its data more than once. Old-policy log-probs are computed once
     before the first pass, so later passes are off-policy: a clipped PPO-style
@@ -44,12 +44,16 @@ class SlimeObjective(ABC):
     declares its ``advantage_rule``, since Slime's own reward step would center
     the delayed samples with the task rollouts.
 
-    Purpose: ``SlimeJobRunner`` calls ``prepare`` with a job's complete data, so
+    Purpose: ``prepare_slime_job`` calls ``prepare`` with a job's complete data, so
     group-relative statistics do not depend on the data-parallel partitioning.
     ``prepare`` returns the proposed objective state; the component commits it
     with the job's last checkpoint. Model-dependent terms stay in the loss family.
     A task job calls no ``prepare``: its driver reads ``advantage_rule`` and
     ``carries_samples``.
+
+    The module that defines a subclass imports no torch, Ray or Slime at module
+    scope: a service without the GPU stack resolves the recipe's objective to
+    read ``loss_family``.
     """
 
     name: str = ""
@@ -60,7 +64,10 @@ class SlimeObjective(ABC):
     carries_samples: bool = False
 
     def validate_scheduling(self, scheduling: StepScheduling) -> None:
-        """Raise ``ValueError`` for a job schedule whose passes this objective's loss cannot train correctly."""
+        """Raise ``ValueError`` for a job schedule whose passes this objective's loss cannot train correctly.
+
+        The default refuses ``epochs`` above 1 without ``supports_multiple_epochs``.
+        """
         if scheduling.epochs > 1 and not self.supports_multiple_epochs:
             raise ValueError(
                 f"objective {self.name!r} does not support {scheduling.epochs} epochs per job: "
@@ -72,100 +79,102 @@ class SlimeObjective(ABC):
         """Prepare a job's full data without mutating it or committing objective state."""
 
 
-#: Slime's objectives by name. ``register_slime_objective`` and ``resolve_slime_objective`` fill it.
-SLIME_OBJECTIVES: dict[str, SlimeObjective] = {}
+#: Slime's objectives by name, the one table of this backend's objectives. A value is the objective, or the
+#: ``package.module:Objective`` reference of one that this process did not import yet: ``resolve_objective`` replaces
+#: the reference with the objective that it names.
+OBJECTIVES: dict[str, SlimeObjective | str] = {}
 
 
-def add_slime_objective(objective: SlimeObjective) -> SlimeObjective:
-    """Register ``objective`` under its name; registering it twice changes nothing. ``ValueError``: another holds it."""
-    if not isinstance(objective, SlimeObjective):
+def register_objective(name: str, objective: SlimeObjective | str) -> None:
+    """Register ``objective`` under ``name``: an objective, or the ``package.module:Objective`` reference of one.
+
+    A reference is not imported here, so a method package registers its objective without importing its code.
+    Registering the same value twice changes nothing. ``TypeError``: the value is neither. ``ValueError``: the
+    reference is malformed, the objective does not declare ``name`` with a loss family, or ``name`` holds
+    another value, or its ``advantage_rule`` or ``carries_samples`` breaks the rules of ``SlimeObjective``.
+    """
+    if isinstance(objective, str):
+        module_name, _, attribute = objective.partition(":")
+        if not module_name or not attribute:
+            raise ValueError(f"objective reference {objective!r} must be 'package.module:Objective'")
+    elif not isinstance(objective, SlimeObjective):
         raise TypeError("a Slime objective must inherit SlimeObjective")
-    if not isinstance(objective.name, str) or not objective.name.strip():
-        raise ValueError("an objective must declare a non-empty name")
-    if not isinstance(objective.loss_family, str) or not objective.loss_family.strip():
-        raise ValueError("an objective must declare a non-empty loss_family")
-    if not isinstance(objective.supports_multiple_epochs, bool):
-        raise ValueError("an objective must declare supports_multiple_epochs as a bool")
-    if objective.advantage_rule is not None and not isinstance(objective.advantage_rule, GroupAdvantageRule):
-        raise ValueError("an objective's advantage_rule must be a GroupAdvantageRule or None")
-    if not isinstance(objective.carries_samples, bool):
-        raise ValueError("an objective must declare carries_samples as a bool")
-    if (objective.advantage_rule is not None or objective.carries_samples) and objective.loss_family != "slime":
-        raise ValueError(
-            "an objective with advantage_rule or carries_samples trains task jobs, which need the 'slime' loss family"
-        )
-    if objective.carries_samples and objective.advantage_rule is None:
-        raise ValueError(
-            "an objective that carries samples declares its advantage_rule: Slime's own reward step would center "
-            "the delayed samples with the task rollouts"
-        )
-    existing = SLIME_OBJECTIVES.get(objective.name)
-    if existing is objective:
-        return objective
-    if existing is not None:
-        raise ValueError(f"Slime objective {objective.name!r} is already registered")
-    SLIME_OBJECTIVES[objective.name] = objective
-    return objective
-
-
-@overload
-def register_slime_objective(value: type[SlimeObjective]) -> type[SlimeObjective]: ...
-
-
-@overload
-def register_slime_objective(value: SlimeObjective) -> SlimeObjective: ...
-
-
-def register_slime_objective(value: SlimeObjective | type[SlimeObjective]) -> SlimeObjective | type[SlimeObjective]:
-    """Register an instance, or decorate a zero-argument objective class."""
-    if isinstance(value, type):
-        if not issubclass(value, SlimeObjective):
-            raise TypeError("a Slime objective must inherit SlimeObjective")
-        add_slime_objective(value())
     else:
-        add_slime_objective(value)
-    return value
+        if not isinstance(objective.name, str) or not objective.name.strip():
+            raise ValueError("an objective must declare a non-empty name")
+        if not isinstance(objective.loss_family, str) or not objective.loss_family.strip():
+            raise ValueError("an objective must declare a non-empty loss_family")
+        if not isinstance(objective.supports_multiple_epochs, bool):
+            raise ValueError("an objective must declare supports_multiple_epochs as a bool")
+        if objective.advantage_rule is not None and not isinstance(objective.advantage_rule, GroupAdvantageRule):
+            raise ValueError("an objective's advantage_rule must be a GroupAdvantageRule or None")
+        if not isinstance(objective.carries_samples, bool):
+            raise ValueError("an objective must declare carries_samples as a bool")
+        if (objective.advantage_rule is not None or objective.carries_samples) and objective.loss_family != "slime":
+            raise ValueError(
+                "an objective with advantage_rule or carries_samples trains task jobs, which need the 'slime' loss "
+                "family"
+            )
+        if objective.carries_samples and objective.advantage_rule is None:
+            raise ValueError(
+                "an objective that carries samples declares its advantage_rule: Slime's own reward step would center "
+                "the delayed samples with the task rollouts"
+            )
+        if objective.name != name:
+            raise ValueError(f"objective {objective.name!r} cannot register under the name {name!r}")
+    existing = OBJECTIVES.get(name)
+    if existing is None:
+        OBJECTIVES[name] = objective
+    elif existing is not objective and existing != objective:
+        raise ValueError(f"Slime objective {name!r} is already registered")
 
 
-def unregister_slime_objective(name: str) -> None:
+def unregister_objective(name: str) -> None:
     """Remove an objective registration, for extension teardown. ``KeyError``: no objective has ``name``."""
-    if SLIME_OBJECTIVES.pop(name, None) is None:
+    if OBJECTIVES.pop(name, None) is None:
         raise KeyError(f"Slime objective {name!r} is not registered")
 
 
-def resolve_slime_objective(reference: str) -> SlimeObjective:
-    """The objective of a registered name, a name that a method package refers to (``objective_refs``), or a dotted
-    ``package.module:Objective`` class or instance reference.
+def resolve_objective(reference: str) -> SlimeObjective:
+    """The objective of a registered name, or of a dotted ``package.module:Objective`` class reference.
 
-    ``ValueError`` for an unknown name, a malformed reference, a module that does not import, or anything else that
-    the reference names.
+    The first resolution of a name that holds a reference imports the reference
+    (``reef.core.plugins.import_plugin_class``) and builds the class without arguments. An unregistered dotted
+    reference registers its objective under the objective's name. ``ValueError``: the name is unknown, or the
+    objective's name holds another objective. ``PluginConfigError``, a ``ValueError``: the reference is malformed,
+    its module does not import, or it names no concrete ``SlimeObjective`` class.
     """
-    objective = SLIME_OBJECTIVES.get(reference)
-    if objective is not None:
-        return objective
-    references = objective_refs("slime")
-    dotted = references.get(reference, reference)
-    if ":" not in dotted:
-        names = ", ".join(sorted({*SLIME_OBJECTIVES, *references}))
-        raise ValueError(f"unknown Slime objective {reference!r}; available objectives: {names}")
-    module_name, _, attribute = dotted.partition(":")
-    if not module_name or not attribute:
-        raise ValueError(f"objective reference {reference!r} must be 'package.module:Objective'")
-    try:
-        candidate = vars(importlib.import_module(module_name)).get(attribute)
-    except ImportError as exc:
-        raise ValueError(f"cannot import objective {dotted!r}: {exc}") from exc
-    if isinstance(candidate, type) and issubclass(candidate, SlimeObjective):
-        registered = SLIME_OBJECTIVES.get(candidate.name)
-        if registered is not None and type(registered) is candidate:
-            return registered
-        candidate = candidate()
-    if not isinstance(candidate, SlimeObjective):
-        raise ValueError(f"objective {reference!r} must name a SlimeObjective class or instance")
-    return add_slime_objective(candidate)
+    registered = OBJECTIVES.get(reference)
+    if isinstance(registered, SlimeObjective):
+        return registered
+    if registered is None and ":" not in reference:
+        raise ValueError(
+            f"unknown Slime objective {reference!r}; available objectives: {', '.join(sorted(OBJECTIVES))}"
+        )
+    dotted = reference if registered is None else registered
+    objective_class = import_plugin_class(
+        dotted,
+        SlimeObjective,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+        setting="Slime objective",
+    )
+    candidate = objective_class()
+    if registered is None:
+        # A job named the objective by its reference: the name may already hold this class.
+        named = resolve_objective(candidate.name) if candidate.name in OBJECTIVES else None
+        if named is not None and type(named) is type(candidate):
+            return named
+        register_objective(candidate.name, candidate)
+    else:
+        # The loaded objective takes the place of its reference, unless it breaks the objective contract.
+        OBJECTIVES.pop(reference)
+        try:
+            register_objective(reference, candidate)
+        except ValueError:
+            OBJECTIVES[reference] = registered
+            raise
+    return candidate
 
 
-@register_slime_objective
 class SftObjective(SlimeObjective):
     """Train all samples in the data with the same weight. A sample has no advantage."""
 
@@ -179,7 +188,9 @@ class SftObjective(SlimeObjective):
         return TrainingSignal("train", {"steps": steps}, {"steps": steps, "samples": len(trajectories(data))})
 
 
-@register_slime_objective
+register_objective("sft", SftObjective())
+
+
 class SlimeDatasetObjective(SlimeObjective):
     """Leave a dataset job's or a task job's advantages and loss to Slime (the ``slime`` loss family)."""
 
@@ -190,10 +201,4 @@ class SlimeDatasetObjective(SlimeObjective):
         raise RuntimeError("a dataset job trains on Slime's own rollouts; Reef prepares no training signal for it")
 
 
-# By reference: only the training driver and the workers import the Slime code. No built-in objective trains
-# ``importance_sampling``: a method that a deployment provides can.
-register_loss_family_ref("sft", "reef.train.slime_backend.sft:SftAlgorithm")
-register_loss_family_ref(
-    "importance_sampling", "reef.train.slime_backend.importance_sampling:ImportanceSamplingAlgorithm"
-)
-register_loss_family_ref("slime", "reef.train.slime_backend.native:SlimeNativeAlgorithm")
+register_objective("slime_dataset", SlimeDatasetObjective())

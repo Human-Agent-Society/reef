@@ -9,8 +9,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory, recorded_trajectory
 from tests.support.chat_templates import CharTemplate
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.prm import (
@@ -23,9 +23,9 @@ from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSetting
 from recipes.openclawrl.turns import TurnJob
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TrajectorySample
 
 pytestmark = pytest.mark.unit
@@ -186,7 +186,7 @@ def test_actor_init_on_resume_needs_the_base_checkpoint(tmp_path, topk_objective
 
 
 def test_topk_preserves_external_advantages_through_slime_hook(topk_objective) -> None:
-    from reef.train.slime_backend.algorithm import resolve_objective_paths
+    from reef.train.slime_backend.loss_families import resolve_objective_paths
 
     args = SimpleNamespace(loss_family="openclawrl")
     resolve_objective_paths(args)
@@ -462,7 +462,7 @@ REQUEST = ({"role": "user", "content": "do my homework"},)
 
 
 def _judge_one_turn(judge):
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     context = PipelineContext("s")
 
@@ -516,7 +516,7 @@ def test_processor_attaches_teacher_candidates_that_the_component_renders() -> N
     from recipes.openclawrl import OpenClawRLJobData
     from recipes.openclawrl.turns import TurnJudgment
     from reef.core.records_types import AgentRecord, RequestType
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     class FakeWorker:
         def __init__(self) -> None:

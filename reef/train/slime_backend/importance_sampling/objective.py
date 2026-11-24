@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 
-from reef.train.slime_backend.algorithm import objective
+from reef.train.slime_backend.algorithm import worker_hook
 
 
 def truncated_importance_sampling(
@@ -32,7 +32,7 @@ def truncated_importance_sampling(
     return -advantages * ratio.clamp(max=cap) * log_probs, ratio
 
 
-@objective("custom_loss_function_path")
+@worker_hook("custom_loss_function_path")
 def importance_sampling_loss(
     args: Namespace,
     batch: dict[str, Any],

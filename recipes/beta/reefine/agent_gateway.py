@@ -1,11 +1,11 @@
 """The loopback gateway Reefine's agent and its trial runs reach models through.
 
 Reefine's gateway is the agent gateway (:mod:`reef.harness.gateway`), which
-relays the model routes to the served model on the step's budget and serves
+relays the model routes to the served model on the job's budget and serves
 the agent's tools, with what a candidate harness reaches in its trials too:
 
 - the multimodal routes (images, embeddings, speech, decisions) go to the
-  recipe's multimodal provider, and the step record keeps their status only;
+  recipe's multimodal provider, and the job record keeps their status only;
 - ``GET /models?modality=`` lists the provider's models, fetched with its key.
 
 The agent and every candidate harness it tries hold its one URL and nothing
@@ -111,7 +111,7 @@ class ReefineGateway(AgentGateway):
         with self.lock:
             self.provider_calls.append(call)
         seconds = round(time.monotonic() - started, 3)
-        # The step record keeps what was asked of the provider and how it answered, never the media itself.
+        # The job record keeps what was asked of the provider and how it answered, never the media itself.
         self.calls.record({"source": "agent", **call, "seconds": seconds})
         outcome = f"{status}" if status < 400 else f"{status}: {call['error'][:160]}"
         self.calls.note("provider", f"{route} {call['model']} → {outcome} ({seconds:g} s)", failed=status >= 400)

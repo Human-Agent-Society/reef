@@ -18,7 +18,8 @@ from reef_client.serve import CapturedTurn
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.harness.capture import CaptureObserver
+from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT, environment_config
+from reef.harness.capture import CaptureObserver, TaggedStore
 from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
     ReefEvalLab,
@@ -28,12 +29,17 @@ from reef.harness.harbor.rollouts import (
     TaskRolloutError,
     TaskRolloutRunner,
     bound_agent,
-    environment_config,
     main,
     rewards_of,
     rollout_reward,
     task_identity,
 )
+
+#: The Harbor environment config of an ``e2b`` trial of a task with no agent time limit: no lifetime, so the sandbox
+#: keeps Harbor's default.
+E2B_CONFIG = {"type": "e2b", "import_path": HARBOR_E2B_ENVIRONMENT}
+#: The same for a ``modal`` trial: a lifetime of two hours.
+MODAL_CONFIG = {"type": "modal", "kwargs": {"sandbox_timeout_secs": 2 * 60 * 60}}
 
 
 class StandInReef:
@@ -197,9 +203,11 @@ def reef():
 def written_task(root: Path, name: str, record_id: str = "rec-source") -> Path:
     task = HarborTask(
         name=name,
-        instruction="List the files in the working directory and write their count to /app/count.txt.",
-        tests={"test.sh": "#!/bin/sh\nmkdir -p /logs/verifier\necho 1 > /logs/verifier/reward.txt\n"},
-        environment={"Dockerfile": "FROM python:3.12-slim\nWORKDIR /app\n"},
+        files={
+            "instruction.md": "List the files in the working directory and write their count to /app/count.txt.",
+            "tests/test.sh": "#!/bin/sh\nmkdir -p /logs/verifier\necho 1 > /logs/verifier/reward.txt\n",
+            "environment/Dockerfile": "FROM python:3.12-slim\nWORKDIR /app\n",
+        },
         source_agent_record_ids=(record_id,),
     )
     return write_harbor_task(task, root)
@@ -427,17 +435,17 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
     ]
     assert sorted(lab.template_builds) == ["t1", "t2", "t3"], "each task's template is built once"
     assert [build["task_path"] for build in lab.builds] == [paths["t1"], paths["t2"]], "t3 has one rollout"
-    assert lab.builds[0]["overrides"] == {"environment": {"type": "e2b"}}
+    assert lab.builds[0]["overrides"] == {"environment": E2B_CONFIG}
     assert lab.most_building == 3, "no task waits for the build of another task"
 
 
 @pytest.mark.parametrize(
     ("environment", "has_compose", "gpu_count", "config"),
     [
-        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True}}),
-        ("modal", False, 0, {"type": "modal"}),
-        ("modal", True, 1, {"type": "modal"}),
-        ("e2b", True, 0, {"type": "e2b"}),
+        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True, "sandbox_timeout_secs": 7200}}),
+        ("modal", False, 0, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("modal", True, 1, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("e2b", True, 0, E2B_CONFIG),
     ],
     ids=["modal-compose", "modal-dockerfile", "modal-compose-gpu", "e2b-compose"],
 )
@@ -470,11 +478,85 @@ def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
     ],
     ids=["agent-limit", "all-limits", "one-day-at-most", "no-agent-limit"],
 )
-def test_a_modal_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
+def test_a_cloud_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
     (tmp_path / "task.toml").write_text(task_toml)
-    expected = {"type": "modal"} if kwargs is None else {"type": "modal", "kwargs": kwargs}
-    assert environment_config("modal", tmp_path) == expected
-    assert environment_config("e2b", tmp_path) == {"type": "e2b"}
+    # With no agent time limit (None), each provider has its own default: two hours on Modal, Harbor's on E2B.
+    lifetime = {} if kwargs is None else {"kwargs": kwargs}
+    assert environment_config("modal", tmp_path) == {**MODAL_CONFIG, **lifetime}
+    # E2B gets the same lifetime from an agent time limit, and Reef's class, which deletes the sandbox at that time.
+    assert environment_config("e2b", tmp_path) == {**E2B_CONFIG, **lifetime}
+    assert environment_config("docker", tmp_path) == {"type": "docker"}
+
+
+@pytest.mark.parametrize("environment", ["e2b", "modal"])
+@pytest.mark.parametrize(
+    ("task_toml", "agent_limits", "lifetime_seconds"),
+    [
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": 7200}, 600 + 7200 + 600 + 3600),
+        ("", {"override_timeout_sec": 7200}, 600 + 7200 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": 0}, 600 + 900 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": None}, 600 + 900 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_setup_timeout_sec": 1800}, 600 + 1800 + 900 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": float("inf")}, 86400),
+        ("[agent]\ntimeout_sec = 900\n", {}, 600 + 900 + 600 + 3600),
+        ("", {"override_setup_timeout_sec": 1800}, None),
+        ("", {"override_timeout_sec": 0}, None),
+        ("", {"override_timeout_sec": None}, None),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": "7200"}, 600 + 7200 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_setup_timeout_sec": "1800"}, 600 + 1800 + 900 + 600 + 3600),
+    ],
+    ids=[
+        "longer",
+        "no-task-limit",
+        "zero",
+        "none",
+        "setup",
+        "infinite",
+        "no-override",
+        "no-agent-limit",
+        "no-task-limit-zero",
+        "no-task-limit-none",
+        "numeric-string",
+        "setup-numeric-string",
+    ],
+)
+def test_a_cloud_sandbox_lives_for_the_time_limits_of_the_runners_agent(
+    reef: StandInReef, tmp_path: Path, environment: str, task_toml: str, agent_limits: dict, lifetime_seconds
+) -> None:
+    """The build and the rollouts of a task get one lifetime, from the limits of the agent config that Harbor gets.
+
+    Harbor's trial runs the agent for its ``override_timeout_sec``, or for the task's limit when that is None or 0,
+    and sets it up for its ``override_setup_timeout_sec`` (harbor 0.25.0, ``Trial._compute_agent_timeout_sec`` and
+    ``Trial._compute_agent_setup_timeout_sec``). Harbor's ``AgentConfig`` reads a numeric string as a number, so the
+    lifetime counts it, and the trial still gets the caller's own value. When neither the task nor the agent config
+    gives the agent a time limit (None), each provider has its own default, and a setup time limit does not count.
+    """
+    task_path = tmp_path / "tasks" / "t"
+    task_path.mkdir(parents=True)
+    (task_path / "task.toml").write_text(task_toml)
+    lab = StandInLab({"reward": 1.0})
+    agent = {**DEFAULT_AGENT, **agent_limits}
+    running = runner(reef, tmp_path, lab, concurrency=2, environment=environment, agent=agent)
+    running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task_path))] * 2)
+    config: dict[str, object] = dict(E2B_CONFIG if environment == "e2b" else MODAL_CONFIG)
+    if lifetime_seconds is not None:
+        config["kwargs"] = {"sandbox_timeout_secs": lifetime_seconds}
+    assert [build["overrides"] for build in lab.builds] == [{"environment": config}]
+    assert [call["overrides"]["environment"] for call in lab.calls] == [config, config]
+    # The agent config of each trial holds the limits that its sandbox lives for.
+    assert [{name: call["agent"][name] for name in agent_limits} for call in lab.calls] == [agent_limits] * 2
+
+
+def test_an_agent_time_limit_that_harbor_refuses_is_refused_before_the_trial(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    agent = {**DEFAULT_AGENT, "override_timeout_sec": "soon"}
+    # Harbor's AgentConfig refuses the value; its error is a ValueError that names the field.
+    with pytest.raises(ValueError, match="override_timeout_sec"):
+        runner(reef, tmp_path, lab, environment="e2b", agent=agent).run(task_path)
+    assert lab.calls == [], "no trial starts with a sandbox that can end before it"
 
 
 def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
@@ -675,6 +757,56 @@ def test_a_capture_observer_gets_every_call_as_it_lands_failed_calls_with_their_
     assert [(turn.status, turn.response) for turn in refused.turns] == [
         (401, {"error": {"message": "invalid service token"}})
     ] * 2
+
+
+def test_an_unrecorded_rollout_without_turns_keeps_no_call_body_and_its_observer_gets_them_all(
+    tmp_path: Path,
+) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    observed, refused_observed = ObservedCalls(), ObservedCalls()
+    with contextlib.closing(StandInReef()) as reef:
+        ran = runner(
+            reef,
+            tmp_path,
+            StandInLab({"reward": 1.0}),
+            is_reporting=False,
+            is_unrecorded=True,
+            keeps_turns=False,
+            capture_observer=observed,
+        ).run(task_path)
+    with contextlib.closing(StandInReef(refuse_inference=True)) as reef:
+        refused_ran = runner(
+            reef,
+            tmp_path,
+            StandInLab({"reward": 0.0}),
+            is_reporting=False,
+            is_unrecorded=True,
+            keeps_turns=False,
+            capture_observer=refused_observed,
+        ).run(task_path)
+    assert (ran.reward, ran.error, ran.failed_calls, ran.turns) == (1.0, "", 0, ())
+    assert [turn.request["messages"][0]["content"] for turn in observed.turns] == ["turn 0", "turn 1"]
+    # A refused call keeps its error body, which names the failure.
+    assert refused_ran.failed_calls == 2 and refused_ran.turns == ()
+    assert refused_ran.error.startswith("2 model calls failed; the first answered 401")
+    assert len(refused_observed.turns) == 2
+
+
+def test_a_store_without_bodies_keeps_an_error_body_and_gives_the_observer_the_whole_call() -> None:
+    observed = ObservedCalls()
+    store = TaggedStore({"task": "t1"}, observed, keeps_bodies=False)
+    answered = CapturedTurn(
+        "s", "/v1/chat/completions", 200, {"messages": ["long"]}, {"choices": []}, None, False, 1.0
+    )
+    refused = CapturedTurn("s", "/v1/chat/completions", 401, {"messages": ["long"]}, {"error": "no"}, None, False, 1.0)
+    store.add(answered)
+    store.add(refused)
+    assert [(turn["status"], turn["request"], turn["response"], turn["tags"]) for turn in store.drain()] == [
+        (200, None, None, {"task": "t1"}),
+        (401, None, {"error": "no"}, {"task": "t1"}),
+    ]
+    assert observed.turns == [answered, refused]
+    assert all(turn["request"] is None for turn in store.snapshot())
 
 
 def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:

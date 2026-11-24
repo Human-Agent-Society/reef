@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import TaskSample
-from reef.service.task_import import DataScenarioStorage
-from reef.storage.samples import SampleStore
-from reef.storage.scenario import ScenarioStore
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.samples import SampleStore
+from reef.storage.scenario.store import ScenarioStore
+from reef.storage.scenario.task_import import DataScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 #: The directories of ``made_task``; they last as long as the test process.
 TASKS = tempfile.TemporaryDirectory(prefix="reef-test-tasks-")

@@ -21,13 +21,13 @@ reports that SDPO reaches GRPO's accuracy with fewer samples.
 +-------------+------------------------------------------------------------+
 | Pipeline    | reported feedback, one job per sampling grid               |
 +-------------+------------------------------------------------------------+
-| Needs       | GPUs, and a backend that captures tokens and log-probs     |
+| Needs       | GPUs and the Slime training backend                        |
 +-------------+------------------------------------------------------------+
 | Example     | `SDPO on SciKnowEval Chemistry                             |
 |             | <../../../recipes/sdpo/examples/sciknoweval/README.md>`__  |
 +-------------+------------------------------------------------------------+
 
-What it does
+How it works
 ------------
 
 The harness samples each question several times through Reef and scores
@@ -50,35 +50,33 @@ grid. The recipe waits for the whole grid and trains on it in one step.
 
    :Loop: the next grid is sampled from the updated weights
 
-How Reef implements it
-----------------------
-
 SDPO has two pipeline stages
-(`Training pipeline <../../developer-guide/processors.rst>`__).
-``SDPOSamples`` groups the reports of one grid and turns each rollout's report
-into one sample. ``SDPOJobData`` makes one job's data of one complete grid.
+(`Training pipeline <../../developer-guide/write-a-recipe.rst>`__).
+``SDPOSamples`` groups the reports of one grid and makes one sample from each
+report. ``SDPOJobData`` makes one job's data of one complete grid.
 
-The teacher's request is the question with the first correct attempt by
-another rollout appended, in the reference implementation's words. An attempt whose question no other rollout got right keeps the plain
-request and a sample weight of 0. It stays in the step's mean and has no
-target. A grid whose attempts came from different policy versions is dropped
-and listed in the pipeline's status. Each sample carries its teacher's
-request in ``extra.reef.teacher``. The training component renders the
-teacher sequence with the model's chat template: the teacher prompt, cut to
-``max_teacher_prompt_tokens``, followed by the attempt's response tokens. It
-leaves out a sample whose teacher sequence is longer than
-``max_teacher_tokens``, and counts it in the job metric
-``unrenderable_samples``.
-
-The ``sdpo`` loss family is a thin family on the Slime backend's
-distillation base (`Loss families <../../developer-guide/loss-families.rst>`__)
-and its defaults are the reference's. The teacher is a copy of the weights
-that moves 5% toward the policy after every step. The loss is the
-Jensen-Shannon divergence over the student's top 100 tokens plus one bucket
-for the rest of the vocabulary. The student picks those tokens in one forward
-before the step, so the trainer needs zero dropout. Each token's loss is
-weighted by the capped ratio between the policy and the old-policy
-log-probs, which the actor computes with the weights of the job's start.
+- **Teacher request.** The teacher reads the question with the first correct
+  attempt by another rollout appended. An attempt whose question no other
+  rollout got right keeps the plain request and a sample weight of 0: it
+  stays in the step's mean and has no target.
+- **Mixed grids.** Reef drops a grid whose attempts came from different
+  policy versions and lists it in the pipeline's status.
+- **Rendering.** The training component renders the teacher sequence with
+  the model's chat template: the teacher prompt, cut to
+  ``max_teacher_prompt_tokens``, then the attempt's response tokens. It
+  leaves out a sample whose teacher sequence is longer than
+  ``max_teacher_tokens`` and counts it in the job metric
+  ``unrenderable_samples``.
+- **Loss.** The ``sdpo`` loss family builds on the Slime backend's
+  distillation base (`Loss families <../../developer-guide/loss-families.rst>`__)
+  with the reference implementation's defaults. The teacher is a copy of the
+  weights that moves 5% toward the policy after every step. The loss is the
+  Jensen-Shannon divergence over the student's top 100 tokens plus one bucket
+  for the rest of the vocabulary. The student picks those tokens in one
+  forward pass before the step, so the trainer needs zero dropout. Each
+  token's loss is weighted by the capped ratio between the policy and the
+  old-policy log-probs, which the actor computes with the weights of the
+  job's start.
 
 The report contract
 -------------------
@@ -99,13 +97,10 @@ Configuration
 -------------
 
 The deployment's top-level ``pipeline`` section configures the two stages.
-Each stage reads only its own ``config``. The sample-to-job stage reads the
-values it needs from the record-to-sample stage:
-
-- ``record2sample`` (``SDPOSamples``) sets the staleness limit, the grid, and
-  the teacher's windows. ``SDPOJobData`` reads the grid and the
-  teacher settings from it.
-- ``sample2job`` (``SDPOJobData``) sets the job size and what the teacher reads.
+``record2sample`` (``SDPOSamples``) sets the grid and the teacher's windows.
+``sample2job`` (``SDPOJobData``) sets the job size and what the teacher
+reads; it reads the grid from ``SDPOSamples``. The stage is on-policy: a
+sample of an artifact that no longer serves does not train.
 
 .. code:: yaml
 
@@ -114,7 +109,6 @@ values it needs from the record-to-sample stage:
    pipeline:
      record2sample:
        config:
-         max_staleness: 0
          groups_per_step: 32
          rollouts_per_group: 8
          max_teacher_tokens: 18944
@@ -127,10 +121,6 @@ values it needs from the record-to-sample stage:
        global_batch_size: 256           # groups_per_step x rollouts_per_group
      options:
        apply-chat-template-kwargs: '{"enable_thinking": false}'   # as the engine samples
-
-Reef checks each stage's config when it loads the recipe. A stage key under
-``recipe.config`` fails the deployment, and the error names the key's place
-in ``pipeline``.
 
 .. container:: config
 
@@ -167,18 +157,18 @@ in ``pipeline``.
    ``pipeline.sample2job.config.environment_feedback_only_without_solution`` : true
        use the feedback only when no correct sibling exists.
 
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
-
 ``SDPOSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
-``scaffold_tolerance``). One job's data is one grid. ``job_samples``
-must not exceed the grid's rollouts (``groups_per_step x rollouts_per_group``);
-with a larger one the scenario's pipeline fails to build. Set it and Slime's
-``--global-batch-size`` equal to the grid to train one optimizer step per
-grid, as the example does. Leave ``pipeline.sample2job.config.buffer_size``
-at its default, ``job_samples``: a larger value can put two grids in one
-job's data.
+``scaffold_tolerance``). Reef checks each stage's config when it loads the
+recipe. A stage key under ``recipe.config`` fails the deployment, and the
+error names the key's place in ``pipeline``.
+
+One job's data is one grid. To train one optimizer step per grid, set
+``job_samples`` and Slime's ``--global-batch-size`` to
+``groups_per_step x rollouts_per_group``, as the example does. With a larger
+``job_samples``, the scenario's pipeline fails to build. Leave
+``pipeline.sample2job.config.buffer_size`` at its default, ``job_samples``: a
+larger value can put two grids in one job's data.
 
 Slime takes ``--loss-type custom_loss`` and
 ``--disable-compute-advantages-and-returns``, and refuses
@@ -213,11 +203,9 @@ Slime takes ``--loss-type custom_loss`` and
    ``--sdpo-skip-response-tokens`` : 0
        response tokens at the start of every attempt left out of the loss.
 
-The sampled reverse-KL mode also accepts score centering for training/inference
-mismatch. Score centering needs the sampler's recorded top-K, which samples
-that serving recorded do not carry. See `Score centering
-<../../developer-guide/loss-families.rst#score-centering>`__. The default JSD
-over top-K plus a tail bucket does not support it.
+The default JSD over top-K plus a tail bucket does not support `score
+centering <../../developer-guide/loss-families.rst#score-centering>`__; only
+the sampled reverse-KL mode does.
 
 Run the example
 ---------------

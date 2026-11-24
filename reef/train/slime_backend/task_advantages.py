@@ -28,7 +28,7 @@ from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from reef.train.algos.group_advantages import GroupAdvantageRule, group_advantages
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule, group_advantages
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 #: The function that the slime family names as Slime's ``--custom-reward-post-process-path``.

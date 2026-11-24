@@ -129,7 +129,7 @@ class CampaignService:
             return self.records[path.rsplit("/", 1)[-1]]
         if "/commits?" in path:
             self.fail_once("verify-1")
-            after = int(parse_qs(urlsplit(path).query)["after_step"][0])
+            after = int(parse_qs(urlsplit(path).query)["after_commit_number"][0])
             return {"commits": self.commits[after : after + 1]}
         assert path == "/reef/status"
         return {}
@@ -146,7 +146,7 @@ class CampaignService:
                 step = len(self.commits) + 1
                 self.commits.append(
                     {
-                        "step": step,
+                        "commit_number": step,
                         "operation": "training",
                         "activated": True,
                         "components": {"weights": f"r{step}"},

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from reef.artifact.sources import HuggingFaceRevision
-from reef.train.tinker_backend.config import SpindleFullConfig
+from reef.train.tinker_backend.config import SpindleFullSettings
 
 #: Where the export function mounts the checkpoint Volume; Spindle mounts it at the same path.
 CHECKPOINT_MOUNT = "/checkpoints"
@@ -50,7 +50,7 @@ def checkpoint_directory(state_path: str) -> str:
 class CheckpointExporter(ABC):
     """Puts the Hugging Face weights of a full-parameter checkpoint into a repo on the Hub.
 
-    Values: ``export(state_path, base)`` returns a commit of the exporter's release repo whose files are exactly the
+    Values: ``export(state_path, base)`` returns a commit of the exporter's repo whose files are exactly the
     weights of the checkpoint at ``state_path`` (its safetensors, ``config.json`` and ``generation_config.json``) and
     the tokenizer, chat template, processor and generation config files of ``base``; a checkpoint's file replaces the
     base's file of the same name. It raises ``ValueError`` for a path that names no
@@ -69,7 +69,7 @@ class ModalCheckpointExporter(CheckpointExporter):
     ``config.hf_secret``, whose ``HF_TOKEN`` writes ``config.release_repo``. Each export starts an ephemeral app.
     """
 
-    def __init__(self, config: SpindleFullConfig, *, timeout_s: float = 3 * 3600) -> None:
+    def __init__(self, config: SpindleFullSettings, *, timeout_s: float = 3 * 3600) -> None:
         self.repo = config.release_repo
         self.volume = config.checkpoint_volume
         self.environment = config.modal_environment

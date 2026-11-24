@@ -3,7 +3,7 @@
 - ``algorithm`` — the driver side, torch-free: the two axes, teacher source
   and divergence, with the representation (whole distribution or top-K),
   the EMA rate, the importance-sampling cap and the skipped tokens
-  (:class:`DistillSettings`); the seven-column wire row (the policy row plus
+  (:class:`DistillAlgorithmSettings`); the seven-column wire row (the policy row plus
   ``teacher_tokens`` and ``sample_weight``); and :class:`DistillAlgorithm`,
   the base a recipe's family subclasses with its prefix and its defaults.
 - ``objective`` — the worker side: forward and reverse KL and the
@@ -21,7 +21,7 @@ from reef.train.slime_backend.distill.algorithm import (
     TEACHER_BATCH_KEYS,
     TEACHER_SOURCES,
     DistillAlgorithm,
-    DistillSettings,
+    DistillAlgorithmSettings,
     settings_from_args,
 )
 
@@ -30,6 +30,6 @@ __all__ = [
     "TEACHER_BATCH_KEYS",
     "TEACHER_SOURCES",
     "DistillAlgorithm",
-    "DistillSettings",
+    "DistillAlgorithmSettings",
     "settings_from_args",
 ]

@@ -82,7 +82,7 @@ class TrainingProgress(ABC):
 class TrainingPosition:
     """A scenario's training as ``GET /reef/status`` reports it.
 
-    ``scenario_step`` is Reef's committed scenario step and ``finished_jobs``
+    ``commit_number`` is the number of the scenario's newest commit and ``finished_jobs``
     the number of training jobs that ended, both non-negative ints.
     ``running_job_id`` is the running job's ID, a non-empty string, or ``None``
     while no job runs. A scenario that the status does not list yet has not
@@ -90,12 +90,12 @@ class TrainingPosition:
     a step and waits for the job after it.
     """
 
-    scenario_step: int
+    commit_number: int
     finished_jobs: int
     running_job_id: str | None
 
     def __post_init__(self) -> None:
-        for name, value in (("scenario_step", self.scenario_step), ("finished_jobs", self.finished_jobs)):
+        for name, value in (("commit_number", self.commit_number), ("finished_jobs", self.finished_jobs)):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise RuntimeError(f"Reef returned an invalid {name}: {value!r}")
         if self.running_job_id is not None and (not isinstance(self.running_job_id, str) or not self.running_job_id):
@@ -110,7 +110,7 @@ class TrainingPosition:
         if job is not None and not isinstance(job, Mapping):
             raise RuntimeError(f"Reef returned an invalid training job: {job!r}")
         return cls(
-            scenario_step=status.get("scenario_step"),
+            commit_number=status.get("commit_number"),
             finished_jobs=status["finished_jobs"],
             running_job_id=None if job is None else job.get("job_id"),
         )
@@ -148,7 +148,7 @@ class TrainingJobOutcome:
 class StatusTrainingProgress(TrainingProgress):
     """Read a scenario's training through Reef's HTTP API.
 
-    ``GET /reef/status`` reports the scenario step, the running job and the
+    ``GET /reef/status`` reports the commit number, the running job and the
     number of finished jobs. ``GET /reef/scenarios/<scenario>/commits`` holds
     each job's committed checkpoint metrics and its end. No Ray connection is
     needed.
@@ -190,18 +190,20 @@ class StatusTrainingProgress(TrainingProgress):
     def scenario_status(self) -> dict[str, Any] | None:
         return scenario_status(self.get_json("/reef/status"), self.scenario)
 
-    def commits_after(self, scenario_step: int) -> list[dict[str, Any]]:
-        """Every commit of the scenario after ``scenario_step``, in step order."""
+    def commits_after(self, commit_number: int) -> list[dict[str, Any]]:
+        """Every commit of the scenario after ``commit_number``, in commit number order."""
         path = f"/reef/scenarios/{urllib.parse.quote(self.scenario, safe='')}/commits"
         commits: list[dict[str, Any]] = []
-        after_step: int | None = scenario_step
-        while after_step is not None:
-            page = self.get_json(f"{path}?{urllib.parse.urlencode({'after_step': after_step, 'limit': 100})}")
+        after_commit_number: int | None = commit_number
+        while after_commit_number is not None:
+            page = self.get_json(
+                f"{path}?{urllib.parse.urlencode({'after_commit_number': after_commit_number, 'limit': 100})}"
+            )
             entries = page.get("commits")
             if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
                 raise RuntimeError(f"Reef returned invalid commits: {page!r}")
             commits.extend(dict(entry) for entry in entries)
-            after_step = page.get("next_after_step")
+            after_commit_number = page.get("next_after_commit_number")
         return commits
 
     def get_json(self, path: str) -> Mapping[str, Any]:
@@ -226,7 +228,7 @@ def wait_for_training_step(
 ) -> TrainingJobOutcome:
     """Wait for the one training job that follows ``after`` to end, and read its checkpoint.
 
-    The step is done when the scenario step advanced past ``after``, one more
+    The step is done when the commit number advanced past ``after``, one more
     job finished, and no job runs. The scenario's training error, a TTTD step
     failure of ``expected_rollout_id``, and a failed job raise ``RuntimeError``.
     """
@@ -248,10 +250,10 @@ def wait_for_training_step(
             if (
                 position.running_job_id is None
                 and position.finished_jobs == expected_jobs
-                and position.scenario_step > after.scenario_step
+                and position.commit_number > after.commit_number
             ):
                 return finished_job_outcome(
-                    commits(after.scenario_step),
+                    commits(after.commit_number),
                     position,
                     last_status.get("served_artifact_id"),
                     expected_rollout_id,

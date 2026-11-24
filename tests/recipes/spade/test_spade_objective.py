@@ -6,14 +6,14 @@ import pytest
 
 import recipes.beta.spade  # noqa: F401  (registers the spade objective)
 from recipes.beta.spade.slime import SpadeObjective
-from reef.train.algos.group_advantages import GroupAdvantageRule, group_advantages
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule, group_advantages
 from reef.train.slime_backend.launch import SlimeDeployment
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
 
 
 @pytest.mark.unit
 def test_the_spade_objective_trains_task_jobs_on_the_slime_family_with_spades_rule() -> None:
-    objective = resolve_slime_objective("spade")
+    objective = resolve_objective("spade")
     assert isinstance(objective, SpadeObjective)
     assert (objective.loss_family, objective.carries_samples) == ("slime", True)
     assert objective.advantage_rule == GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)

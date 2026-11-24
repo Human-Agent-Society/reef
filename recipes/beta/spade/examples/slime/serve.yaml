@@ -23,7 +23,7 @@ inference:
     router-port: 23000
     context-length: 49152
     dtype: bfloat16
-  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-factory: reef.inference.sglang.chat:SGLangInferenceHandler
   handler-config:
     # The trainer's distribution: the Designer's replies train from the sample of its served call.
     sampling_defaults:
@@ -73,8 +73,8 @@ pipeline:
       description: shell tasks with hidden state under /var and /etc
       # The Designer replies of generation g train in the first task job of round g + 1.
       designer_delay: 1
-      # A carried reply is one artifact behind the job that trains it.
-      max_staleness: 2
+      # A carried reply is one artifact behind the job that trains it; it trains while at most two behind.
+      max_artifact_lag: 2
       generator:
         module: recipes.beta.spade:SpadeTaskGenerator
         config:
@@ -176,6 +176,7 @@ storage:
   artifact-work-dir: ${REEF_SPADE_STATE_DIR}/artifact-work
   artifact-cache-dir: ${REEF_SPADE_STATE_DIR}/artifact-cache
   agent-record-dir: ${REEF_SPADE_STATE_DIR}/agent-record
+  task-file-dir: ${REEF_SPADE_STATE_DIR}/task-files
 execution:
   training: ray
   rollout: ray

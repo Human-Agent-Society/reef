@@ -5,7 +5,7 @@ artifacts holding a ``tinker-checkpoint.json`` manifest that names the
 immutable remote sampler; this module serves whatever sampler a frozen
 artifact names, through Tinker's SDK, as an OpenAI text chat endpoint. The
 service returns and records no training tensors (``provider_response`` of
-``reef.service.inference_service``). The sampling itself is
+``reef.api.inference_service``). The sampling itself is
 ``reef.tinker.sampling``, which the trainer's rollouts use too, with their
 training tensors;
 the manifest in the artifact is the whole contract about which sampler
@@ -23,6 +23,7 @@ from typing import Any
 from reef_client.sse import synthesize_sse_events
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import read_base_root
 from reef.artifact.sources import read_reference
 from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
@@ -49,15 +50,26 @@ def checkpoint_sampler_path(
 ) -> str | None:
     """The sampler that a snapshot's checkpoint manifest names; ``None`` for the base model's own weights.
 
-    A LoRA's default start holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
+    A base root (``reef.artifact.base_root``) of ``base_model`` on ``service`` is the base model: a LoRA's default
+    start. A root of an older Reef holds the untrained adapter's manifest, whose sampler serves the base model's
+    outputs.
     Under full-parameter training (``full``), a snapshot without a manifest has the base model's weights: the
     component's base, a reference to the base revision, or an import of the base's files (RFC #996).
-    ``ValueError``: the snapshot is not materialized; it has no manifest and is not full-parameter, or refers to
-    another repo; or its manifest names another model or another service than ``service``.
+    ``ValueError``: the snapshot is not materialized; its base file is not readable, or names another model or
+    another service; it has no manifest and is not full-parameter, or refers to another repo; or its manifest names
+    another model or another service than ``service``.
     """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
+    base = read_base_root(path)
+    if base is not None:
+        if base.model != base_model or base.inputs.get("service") != service:
+            raise ValueError(
+                f"the base root stands for {base.model} on {base.inputs.get('service') or 'hosted Tinker'}, "
+                f"not for {base_model} on {service or 'hosted Tinker'}"
+            )
+        return None
     if not (path / MANIFEST).exists():
         if not full:
             raise ValueError(f"artifact is missing {MANIFEST}")
@@ -73,11 +85,16 @@ def checkpoint_sampler_path(
 class TinkerInferenceRuntime(InferenceRuntime):
     """Serve the sampler each snapshot names, on the Tinker-compatible service ``service`` (None: hosted Tinker).
 
-    ``served_weight_kind`` is ``model_adapter`` for a LoRA's releases, and ``model`` for the snapshots of
+    ``served_weight_kind`` is ``model_adapter`` for a LoRA's snapshots, and ``model`` for the snapshots of
     Spindle's full-parameter training, whose base serves the base model (``checkpoint_sampler_path``).
     Every sampler served in this process gets a runtime load ID of this
     incarnation; activating a snapshot whose sampler is not the one served
     mints a new one. A snapshot of another service is refused.
+
+    ``active_artifact_id`` is None before the first activation. Each successful ``activate_checkpoint`` sets it to
+    the ID of the activated artifact, whose manifest names the active sampler; a refused snapshot changes nothing.
+    ``served_artifact`` gives a route for that artifact only. A sampler is immutable, so a route's name keeps its
+    weights after a later activation.
     """
 
     def __init__(
@@ -97,12 +114,13 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._service = service
         self._kind = weight_kind
         self._handler = TinkerInferenceHandler(self, sampler, base_model)
-        self._lock = RLock()
+        self.lock = RLock()
         self._incarnation = new_runtime_load_id_incarnation()
         self._load_count = 0
         #: The runtime load ID that each sampler served under last, by sampler path (None: the base model).
         self._versions: dict[str | None, str] = {}
         self._active, self._version = self._remember(None)
+        self.active_artifact_id: str | None = None
         self._closed = False
 
     @property
@@ -116,13 +134,28 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def served_model_name(self, scenario: str) -> str:
         """The name of the sampler that serves now: its sampler path, or the base model before any snapshot.
         A request under this name reaches that sampler on the service at ``base_url``."""
-        with self._lock:
+        with self.lock:
             return self._active or self._model
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """The activated artifact's sampler, never the active sampler relabelled with an arbitrary artifact ID.
+
+        None for any other artifact. Also None when ``base_url`` is no HTTP(S) URL: the service then has no route
+        that another process can call.
+        """
+        with self.lock:
+            if self.active_artifact_id != artifact_id:
+                return None
+            try:
+                return ServedArtifact(artifact_id, self.base_url, self.served_model_name(scenario))
+            except ValueError:
+                # The service URL is no HTTP(S) URL that another process can call.
+                return None
 
     def sampler_load(self, model_name: str) -> tuple[str | None, str]:
         """The sampler that ``model_name`` names (None for the base model) and its runtime load ID."""
         sampler_path = None if model_name == self._model else model_name
-        with self._lock:
+        with self.lock:
             if sampler_path == self._active:
                 return self._active, self._version
             return self._remember(sampler_path)
@@ -142,7 +175,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that serves ``artifact``: each call samples its own artifact.
 
-        A LoRA's release is the base model with the adapter that its manifest names. A full-parameter release is a
+        A LoRA's artifact is the base model with the adapter that its manifest names. A full-parameter artifact is a
         model of its own, which Spindle serves under its sampler path; its base is the base model.
         """
         sampler_path = self.sampler_path(artifact)
@@ -173,21 +206,22 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._load_count += 1
         return sampler_path, version
 
-    # -- Serving releases
+    # -- Serving artifacts
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the snapshot's sampler; a sampler other than the served one is a new serving update."""
-        with self._lock:
+        with self.lock:
             sampler_path = self.sampler_path(artifact)
             if sampler_path != self._active:
                 # Even a sampler served earlier in this incarnation, as after an activation, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
                 self._versions[sampler_path] = self._version
+            self.active_artifact_id = artifact.artifact_id
             return self._version
 
     def shutdown(self) -> None:
         self.close_admission()
-        with self._lock:
+        with self.lock:
             if self._closed:
                 return
             self._closed = True
@@ -238,7 +272,7 @@ def chat_stream(response: dict[str, Any], payload: dict[str, Any]) -> InferenceS
 
 
 @dataclass(frozen=True)
-class TinkerInferenceConfig:
+class TinkerInferenceSettings:
     """What the sampler needs; the trainer passes these from its own ``training.options``."""
 
     api_key: str | None = config_option(None, help="Tinker API key; prefer api_key_env.")
@@ -249,7 +283,7 @@ class TinkerInferenceConfig:
     )
     timeout_s: float = config_option(300.0, help="Sampling request timeout in seconds.")
     parameterization: str = config_option(
-        "lora", help="lora: each snapshot is a LoRA's manifest; full: Spindle's full-parameter releases."
+        "lora", help="lora: each snapshot is a LoRA's manifest; full: Spindle's full-parameter snapshots."
     )
 
     def __post_init__(self) -> None:
@@ -267,7 +301,7 @@ class TinkerInferenceRuntimeFactory(RuntimeFactory):
     kind = "tinker"
 
     def config_type(self) -> type:
-        return TinkerInferenceConfig
+        return TinkerInferenceSettings
 
     def __call__(
         self,

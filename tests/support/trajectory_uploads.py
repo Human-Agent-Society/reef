@@ -4,31 +4,39 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient
-from tests.support.runtime_stubs import RecordingComponent
+from tests.support.runtime_stubs import (
+    RecordedJob,
+    RecordingComponent,
+    StubInferenceRuntime,
+    job_sized_stages,
+    live_objects,
+)
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
+from reef.control.operations.data_service import DataWorker, data_jobs
+from reef.control.operations.data_transfer import ArchiveWriters
+from reef.control.scenario.live_objects import LiveObjects
 from reef.recipe import Recipe
-from reef.record2sample import NoSamples
-from reef.sample2job import Sample2Job
-from reef.service.data_service import DataWorker, data_jobs
-from reef.service.data_transfer import ArchiveWriters
-from reef.service.task_import import DataScenarioStorage
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
-from reef.train import JobData, Trainer
-from reef.train.jobs import JobLoop
-from reef.train.pipeline import TrainingPipeline
+from reef.recipe.base import WeightTrainingRecipe
+from reef.samples import NoSamples, Record2Sample
+from reef.samples.context import PipelineContext
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.task_import import DataScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
+from reef.train import JobData
+from reef.train.pipeline import PipelineSpec
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 
 TOKEN = "upload-test-token"
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
@@ -77,6 +85,18 @@ async def upload_trajectories(
 class UploadJobData(Sample2Job):
     accepts_trajectories = True
 
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2sample: Record2Sample,
+        environ: Mapping[str, str],
+    ) -> Self:
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
+
     def make_job_data(self, samples, data_id):
         return JobData(data_id, samples)
 
@@ -95,50 +115,58 @@ class RenderingSamples(NoSamples):
 
 
 @dataclass(frozen=True, kw_only=True)
-class UploadRecipe(Recipe):
+class UploadRecipe(WeightTrainingRecipe):
+    """A weight recipe whose stages are ``task_stage`` and ``batch_stage``, with two samples in a job.
+
+    ``dispatcher_for`` gives its scenarios an ``UploadComponent``: the jobs go into ``batches``, and a new scenario
+    starts from ``start``.
+    """
+
     batch_stage: type[Sample2Job] = UploadJobData
     task_stage: type[NoSamples] = NoSamples
-    batches: list[JobData] = field(default_factory=list)
+    batches: list[RecordedJob] = field(default_factory=list)
     #: The content of a new scenario's root snapshot.
     start: DefaultStart = field(default_factory=DefaultStart)
 
-    def default_start(self) -> DefaultStart:
+    def __post_init__(self) -> None:
+        if self.pipeline_stages is None:
+            # An uploaded trajectory is one sample, so two uploads make one job's data.
+            stages = job_sized_stages(PipelineSpec(self.task_stage, self.batch_stage), job_samples=2)
+            object.__setattr__(self, "pipeline_stages", stages)
+        super().__post_init__()
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(NoSamples, UploadJobData)
+
+
+class UploadComponent(RecordingComponent):
+    """A recording component whose facts start a new scenario from ``start``."""
+
+    def __init__(self, batches: list[RecordedJob], start: DefaultStart) -> None:
+        super().__init__(batches)
+        self.start = start
+
+    def stub_default_start(self) -> DefaultStart:
         return self.start
 
-    def build(
-        self,
-        scenario,
-        records,
-        *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            # An uploaded trajectory is one sample, so two uploads make one job's data.
-            pipeline_factory=lambda context: TrainingPipeline(
-                context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, 2)
-            ),
-            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
-            root=root,
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-            task_storage=task_storage,
-            samples=samples,
-        )
 
-
-def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFactory | None = None) -> Dispatcher:
+def dispatcher_for(
+    tmp_path: Path,
+    recipe: Recipe,
+    factory: RepositoryBackendFactory | None = None,
+    live: LiveObjects | None = None,
+) -> Dispatcher:
     """A dispatcher with a data store, as deployment assembly builds it; the scenario storage owns the task files.
+    ``live`` holds the runtime and the job components of ``recipe``; the dispatcher gets it with the data store.
+    The default for an ``UploadRecipe`` is an ``UploadComponent``, whose jobs the dispatcher's training worker runs,
+    and a stub runtime that several training scenarios share. The default for any other recipe is no object.
 
     ``factory`` defaults to an in-memory repository under ``tmp_path``; a test that restarts passes its own.
     """
+    if live is None and isinstance(recipe, UploadRecipe):
+        runtime = StubInferenceRuntime(shared_by_training_scenarios=True)
+        live = live_objects(UploadComponent(recipe.batches, recipe.start), runtime)
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
@@ -148,9 +176,9 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(data_store=data) if live is None else replace(live, data_store=data),
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
-        data_store=data,
         coordination=coordination,
     )
     # The data service runs the data jobs, as assembly runs it.

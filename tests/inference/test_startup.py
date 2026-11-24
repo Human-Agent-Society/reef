@@ -6,25 +6,55 @@ import asyncio
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import (
+    RunningEngines,
+    StubFacts,
+    StubInferenceRuntime,
+    StubTrainingComponent,
+    live_objects,
+)
+from tests.support.serving import Engines
 
+from reef.api.app import create_app
+from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.artifact import InMemoryRepositoryBackend
-from reef.core.served_models import ScheduledStop
-from reef.dispatcher import Dispatcher, serving
-from reef.dispatcher.serving import ServingWorker
-from reef.inference.interfaces import FixedEngineClients, InferenceHandler
+from reef.artifact.artifact import Artifact, SnapshotRef
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
+from reef.control.workers import serving
+from reef.control.workers.serving import ServingWorker
+from reef.core.errors import ScenarioDeletedError
+from reef.core.served_models import ScheduledStop, ServedArtifact
+from reef.inference.checkpoint_slots import CheckpointSlotsRuntime
+from reef.inference.http import InferenceProxyRuntime
+from reef.inference.interfaces import (
+    FixedEngineClients,
+    InferenceHandler,
+    InferenceOwnerLostError,
+    RuntimeContractError,
+)
 from reef.inference.null import NullInferenceRuntime
-from reef.inference.startup import StartupFailed, StartupStopped, redeploying, report_startup, stopping
-from reef.service.app import create_app
-from reef.service.inference_service import build_inference_app
-from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
-from reef.storage.sql_coordination import memory_coordination, open_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import WorkLeaseLost
+from reef.inference.serving import FullWeightServingRuntime, OpenedEngines
+from reef.inference.startup import StartupFailedError, StartupStoppedError, redeploying, report_startup, stopping
+from reef.recipe.base import Recipe
+from reef.recipe.composite import CompositeRecipe
+from reef.storage.coordination.served_models import (
+    REDEPLOY,
+    SERVE_ARTIFACT_KIND,
+    SERVING_KIND,
+    SERVING_QUEUE,
+    STOP_SERVING_KIND,
+)
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.sql.coordination import memory_coordination, open_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
@@ -41,6 +71,7 @@ class PausedRuntime(StubInferenceRuntime):
         self.opens = 0
         self.shutdowns = 0
         self.stops = []
+        self.binding_known = True
 
     def open(self) -> None:
         self.opens += 1
@@ -60,7 +91,14 @@ class PausedRuntime(StubInferenceRuntime):
             raise TimeoutError("the test did not release startup")
         if self.fail_start:
             raise ValueError("the selected model cannot load")
-        return super().activate_checkpoint(artifact, scenario=scenario)
+        result = super().activate_checkpoint(artifact, scenario=scenario)
+        self.binding_known = True
+        return result
+
+    def served_artifact(self, artifact_id, scenario):
+        if not self.binding_known:
+            return None
+        return super().served_artifact(artifact_id, scenario)
 
     def served_model_name(self, scenario: str) -> str:
         return "test-model"
@@ -74,26 +112,171 @@ class Answer(InferenceHandler):
 @pytest.fixture
 def startup(tmp_path):
     runtime = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     storage = SQLiteScenarioStorage(tmp_path / "records")
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=storage,
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     inference = build_inference_app(coordination.served_models, storage, FixedEngineClients(Answer()), tokens=None)
     try:
         yield control, worker, runtime, inference
     finally:
         runtime.release.set()
+        worker.stop()
+        control.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lost_binding", [False, True])
+def test_cached_activation_is_reused_only_while_the_runtime_still_has_its_route(startup, lost_binding):
+    control, worker, runtime = startup[:3]
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+    item = control.coordination.served_models.current_request("math")
+    assert item.state == "finished"
+    runtime.entered.clear()
+    runtime.binding_known = not lost_binding
+
+    # A serving-config or alias update can select the same artifact again.
+    result = worker.run_item(item, threading.Event())
+    assert runtime.entered.is_set() is lost_binding
+    assert result["active"]["artifact_id"] == item.payload["artifact_id"]
+
+
+@pytest.mark.unit
+def test_an_activation_that_leaves_no_weight_binding_fails_despite_an_endpoint_model(startup, monkeypatch):
+    control, worker, runtime = startup[:3]
+    # The activation returns, but the runtime holds no weight binding for the artifact afterwards.
+    monkeypatch.setattr(runtime, "served_artifact", lambda artifact_id, scenario: None)
+    control.create_scenario("math")
+    runtime.release.set()
+    while worker.run_once():
+        pass
+    routes = control.coordination.served_models
+    failed = routes.current_request("math")
+    assert runtime.activated and runtime.endpoint_model_name("math") == "test-model"
+    assert failed.state == "failed" and "provides no route for the selected artifact" in failed.error
+    assert routes.read_scenario("math") == {}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("composite", [False, True])
+def test_full_weight_worker_restores_its_component_after_a_failed_load_and_takeover(tmp_path, composite):
+    class AttachedEngines(RunningEngines):
+        """Attach to the same backend and signal ``checked_twice`` after two healthy ticks."""
+
+        def __init__(self, backend):
+            super().__init__(backend)
+            self.checks = 0
+            self.checked_twice = threading.Event()
+
+        def open(self):
+            return OpenedEngines(self.backend, attached=True)
+
+        def check_health(self):
+            self.checks += 1
+            if self.checks >= 2:
+                self.checked_twice.set()
+
+    class WaitingRuntime(FullWeightServingRuntime):
+        """A full-weight runtime whose activation waits for ``release`` after signaling ``activating``."""
+
+        def __init__(self, engines):
+            super().__init__(engines, Answer(), model_path="test-model", health_interval_s=0.01)
+            self.activating = threading.Event()
+            self.release = threading.Event()
+
+        def activate_checkpoint(self, artifact, *, scenario=None):
+            self.activating.set()
+            if not self.release.wait(5):
+                raise TimeoutError("the test did not release activation")
+            return super().activate_checkpoint(artifact, scenario=scenario)
+
+    engines = Engines()
+    runtime = FullWeightServingRuntime(RunningEngines(engines), Answer(), model_path="test-model")
+    weights = TestPolicyRecipe()
+    recipe = CompositeRecipe(components={"weights": weights, "records": Recipe()}) if composite else weights
+    # Control and inference hold the facts of the training backend, and no training component.
+    live = LiveObjects(runtime=runtime, training_facts=StubFacts(StubTrainingComponent()))
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    coordination = memory_coordination()
+    control = Dispatcher(
+        recipe,
+        backends,
+        live=live,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=coordination,
+        components=frozenset({"control"}),
+        local_artifact_dir=tmp_path / "control",
+    )
+    worker = ServingWorker(
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+    )
+    try:
+        control.create_scenario("math")
+        assert worker.run_once()
+        item = coordination.served_models.current_request("math")
+        assert item.state == "finished"
+        selected = item.payload["selection"]["weights"]
+        assert item.payload["artifact_id"] == runtime.served_artifact_id == selected
+        original_path = engines.loads()[-1][-1]
+
+        candidate = tmp_path / "failed-candidate"
+        candidate.mkdir()
+        engines.misreport = "unexpected-load"
+        with pytest.raises(RuntimeContractError):
+            runtime.activate_checkpoint(
+                Artifact(SnapshotRef("candidate", None), None, local_path=candidate, artifact_id="artifact:candidate")
+            )
+        assert runtime.served_artifact(selected, "math") is None
+
+        # The worker cached this selection before the failed load. It must still restore the weights.
+        engines.misreport = None
+        result = worker.run_item(item, threading.Event())
+        assert engines.loads()[-1][-1] == original_path
+        assert engines.events[-1] == "resume"
+        assert result["active"]["artifact_id"] == selected
+        assert runtime.served_artifact(selected, "math") is not None
+
+        worker.stop()
+        engines.events.clear()
+        attached = AttachedEngines(engines)
+        restarted = WaitingRuntime(attached)
+        worker = ServingWorker(
+            recipe,
+            replace(live, runtime=restarted),
+            backends,
+            coordination,
+            worker_id="restarted-inference",
+            local_artifact_dir=tmp_path / "restarted-inference",
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            started = executor.submit(worker.run_once)
+            try:
+                assert restarted.activating.wait(2)
+                assert attached.checked_twice.wait(2)
+                assert restarted.recovery_pending
+                assert "pause" in engines.events and "resume" not in engines.events
+                assert coordination.served_models.read_scenario("math") == {}
+            finally:
+                restarted.release.set()
+            assert started.result(timeout=5)
+        assert engines.events[-1] == "resume"
+        assert coordination.served_models.read_scenario("math")["active"].artifact_id == selected
+    finally:
         worker.stop()
         control.close()
 
@@ -168,35 +351,25 @@ def test_slow_start_reports_its_result_without_blocking_control(startup, fails, 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("recreate", [False, True])
-def test_deleted_or_recreated_scenario_rejects_the_old_startup_result(startup, recreate):
+def test_a_deleted_scenario_rejects_the_old_startup_result_and_its_id_is_not_created_again(startup):
     control, worker, runtime, inference_app = startup
 
     async def run() -> None:
         async with TestClient(TestServer(inference_app)) as client:
             control.create_scenario("math")
-            first = control.coordination.served_models.current_request("math")
             work = asyncio.create_task(asyncio.to_thread(worker.run_once))
             try:
                 assert await asyncio.to_thread(runtime.entered.wait, 2)
                 await asyncio.wait_for(asyncio.to_thread(control.delete_scenario, "math"), 2)
                 assert (await client.get(STATUS)).status == 404
-                if recreate:
+                with pytest.raises(ScenarioDeletedError):
                     control.create_scenario("math")
-                    current = control.coordination.served_models.current_request("math")
-                    assert current.id != first.id
-                    assert (await (await client.get(STATUS)).json())["state"] == "pending"
             finally:
                 runtime.release.set()
                 assert await asyncio.wait_for(work, 5)
 
             assert control.coordination.served_models.read_scenario("math") == {}
-            if recreate:
-                assert (await (await client.get(STATUS)).json())["state"] == "pending"
-                assert await asyncio.to_thread(worker.run_once)
-                assert (await (await client.get(STATUS)).json())["state"] == "ready"
-            else:
-                assert (await client.get(STATUS)).status == 404
+            assert (await client.get(STATUS)).status == 404
 
     asyncio.run(run())
 
@@ -221,7 +394,7 @@ def test_an_inference_worker_resumes_expired_startup_and_keeps_completed_work_re
             completed = control.coordination.served_models.current_request("math")
             assert completed.id == abandoned.id and completed.attempt_count == 2
             assert completed.result and control.coordination.served_models.read_scenario("math")
-            with pytest.raises(WorkLeaseLost):
+            with pytest.raises(WorkLeaseLostError):
                 control.coordination.served_models.complete_request(
                     abandoned, "previous-process", {}, serving_config={}, stop_delay_seconds=0
                 )
@@ -239,8 +412,9 @@ def test_a_standby_recovers_completed_selections_after_the_owner_stops(startup, 
     runtime.release.set()
     assert worker.run_once()
     replacement = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "replacement"), replacement))
-    standby = ServingWorker(recipe, worker.backends, control.coordination, worker_id="standby")
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(recipe, live, worker.backends, control.coordination, worker_id="standby")
 
     async def run() -> None:
         async with TestClient(TestServer(inference_app)) as client:
@@ -280,8 +454,9 @@ def test_a_fresh_owner_opens_the_runtime_before_cleanup(startup, tmp_path):
     )
     worker.stop()
     replacement = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "replacement"), replacement))
-    standby = ServingWorker(recipe, worker.backends, control.coordination, worker_id="standby")
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(recipe, live, worker.backends, control.coordination, worker_id="standby")
     try:
         assert standby.run_once()
         assert replacement.opens == 1 and replacement.stops == [served]
@@ -292,16 +467,37 @@ def test_a_fresh_owner_opens_the_runtime_before_cleanup(startup, tmp_path):
 @pytest.mark.unit
 def test_owner_lease_loss_stops_the_runtime_and_prevents_reacquisition(startup):
     control, worker, runtime, _ = startup
-    control.coordination.work_queue.lease_seconds = 0.3
+    # The owner renews its lease every third of it, so it sees the takeover within a second. A shorter lease can
+    # expire on a loaded host before the owner starts its item, and the test then fails before the takeover.
+    control.coordination.work_queue.lease_seconds = 3.0
     control.create_scenario("math")
     runtime.release.set()
     assert worker.run_once()
     owner = worker.owner
     assert owner is not None
     control.coordination.work_queue.cancel(owner.item.queue, owner.item.id, "test takeover")
-    assert owner.lease_lost.wait(2)
+    # The bound is for a loaded host; the wait ends when the owner sees the loss.
+    assert owner.lease_lost.wait(30)
     owner.stop()
     assert runtime.shutdowns == 1 and worker.stopped.is_set()
+    assert not worker.run_once()
+
+
+@pytest.mark.unit
+def test_receiver_ownership_loss_preserves_the_selection_even_when_cleanup_is_fenced(startup, monkeypatch):
+    control, worker, runtime = startup[:3]
+    control.create_scenario("math")
+
+    def fenced(*args, **kwargs):
+        raise InferenceOwnerLostError("the receiver accepted another owner")
+
+    monkeypatch.setattr(runtime, "activate_checkpoint", fenced)
+    monkeypatch.setattr(runtime, "shutdown", fenced)
+    assert worker.run_once()
+    item = control.coordination.served_models.current_request("math")
+    assert item.state == "running" and item.error is None
+    assert item.attempt_count == 1
+    assert worker.owner.lease_lost.is_set() and worker.stopped.is_set()
     assert not worker.run_once()
 
 
@@ -328,13 +524,78 @@ def test_an_owner_retries_recovery_before_opening_its_runtime(startup, monkeypat
 
 
 @pytest.mark.unit
+def test_a_stop_shuts_down_a_runtime_whose_open_failed(startup, monkeypatch):
+    control, worker, runtime = startup[:3]
+    control.create_scenario("math")
+
+    def refuse_open():
+        raise RuntimeError("one engine group did not open")
+
+    monkeypatch.setattr(runtime, "open", refuse_open)
+    assert worker.run_once()
+    # The failed open can have started engines, so the stop shuts down the runtime that never opened.
+    assert not worker.opened and runtime.shutdowns == 0
+    worker.stop()
+    assert runtime.shutdowns == 1
+
+
+@pytest.mark.unit
+def test_an_idle_owner_releases_what_no_route_and_no_scheduled_stop_uses(startup, monkeypatch):
+    control, worker, runtime = startup[:3]
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+    [published] = set(control.coordination.served_models.read_scenario("math").values())
+    retiring = ServedArtifact("retiring", "http://inference-runtime", "sampler:retiring")
+    control.coordination.served_models.schedule_stop(
+        ScheduledStop(retiring, time.time() + 3600), control_lease_number=control.publisher.lease_number
+    )
+    calls = []
+
+    def release(retained):
+        calls.append(set(retained))
+        if len(calls) == 1:
+            raise RuntimeError("the engines did not pause")
+
+    monkeypatch.setattr(runtime, "release_unreferenced_artifacts", release)
+    # A serving work ran. The next round keeps the published route and the stop that is due in an hour, and a
+    # release that fails runs again in the round after it.
+    with pytest.raises(RuntimeError, match="did not pause"):
+        worker.run_once()
+    worker.run_once()
+    assert calls == [{published, retiring}, {published, retiring}]
+    # No serving work ran since the release, so an idle round releases nothing again.
+    worker.run_once()
+    assert len(calls) == 2 and runtime.stops == []
+
+
+@pytest.mark.unit
+def test_a_release_that_the_receiver_fences_stops_the_owner(startup, monkeypatch):
+    control, worker, runtime = startup[:3]
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+
+    def fenced(retained):
+        raise InferenceOwnerLostError("the receiver accepted another owner")
+
+    monkeypatch.setattr(runtime, "release_unreferenced_artifacts", fenced)
+    with pytest.raises(WorkLeaseLostError, match="newer owner"):
+        worker.run_once()
+    assert worker.owner.lease_lost.is_set() and worker.stopped.is_set() and runtime.shutdowns == 1
+    assert not worker.run_once()
+
+
+@pytest.mark.unit
 def test_an_offline_training_runtime_has_no_startup_request(tmp_path):
     runtime = NullInferenceRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     coordination = memory_coordination()
     control = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
@@ -348,15 +609,108 @@ def test_an_offline_training_runtime_has_no_startup_request(tmp_path):
         control.close()
 
 
+@contextmanager
+def served_scenarios(tmp_path, recipe, live, *scenarios):
+    """Create ``scenarios`` on a control dispatcher over ``recipe`` and ``live`` and run an inference worker until no
+    serving work is left; yield the routes, the record storage and an inference app that answers each route with
+    ``Answer``."""
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    coordination = memory_coordination()
+    storage = SQLiteScenarioStorage(tmp_path / "records")
+    control = Dispatcher(
+        recipe,
+        backends,
+        live=live,
+        scenario_storage=storage,
+        coordination=coordination,
+        components=frozenset({"control"}),
+        local_artifact_dir=tmp_path / "control",
+    )
+    worker = ServingWorker(
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+    )
+    try:
+        for scenario in scenarios:
+            control.create_scenario(scenario)
+        while worker.run_once():
+            pass
+        inference = build_inference_app(coordination.served_models, storage, FixedEngineClients(Answer()), tokens=None)
+        yield coordination.served_models, storage, inference
+    finally:
+        worker.stop()
+        control.close()
+
+
+def chat(app, scenario):
+    """The status, headers and JSON body of one chat request to ``scenario`` through ``app``."""
+
+    async def send():
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post("/v1/chat/completions", headers={"x-reef-scenario": scenario}, json=CHAT)
+            return response.status, response.headers, await response.json()
+
+    return asyncio.run(send())
+
+
+@pytest.mark.unit
+def test_a_proxy_routes_each_snapshot_without_weights_to_its_configured_model(tmp_path):
+    """A record-only snapshot loads no weights, so it gets no activation: its route names the scenario's own selected
+    artifact at the proxy's configured model. The proxy still binds no weights to any artifact."""
+    runtime = InferenceProxyRuntime(base_url="http://provider.invalid", model_path="configured-model")
+    live = LiveObjects(runtime=runtime)
+    with served_scenarios(tmp_path, Recipe(), live, "math", "code") as (routes, storage, inference):
+        selected = {scenario: routes.current_request(scenario).payload["artifact_id"] for scenario in ("math", "code")}
+        assert selected["math"] != selected["code"]
+        for scenario, artifact_id in selected.items():
+            route = ServedArtifact(artifact_id, "http://provider.invalid", "configured-model")
+            published = routes.read_scenario(scenario)
+            assert published["active"] == route and set(published.values()) == {route}
+            assert runtime.served_artifact(artifact_id, scenario) is None
+        assert runtime.served_artifact("an-arbitrary-artifact", "math") is None
+        status, headers = chat(inference, "math")[:2]
+        assert (status, headers[ARTIFACT_HEADER]) == (200, selected["math"])
+        store = storage.open("math")
+        try:
+            [record] = store.records.replay("math")
+        finally:
+            store.close()
+        assert (record.agent_record_id, record.artifact_id) == (headers[RECORD_HEADER], selected["math"])
+
+
+@pytest.mark.unit
+def test_a_proxy_refuses_a_recipe_that_loads_weights_even_with_a_configured_model(tmp_path):
+    runtime = InferenceProxyRuntime(base_url="http://provider.invalid", model_path="configured-model")
+    live = LiveObjects(runtime=runtime, training_facts=StubFacts(StubTrainingComponent()))
+    with served_scenarios(tmp_path, TestPolicyRecipe(), live, "math") as served:
+        routes, inference = served[0], served[2]
+        failed = routes.current_request("math")
+        # The weights cannot load, and the configured model is no route for them.
+        assert failed.state == "failed" and "an inference proxy loads no weights" in failed.error
+        assert routes.read_scenario("math") == {}
+        answer = chat(inference, "math")
+        assert (answer[0], answer[2]["error"]["type"]) == (503, "inference_start_failed")
+
+
+@pytest.mark.unit
+def test_a_weight_runtime_gives_no_route_to_a_snapshot_without_weights(tmp_path):
+    runtime = FullWeightServingRuntime(RunningEngines(Engines()), Answer(), model_path="test-model")
+    with served_scenarios(tmp_path, Recipe(), LiveObjects(runtime=runtime), "math") as served:
+        routes = served[0]
+        failed = routes.current_request("math")
+        assert failed.state == "failed" and "provides no route for the selected artifact" in failed.error
+        assert routes.read_scenario("math") == {}
+    assert runtime.endpoint_model_name("math") is None
+
+
 @pytest.mark.unit
 def test_the_worker_logs_its_ownership_its_opening_and_each_activation(startup, caplog):
     control, worker, runtime = startup[0], startup[1], startup[2]
     runtime.release.set()
     control.create_scenario("math")
-    with caplog.at_level("INFO", logger="reef.dispatcher.serving"):
+    with caplog.at_level("INFO", logger="reef.control.workers.serving"):
         assert worker.run_once()
         worker.stop()
-    messages = [record.getMessage() for record in caplog.records if record.name == "reef.dispatcher.serving"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "reef.control.workers.serving"]
     assert any("holds runtime ownership" in message for message in messages)
     assert any("opened the inference runtime" in message for message in messages)
     assert any("kept 0 of 0 routes from before" in message for message in messages)
@@ -392,12 +746,12 @@ class StoppableRuntime(PausedRuntime):
         try:
             while not self.release.wait(0.02):
                 if stopping():
-                    raise StartupStopped
+                    raise StartupStoppedError
         finally:
             with self.lock:
                 self.running -= 1
         if self.fail_start:
-            raise StartupFailed("--language-model-only does not support this model")
+            raise StartupFailedError("--language-model-only does not support this model")
         return StubInferenceRuntime.activate_checkpoint(self, artifact, scenario=scenario)
 
 
@@ -406,19 +760,21 @@ def stoppable(tmp_path, monkeypatch, request):
     monkeypatch.setattr(serving, "REPLACED_CHECK_SECONDS", 0.05)
     runtime = StoppableRuntime(getattr(request, "param", 1))
     training = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=True)
-    recipe = TestPolicyRecipe(**runtime_bindings(training, runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(training, runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     try:
         yield control, worker, runtime
@@ -443,7 +799,7 @@ def test_a_redeploy_stops_the_held_start_and_the_next_control_round_keeps_it(sto
     # The held start stops within seconds, not when the engine would have started.
     held.join(5)
     assert not held.is_alive()
-    stopped = control.coordination.work_queue.get(SERVING_QUEUE, first.id)
+    stopped = control.coordination.work_queue.read(SERVING_QUEUE, first.id)
     assert (stopped.state, stopped.error) == ("failed", serving.REPLACED)
     # A control round compares the payloads without the redeploy number, so it keeps the redeploy request.
     control.publisher.run_once()
@@ -471,6 +827,72 @@ def test_the_runtime_s_slots_start_that_many_scenarios_at_once(stoppable):
     while time.monotonic() < deadline and not all(routes.read_scenario(name) for name in ("math", "code")):
         time.sleep(0.02)
     assert all(routes.read_scenario(name) for name in ("math", "code"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stoppable", [2], indirect=True)
+@pytest.mark.parametrize("standalone", [False, True], ids=["selection", "evaluation"])
+def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, monkeypatch, standalone):
+    control, worker, runtime = stoppable
+    runtime.release.set()
+    control.create_scenario("math")
+    assert worker.run_once()
+    worker.item_threads[-1].join(5)
+    routes = control.coordination.served_models
+    served = routes.read_scenario("math")["active"]
+    selection = routes.current_request("math").payload["selection"]
+    control.set_served("math", {})
+    if standalone:
+        monkeypatch.setattr(runtime, "serve_artifact", lambda artifact, scenario: served)
+        worker.queue.append(
+            NewWork(
+                SERVING_QUEUE,
+                "evaluation-candidate",
+                "math",
+                SERVE_ARTIFACT_KIND,
+                {"selection": selection, "component": "weights"},
+            )
+        )
+    else:
+        control.set_served("math", {served.artifact_id: 100})
+
+    finishing = threading.Event()
+    publish = threading.Event()
+    retirement_waiting = threading.Event()
+    retired = threading.Event()
+    finish = worker.finish_item
+    wait = worker.serving_work_changed.wait
+
+    def wait_for_result(timeout=None):
+        retirement_waiting.set()
+        return wait(timeout)
+
+    def finish_item(item, result):
+        if item.kind != STOP_SERVING_KIND:
+            finishing.set()
+            assert publish.wait(15)
+        finish(item, result)
+        if item.kind == STOP_SERVING_KIND:
+            retired.set()
+
+    monkeypatch.setattr(worker, "finish_item", finish_item)
+    monkeypatch.setattr(worker.serving_work_changed, "wait", wait_for_result)
+    assert worker.run_once()
+    try:
+        assert finishing.wait(5)
+        routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=control.publisher.lease_number)
+        assert worker.run_once()
+        assert retirement_waiting.wait(5)
+    finally:
+        publish.set()
+    assert retired.wait(5)
+    if standalone:
+        item = worker.queue.read(SERVING_QUEUE, "evaluation-candidate")
+        assert item.result == {"served": served.to_json()}
+    else:
+        assert routes.read_scenario("math")["active"] == served
+    assert routes.due_stops(time.time()) == ()
+    assert runtime.stops == []
 
 
 @pytest.mark.unit
@@ -530,19 +952,21 @@ def test_a_redeploy_of_a_scenario_that_serves_nothing_starts_no_engine(startup):
 def deployment(tmp_path, runtime):
     """Control and an inference worker on the record and coordination files of ``tmp_path``, as one start of the
     service has them."""
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     return control, worker
 
@@ -607,3 +1031,51 @@ def test_a_scenario_that_stopped_all_serving_activates_the_same_artifact_again(s
     assert worker.run_once()
     assert len(runtime.activated) == 2
     assert routes.read_scenario("math")["active"] == served
+
+
+@pytest.mark.unit
+def test_checkpoint_slots_keep_a_withdrawn_checkpoint_until_its_stop_and_then_load_it_again(tmp_path):
+    class SlotEngines(RunningEngines):
+        """Running engines at ``url``: each checkpoint slot has its own base URL."""
+
+        def __init__(self, url):
+            super().__init__(Engines())
+            self.url = url
+
+        @property
+        def base_url(self):
+            return self.url
+
+    first, second = SlotEngines("http://slot-a.example"), SlotEngines("http://slot-b.example")
+    runtime = CheckpointSlotsRuntime(
+        [FullWeightServingRuntime(engines, Answer(), model_path="test-model") for engines in (first, second)]
+    )
+    control, worker = deployment(tmp_path, runtime)
+    routes = control.coordination.served_models
+    try:
+        control.create_scenario("math")
+        assert worker.run_once()
+        artifact_id = control.get_or_create_scenario("math").serving_artifact_id()
+        [served] = set(routes.read_scenario("math").values())
+        assert runtime.bindings == {artifact_id: served} and served.url == "http://slot-a.example"
+
+        # The scenario serves nothing. Its withdrawn route waits for its stop, so the release of what no route uses
+        # runs and keeps the checkpoint in its slot.
+        assert control.set_served("math", {}) == {"served": {}}
+        assert not worker.run_once()
+        assert not worker.release_due and runtime.bindings == {artifact_id: served}
+
+        # The stop releases the slot, and the worker forgets its activation. The same artifact then loads again
+        # into the free slot, under the route of the new load.
+        routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=control.publisher.lease_number)
+        assert worker.run_once()
+        assert runtime.bindings == {} and worker.activated == {} and first.backend.events[-1] == "pause"
+        control.set_served("math", {artifact_id: 100})
+        assert worker.run_once()
+        restored = routes.read_scenario("math")["active"]
+        assert restored == runtime.bindings[artifact_id] and restored != served and restored.url == served.url
+        assert len(first.backend.loads()) == 2 and first.backend.events[-1] == "resume"
+        assert second.backend.loads() == []
+    finally:
+        worker.stop()
+        control.close()

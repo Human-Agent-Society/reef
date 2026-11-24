@@ -9,7 +9,9 @@ description = "Minimal Harbor agent harness that talks to a Reef service"
 requires-python = ">=3.12"
 dependencies = [
     "reef-client",
-    "reef-eval[harbor]",
+    # Reef supplies Harbor in this environment. The "harbor" extra of reef-eval pins a version that Reef refuses.
+    "reef-eval",
+    "harbor",
 ]
 
 [tool.setuptools.packages.find]

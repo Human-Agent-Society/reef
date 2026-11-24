@@ -4,7 +4,8 @@ The modules at the package root hold the contracts and their coordination:
 ``interfaces`` the request, runtime and backend contracts; ``deployment`` the
 inference component; ``registry`` the serving runtime kinds; ``serving``,
 ``residency`` and ``recovery`` the serving of saved weights on engines. They
-import no concrete integration.
+import no concrete integration. ``engine_clients`` picks the handler of each
+``served_models`` row for a separate inference service.
 
 Each integration owns native engine launch, request adaptation, loading saved
 weight files and its worker lifecycle. The serving runtimes of

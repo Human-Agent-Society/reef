@@ -1,37 +1,39 @@
 State Model: Records, Artifacts, and Operations
 ==============================================
 
+This page is for readers who write a storage or artifact backend, or who must
+reason about recovery. It states what Reef stores for a scenario and the order
+in which a commit becomes durable. Operators find the tasks in `Operate a
+deployment <../user-guide/operate.rst>`__.
+
 Records
 -------
 
-Reef stores every exchange of inference and every report as ``AgentRecord``.
-It includes a record id, a scenario, an inference payload (for inference
-exchange) or feedback (for report), and necessary metadata (e.g. request type
-or artifact identifier used for serving).
+Reef stores every inference exchange and every report as an ``AgentRecord``:
+a record ID, a scenario, the inference payload or the feedback, and metadata
+such as the request type and the artifact that served the request.
 
-``RecordStore`` defines record append, replay, and audit
-operations. It does not know about scenario lifecycle, commits, artifact
-publication, or training. A scenario's records are record items of its owner in
-the data store (RFC #1219): ``ItemRecordStore`` gives the records of one scenario
-over the data store, and each storage session has one.
+``RecordStore`` defines record append, replay and audit. It knows nothing about
+scenario lifecycle, commits, artifact publication or training. A scenario's
+records are record items of its owner in the data store; ``ItemRecordStore``
+gives the records of one scenario over that store.
 
-Consumption does not delete a record: reads include every retained record,
-whether a trainer consumed it or not. Each trainer keeps its own consumption
-in its commits (see `Commit ordering`_). Retention deletes the oldest record
-items only when the deployment-wide byte budget is full
-(``DataStore.prune_records``), and it keeps the commit metadata. A retry of a
-deleted record stores it again.
-
-With a database path configured, the SQLite scenario database uses WAL
-journalling and synchronous = FULL. The default in-memory database is for tests
-and does not survive a restart.
+- **Consumption** does not delete a record. Reads include every retained
+  record, and each trainer keeps its own consumption in its commits (see
+  `Commit ordering`_).
+- **Retention** deletes the oldest record items only when the deployment-wide
+  byte budget is full (``DataStore.prune_records``). It keeps the commit
+  metadata. A retry of a deleted record stores it again.
+- **Durability.** With a database path, the SQLite scenario database uses WAL
+  journalling and ``synchronous = FULL``. The default in-memory database is for
+  tests and does not survive a restart.
 
 The snapshot chain
 ------------------
 
-The repository retains a publication chain internally. The public state
-model has three parts: immutable artifacts, scenario selections and an
-append-only operation history.
+The public state model has three parts: immutable artifacts, scenario
+selections and an append-only operation history. The repository also keeps a
+publication chain internally.
 
 An *artifact* is one output of one component. Its ``artifact_id`` is the
 only public artifact identity. Training, import and harness sync create
@@ -51,9 +53,8 @@ Serving and training use separate selections:
 
 - The active selection supplies the default routes. An ``activate``
   operation replaces one selected artifact and leaves every trainer's start
-  unchanged. Inference
-  uses the selection that completed startup; a failed load remains visible
-  in startup status until control retries it.
+  unchanged. Inference uses the selection that completed startup; a failed
+  load remains visible in startup status until control retries it.
 - Each trainer has a training start: the artifact its next job or evolve
   step starts from. It begins at the creation artifact and moves to its own
   newest output after training. ``train-from`` selects an existing artifact
@@ -87,12 +88,13 @@ artifacts in the artifact catalog. Their operations preserve history and
 provide the complete selection needed for recovery. Rejected or skipped
 training steps remain operations even when they create no artifact.
 
-The built-in repository stores durable bytes in Git with LFS patterns for
-weight files and a ``reef-artifact.json`` manifest. Backend interfaces use ``SnapshotRef`` with ``revision`` and ``parent_revision``.
-These fields locate stored bytes; component IDs remain independent of storage.
-The publication head orders new snapshots independently of the active
-selection. Publication checks its expected parent and uses a Git push lease;
-a stale writer conflicts instead of overwriting another publication.
+The built-in repository stores durable bytes in Git, with LFS patterns for
+weight files and a ``reef-artifact.json`` manifest. Backend interfaces use
+``SnapshotRef`` with ``revision`` and ``parent_revision``. These fields locate
+stored bytes; component IDs remain independent of storage. The publication head
+(the chain tip) orders new snapshots independently of the active selection.
+Publication checks its expected parent and uses a Git push lease, so a stale
+writer conflicts instead of overwriting another publication.
 
 Old commit records remain readable, with their stored locations. A new commit
 record stores only its component artifact selection. Recovery reads each
@@ -105,26 +107,30 @@ Commit ordering
 ---------------
 
 ``ScenarioStore`` owns a scenario's committed state, its ``RecordStore`` and
-its task stores. It validates step progression and settles record
-consumption with each commit.
-Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` writes a
-new scenario's root snapshot, opens a storage session, and returns the
-complete ``Scenario``. The scenario owns that session and
-coordinates trainer and artifact operations. Both built-in storages
-assemble their record store with ``CommitHistoryScenarioStore`` and keep
-commits in a ``scenario_commit`` table of the record database.
-``SQLiteScenarioStorage`` keeps one database file per scenario;
-``PostgresScenarioStorage`` keeps every scenario in one schema. The committed
-row is the commit point. A committed step records its step number, operation,
-component selection, private artifact locator, checkpoint flag, algorithm
-state, record high-water mark, consumed IDs
-(record IDs, and ``sample:<sample id>`` for each sample that its job trained), metrics, training job ID, and, in a scenario of several trainers, the
-component that made it.
+its task stores. It validates the order of commit numbers and settles record
+consumption with each commit. Deployment assembly supplies a
+``ScenarioStorage``. ``ScenarioFactory`` writes a new scenario's root snapshot,
+opens a storage session and returns the complete ``Scenario``, which owns that
+session.
 
-``commit_step(expected_step=..., commit=...)`` validates the expected scenario
-step before accepting its successor. Identical retries (ignoring only
-``recorded_at``) return the original commit; different content for that step
-or a stale expected step conflicts.
+Both built-in storages keep commits in a ``scenario_commit`` table of the
+record database (``CommitHistoryScenarioStore``). ``SQLiteScenarioStorage``
+keeps one database file per scenario; ``PostgresScenarioStorage`` keeps every
+scenario in one schema. The committed row is the commit point. A commit
+records:
+
+- its commit number, operation and component selection;
+- the private artifact locator and the checkpoint flag;
+- the algorithm state and the record high-water mark;
+- the consumed IDs: record IDs, and ``sample:<sample id>`` for each sample
+  that its job trained;
+- metrics and the training job ID;
+- in a scenario of several trainers, the component that made it.
+
+``append_commit(expected_commit_number=..., commit=...)`` validates the
+expected commit number before it accepts the successor. An identical retry
+(ignoring only ``recorded_at``) returns the original commit. Different content
+for that commit number, or a stale expected commit number, conflicts.
 
 ``ScenarioCommitter`` keeps artifact operations outside the store. For a
 durable store, the order is:
@@ -141,13 +147,14 @@ durable store, the order is:
        synchronize the backend pointer, apply trainer state.
    * - Activation
      - Check the selected artifact. Inference loads it after the selection
-       commits. Append
-       an ``activate`` operation with the complete component mapping.
+       commits. Append an ``activate`` operation with the complete component
+       mapping.
        Publish no artifact snapshot. Recovery restores the committed mapping,
        including every unchanged component.
    * - Train-from
      - The trainer takes the artifact as its start and cancels its running
-       job: a weight trainer imports the artifact with ``import_start``, and
+       job: a weight trainer names the artifact's snapshot as its start, which the
+       training service imports with ``import_start`` for the next job, and
        a harness trainer reads the entries of its tree. Commit a ``train_from``
        record. A restart before the trainer's next training commit takes the
        start again from that record.
@@ -193,20 +200,20 @@ others. On restart each trainer recovers its state and
 read cursor from its own commits and skips the rows that they name, which needs
 durable commit storage.
 
-Without a durable store, a saved snapshot advances the active selection and the
-chain tip before the in-memory commit settles. A conflicting chain tip
-therefore rejects the step before its records are consumed. In-memory commit history supports retries
-only for the lifetime of that session.
+Without a durable store, a saved snapshot advances the active selection and
+the chain tip before the in-memory commit settles. A conflicting chain tip
+therefore rejects the step before its records are consumed. In-memory commit
+history supports retries only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record`` (format ``reef-scenario/7``): the root's
-``source``, and after step zero the root snapshot as ``start_artifact``.
+under ``scenario_commit_record`` (format ``reef-scenario/8``): the root's
+``source``, and after commit number zero the root snapshot as ``start_artifact``.
 Recovery refuses other formats. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the commit history can
 be adopted into the history. Recovery replays retained records through the
-committed watermark while excluding every committed step's consumed IDs and
+committed watermark while excluding every commit's consumed IDs and
 the records that the trainer's stages consumed (its training state), and
 restores the read cursor. The watermark is a read position:
 retained records behind it can still belong to incomplete job data.
@@ -215,12 +222,14 @@ Training jobs run outside the transaction. A job's ID is a hash of the
 scenario, the backend, the start, the records of the job's data, and the parameters.
 A retry after a crash therefore submits the same job, and the component
 ignores a job ID it already has. After an ambiguous commit error, history is
-authoritative. Callers must reconcile or retry the same commit before
-publishing another version. Each scenario still needs exactly one logical Reef
-writer; expected-step validation does not provide distributed leases or make
-external training operations atomic. Those operations must be idempotent or
+authoritative: callers must reconcile or retry the same commit before they
+publish another version.
+
+Each scenario still needs exactly one logical Reef writer. The check of the
+expected commit number provides no distributed lease and does not make external
+training operations atomic. Those operations must be idempotent or
 reconcilable after a crash. See the `Python storage contract
-<../reference/python-api.rst#scenario-stores>`__ for custom adapters.
+<../reference/python-api.rst#integrations-and-plugins>`__ for custom adapters.
 
 These guarantees require persistent storage. `Configuration
 <../reference/configuration.rst>`__ lists the paths, and `Operate a deployment

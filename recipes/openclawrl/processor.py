@@ -26,9 +26,9 @@ from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory, source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobWorker
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import JudgedSamples, Record2Sample
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import JudgedSamples, Record2Sample
+from reef.samples.context import PipelineContext
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class OpenClawRLSamples(JudgedSamples):
             worker = BackgroundJobWorker(
                 self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
             )
-        super().__init__(self.openclawrl_judging, worker, max_staleness=settings.max_staleness)
+        super().__init__(self.openclawrl_judging, worker)
 
     @classmethod
     def from_config(

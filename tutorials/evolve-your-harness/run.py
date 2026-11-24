@@ -23,7 +23,7 @@ that is already running:
              and follows the head
     turns  - ``python3 run.py native`` sends each task to the process as one
              turn, grades the reply, and reports the score against the
-             receipts the turn returned
+             last receipt the turn returned
     mount  - every reported score batches, so each report triggers one
              evolve step; a winning tree publishes and the process mounts it
              while it runs, which its log shows as ``harness/mount``
@@ -65,7 +65,7 @@ TASKS_FILE = WORK / "tasks.json"
 # The native variant: the pulled tree the serve process runs, and the workspace its tools work in.
 TREE_DIR = WORK / "tree"
 SCRATCH_DIR = WORK / "scratch"
-RELEASE_FILE = ".reef-harness-release"
+SNAPSHOT_FILE = ".reef-harness-release"
 #: The key the binding carries when the service wants no token: the native loop refuses an empty one.
 NO_TOKEN_API_KEY = "reef-no-token"
 
@@ -90,9 +90,10 @@ def main():
         )
         prefix = task.split(maxsplit=1)[0]  # keys evolution.py's ANSWERS table
         score = evolution.grade_text(task, body["choices"][0]["message"]["content"])
+        # The receipt in the ID keeps a rerun on the same work/ from reusing the ID of an earlier report.
         client.report(
             SCENARIO,
-            {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": prefix},
+            {"agent_record_id": f"harness-evolve-{receipt}", "score": score, "feedback": prefix},
             references=[receipt],
         )
         # The recipe's default stages batch valid scored reports, passing ones included, and
@@ -236,11 +237,11 @@ def turn(prompt, session=None):
 
 
 def report(client, result, score, feedback):
-    """Post the score against the receipts of the model calls one turn made."""
+    """Post the score against the last model call of one turn; Reef adds the earlier calls of its trajectory."""
     client.report(
         SCENARIO,
         {"agent_record_id": f"native-{result['session']}-{result['turn']}", "score": score, "feedback": feedback},
-        references=result["receipts"],
+        references=result["receipts"][-1:],
     )
 
 
@@ -261,10 +262,10 @@ def native_main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The pulled tree is the seed: the head moves off it only when a step publishes.
-    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["artifact_id"]
+    seed = json.loads((TREE_DIR / SNAPSHOT_FILE).read_text())["artifact_id"]
 
     before = steps_before(client)
-    # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
+    # turns + report: each task is one turn on the resident process; the score goes against the turn's last receipt.
     batched = 0
     failures = 0
     for index, task in enumerate(tasks, start=1):
@@ -340,7 +341,7 @@ def replay():
     except (OSError, ValueError, KeyError) as exc:
         print(f"replay page not written: {exc}")
         return
-    print(f"replay: open work/replay.html ({len(data['releases'])} release(s), {len(data['sessions'])} session(s))")
+    print(f"replay: open work/replay.html ({len(data['snapshots'])} snapshot(s), {len(data['sessions'])} session(s))")
 
 
 if __name__ == "__main__":

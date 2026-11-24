@@ -1,13 +1,13 @@
 """ACE, Agentic Context Engineering (Zhang et al., arXiv 2510.04618), as a Reef harness method.
 
 ACE keeps a playbook of short lessons, called bullets, in the context of the agent. The served agent is ACE's
-Generator: it reads the playbook in ``rules.md``, which every session reads. In each step, each run (a trace with
+Generator: it reads the playbook in ``rules.md``, which every session reads. In each job, each run (a trace with
 a score or a reply) gets two model calls. The Reflector analyses the run and tags the bullets that applied as
 helpful, harmful or neutral. The Curator turns the analysis into new bullets. Code, not a model, merges the
 result: it counts the tags, adds the new bullets, and then removes the harmful bullets and the bullets past the
 cap.
 
-``state/playbook.json`` holds the playbook. Each step renders it into one marked block of ``rules.md`` and keeps
+``state/playbook.json`` holds the playbook. Each job renders it into one marked block of ``rules.md`` and keeps
 the rest of that file unchanged.
 """
 
@@ -28,14 +28,14 @@ from reef.core.trajectories import atif_messages
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import TreePatch
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.train.harness_backend import Method, StepContext, Trace
+from reef.train.harness_backend import Method, MethodJob, Trace
 
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 REFLECTOR_PROMPT = (PROMPTS_DIR / "reflector.md").read_text(encoding="utf-8")
 CURATOR_PROMPT = (PROMPTS_DIR / "curator.md").read_text(encoding="utf-8")
 PLAYBOOK_FILE = "playbook.json"
 RULES_FILE = "rules.md"
-#: The lines around the method's block in rules.md. Each step replaces the block and keeps the text outside it.
+#: The lines around the method's block in rules.md. Each job replaces the block and keeps the text outside it.
 BLOCK_BEGIN = "<!-- ace playbook: begin -->"
 BLOCK_END = "<!-- ace playbook: end -->"
 BLOCK = re.compile(re.escape(BLOCK_BEGIN) + ".*?" + re.escape(BLOCK_END), re.DOTALL)
@@ -62,11 +62,11 @@ def normalized(text: str) -> str:
 class ACESettings(PluginSettings):
     """The config of ``ACE``.
 
-    Values: ``model`` is a non-empty name that ``ACE.step`` looks up in ``Services.models``: ``served`` or an
+    Values: ``model`` is a non-empty name that ``ACE.run`` looks up in ``Services.models``: ``served`` or an
     ``evolution.models`` entry. ``sections`` holds one or more names; each name is non-empty text on one line, with single spaces, and no
     two names are equal by ``normalized``. ``max_bullets`` ≥ 1 and ``prune_margin`` ≥ 1.
     ``max_traces_per_step`` ≥ 0, where 0 sets no limit.
-    Purpose: ``ACE.from_config`` parses ``evolution.method.config`` into it; ``ACE.step`` reads it.
+    Purpose: ``ACE.from_config`` parses ``evolution.method.config`` into it; ``ACE.run`` reads it.
     """
 
     model: str = config_option("served", help="The model binding of the Reflector and the Curator.")
@@ -76,7 +76,7 @@ class ACESettings(PluginSettings):
         2, help="Remove a bullet when its harmful count exceeds its helpful count by this many or more."
     )
     max_traces_per_step: int = config_option(
-        0, help="The most runs (traces with a score or a reply) that one step reads. 0 sets no limit."
+        0, help="The most runs (traces with a score or a reply) that one job reads. 0 sets no limit."
     )
 
     def __post_init__(self) -> None:
@@ -99,7 +99,7 @@ class Bullet:
 
     Values: ``id`` is ``ace-`` and a number of five or more digits. ``section`` and ``content`` are non-empty
     text on one line, with single spaces between words. ``helpful`` and ``harmful`` ≥ 0 count the reflections
-    that tagged the bullet so. ``step`` ≥ 1 is the step that added the bullet.
+    that tagged the bullet so. ``step`` ≥ 1 is the number of the job that added the bullet.
     Purpose: a ``Playbook`` holds the bullets; ``rules.md`` and the prompts show each bullet as its ``line``.
     """
 
@@ -135,7 +135,7 @@ class Playbook:
     Values: no two ``bullets`` have the same id, and no two have the same text by ``normalized``.
     ``next_number`` is above the number of every bullet. It only grows, so the id of a removed bullet is never
     given again.
-    Purpose: ``ACE.step`` reads it from ``state/playbook.json``, changes it with the operations below, writes it
+    Purpose: ``ACE.run`` reads it from ``state/playbook.json``, changes it with the operations below, writes it
     back, and renders it into ``rules.md``. Each operation returns a new playbook.
     """
 
@@ -220,15 +220,15 @@ class ACE(Method):
     """ACE's Reflector, Curator and merge as a harness method; the served agent is ACE's Generator.
 
     Values: ``settings`` is the parsed config.
-    Purpose: a deployment names the class in ``evolution.method``, and the backend calls ``step`` once per step.
-    A step reads the runs of its material, the traces with a score or a reply, in order and at most
+    Purpose: a deployment names the class in ``evolution.method``, and the backend calls ``run`` once per job.
+    A job reads the runs of its material, the traces with a score or a reply, in order and at most
     ``max_traces_per_step`` of them. For each run, the Reflector's tags add to the counts of the bullets, and the
-    Curator's ``ADD`` operations add bullets. Then the step removes the harmful bullets and the bullets past the
-    cap, writes ``state/playbook.json``, and renders the playbook into ``rules.md``. The step's notes count what
+    Curator's ``ADD`` operations add bullets. Then the job removes the harmful bullets and the bullets past the
+    cap, writes ``state/playbook.json``, and renders the playbook into ``rules.md``. The job's notes count what
     happened:
 
     ``traces``, ``runs``, ``read``
-        The traces of the step's material, the runs among them, and the runs that the Reflector read.
+        The traces of the job's material, the runs among them, and the runs that the Reflector read.
     ``skipped``
         Each read run whose Reflector or Curator reply was not the asked JSON, as ``{trace, reason}``.
     ``helpful_tags``, ``harmful_tags``
@@ -248,8 +248,8 @@ class ACE(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(ACESettings.parse(config, plugin_class=cls))
 
-    def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
+    def run(self, job: MethodJob) -> None:
+        workspace, services = job.workspace, job.services
         settings = self.settings
         model = services.models[settings.model]
         path = workspace.state / PLAYBOOK_FILE
@@ -297,7 +297,7 @@ class ACE(Method):
         candidate = tree.apply(TreePatch({RULES_FILE: rules or None}))
         validation = services.check(candidate)
         if not validation.passed:
-            # The playbook stays as the last step left it, so state/ and rules.md still agree.
+            # The playbook stays as the last job left it, so state/ and rules.md still agree.
             workspace.write_output(
                 f"kept the last playbook: the new rules fail validation: {validation.message()}", notes
             )
@@ -384,7 +384,7 @@ def merged(
         elif (
             secret_shaped(content)
             or directive_shaped(content)
-            # A bullet line that holds a marker would end the block early when the next step reads rules.md.
+            # A bullet line that holds a marker would end the block early when the next job reads rules.md.
             or any(marker in " ".join(content.split()) for marker in (BLOCK_BEGIN, BLOCK_END))
         ):
             outcomes["refused"] += 1

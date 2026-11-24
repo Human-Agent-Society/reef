@@ -7,11 +7,11 @@ import pytest
 import yaml
 from tests.support.config_helpers import deployment_layout
 
+from reef.deploy.execution import service_executor_selection, validate_services
+from reef.deploy.inference import INFERENCE_COMPONENT_SERVICE
+from reef.deploy.service_config import service_config_from_mapping
 from reef.execution.executor.config import role_executor_settings, select_executor
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.service.deploy.execution import service_executor_selection, validate_services
-from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE
-from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.slime_backend.launch import SlimeDeployment, slime_arguments
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +21,7 @@ SERVICE_CONFIGS = (
     "recipes/openclawrl/examples/openclawrl/serve.yaml",
     "recipes/sao/examples/imo_answerbench/serve.yaml",
     "recipes/beta/coral/examples/coral_demo/serve.yaml",
+    "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
     "tutorials/evolve-your-harness/configs/serve.yaml",

@@ -19,12 +19,13 @@ from typing import Any
 import pytest
 from tests.support.job_data import delayed_sample
 
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.training_capture import SamplingDistribution
 from reef.storage.durable_files import write_json
-from reef.train.algos.group_advantages import GroupAdvantageRule
-from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend import harbor_rollouts
 from reef.train.slime_backend.dataset import DATASET_FILE
+from reef.train.slime_backend.facts import SlimeFacts
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.harbor_rollouts import (
     DELAYED_FUNCTION_PATH,
     DELAYED_POSITION_KEY,
@@ -39,7 +40,8 @@ from reef.train.slime_backend.harbor_rollouts import (
     read_delayed_rows,
     write_delayed_rows,
 )
-from reef.train.slime_backend.objectives import SlimeObjective, resolve_slime_objective
+from reef.train.slime_backend.objectives import SlimeObjective, register_objective, resolve_objective
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.slime_backend.task_advantages import ADVANTAGE_RULE_KEY, DELAYED_ADVANTAGE_KEY, TASK_ADVANTAGES_PATH
 from reef.train.task_rollouts import HarborSettings
 
@@ -210,7 +212,7 @@ def test_a_task_job_that_carries_samples_passes_with_options_that_work() -> None
     check_delayed_task_job(Args(), CarryingObjective())
     check_delayed_task_job(Args(use_tis=False), RuleObjective())
     # Slime's own objective reads none of these options.
-    check_delayed_task_job(SimpleNamespace(), resolve_slime_objective("slime_dataset"))
+    check_delayed_task_job(SimpleNamespace(), resolve_objective("slime_dataset"))
 
 
 @pytest.mark.unit
@@ -255,6 +257,84 @@ def test_the_limit_keeps_the_samples_of_slimes_distribution_that_fit_the_first_s
         limit.check([other])
     with pytest.raises(ValueError, match="sampled rollout distribution"):
         delayed_sample_limit(Args(rollout_temperature=0.0))
+
+
+@pytest.mark.unit
+def test_the_facts_state_the_limit_of_the_options_as_written() -> None:
+    carrying = {"objective": f"{__name__}:CarryingObjective"}
+    written = [
+        "--hf-checkpoint",
+        "/models/m",
+        "--rollout-batch-size",
+        "4",
+        "--n-samples-per-prompt",
+        "2",
+        "--global-batch-size=7",
+        "--rollout-temperature",
+        "0.6",
+    ]
+    facts = SlimeFacts.from_arguments(written)
+    # Control's limit is the training service's limit of the parsed options.
+    assert (
+        facts.delayed_sample_limit(carrying)
+        == delayed_sample_limit(Args())
+        == DelayedSampleLimit(6, SamplingDistribution(0.6, 1.0, -1))
+    )
+    assert facts.delayed_sample_limit({"objective": "slime_dataset"}) is None, "the objective carries no sample"
+    # Slime computes the optimizer step from --num-steps-per-rollout: 4 * 2 // 2.
+    unstepped = [option for option in written if option != "--global-batch-size=7"]
+    stepped = [*unstepped, "--num-steps-per-rollout", "2"]
+    assert SlimeFacts.from_arguments(stepped).delayed_sample_limit(carrying).count == 4
+    # The rollout options take no part in the facts that the component compares as written and parsed.
+    assert SlimeFacts.from_arguments(stepped) == facts
+    with pytest.raises(ValueError, match="--global-batch-size or --num-steps-per-rollout"):
+        SlimeFacts.from_arguments(unstepped).delayed_sample_limit(carrying)
+    with pytest.raises(ValueError, match="sampled rollout distribution"):
+        SlimeFacts.from_arguments([*written, "--rollout-temperature", "0"]).delayed_sample_limit(carrying)
+
+
+class RuleBreaker(SlimeObjective):
+    """An objective whose task job members a subclass sets against the rules of ``SlimeObjective``."""
+
+    def prepare(self, data: Any, state: Mapping[str, Any]) -> TrainingSignal:
+        raise AssertionError("a task job prepares nothing")
+
+
+class NotOnSlime(RuleBreaker):
+    name = "test-not-on-slime"
+    loss_family = "sft"
+    advantage_rule = SPADE
+
+
+class CarryingWithoutRule(RuleBreaker):
+    name = "test-carrying-without-rule"
+    loss_family = "slime"
+    carries_samples = True
+
+
+class RuleOfAnotherType(RuleBreaker):
+    name = "test-rule-of-another-type"
+    loss_family = "slime"
+    advantage_rule = "population"  # type: ignore[assignment]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("objective_class", "message"),
+    [
+        (NotOnSlime, "need the 'slime' loss family"),
+        (CarryingWithoutRule, "declares its advantage_rule"),
+        (RuleOfAnotherType, "must be a GroupAdvantageRule or None"),
+    ],
+)
+def test_an_objective_whose_task_job_members_break_the_rules_is_not_registered(
+    objective_class: type[RuleBreaker], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        register_objective(objective_class.name, objective_class())
+    # A job that names the objective by its reference meets the same refusal.
+    with pytest.raises(ValueError, match=message):
+        resolve_objective(f"{__name__}:{objective_class.__name__}")
 
 
 def slime_rollout(

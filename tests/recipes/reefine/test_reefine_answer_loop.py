@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.recipes.reefine.reefine_support import (
+from tests.recipes.reefine.support import (
     DESIGN,
     REQUEST,
     REVIEW,
@@ -32,7 +32,7 @@ from tests.recipes.reefine.reefine_support import (
     skill,
     step_workspace,
 )
-from tests.support._trajectories import recorded_trajectory
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import answer as reefine_answer
@@ -286,9 +286,9 @@ def test_a_request_step_publishes_the_answer_with_its_design_and_review_in_plain
     assert metrics["method_notes"]["design"] == DESIGN and metrics["method_notes"]["review"] == REVIEW
     assert [item["name"] for item in metrics["training_request"]["requires"]] == ["gh"]
     # The step record keeps the candidate the method left, and every model call it made.
-    step_dir = Path(metrics["step_record"])
-    assert (step_dir / "harness" / "skills" / "run-tests" / "SKILL.md").is_file()
-    assert len(json.loads((step_dir / "calls.json").read_text())) == metrics["model_calls"] == 3
+    job_dir = Path(metrics["step_record"])
+    assert (job_dir / "harness" / "skills" / "run-tests" / "SKILL.md").is_file()
+    assert len(json.loads((job_dir / "calls.json").read_text())) == metrics["model_calls"] == 3
 
 
 def test_a_request_without_a_usable_answer_leaves_the_head_and_says_why(tmp_path: Path) -> None:

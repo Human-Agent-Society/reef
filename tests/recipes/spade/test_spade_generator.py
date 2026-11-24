@@ -16,7 +16,6 @@ from recipes.beta.spade import ScoreSettings, SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
-from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
@@ -27,8 +26,9 @@ from reef.recipe.generated_tasks.generator import (
 )
 from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult
-from reef.record2sample.generator import GeneratorError, TaskNameConflict
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.context import PipelineContext
+from reef.samples.generator import GeneratorError, TaskNameConflictError
+from reef.samples.generator.inputs import TaskGenerationRequest
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)
@@ -76,7 +76,7 @@ def test_a_generation_asks_the_designer_count_times_across_the_skills(tmp_path: 
     assert service.proposals[0]["tags"] == {"role": "designer", "generation": "0", "skill": "inspection"}
     assert service.proposals[0]["scenario"] == "spade" and service.proposals[0]["model"] == "Qwen/Qwen3-8B"
     assert "nothing recorded yet" in service.proposals[0]["request"].experience_text
-    assert service.proposals[0]["request"].target == DESCRIPTION
+    assert service.proposals[0]["request"].inputs.description == DESCRIPTION
     assert [task.name for task in tasks] == [
         "harbor-00000-000-inspection",
         "harbor-00000-001-repair",
@@ -123,7 +123,7 @@ def test_a_history_task_never_replaces_a_conflicting_name(tmp_path: Path) -> Non
     service = StandInGenerator(tmp_path / "tasks", taken=("harbor-history-1",))
     task = task_for("harbor-history-1", "designer-1", 1)
     history = type(task)(**{**task.__dict__, "metadata": {"designer_record_id": "designer-1"}})
-    with pytest.raises(TaskNameConflict):
+    with pytest.raises(TaskNameConflictError):
         asyncio.run(spade(tmp_path, service).write(history))
     assert service.deleted == []
 
@@ -254,7 +254,7 @@ def test_a_check_that_could_not_run_raises_and_is_named_in_the_report(tmp_path: 
         asyncio.run(generator.validate(item))
     asyncio.run(generator.record_results((), generation=0))
     document = report(tmp_path, 0)
-    assert "OracleUnavailable" in document["error"] and document["proposals"] == []
+    assert "OracleUnavailableError" in document["error"] and document["proposals"] == []
     assert service.reports == [], "an unchecked task is no refusal"
 
 
@@ -279,7 +279,6 @@ def test_from_config_reads_its_section_and_takes_the_state_of_its_scenario(tmp_p
     for config, message in (
         ({}, "generator_url"),
         ({"generator_url": "${endpoints.generator}"}, "generator_url"),
-        ({"generator_url": "http://g", "state_dir": "s"}, r"does not take state_dir: .* \(RFC #1370\)"),
         ({"generator_url": "http://g", "rollouts": 2}, "does not take rollouts"),
         ({"generator_url": "http://g", "count": 0}, "count must be positive"),
     ):
@@ -472,7 +471,7 @@ def test_the_slime_example_trains_the_designer_with_the_paper_score_settings(tmp
     text = example.read_text().replace("${endpoints.generator}", "http://127.0.0.1:8910")
     stage_config = yaml.safe_load(text)["pipeline"]["record2sample"]
     settings = GeneratedTaskSettings.parse(stage_config["config"], plugin_class=GeneratedTaskSamples)
-    assert (settings.designer_delay, settings.jobs_per_round, settings.max_staleness) == (1, 1, 2)
+    assert (settings.designer_delay, settings.jobs_per_round, settings.max_artifact_lag) == (1, 1, 2)
     generator = SpadeTaskGenerator.from_config(
         stage_config["config"]["generator"]["config"], scenario="s", environ={}, state=generator_state(tmp_path, "s")
     )

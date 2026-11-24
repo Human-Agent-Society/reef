@@ -127,7 +127,7 @@ def require_name_field(config: Mapping[str, Any]) -> str:
 def reject_inline_secret(data: Any, path: str) -> None:
     """Refuse a key-named field holding a literal value anywhere in ``data``.
 
-    A tree persists verbatim in every git release that holds it. No render path needs a
+    A tree persists verbatim in every git snapshot that holds it. No render path needs a
     credential in the tree - the served model binds through
     ``reef.upstream_api_key`` and is injected at run render, method
     models declare ``evolution.models.<name>.api_key_env`` - so a secret
@@ -200,7 +200,7 @@ def reject_secret_shaped_text(text: str, where: str) -> None:
 
     The same boundary as :func:`reject_inline_secret`, for the free-text
     formats: a tree persists verbatim, so a pasted key in a rule, skill,
-    command, or extension would outlive rotation in every git release that
+    command, or extension would outlive rotation in every git snapshot that
     holds it. The message names the field, never the value.
     """
     if secret_shaped(text):

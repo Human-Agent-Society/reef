@@ -7,8 +7,10 @@ ends, its ``JobOutcome`` is what the training pipeline learns about it.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -16,6 +18,9 @@ from typing import Any, Literal
 
 from reef.core.training_capture import SamplingDistribution
 from reef.core.training_request import TrainingRequest
+
+#: The lowercase hex SHA-256 that the task file store uses to identify a directory.
+FILES_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -34,7 +39,8 @@ class TrajectorySample:
     exception is a served call that kept its exact sample (``x-reef-record-training``): its record holds the
     sampled tokens, and a recipe that trains it later makes a ``DelayedSample`` with them. A task rollout of a
     training component carries the exact tokens that its engine sampled. Full ATIF validation and
-    algorithm-required fields belong to the consumer.
+    algorithm-required fields belong to the consumer. A ``group_id`` names the comparison group of the trajectory
+    within the job's data (``trajectory_groups``); None means an independent trajectory.
     """
 
     trajectory: Mapping[str, Any]
@@ -58,7 +64,14 @@ class TrajectorySample:
 
     @property
     def metadata(self) -> Mapping[str, Any]:
-        """Reef's JSON metadata within the ATIF extension object."""
+        """Reef's JSON metadata within the ATIF extension object.
+
+        Among its fields: ``reward`` and ``feedback``, the supplied or computed training signal;
+        ``source_agent_record_id``, the primary source record; ``records``, the summary of each captured call
+        (``reef.core.trajectories.call_summary``); ``teacher`` and ``teacher_candidates``, the teacher requests of a
+        distillation stage (``reef.core.chat_rendering``); ``max_tokens``, the longest sample, in tokens, that a
+        stage lets train; and ``training``.
+        """
         extra = self.trajectory.get("extra") or {}
         if not isinstance(extra, Mapping):
             raise ValueError("ATIF extra must be an object")
@@ -70,7 +83,9 @@ class TrajectorySample:
     @property
     def training(self) -> Mapping[str, Any]:
         """The training fields: the tokens and the loss mask once the sample is rendered or rolled out, and the
-        fields that a recipe adds."""
+        fields that a recipe adds. A task rollout of a training component also carries ``rollout_log_probs`` and
+        ``artifact_id``, and the sampler's ``topk_indices`` and ``topk_log_probs`` when the component records them.
+        Arrays are JSON lists."""
         training = self.metadata.get("training", {})
         if not isinstance(training, Mapping):
             raise ValueError("ATIF extra.reef.training must be an object")
@@ -80,7 +95,8 @@ class TrajectorySample:
     def artifact_id(self) -> str | None:
         """The artifact that produced the trajectory: ``training.artifact_id``, which a rollout of a training component
         names, else the ``artifact_id`` of the last call that the trajectory recorded (``extra.reef.records``), or
-        None when it names none, as an upload does."""
+        None when it names none, as an upload does. The staleness check of the samples service reads it
+        (``reef.samples.staleness.lags_behind``)."""
         named = self.training.get("artifact_id")
         if isinstance(named, str) and named:
             return named
@@ -105,12 +121,33 @@ class TrajectorySample:
 
 
 @dataclass(frozen=True)
+class TaskFiles:
+    """The name of one task directory in the task file store.
+
+    Values: ``partition`` is the non-empty name of the store's partition that keeps the directory, and ``digest`` the
+    non-empty digest of its files. Purpose: the code that takes a task's directory from the store makes the value
+    (``reef.storage.scenario.samples``, ``reef.recipe.generated_tasks``). A job data directory names a task by it, and a
+    reader gives it back to the store for the directory (``reef.storage.data.job_data``).
+    """
+
+    partition: str
+    digest: str
+
+    def __post_init__(self) -> None:
+        for name, value in (("partition", self.partition), ("digest", self.digest)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"TaskFiles.{name} must be a non-empty string")
+
+
+@dataclass(frozen=True)
 class TaskSample:
     """A Harbor task directory containing its instruction, environment and verifier.
 
     Values: ``task_path`` is a ``Path``, ``source_agent_record_ids`` a tuple of
     the non-empty IDs of the agent records the task came from, and
-    ``metadata`` a mapping. Purpose: the record-to-sample stage makes the value,
+    ``metadata`` a mapping. ``files`` names the directory in the task file store, or is None for a directory that
+    the store does not keep; ``task_path`` is then the only place of the files, and the sample cannot go into a job
+    data directory. Purpose: the record-to-sample stage makes the value,
     and a training component that runs task jobs reads it.
 
     The path is resolved in the consuming algorithm's execution environment;
@@ -121,6 +158,7 @@ class TaskSample:
     task_path: Path
     source_agent_record_ids: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    files: TaskFiles | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_path, Path):
@@ -128,6 +166,8 @@ class TaskSample:
         check_record_ids(self.source_agent_record_ids)
         if not isinstance(self.metadata, Mapping):
             raise TypeError("task metadata must be a mapping")
+        if self.files is not None and not isinstance(self.files, TaskFiles):
+            raise TypeError("task files must be a TaskFiles or None")
 
 
 @dataclass(frozen=True)
@@ -203,10 +243,12 @@ class DelayedSampleLimit:
     Values: ``count`` is a positive int, the most delayed samples that one job's data may hold. ``distribution`` is
     the ``SamplingDistribution`` that every delayed sample must come from: the one that the component trains under,
     so that the sample's recorded log-probs are those of its own sampler. The constructor refuses other values.
-    Purpose: ``TrainingComponent.delayed_sample_limit`` gives it for the parameters of a task job. A recipe whose task
-    jobs carry delayed samples refuses a deployment without it and gives it to its stages
-    (``PipelineContext.delayed_sample_limit``), which build only the samples that it keeps (``trainable``). The
-    component's ``check_job`` refuses a job outside it (``check``).
+    Purpose: ``TrainingComponent.delayed_sample_limit`` gives it for the parameters of a task job, and the facts of
+    the training backend state the same limit to control (``TrainingBackendFacts.delayed_sample_limit``).
+    ``check_recipe_objects`` (``reef.control.scenario.live_objects``) refuses a deployment whose task jobs carry
+    delayed samples without it; the scenario factory gives it to the stages through
+    ``TrainerSpec.delayed_sample_limit`` and ``PipelineContext.delayed_sample_limit``, and they build only the samples
+    that it keeps (``trainable``). The component's ``check_job`` refuses a job outside it (``check``).
     """
 
     count: int
@@ -263,6 +305,11 @@ class JobData:
     (``TrainingJob.data``) or the harness backend reads it. The consuming
     algorithm decides which sample kinds it supports, and whether it trains
     delayed samples, and refuses the others explicitly.
+
+    One job's data holds samples of one kind: ``Sample2Job.job_parameters`` and the job data directory refuse data
+    with both trajectories and tasks. The component reads the samples from that directory
+    (``reef.storage.data.job_data``), so they must hold only JSON values (``to_dict``). The directory keeps
+    ``delayed`` in its ``delayed.jsonl`` file.
     """
 
     data_id: str
@@ -304,6 +351,7 @@ class JobData:
                         "task_path": str(sample.task_path),
                         "source_agent_record_ids": list(sample.source_agent_record_ids),
                         "metadata": dict(sample.metadata),
+                        "files": None if sample.files is None else dataclasses.asdict(sample.files),
                     }
                 )
         request = None if self.request is None else {"id": self.request.id, **self.request.to_dict()}
@@ -328,7 +376,10 @@ class JobData:
                 elif entry["kind"] == "task":
                     samples.append(
                         TaskSample(
-                            Path(entry["task_path"]), tuple(entry["source_agent_record_ids"]), entry["metadata"]
+                            Path(entry["task_path"]),
+                            tuple(entry["source_agent_record_ids"]),
+                            entry["metadata"],
+                            None if entry["files"] is None else TaskFiles(**entry["files"]),
                         )
                     )
                 else:
@@ -364,7 +415,10 @@ def trajectory_of(entry: Mapping[str, Any]) -> TrajectorySample:
 
 
 def trajectories(data: JobData) -> tuple[TrajectorySample, ...]:
-    """Read the ATIF trajectory samples in the data's order; task samples require a rollout-capable algorithm."""
+    """Read the ATIF trajectory samples in the data's order; task samples require a rollout-capable algorithm.
+
+    ``TypeError`` for a sample of another kind: the function does not filter mixed data.
+    """
     found: list[TrajectorySample] = []
     for index, sample in enumerate(data.samples):
         if not isinstance(sample, TrajectorySample):
@@ -376,7 +430,11 @@ def trajectories(data: JobData) -> tuple[TrajectorySample, ...]:
 
 
 def trajectory_groups(data: JobData) -> tuple[tuple[TrajectorySample, ...], ...]:
-    """Read explicit, contiguous comparison groups without reordering trajectory rows."""
+    """Read explicit, contiguous comparison groups without reordering trajectory rows.
+
+    ``ValueError`` for a trajectory without a ``group_id``, and for a group whose trajectories are not contiguous.
+    ``TypeError`` for a sample that is not a trajectory (``trajectories``).
+    """
     groups: dict[str, list[TrajectorySample]] = {}
     previous: str | None = None
     for item in trajectories(data):

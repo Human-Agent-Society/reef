@@ -1,23 +1,16 @@
-"""Storage interfaces and implementations for records, scenario commits, training samples, and generated tasks.
+"""The database and the work queues: the storage contracts, and their SQLite and PostgreSQL implementations.
 
-``commits`` owns CommitRecord, RecordProgress, and registration/checkpoint metadata
-encoding. ``records``, ``tasks``, ``scenario`` and ``commit_history`` define storage
-interfaces without importing concrete adapters, and ``samples`` the training samples. ``tasks`` also holds the local task
-file store. These modules depend only on shared core values and each other.
-Nothing in this package imports scenario coordination, recipes, runtimes, or training.
-This package initializer also loads no adapters. Record and commit implementations
-depend on ``reef.storage.records`` and ``reef.storage.scenario``.
-Application assembly selects a storage service and
-injects it into scenario coordination. Records, commits, samples, generated tasks
-and scenario settings all go through that service.
+- ``scenario`` holds the contracts of one scenario's state: its records, commit history, training samples and
+  evaluations, and the scenario storage that opens them.
+- ``data`` holds the contract of the data store, which keeps the data items of the whole deployment.
+- ``coordination`` holds what connects the services: the work queues, ``served_models`` and the control lease.
+- ``sql`` implements the three in SQLite and PostgreSQL. Database-specific code stays there.
+- ``durable_files`` writes JSON files atomically and creates directories durably.
 
-``sql_records`` implements shared SQLAlchemy record operations. ``sql_tasks``,
-``sql_samples`` and ``sql_commits`` define the task, training sample and commit
-tables and implement their operations in the same database. ``sqlite``
-supplies SQLite connections, schema upgrades, and file retention. ``postgres``
-supplies PostgreSQL tables, a shared connection pool, and SQL retention.
-``commit_history`` defines the commit history contract and combines a commit
-history with any record store. ``migrations``
-holds one-time upgrades of older schemas and files. ``sqlite`` and ``postgres``
-also assemble their scenario storage services. Database-specific code stays here.
+``sql`` imports the other three. ``scenario`` imports ``data``, and ``data`` imports ``coordination``. No import goes
+the other way, and the contracts import no concrete adapter. Nothing in this package imports scenario coordination,
+recipes, runtimes, or training. Application assembly selects a scenario storage and gives it to scenario
+coordination. Records, commits, samples, generated tasks and scenario settings all go through that storage.
+
+Import each module directly; this package exports nothing.
 """

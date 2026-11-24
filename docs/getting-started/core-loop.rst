@@ -1,5 +1,9 @@
 The core loop: a closer look
-================================
+============================
+
+This page shows one pass of the loop that `Quickstart <quickstart.rst>`__
+introduces: Reef serves and records a request, trains on the feedback,
+evaluates the candidate, and publishes it.
 
 The core loop
 -------------
@@ -18,7 +22,7 @@ The core loop
 
        opt Harness recipe: pull the active selection's tree
          H->>S: GET /reef/harness for scenario
-         S-->>H: Harness tree and release
+         S-->>H: Harness tree and artifact ID
          Note over H: Agent runs on that tree
        end
        Note over H,I: Serve and record each request
@@ -26,7 +30,7 @@ The core loop
        S->>S: Freeze active selection
        S->>I: Provider-native request
        I-->>S: Provider response
-       S->>S: Validate frozen release and store record
+       S->>S: Validate frozen selection and store record
        S-->>H: Response and receipt
        H->>S: Feedback quotes the receipt
        S->>T: Eligible record
@@ -51,15 +55,14 @@ component trains the job's data with its own training loop and saves checkpoints
 Each saved checkpoint is a candidate. Serving loads only a snapshot that Reef
 published, and the next job starts from the newest saved checkpoint. A
 harness recipe uses its own backend in place of the training component: the
-backend prepares a candidate tree for each step. See `Training components
-<../developer-guide/executors.rst#training-components>`__ and `Serving saved
-weights <../developer-guide/executors.rst#serving-saved-weights>`__.
+backend prepares a candidate tree for each step. See `Training backends
+<../developer-guide/training-backends.rst>`__ and `Serving saved
+weights <../developer-guide/serving-runtimes.rst#serving-saved-weights>`__.
 
 Learn more
 ----------
 
-This page stays at the level of the loop. Each step it shows is specified in
-full elsewhere:
+Each step is specified in full on its own page:
 
 .. list-table::
    :header-rows: 1
@@ -68,18 +71,18 @@ full elsewhere:
    * - Topic
      - Page
    * - Inference
-     - `Inference HTTP API <../reference/http-api.rst#inference>`__
+     - `Inference HTTP API <../reference/http-api-inference.rst#http-api-inference-and-feedback>`__
    * - Feedback report
-     - `Report HTTP API <../reference/http-api.rst#report>`__
+     - `Report HTTP API <../reference/http-api-inference.rst#report>`__
    * - Scenario
-     - `Scenarios <../reference/http-api.rst#scenarios>`__
+     - `Scenarios <../reference/http-api-scenarios.rst#http-api-scenarios-and-their-settings>`__
    * - Learning / training in general
      - `Write a recipe <../developer-guide/write-a-recipe.rst>`__
    * - Record eligibility
-     - `Training pipeline <../developer-guide/processors.rst>`__
+     - `Samples service <../developer-guide/recipe-samples-service.rst>`__
    * - Activation
-     - `Activate an artifact
-       <../developer-guide/write-a-recipe.rst#activate-an-artifact>`__
-   * - Release lifecycle
+     - `Activation rule
+       <../developer-guide/recipe-control-service.rst#activation-rule>`__
+   * - Snapshot lifecycle
      - `The snapshot chain
        <../advanced_topics/state-model.rst#the-snapshot-chain>`__

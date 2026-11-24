@@ -18,9 +18,8 @@
 from recipes.sdpo.processor import SDPOJobData, SDPOSamples
 from recipes.sdpo.recipe import SDPORecipe
 from recipes.sdpo.report import SDPOReport
-from reef.train.algos.registry import register_loss_family_ref, register_objective_ref
+from reef.train.slime_backend.objectives import register_objective
 
-register_objective_ref("sdpo", "recipes.sdpo.slime:SdpoObjective")
-register_loss_family_ref("sdpo", "recipes.sdpo.slime:SdpoAlgorithm")
+register_objective("sdpo", "recipes.sdpo.slime:SdpoObjective")
 
 __all__ = ["SDPOJobData", "SDPORecipe", "SDPOReport", "SDPOSamples"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 import urllib.request
 from collections.abc import Iterator, Mapping
@@ -12,32 +13,43 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from reef_client.serve import CapturedTurn
+from tests.support.polling import wait_until
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    TASK_TEMPLATE_KIND,
     CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
+    LocalCandidateEndpoints,
     RolloutCalls,
+    TaskTemplateWorker,
+    TreeHarness,
+    check_finish_timeout,
     evaluation_call,
     reply_summary,
     rollout_item_id,
     run_while_held,
+    template_item_id,
     verifier_output,
 )
+from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import WorkerStopped
+from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
+from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
-from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork, WorkLeaseLost
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError, WorkQueue
+from reef.storage.sql.coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -235,10 +247,10 @@ class CalledThenFailedLab(TaskLab):
 def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp_path):
     queue = memory_coordination().work_queue
     value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
-    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=CalledThenFailedLab())
     assert worker.run_once() is True
-    item = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert (item.state, item.error) == ("finished", None)
     assert item.result == {
         "score": FAILED,
@@ -255,7 +267,7 @@ def turn(path: str, status: int, response: dict[str, object] | None) -> Captured
 def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
     value = rollout(repeat=1)
     queue = memory_coordination().work_queue
-    item = queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    item = queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     assert item.id == rollout_item_id("e1", 2, 1) == "evaluation_rollout:e1:00002:00001"
     assert EvaluationRollout.from_item(item) == value
 
@@ -264,15 +276,46 @@ def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
 def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
-    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     worker = ServedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
 
     assert worker.run_once() is True
-    assert queue.get(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
     assert worker.run_once() is True
-    failed = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
+
+
+class ServingRefusedWorker(EvaluationRolloutWorker):
+    """A worker that fails the test when it asks to serve a candidate."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        raise AssertionError("a rollout that cannot run serves no candidate")
+
+
+class ToolTaskEndpoints(OpenEndpoints):
+    """Endpoints whose task asks its agent for an SSE MCP server."""
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = super().task_directory(rollout)
+        (task / "task.toml").write_text(
+            '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
+        )
+        return task
+
+
+@pytest.mark.unit
+def test_a_tree_rollout_whose_task_needs_what_the_agent_lacks_fails_for_good_before_serving(tmp_path):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(rollout(), agent=None, tree=TreeHarness("codex", "openai-responses", {}))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServingRefusedWorker(queue, ToolTaskEndpoints(tmp_path), worker_id="evaluation-1")
+
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert failed.state == "failed" and failed.attempt_count == 1
+    assert failed.error == "task 'add' needs mcp_servers, which adapter 'codex' does not give its agent"
 
 
 @pytest.mark.unit
@@ -428,21 +471,716 @@ def test_a_verifier_output_that_cannot_be_kept_is_logged_and_changes_nothing(tmp
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLost), ("stopped", WorkerStopped)])
+@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLostError), ("stopped", WorkerStoppedError)])
 def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops(monkeypatch, event, error):
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     cancelled = threading.Event()
 
-    class EndlessRunner:
-        async def run_rollouts_async(self, requests, slots):
-            try:
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
+    async def endless_trial():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
 
     events = {"lease_lost": threading.Event(), "stopped": threading.Event()}
     threading.Timer(0.1, events[event].set).start()
     with pytest.raises(error):
-        asyncio.run(run_while_held(EndlessRunner(), "request", events["lease_lost"], events["stopped"]))
+        asyncio.run(run_while_held(endless_trial(), events["lease_lost"], events["stopped"]))
     assert cancelled.is_set()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lease_lost", [False, True])
+def test_work_that_ended_before_the_stop_keeps_its_result_unless_the_lease_is_lost(lease_lost):
+    lost, stopped = threading.Event(), threading.Event()
+    stopped.set()
+    if lease_lost:
+        lost.set()
+
+    async def held() -> str:
+        ended = asyncio.get_running_loop().create_future()
+        ended.set_result("scored")
+        return await run_while_held(ended, lost, stopped)
+
+    if lease_lost:
+        with pytest.raises(WorkLeaseLostError):
+            asyncio.run(held())
+    else:
+        assert asyncio.run(held()) == "scored"
+
+
+def e2b_rollout() -> EvaluationRollout:
+    return replace(rollout(), environment="e2b")
+
+
+class TemplateBuilds:
+    """A stand-in for ``build_task_template`` of Reef's e2b sandbox: each call takes the next of ``outcomes``, an
+    exception to raise or None for a ready template, and keeps the task directory in ``paths``."""
+
+    def __init__(self, *outcomes: Exception | None) -> None:
+        self.outcomes = list(outcomes)
+        self.paths: list[Path] = []
+
+    async def __call__(self, task_path: Path) -> str:
+        self.paths.append(task_path)
+        outcome = self.outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return "add__0123456789ab__aenv"
+
+
+@pytest.mark.unit
+def test_a_template_item_waits_again_for_a_template_that_found_no_free_builder(monkeypatch, tmp_path):
+    pytest.importorskip("e2b")
+    builds = TemplateBuilds(TimeoutError("the template was waiting after 600 s"), None)
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", builds)
+    queue = memory_coordination().work_queue
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    worker = TaskTemplateWorker(queue, endpoints, DockerfileTemplateBuilder(), worker_id="w")
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert builds.paths == [endpoints.task_directory(value)] * 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("outcome", "message"),
+    [
+        (TimeoutError("the template was waiting after 600 s"), "the template of task 'add' was not ready after 0 s"),
+        (AgentEnvBuildError("aenv build of add failed with exit code 1"), "aenv build of add failed"),
+    ],
+)
+def test_a_template_item_fails_as_retryable_when_its_template_is_not_ready(monkeypatch, tmp_path, outcome, message):
+    pytest.importorskip("e2b")
+    monkeypatch.setattr("reef.evaluation.rollout_worker.TEMPLATE_WAIT_S", 0.0)
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", TemplateBuilds(outcome))
+    queue = memory_coordination().work_queue
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    worker = TaskTemplateWorker(queue, OpenEndpoints(tmp_path / "tasks"), DockerfileTemplateBuilder(), worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert item.state == "queued" and message in str(item.error)
+
+
+class RecordedBuilder(TaskTemplateBuilder):
+    """A ``TaskTemplateBuilder`` that keeps the arguments of each build in ``builds`` and builds nothing."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str, str, Path]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.builds.append((scenario, task_name, task_directory))
+
+
+@pytest.mark.unit
+def test_a_template_item_builds_with_the_deployments_builder_and_not_from_the_dockerfile(monkeypatch, tmp_path):
+    monkeypatch.setattr("reef.execution.sandbox.e2b.build_task_template", TemplateBuilds())
+    queue = memory_coordination().work_queue
+    endpoints = OpenEndpoints(tmp_path / "tasks")
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = RecordedBuilder()
+    assert TaskTemplateWorker(queue, endpoints, builder, worker_id="w").run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert builder.builds == [(value.scenario, value.task_name, endpoints.task_directory(value))]
+
+
+class OwnedEndpoints(OpenEndpoints):
+    """``OpenEndpoints`` whose scenario record stores the owner ``owner``, or none when it is None."""
+
+    def __init__(self, root: Path, owner: str | None) -> None:
+        super().__init__(root)
+        self.owner = owner
+
+    def task_owner(self, rollout: EvaluationRollout) -> str | None:
+        return self.owner
+
+
+class OwnerBuilder(TaskTemplateBuilder):
+    """A builder that finds templates by owner: it keeps ``(owner, scenario, task_name)`` of each build in ``builds``
+    and builds nothing. Its three-argument ``build`` fails the test, since the worker gives the owner."""
+
+    def __init__(self) -> None:
+        self.builds: list[tuple[str | None, str, str]] = []
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_owner")
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.builds.append((owner, scenario, task_name))
+
+
+class OwnerDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with legacy owner-based registry selection."""
+
+    async def build_for_owner(self, owner: str | None, scenario: str, task_name: str, task_directory: Path) -> None:
+        pass
+
+
+class CustomDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with a legacy name-based build."""
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("pinned work must skip the legacy build")
+
+
+class InheritedDockerfileBuilder(DockerfileTemplateBuilder):
+    """The Dockerfile builder with the default build hooks."""
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("queued_owner", "record_owner", "error"),
+    [
+        # An item that an older Reef queued names no owner: the record's owner counts.
+        (None, "workspace-7", None),
+        ("workspace-7", "workspace-7", None),
+        # A scenario of the same name with another owner, or none, gets no template of this evaluation.
+        ("workspace-7", "workspace-9", "has the owner 'workspace-9' now, not 'workspace-7'"),
+        ("workspace-7", None, "has no owner now, not 'workspace-7'"),
+    ],
+)
+def test_a_template_item_builds_for_the_owner_of_the_scenarios_record_and_never_for_another(
+    tmp_path, queued_owner, record_owner, error
+):
+    queue = memory_coordination().work_queue
+    # The scenario's name is a slug that says nothing of its owner.
+    value = replace(e2b_rollout(), scenario="eval-run-3f9a", owner=queued_owner)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = OwnerBuilder()
+    worker = TaskTemplateWorker(queue, OwnedEndpoints(tmp_path / "tasks", record_owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    if error is None:
+        assert item.state == "finished"
+        assert builder.builds == [(record_owner, "eval-run-3f9a", "add")]
+        return
+    assert (item.state, item.attempt_count, builder.builds) == ("failed", 1, [])
+    assert error in str(item.error)
+
+
+@pytest.mark.unit
+def test_a_template_item_gives_the_builder_its_pinned_task_digest(tmp_path):
+    versions = []
+
+    class VersionBuilder(OwnerDockerfileBuilder):
+        async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+            versions.append((owner, task_name, task_digest))
+
+    class InheritedVersionBuilder(VersionBuilder):
+        pass
+
+    class VersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), rollout.task_digest
+
+    queue = memory_coordination().work_queue
+    owner = "workspace-7"
+    digest = "1" * 64
+    value = replace(e2b_rollout(), owner=owner, task_digest=digest)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = InheritedVersionBuilder()
+    worker = TaskTemplateWorker(queue, VersionEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, item_id).state == "finished"
+    assert versions == [(owner, value.task_name, digest)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder_type", [OwnerBuilder, OwnerDockerfileBuilder, CustomDockerfileBuilder])
+def test_a_queued_pinned_template_never_uses_a_legacy_builder(tmp_path, builder_type):
+    class VersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), rollout.task_digest
+
+    queue = memory_coordination().work_queue
+    owner = "workspace-7"
+    value = replace(e2b_rollout(), owner=owner, task_digest="1" * 64)
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    builder = builder_type()
+    worker = TaskTemplateWorker(queue, VersionEndpoints(tmp_path / "tasks", owner), builder, worker_id="w")
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert (item.state, item.attempt_count) == ("failed", 1)
+    assert "does not support pinned task files" in str(item.error)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("returns_mismatch", [False, True])
+def test_a_pinned_rollout_refuses_name_only_or_mismatched_resolution(tmp_path, returns_mismatch):
+    class WrongVersionEndpoints(OwnedEndpoints):
+        def task_version(self, rollout):
+            return self.task_directory(rollout), "0" * 64
+
+    endpoint_type = WrongVersionEndpoints if returns_mismatch else OwnedEndpoints
+    endpoints = endpoint_type(tmp_path, "workspace-7")
+    worker = EvaluationRolloutWorker(memory_coordination().work_queue, endpoints, worker_id="w")
+    value = replace(rollout(), task_digest="1" * 64)
+    message = "returned different files" if returns_mismatch else "does not support pinned task files"
+    with pytest.raises(ItemFailedError, match=message):
+        worker.score(value, threading.Event(), 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize(
+    "resolver", ["base", "legacy", "inherited_legacy", "version", "explicit", "legacy_after_version"]
+)
+def test_template_and_trial_resolve_the_same_local_task(tmp_path, pinned, resolver):
+    current, custom, explicit, admitted = (tmp_path / name for name in ("current", "custom", "explicit", "admitted"))
+    for directory in (current, custom, explicit, admitted):
+        directory.mkdir()
+        (directory / "task.toml").write_text("")
+
+    class Endpoints(LocalCandidateEndpoints):
+        """Local endpoints whose trial opens without an inference server."""
+
+        open = OpenEndpoints.open
+
+    class NameBasedEndpoints(Endpoints):
+        """Endpoints whose legacy resolver always selects the custom directory."""
+
+        def task_directory(self, rollout):
+            return custom
+
+    class InheritedNameBasedEndpoints(NameBasedEndpoints):
+        """Endpoints that inherit the custom legacy resolver."""
+
+    class VersionEndpoints(NameBasedEndpoints):
+        """Endpoints that delegate explicit version resolution to the built-in resolver."""
+
+        def task_version(self, rollout):
+            return super().task_version(rollout)
+
+    class ExplicitVersionEndpoints(NameBasedEndpoints):
+        """Endpoints that resolve unpinned versions to their own directory and known digest."""
+
+        def task_version(self, rollout):
+            if rollout.task_digest is None:
+                return explicit, custom_digest
+            return super().task_version(rollout)
+
+    class NewNameBasedEndpoints(VersionEndpoints):
+        """Endpoints that replace the legacy hook below an inherited version resolver."""
+
+        def task_directory(self, rollout):
+            return custom
+
+    class Builder(RecordedBuilder):
+        """A builder that records the directory and digest passed to preparation."""
+
+        async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+            prepared.append((task_directory, task_digest))
+
+    class Lab(NoSandboxLab):
+        """A lab that checks the trial uses the prepared directory, then simulates no sandbox."""
+
+        async def run(self, task_path, agent, *, key, tags, overrides):
+            [expected] = prepared
+            assert Path(task_path) == expected[0]
+            return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.task_owner.return_value = None
+    artifacts.candidate_task.return_value = current
+    current_digest, admitted_digest, custom_digest = "0" * 64, "1" * 64, "2" * 64
+    artifacts.candidate_task_version.return_value = (current, current_digest)
+    artifacts.candidate_task_for_digest.return_value = admitted
+    endpoint_type = {
+        "base": Endpoints,
+        "legacy": NameBasedEndpoints,
+        "inherited_legacy": InheritedNameBasedEndpoints,
+        "version": VersionEndpoints,
+        "explicit": ExplicitVersionEndpoints,
+        "legacy_after_version": NewNameBasedEndpoints,
+    }[resolver]
+    endpoints = endpoint_type(artifacts)
+    value = replace(e2b_rollout(), task_digest=admitted_digest if pinned else None)
+    queue = memory_coordination().work_queue
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    prepared = []
+    assert TaskTemplateWorker(queue, endpoints, Builder(), worker_id="template").run_once()
+    template = queue.read(EVALUATIONS_QUEUE, item_id)
+    worker = ServedWorker(queue, endpoints, worker_id="rollout", lab=Lab(tmp_path / "trials"))
+
+    if pinned and resolver not in ("base", "version", "explicit"):
+        assert template.state == "failed" and "must override task_version" in template.error
+        assert not prepared
+        with pytest.raises(ItemFailedError, match="must override task_version"):
+            worker.score(value, threading.Event(), 1)
+        return
+
+    assert template.state == "finished"
+    if pinned:
+        assert prepared == [(admitted, admitted_digest)]
+    elif resolver == "base":
+        assert prepared == [(current, current_digest)]
+    elif resolver == "explicit":
+        assert prepared == [(explicit, custom_digest)]
+    else:
+        assert prepared == [(custom, None)]
+    with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
+        worker.score(replace(value, requires_prepared_templates=True), threading.Event(), 1)
+
+
+def finished_template(queue: WorkQueue, value: EvaluationRollout, error: str | None) -> None:
+    """Add the template item of ``value``'s task, and end it: finished when ``error`` is None, else failed for good
+    with ``error``."""
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == item_id
+    if error is None:
+        queue.finish(EVALUATIONS_QUEUE, item_id, "builder", {})
+    else:
+        queue.fail(EVALUATIONS_QUEUE, item_id, "builder", error, retryable=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("template_error", "reason"),
+    [
+        ("the registry holds no image of task add", "the registry holds no image of task add"),
+        (None, "the queue no longer holds its template item"),
+    ],
+)
+def test_a_rollout_that_requires_prepared_templates_runs_no_trial_without_them(tmp_path, template_error, reason):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(e2b_rollout(), requires_prepared_templates=True)
+    if template_error is not None:
+        finished_template(queue, value, template_error)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    # No candidate is served and the lab runs no trial, which would write under ``trials``.
+    lab = NoSandboxLab(tmp_path / "trials")
+    worker = ServingRefusedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1", lab=lab)
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (failed.state, failed.attempt_count) == ("failed", 1)
+    assert failed.error == f"the templates of task 'add' were not prepared: {reason}"
+    assert not (tmp_path / "trials").exists()
+
+
+class EnvironmentLab(CalledThenFailedLab):
+    """A ``CalledThenFailedLab`` that keeps the Harbor environment config of each trial in ``environments``."""
+
+    def __init__(self) -> None:
+        self.environments: list[Mapping[str, object]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.environments.append(overrides["environment"])
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requires", [True, False])
+def test_the_trial_of_a_rollout_that_requires_prepared_templates_builds_no_template(tmp_path, requires):
+    queue = memory_coordination().work_queue
+    value = replace(
+        e2b_rollout(),
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+        requires_prepared_templates=requires,
+    )
+    finished_template(queue, value, None)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    assert worker.run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "finished"
+    [environment] = lab.environments
+    # Only a rollout that requires prepared templates tells Reef's e2b class not to build one.
+    assert environment["import_path"] == "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+    assert ("builds_templates" in environment.get("kwargs", {})) == requires
+    if requires:
+        assert environment["kwargs"]["builds_templates"] is False
+
+
+@pytest.mark.unit
+def test_only_a_rollout_on_e2b_requires_prepared_templates():
+    with pytest.raises(ValueError, match="only a rollout on e2b requires prepared templates"):
+        replace(rollout(), requires_prepared_templates=True)
+    with pytest.raises(ValueError, match="owner is a non-empty string or None"):
+        replace(e2b_rollout(), owner="")
+    value = replace(e2b_rollout(), owner="workspace-7", requires_prepared_templates=True)
+    item = memory_coordination().work_queue.append(
+        NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload())
+    )
+    assert EvaluationRollout.from_item(item) == value
+
+
+class HeldLab(CalledThenFailedLab):
+    """A ``TaskLab`` whose trial of each task in ``tasks`` makes one model call, as ``CalledThenFailedLab``, then runs
+    until ``released[task]`` is set, and ends with the reward 1.
+
+    ``started[task]`` is set once the call has an answer. A cancelled trial sets ``cleaned_up[task]`` as it stops, as
+    Harbor stops the sandbox of a cancelled trial. Each of the three maps holds one event for each task.
+    """
+
+    def __init__(self, *tasks: str) -> None:
+        self.started = {task: threading.Event() for task in tasks}
+        self.released = {task: threading.Event() for task in tasks}
+        self.cleaned_up = {task: threading.Event() for task in tasks}
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        task = Path(task_path).name
+        await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        self.started[task].set()
+        try:
+            while not self.released[task].is_set():
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            self.cleaned_up[task].set()
+            raise
+        return RolloutRow(rewards={"reward": 1.0}, error=None, trial_uri=None)
+
+
+def held_rollout(task_index: int, task_name: str) -> EvaluationRollout:
+    """The rollout of task ``task_name`` at ``task_index``, whose agent calls the model through the rollout's
+    endpoint, as ``HeldLab`` needs."""
+    return replace(
+        rollout(),
+        task_index=task_index,
+        task_name=task_name,
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+    )
+
+
+def add_rollout(queue: WorkQueue, value: EvaluationRollout) -> None:
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("on_stop", "finish_timeout_s", "state", "error"),
+    [
+        ("requeue", None, "queued", "the worker stopped"),
+        ("finish", None, "finished", None),
+        # A rollout that finishes before the timeout ends the stop, and the stop ends the timer.
+        ("finish", 3600.0, "finished", None),
+    ],
+)
+def test_a_stopping_worker_requeues_or_finishes_the_rollouts_that_it_runs(
+    tmp_path, monkeypatch, on_stop, finish_timeout_s, state, error
+):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    queue = memory_coordination().work_queue
+    value = held_rollout(2, "add")
+    add_rollout(queue, value)
+    lab = HeldLab("add")
+    worker = ServedWorker(
+        queue,
+        AnsweringEndpoints(tmp_path / "tasks"),
+        worker_id="w",
+        lab=lab,
+        slots=2,
+        on_stop=on_stop,
+        finish_timeout_s=finish_timeout_s,
+    )
+    assert worker.run_once() is True
+    assert lab.started["add"].wait(10)
+    worker.begin_stop()
+    timer = worker.cancel_timer
+    assert (timer is None) == (finish_timeout_s is None)
+    # The rollout ends only when the lab lets it, so a worker that cancels it stops first.
+    threading.Timer(0.3, lab.released["add"].set).start()
+    worker.stop()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == (state, error)
+    assert lab.cleaned_up["add"].is_set() == (on_stop == "requeue")
+    if on_stop == "finish":
+        assert item.result == {"score": 1.0, "rewards": {"reward": 1.0}, "error": None}
+        assert not worker.rollouts_cancelled.is_set()
+    assert worker.cancel_timer is None and (timer is None or not timer.is_alive())
+
+
+class GatedCutoffWorker(ServedWorker):
+    """A ``ServedWorker`` whose cutoff waits, once the timer of ``finish_timeout_s`` calls it, until the test sets
+    ``cutoff_allowed``. So the test decides what ends before the cutoff, with no race against the clock.
+
+    ``cutoff_reached`` is set when the timer calls the cutoff, and ``cutoff_count`` counts the calls.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.cutoff_reached = threading.Event()
+        self.cutoff_allowed = threading.Event()
+        self.cutoff_count = 0
+
+    def cancel_rollouts(self) -> None:
+        self.cutoff_count += 1
+        self.cutoff_reached.set()
+        self.cutoff_allowed.wait(10)
+        super().cancel_rollouts()
+
+
+@pytest.mark.unit
+def test_a_stopping_worker_keeps_the_rollout_that_finishes_in_time_and_gives_back_the_one_that_runs_at_the_cutoff(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    # Each rollout has one attempt: a stop that counted as an attempt would leave it none.
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 1})
+    in_time, at_cutoff, fresh = held_rollout(0, "in-time"), held_rollout(1, "at-cutoff"), held_rollout(2, "fresh")
+    add_rollout(queue, in_time)
+    add_rollout(queue, at_cutoff)
+    lab = HeldLab("in-time", "at-cutoff", "fresh")
+    endpoints = AnsweringEndpoints(tmp_path / "tasks")
+    # Three slots: the worker has a free slot while it stops, and still takes no new rollout.
+    worker = GatedCutoffWorker(
+        queue, endpoints, worker_id="w", lab=lab, poll_seconds=0.01, slots=3, on_stop="finish", finish_timeout_s=0.05
+    )
+    workers = ServiceWorkers()
+    workers.add(worker)
+    workers.start()
+    assert lab.started["in-time"].wait(10) and lab.started["at-cutoff"].wait(10)
+
+    workers.begin_stop()
+    timer = worker.cancel_timer
+    # Another stop request keeps the cutoff of the first.
+    workers.begin_stop()
+    assert timer is not None and worker.cancel_timer is timer
+    add_rollout(queue, fresh)
+    assert worker.cutoff_reached.wait(10)
+    lab.released["in-time"].set()
+    wait_until(lambda: queue.read(EVALUATIONS_QUEUE, in_time.item_id()).state == "finished")
+    worker.cutoff_allowed.set()
+    workers.stop()
+
+    finished = queue.read(EVALUATIONS_QUEUE, in_time.item_id())
+    assert (finished.state, finished.attempt_count, finished.stopped_attempt_count) == ("finished", 1, 0)
+    assert finished.result == {"score": 1.0, "rewards": {"reward": 1.0}, "error": None}
+    given_back = queue.read(EVALUATIONS_QUEUE, at_cutoff.item_id())
+    assert (given_back.state, given_back.error) == ("queued", "the worker stopped")
+    assert (given_back.attempt_count, given_back.stopped_attempt_count) == (1, 1)
+    assert queue.has_attempts_left(given_back)
+    assert lab.cleaned_up["at-cutoff"].is_set() and not lab.cleaned_up["in-time"].is_set()
+    assert queue.read(EVALUATIONS_QUEUE, fresh.item_id()).attempt_count == 0
+    assert worker.cutoff_count == 1 and worker.cancel_timer is None and not timer.is_alive()
+    # Another worker starts the rollout that was given back from its start, and finishes it.
+    lab.released["at-cutoff"].set()
+    assert ServedWorker(queue, endpoints, worker_id="w2", lab=lab).run_once() is True
+    restarted = queue.read(EVALUATIONS_QUEUE, at_cutoff.item_id())
+    assert (restarted.state, restarted.attempt_count, restarted.stopped_attempt_count) == ("finished", 2, 1)
+
+
+@pytest.mark.unit
+def test_a_rollout_that_the_worker_takes_as_its_stop_begins_goes_back_with_no_trial(tmp_path, monkeypatch):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 1})
+    value = held_rollout(2, "add")
+    add_rollout(queue, value)
+    # No candidate is served and the lab runs no trial, which would write under ``trials``.
+    lab = NoSandboxLab(tmp_path / "trials")
+    worker = ServingRefusedWorker(
+        queue, UnreachableEndpoints(), worker_id="w", lab=lab, on_stop="finish", finish_timeout_s=60.0
+    )
+    take = queue.take
+
+    def take_as_the_stop_begins(*args, **kwargs):
+        item = take(*args, **kwargs)
+        worker.begin_stop()
+        return item
+
+    monkeypatch.setattr(queue, "take", take_as_the_stop_begins)
+    assert worker.run_once() is False
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == ("queued", "the worker stopped")
+    assert (item.attempt_count, item.stopped_attempt_count) == (1, 1) and queue.has_attempts_left(item)
+    assert not (tmp_path / "trials").exists()
+    # A stopping worker takes no rollout at all.
+    assert worker.run_once() is False
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).attempt_count == 1
+    worker.stop()
+    assert worker.cancel_timer is None
+
+
+class SlowCancelBuilder(TaskTemplateBuilder):
+    """A builder whose build runs until it is cancelled, and whose cancellation ends only when ``ended`` is set, as a
+    build that waits for its builder to answer. ``started`` is set when the build starts; ``saw_end`` is whether
+    ``ended`` was set within 10 s of the cancellation."""
+
+    def __init__(self, ended: threading.Event) -> None:
+        self.ended = ended
+        self.started = threading.Event()
+        self.saw_end = False
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.saw_end = await asyncio.to_thread(self.ended.wait, 10)
+            raise
+
+
+@pytest.mark.unit
+def test_the_cutoff_of_the_rollouts_does_not_wait_for_the_stop_of_the_template_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    queue = memory_coordination().work_queue
+    value = held_rollout(2, "add")
+    add_rollout(queue, value)
+    template = e2b_rollout()
+    template_id = template_item_id(template.evaluation_id, template.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, template_id, "s", TASK_TEMPLATE_KIND, template.to_payload()))
+    lab = HeldLab("add")
+    endpoints = AnsweringEndpoints(tmp_path / "tasks")
+    rollouts = ServedWorker(
+        queue, endpoints, worker_id="w", lab=lab, poll_seconds=0.01, on_stop="finish", finish_timeout_s=0.05
+    )
+    # The template worker's stop waits until the rollout worker has cancelled its rollouts.
+    builder = SlowCancelBuilder(rollouts.rollouts_cancelled)
+    # As in a process of the evaluation service: the template worker is added last, so it stops first.
+    workers = ServiceWorkers()
+    workers.add(rollouts)
+    workers.add(TaskTemplateWorker(queue, endpoints, builder, worker_id="t", poll_seconds=0.01))
+    workers.start()
+    assert lab.started["add"].wait(10) and builder.started.wait(10)
+
+    workers.stop()
+
+    assert builder.saw_end
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.stopped_attempt_count) == ("queued", 1) and lab.cleaned_up["add"].is_set()
+    template_item = queue.read(EVALUATIONS_QUEUE, template_id)
+    assert (template_item.state, template_item.stopped_attempt_count) == ("queued", 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("on_stop", "finish_timeout_s", "message"),
+    [
+        ("drain", None, "on_stop must be one of requeue, finish, not 'drain'"),
+        ("requeue", 60.0, "finish_timeout_s needs on_stop: finish"),
+        ("finish", 0.0, "finish_timeout_s is a number of seconds above 0"),
+        ("finish", math.inf, "finish_timeout_s is a number of seconds above 0"),
+        # Longer than a timer can wait, and an int too large for a float.
+        ("finish", math.nextafter(threading.TIMEOUT_MAX, math.inf), "at most"),
+        ("finish", 10**400, "at most"),
+    ],
+)
+def test_a_worker_refuses_an_unknown_stop_and_a_timeout_that_it_cannot_keep(on_stop, finish_timeout_s, message):
+    with pytest.raises(ValueError, match=message):
+        ServedWorker(
+            memory_coordination().work_queue,
+            UnreachableEndpoints(),
+            worker_id="w",
+            on_stop=on_stop,
+            finish_timeout_s=finish_timeout_s,
+        )
+
+
+@pytest.mark.unit
+def test_the_longest_finish_timeout_is_a_wait_that_the_timer_can_keep():
+    # ``threading.Timer`` waits on a timed lock, which takes ``TIMEOUT_MAX`` and refuses a much longer timeout.
+    assert threading.Lock().acquire(timeout=threading.TIMEOUT_MAX)
+    with pytest.raises(OverflowError):
+        threading.Lock().acquire(timeout=2 * threading.TIMEOUT_MAX)
+    check_finish_timeout("finish", threading.TIMEOUT_MAX)

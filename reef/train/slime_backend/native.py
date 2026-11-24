@@ -12,16 +12,17 @@ Slime's rollout manager builds its reward step once for the serving session,
 so the family installs Reef's as Slime's ``--custom-reward-post-process-path``
 (``reef.train.slime_backend.task_advantages``). It runs Slime's own reward
 step for every rollout but those of a task job whose objective declares its
-own rule or carries delayed samples. The built-in dataset recipe
-(``reef.recipe.dataset``) registers this family by reference, so only the
-training driver and the workers import the Slime code.
+own rule or carries delayed samples.
+``reef.train.slime_backend.loss_families`` knows this family by reference, so
+only the training driver and the workers import the Slime code.
 """
 
 from __future__ import annotations
 
 from argparse import Namespace
 
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
+from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.loss_families import register_loss_family
 from reef.train.slime_backend.task_advantages import TASK_ADVANTAGES_PATH
 
 #: The data source that serves a dataset job's or a task job's prompts to Slime's rollout manager.

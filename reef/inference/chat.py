@@ -26,33 +26,43 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
 from reef.core.training_capture import sample_training, sampling_distribution
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
-from reef.inference.interfaces import InferenceArtifact, InferenceStream
+from reef.inference.interfaces import InferenceArtifact, InferenceStream, parse_full_weight_name
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
+from reef.inference.residency import ADAPTER_NAME_PREFIX, parse_adapter_name
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
-# ``<think>`` and the newline after it can be several tokens; the end of a
-# rendered prompt this long is enough to read an open tag.
-PROMPT_TAIL_TOKEN_COUNT = 8
-# The reasoning tags and the tool-call start that SGLang's Qwen3 reasoning
-# parser reads; a tool call that starts before ``</think>`` ends the reasoning.
-THINK_START = "<think>"
-THINK_END = "</think>"
-TOOL_CALL_START = "<tool_call>"
+
+def bound_runtime_load_id(served_model: str | None) -> str | None:
+    """The runtime load that the route name ``served_model`` binds: the load of a full-weight name
+    (``parse_full_weight_name``) or of an adapter name (``parse_adapter_name``); None for no name or a plain model
+    name, which binds no weights.
+
+    The engine admits a request that names such a load only while it serves that load, and drains its requests
+    before every weight change (request pinning), so the whole reply comes from that load.
+    """
+    if served_model is None:
+        return None
+    full_weight = parse_full_weight_name(served_model)
+    if full_weight is not None:
+        return full_weight[1]
+    if served_model.startswith(ADAPTER_NAME_PREFIX):
+        return parse_adapter_name(served_model)[1]
+    return None
 
 
 @dataclass(frozen=True)
 class CapturedGeneration:
     """One request's exact engine output.
 
-    ``token_runtime_load_ids`` names the weight version that produced each
-    sampled token; a request paused for a weight update and resumed spans two.
+    ``output_ids`` and ``rollout_log_probs`` have one entry per sampled token.
     ``text`` is the engine's own decoding when it provides one; ``None`` makes
     the handler decode the ids with its tokenizer. ``public_meta`` is the
     engine metadata exposed to clients as ``choice["meta_info"]``; it must not
@@ -61,14 +71,13 @@ class CapturedGeneration:
 
     output_ids: list[int]
     rollout_log_probs: list[float]
-    token_runtime_load_ids: list[str]
     finish_reason: str
     text: str | None
     public_meta: dict[str, Any]
 
     def __post_init__(self) -> None:
         count = len(self.output_ids)
-        if len(self.rollout_log_probs) != count or len(self.token_runtime_load_ids) != count:
+        if len(self.rollout_log_probs) != count:
             raise ValueError("captured response tensors have inconsistent lengths")
         if not count and self.finish_reason != "abort":
             raise ValueError("captured response has no sampled tokens")
@@ -100,7 +109,7 @@ class NativeGenerateClient(ABC):
         """The native request body for ``prompt_ids``, asking for the sampled tokens' log-probs."""
 
     @abstractmethod
-    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
+    def parse(self, response: Mapping[str, Any]) -> CapturedGeneration:
         """Validate one buffered native response and read the exact sample out of it."""
 
     @abstractmethod
@@ -116,10 +125,11 @@ class NativeGenerateClient(ABC):
 
 
 async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    """Decode arbitrarily chunked SSE bytes into JSON data events, up to the ``[DONE]`` event.
+    """Decode SSE JSON events and consume the transport through EOF, including after ``[DONE]``.
 
     An event without data is skipped. An event whose data is not a JSON object,
-    or that reports an ``error``, raises :class:`ValueError`.
+    or that reports an ``error``, raises :class:`ValueError`. Data after ``[DONE]`` is invalid.
+    Exhaustion means the transport completed, so a trailing transport error cannot be hidden by the marker.
     """
 
     def decode_event(payload: str) -> dict[str, Any]:
@@ -131,93 +141,22 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
         return value
 
     decoder = SSEFrameDecoder()
+    done = False
     async for chunk in chunks:
         for frame in decoder.feed(chunk):
             payload = frame_data(frame)
+            if done and payload:
+                raise ValueError("native stream sent data after [DONE]")
             if payload == SSE_DONE:
-                return
-            if payload:
+                done = True
+            elif payload:
                 yield decode_event(payload)
 
     payload = frame_data(decoder.finish())
+    if done and payload:
+        raise ValueError("native stream sent data after [DONE]")
     if payload and payload != SSE_DONE:
         yield decode_event(payload)
-
-
-class ReasoningStreamSplitter:
-    """Split sampled thinking tags without waiting for the full completion.
-
-    Follows SGLang's Qwen3 reasoning parser: the first ``<think>`` starts
-    reasoning and is dropped, the first ``</think>`` or ``<tool_call>`` ends
-    it, and a stream that ends inside it is reasoning. A slice that may be
-    the start of one of these tags is held until the next delta.
-    """
-
-    def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
-        self._enabled = enabled
-        self._in_reasoning = enabled and force_reasoning
-        self._stripped_think_start = False
-        self._buffer = ""
-
-    @staticmethod
-    def _held_suffix(value: str, delimiter: str) -> int:
-        for size in range(min(len(value), len(delimiter) - 1), 0, -1):
-            if delimiter.startswith(value[-size:]):
-                return size
-        return 0
-
-    def feed(self, delta: str) -> list[tuple[str, str]]:
-        if not delta:
-            return []
-        if not self._enabled:
-            return [("text", delta)]
-        self._buffer += delta
-        if any(
-            tag.startswith(self._buffer) and tag != self._buffer for tag in (THINK_START, THINK_END, TOOL_CALL_START)
-        ):
-            return []
-        if not self._stripped_think_start and THINK_START in self._buffer:
-            self._buffer = self._buffer.replace(THINK_START, "", 1)
-            self._stripped_think_start = True
-            self._in_reasoning = True
-        if not self._in_reasoning:
-            value, self._buffer = self._buffer, ""
-            return [("text", value)]
-
-        before, separator, after = self._buffer.partition(THINK_END)
-        if separator:
-            self._buffer = ""
-            self._in_reasoning = False
-            parts = [("thinking", before)] if before else []
-            visible = after.lstrip("\n")
-            if visible:
-                parts.append(("text", visible))
-            return parts
-        tool_start = self._buffer.find(TOOL_CALL_START)
-        if tool_start != -1:
-            before, after = self._buffer[:tool_start], self._buffer[tool_start:]
-            self._buffer = ""
-            self._in_reasoning = False
-            return [("thinking", before), ("text", after)] if before else [("text", after)]
-        held_tags = (
-            [THINK_END, TOOL_CALL_START] if self._stripped_think_start else [THINK_START, THINK_END, TOOL_CALL_START]
-        )
-        held = max(self._held_suffix(self._buffer, tag) for tag in held_tags)
-        if held:
-            value = self._buffer[:-held]
-            self._buffer = self._buffer[-held:]
-        else:
-            value, self._buffer = self._buffer, ""
-        return [("thinking", value)] if value else []
-
-    def finish(self) -> list[tuple[str, str]]:
-        if not self._buffer:
-            return []
-        value, self._buffer = self._buffer, ""
-        if self._in_reasoning:
-            value = value.removeprefix(THINK_START)
-            return [("thinking", value)] if value else []
-        return [("text", value)]
 
 
 def _sse_data(event: Mapping[str, Any]) -> bytes:
@@ -310,11 +249,14 @@ class _OpenAIChunkWriter(_StreamWriter):
         return [self._chunk({}, logprobs={"content": content})]
 
     def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
+        """The last chunk carries the finish reason and ``meta_info``, and the token IDs of a response that has
+        them: ``token_ids`` in its choice and ``prompt_token_ids`` beside ``choices``."""
         choice = response["choices"][0]
-        return [
-            self._chunk({}, finish_reason=choice["finish_reason"], meta_info=choice["meta_info"]),
-            b"data: [DONE]\n\n",
-        ]
+        closing = {"index": 0, "delta": {}, "finish_reason": choice["finish_reason"], "meta_info": choice["meta_info"]}
+        if "token_ids" in choice:
+            closing["token_ids"] = choice["token_ids"]
+        prompt = {"prompt_token_ids": response["prompt_token_ids"]} if "prompt_token_ids" in response else {}
+        return [_sse_data({**self._common, **prompt, "choices": [closing]}), b"data: [DONE]\n\n"]
 
 
 class _AnthropicEventWriter(_StreamWriter):
@@ -528,8 +470,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     clients that requested a stream still receive a valid one.
     """
 
-    # A harness that parses raw thinking tags itself opts out by overriding
-    # this class attribute.
+    #: A harness that parses raw thinking tags itself opts out by overriding
+    #: this class attribute with False, which keeps the tags in the content.
     SPLIT_REASONING = True
     # Set when the chat template pre-opens ``<think>``: the sample then
     # carries only the closing tag, so a sample with no ``</think>`` is
@@ -627,8 +569,11 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
         """The engine serves the base model under its path and each adapter under its own name, which a native
         request names in ``lora_path``."""
+        pinned = parse_full_weight_name(model_name)
+        if pinned is not None:
+            model_name = self.model_path
         addressed = {key: value for key, value in payload.items() if key != "lora_path"}
-        if model_name == self._model_path:
+        if model_name == self.model_path:
             return {**addressed, "model": model_name}
         return {**addressed, "model": model_name, "lora_path": model_name}
 
@@ -650,8 +595,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         """The provider response of a chat call with its exact sample as the ``training`` block
-        (``reef.core.training_capture.sample_training``). The block is absent when the engine aborted the call or
-        when two weight versions drew its reply, which has no single policy to train under."""
+        (``reef.core.training_capture.sample_training``). The block is absent when the engine aborted the call, or
+        when the route names no weight load (``artifact.served_model`` None or a plain model name): then no single
+        policy is known to have drawn the reply (``bound_runtime_load_id``)."""
         if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
             raise ValueError(f"only {CHAT_COMPLETIONS_PATH} and {ANTHROPIC_MESSAGES_PATH} record their sample")
         call = self._chat_call(path, payload)
@@ -668,17 +614,17 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             self._client.generate_path,
             self._client.payload(call.request, call.prompt_ids, call.sampling_params, stream=False),
         )
-        captured = self._client.parse(artifact, native)
+        captured = self._client.parse(native)
         response = self._response_from_capture(call, captured, call.tool_parser)
         provider = anthropic_response(call.payload, response) if call.anthropic else response
-        load_ids = set(captured.token_runtime_load_ids)
-        if not with_sample or not captured.output_ids or len(load_ids) != 1:
+        runtime_load_id = bound_runtime_load_id(artifact.served_model) if with_sample else None
+        if runtime_load_id is None or not captured.output_ids:
             return response, provider
         sample = sample_training(
             prompt_ids=call.prompt_ids,
             output_ids=captured.output_ids,
             rollout_log_probs=captured.rollout_log_probs,
-            runtime_load_id=load_ids.pop(),
+            runtime_load_id=runtime_load_id,
             finish_reason=captured.finish_reason,
             distribution=sampling_distribution(call.sampling_params),
         )
@@ -720,7 +666,11 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         }
         if call.request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(captured.output_ids, captured.rollout_log_probs)}
-        return {
+        # vLLM's ``return_token_ids`` extension: the rendered prompt's ids and the sampled ids, as the client asked.
+        return_token_ids = call.request.get("return_token_ids") is True
+        if return_token_ids:
+            choice["token_ids"] = list(captured.output_ids)
+        response: dict[str, Any] = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
@@ -732,6 +682,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 "total_tokens": len(call.prompt_ids) + len(captured.output_ids),
             },
         }
+        if return_token_ids:
+            response["prompt_token_ids"] = list(call.prompt_ids)
+        return response
 
     # -- Streaming --------------------------------------------------------------
 
@@ -924,7 +877,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if self.force_reasoning is not None:
             return self.force_reasoning
         tail = self._require_tokenizer().decode(prompt_ids[-PROMPT_TAIL_TOKEN_COUNT:], skip_special_tokens=False)
-        return tail.rstrip().endswith("<think>")
+        return is_reasoning_pre_opened(tail)
 
     @classmethod
     def _assistant_message(
@@ -942,29 +895,14 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # (agents, judges, user simulators) sees chain-of-thought as the
         # reply. Training tensors are captured from the raw token stream and
         # are unaffected by this presentation split. The split follows
-        # SGLang's Qwen3 reasoning parser. SGLang forces reasoning whenever
-        # enable_thinking is not false, so a closing tag also starts the
-        # split: it only appears when thinking is on.
-        reasoning: str | None = None
-        if cls.SPLIT_REASONING and (force_reasoning or THINK_START in text or THINK_END in text):
-            body = text
-            while body.startswith(THINK_START):
-                body = body[len(THINK_START) :]
-            head, separator, tail = body.partition(THINK_END)
-            tool_start = body.find(TOOL_CALL_START)
-            if separator:
-                reasoning, text = head, tail.lstrip("\n")
-            elif tool_start != -1:
-                # A tool call that starts before </think> ends the reasoning.
-                reasoning, text = body[:tool_start], body[tool_start:]
-            else:
-                # No closing tag: the generation hit its token cap
-                # mid-thought. The whole sample is reasoning, so fail closed
-                # — handing it back as content is exactly the
-                # chain-of-thought-as-reply this split exists to prevent, and
-                # a judge scoring it scores the wrong text.
-                reasoning, text = body, ""
-            reasoning = reasoning.strip()
+        # SGLang's Qwen3 reasoning parser (``split_reasoning``). SGLang forces
+        # reasoning whenever enable_thinking is not false, so a closing tag
+        # also starts the split: it only appears when thinking is on. A reply
+        # without a closing tag hit its token cap mid-thought, so all of it is
+        # reasoning: a judge that scored it as content would score the wrong text.
+        reasoning = ""
+        if cls.SPLIT_REASONING:
+            reasoning, text = split_reasoning(text, pre_opened=force_reasoning)
         message: dict[str, Any] = {"role": "assistant", "content": text}
         if reasoning:
             message["reasoning_content"] = reasoning
@@ -1059,8 +997,8 @@ __all__ = [
     "ChatCall",
     "ChatStreamRelay",
     "NativeGenerateClient",
-    "ReasoningStreamSplitter",
     "TokenNativeChatHandler",
+    "bound_runtime_load_id",
     "finite_log_prob",
     "integer_tokens",
     "normalize_finish_reason",

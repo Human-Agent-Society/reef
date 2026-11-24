@@ -31,15 +31,16 @@ The map, one subpackage per job:
 ``gateway``
     the loopback gateway an agent process reaches its model and its tools
     through, which meters each call.
-``delivery``
-    the file tree that serves a snapshot to a client: its source tree rendered
-    for the scenario's adapter.
+``sync``
+    a harness between a client's machine and Reef: the file tree that serves a
+    snapshot to a client, rendered for the scenario's adapter, and the import
+    and merge of the client's files into a tree.
 
 This package depends on core values, runtime and artifact contracts, and
 sandbox execution, never on training, recipes, scenario coordination, or the
 HTTP service. The evolution loop is ``reef.train.harness_backend``; versioning
 (staging, publishing, the commit history, recovery and activation) is Reef's
-artifact stack (``reef.artifact``, ``reef.scenario``).
+artifact stack (``reef.artifact``, ``reef.control.scenario``).
 """
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor

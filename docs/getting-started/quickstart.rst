@@ -8,43 +8,39 @@ from the records you collect.
 
 A typical Reef workflow includes the following steps:
 
-1. **Request.** Harness sends a request with a *scenario*.
-2. **Response.** Reef forwards the response from the model to the harness, with
-   a *receipt* attached to it.
-3. **Report.** An entity provides a *report* containing feedback for the
-   response associated with the *receipt* to Reef.
-4. **Learn.** Reef runs the training / learning process against the reports in
-   training jobs according to its *recipe*.
-5. **Evolve.** Reef potentially creates a new version of the *artifact*, which
-   may become immediately effective (e.g. model evolution) or requires a pull
-   from the harness to take effect (e.g. harness evolution).
-6. **Update.** Harness can view the history of served artifacts (*release
-   chain*) and potentially pull a new harness tree.
+1. **Request.** The harness sends a request that names a *scenario*.
+2. **Response.** Reef forwards the model's response to the harness, with a
+   *receipt* attached.
+3. **Report.** A grader sends Reef a *report*: feedback about the response that
+   the *receipt* names.
+4. **Learn.** Reef trains on the reports in training jobs, as its *recipe*
+   defines.
+5. **Evolve.** Reef may create a new version of the *artifact*. New model
+   weights take effect at once; a new harness tree takes effect when the
+   harness pulls it.
+6. **Update.** The harness can read the history of served artifacts (the
+   *snapshot chain*) and pull a new harness tree.
 
 This workflow touches a few key concepts:
 
-- **scenario** - A specific type of workload. For example, a code reviewer, or a
-  math problem solver. Reef manages the training of each scenario separately,
-  i.e. records, training state and snapshot chain.
-- **receipt** - The id of a recorded inference exchange. It identifies the
+- **scenario**: one workload, such as a code reviewer or a math problem
+  solver. Reef keeps the records, training state and snapshot chain of each
+  scenario separate.
+- **receipt**: the ID of a recorded inference exchange. It identifies the
   request, the response, and the snapshot that produced it.
-- **report** - A feedback quoting one or more receipts.
-- **recipe** - How Reef use the report to evolve new versions of artifacts. A
+- **report**: feedback that quotes one or more receipts.
+- **recipe**: how Reef uses reports to evolve new versions of artifacts. A
   deployment serves one recipe, and every scenario on it evolves under that
   recipe.
-- **artifact** - The content a snapshot selects: model weights, or a harness
-  tree of rules, prompts, skills, and config. Versioned.
-- **release** - One accepted publication in a scenario. The chain of them is
+- **artifact**: the versioned content that a snapshot selects: model weights,
+  or a harness tree of rules, prompts, skills and config.
+- **snapshot**: one accepted publication in a scenario. The chain of them is
   the scenario's history.
 
-We will explore these concepts in greater depth later. For now, it's time to
-get our hands dirty and experience these steps ourselves.
+The `Glossary <../reference/glossary.rst>`__ defines each term in full.
 
 Run the loop
 ------------
-
-This runs the serving half of the loop against a hosted provider, on a laptop,
-with no GPU.
 
 .. container:: steps
 
@@ -190,5 +186,5 @@ Choose your next step
   worked harness example, or `SAO rollout training
   <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
 - Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
-  your own agent: it covers inference headers, feedback reports, and release
+  your own agent: it covers inference headers, feedback reports, and artifact
   management.

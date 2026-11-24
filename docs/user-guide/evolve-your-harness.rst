@@ -10,34 +10,23 @@ the model cannot do the task.
 You evolve a harness in four stages:
 
 #. **Start Reef with a recipe.** ``reef serve -c deployment.yaml`` starts the
-   service. The deployment chooses the agent, the method and the evaluation
-   (see the table below).
+   service. The deployment chooses the agent (``evolution.adapter``), the
+   method (``evolution.method``) and the evaluation
+   (``evolution.evaluation``).
 #. **Connect your agent.** ``reef-client harness connect`` installs the active
-   selection as your agent's own plugin. It also sends the agent's model calls
+   selection as your agent's own plugin, and sends the agent's model calls
    through Reef.
-#. **Use the agent and score it.** Use the agent as you always do, and score
-   sessions with ``POST /reef/report``. When enough scored sessions wait, a
-   training step changes the harness and evaluates the change. The offline
-   way uses uploaded tasks in place of sessions.
-#. **Get the new snapshot.** Reef stores each selected change as a new snapshot.
-   Your next agent session syncs first: it sends back the files you changed
-   and installs the active selection. A deployment can make a new snapshot wait
-   for a person (see `Activate an inactive artifact`_).
+#. **Use the agent and score it.** Score sessions with ``POST /reef/report``.
+   When enough scored sessions wait, a training step changes the harness and
+   evaluates the change. The offline way uses uploaded tasks in place of
+   sessions.
+#. **Get the new snapshot.** Reef stores each selected change as a new
+   snapshot. Your next agent session syncs first: it sends back the files you
+   changed and installs the active selection.
 
-`Quickstart`_ gives the commands. The deployment chooses three things:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Key
-     - Chooses
-   * - ``evolution.adapter``
-     - the agent (see `The harness tree`_)
-   * - ``evolution.method``
-     - how a step changes the tree (see `Choose or write a method`_)
-   * - ``evolution.evaluation``
-     - whether a change is published (see `Evaluation: the publication policy`_)
+The `tutorial <../getting-started/harness-tutorial.rst>`__ walks through
+these stages with the pi agent. This page describes the settings and the
+other ways to run them.
 
 How it works
 ------------
@@ -131,19 +120,14 @@ Online: learn from your sessions
    reef-client harness connect <scenario> --reef http://127.0.0.1:8901
    pi
 
-   # Score the session over its model calls: 0 fails, 1 succeeds.
-   CALLS=$(curl -s "http://127.0.0.1:8901/reef/scenarios/<scenario>/records?request_type=inference&limit=100" \
-     | jq -c '[.records[].agent_record_id]')
-   curl -s -X POST http://127.0.0.1:8901/reef/report \
-     -H "x-reef-scenario: <scenario>" -H "Content-Type: application/json" \
-     -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
+After the session, `report feedback on its last model call
+<../getting-started/harness-tutorial.rst#tell-reef-how-it-went>`__. A row
+of ``GET /reef/harness/artifacts`` with ``"selected": true`` is a new
+snapshot, and the next ``pi`` session uses the active selection:
 
-   # The steps and their results; a row with "selected": true is a new snapshot.
+.. code:: bash
+
    curl -s -H "x-reef-scenario: <scenario>" http://127.0.0.1:8901/reef/harness/artifacts
-
-The next ``pi`` session starts on the new active selection. `Tutorial: evolve your
-agent's harness <../getting-started/harness-tutorial.rst>`__ walks through
-these steps.
 
 Offline: learn from uploaded tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -161,7 +145,7 @@ Change the deployment's evaluation and add a ``pipeline`` section:
            policy: compare
    pipeline:
      sample2job:
-       module: reef.sample2job.traces:TrainTaskJobData
+       module: reef.train.sample2job.traces:TrainTaskJobData
        config: {buffer_size: 4}
 
 Then upload Harbor task directories as task items of the scenario's owner,
@@ -191,10 +175,8 @@ The example runs the online way without a person:
    cd tutorials/evolve-your-harness && ./run.sh
 
 ``configs/serve.yaml`` holds the endpoint, the model and the token. Three
-exact-answer tasks go through Reef, and each graded reply is one step. The
-run succeeds when a row of ``/reef/harness/artifacts`` shows ``selected:
-true``. When both sides score nothing, no run gave an answer: vLLM, for
-example, needs ``--enable-auto-tool-choice --tool-call-parser hermes``. See
+exact-answer tasks go through Reef, and each graded reply starts one step.
+A tied or unchanged candidate keeps the current harness. See
 `Troubleshooting <troubleshooting.rst>`__.
 
 The harness tree
@@ -230,6 +212,10 @@ part:
    * - ``native/{tools,hooks,graphs,agents,loops}/<name>``
      - ``native_*``
      - the native loop's tools, hooks, control flow, subagents and loop code
+   * - ``program/<name>.py``
+     - ``program``
+     - a module of the ``python`` adapter's program; ``main`` is the entry
+       point
 
 .. list-table::
    :header-rows: 1
@@ -259,6 +245,9 @@ part:
    * - ``native``
      - Reef's own loop
      - rules, skill, config, and the five ``native_*`` parts
+   * - ``python``
+     - a Python program that owns its loop
+     - program (``program/<name>.py``), config
 
 For the first four, the parts are what the agent's own plugin carries: the
 same plugin runs in the evaluation and on a person's machine. Reef refuses a
@@ -279,31 +268,31 @@ A step starts when ``pipeline.sample2job.config.job_samples`` traces wait
 In ``manual`` mode (``recipe.config.training_mode: manual``), a training
 request starts each step instead: ``POST /reef/train`` with a ``text`` that
 the method reads as an instruction (`Manual training
-<../reference/http-api.rst#manual-training>`__). The step needs no trace.
+<../reference/http-api-training.rst#manual-training>`__). The step needs no trace.
 To learn from inference traffic without reports, name the inference stage;
 each call is then one unscored trace:
 
 .. code-block:: yaml
 
    pipeline:
-     record2sample: {module: reef.record2sample.traces:InferenceSamples}
+     record2sample: {module: reef.samples.traces:InferenceSamples}
 
 Offline runs on uploaded tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.sample2job.traces:TrainTaskJobData`` makes each step from the train
+``reef.train.sample2job.traces:TrainTaskJobData`` makes each step from the train
 split of the scenario's imported tasks:
 
-- Each uploaded train task trains once, in upload
-  order. A step of train tasks runs up to ``buffer_size`` of them (default
-  ``job_samples``) on the head, and the method reads those runs.
+- Each uploaded train task trains once, in upload order. A step runs up to
+  ``buffer_size`` of them (default ``job_samples``) on the head, and the
+  method reads those runs.
 - A step holds either traces or train tasks, so recorded sessions still
   start their own steps.
 - The eval split is the evaluation's task source. The stage needs a scorer
   and task directories (see `Task directories`_).
 
 Upload the tasks as in `Offline: learn from uploaded tasks`_ (`Create task
-items <../reference/http-api.rst#create-task-items>`__), or import them with
+items <../reference/http-api-data-upload.rst#create-task-items>`__), or import them with
 the deployment's ``task-import`` section.
 
 Evaluation: the publication policy
@@ -335,15 +324,16 @@ state the whole problem.
      - nothing
      - always; it needs no tasks and no scorer
 
-A run that gave no answer scores 0. A failed run, one that the
-environment could not run, counts for neither tree: ``wins`` drops its pair
-and ``mean`` leaves it out. A tie publishes nothing. Reef keeps every scored run and reuses it for the same tree,
-task and repeat, so a step usually runs only the candidate's runs.
-`Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__
+A run that gave no answer scores 0. A failed run, one that the environment
+could not run, counts for neither tree: ``wins`` drops its pair and ``mean``
+leaves it out. A tie publishes nothing. Reef keeps every scored run and
+reuses it for the same tree, task and repeat, so a step usually runs only the
+candidate's runs.
+`Harness evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__
 lists every key.
 
 Running runs
-^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^
 
 .. list-table::
    :header-rows: 1
@@ -354,8 +344,9 @@ Running runs
    * - ``local`` (default)
      - a plain subprocess, with no isolation; for development
    * - ``sandbox``
-     - a bubblewrap jail: read-only base, explicit credentials only, no
-       network unless ``evolution.sandbox.egress_hosts`` is set
+     - a local sandbox: read-only base, explicit credentials only, no
+       network unless ``evolution.sandbox.egress_hosts`` is set. Linux uses
+       a bubblewrap jail; macOS uses a Seatbelt profile
    * - ``e2b``, ``modal``
      - one cloud sandbox per run (``reef-infra[e2b]`` or
        ``reef-infra[modal]``), with outbound internet
@@ -367,17 +358,18 @@ Task directories
 ^^^^^^^^^^^^^^^^
 
 A Harbor task directory holds an instruction, an environment and tests. Reef
-runs each one in its own container: Harbor starts it, Reef installs the
-adapter's pinned agent with npm (uv for ``python``) and copies in the rendered tree, the agent
-plays the instruction, and the tests' reward is the score
+runs each one in its own container: Harbor starts it, Reef puts the
+adapter's pinned agent in it and copies in the rendered tree, the agent plays
+the instruction, and the tests' reward is the score
 (``VerifierRewardScorer``). The image needs glibc.
 
 The agent reaches Reef at ``evolution.evaluation.agent_host`` (default
 ``host.docker.internal``) in place of a loopback address. On Linux, set it
 to an address the container reaches, such as the Docker bridge gateway.
-Startup refuses task directories when the adapter has no npm, uv or git ``install``,
-when the executor is not ``local``, or with ``collect_failures``. An offline
-run's evaluation tasks must be directories too.
+Startup refuses task directories when the adapter has no npm, uv or git
+``install``, when the executor is not ``local``, or with
+``collect_failures``. An offline run's evaluation tasks must be directories
+too.
 
 Collection: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -406,10 +398,8 @@ Use a published tree
 ``reef-client harness`` installs the active selection as your agent's own
 plugin, with the agent's own command, so every session of the agent loads it
 beside your own configuration. A session that starts through Reef also sends
-its model calls to Reef. To go back to an earlier snapshot, activate it
-(`Activate an inactive artifact`_); your next sync installs it.
-The deployment's ``evolution.adapter`` decides the agent; ``GET
-/reef/scenarios`` lists each harness with its ``adapter``.
+its model calls to Reef. The deployment's ``evolution.adapter`` decides the
+agent; ``GET /reef/scenarios`` lists each harness with its ``adapter``.
 
 .. code:: bash
 
@@ -469,14 +459,14 @@ as your rules and the names of your skills.
 
 A client of your own reads a snapshot with ``GET /reef/harness`` and commits a
 sync with ``POST /reef/harness/import`` (see `HTTP API
-<../reference/http-api.rst#importing-a-harness>`__).
+<../reference/http-api-harness.rst#importing-a-harness>`__).
 
 Activate an inactive artifact
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tree code runs with your privileges. To make a person approve a change, set
 the deployment's top-level ``activation`` section (`Configuration
-<../reference/configuration.rst#the-activation-section>`__):
+<../reference/configuration-recipe.rst#the-activation-section>`__):
 
 - ``module: never`` leaves every win inactive.
 - ``module: always`` with ``config: {review_kinds: [extension]}`` leaves

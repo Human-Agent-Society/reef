@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from reef.train.algos.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend import task_advantages
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.task_advantages import (
     ADVANTAGE_RULE_KEY,
     DELAYED_ADVANTAGE_KEY,

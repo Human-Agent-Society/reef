@@ -143,11 +143,11 @@ def write_rollout_start(
     *,
     lora: bool,
 ) -> tuple[Path, Path]:
-    """Write the saved rollout's start and return (start directory, release directory).
+    """Write the saved rollout's start and return (start directory, artifact directory).
 
     The runner supplies a validated, non-symlink Hugging Face directory.
     Full-weight artifacts use that directory directly. LoRA artifacts copy its
-    files into the start's release/adapter directory. The start records the
+    files into the start's ``release/adapter`` directory. The start records the
     supplied schedule and the rollout's objective state before returning.
     """
     start_dir = starts_root / f"rollout_{rollout.rollout_id}"

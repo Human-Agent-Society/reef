@@ -9,16 +9,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.train.algos.group_advantages import GroupAdvantageRule
-from reef.train.algos.signals import TrainingSignal
-from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule
+from reef.train.slime_backend.objectives import SlimeObjective
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData
 
 #: SPADE's per-game z-score of the plays: the population deviation (``np.std``) plus 1e-8 (``game_utils.py``).
 SPADE_ADVANTAGE_RULE = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
 
 
-@register_slime_objective
 class SpadeObjective(SlimeObjective):
     """A SPADE task job: Slime's own loop over the generation's tasks, with the Designer's delayed replies.
 

@@ -16,11 +16,11 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-from reef.storage.commits import CommitRecord
+from reef.storage.scenario.commits import CommitRecord
 
 TUTORIAL = Path(__file__).resolve().parent.parent
 WORK = TUTORIAL / "work"
-RELEASE_FILE = ".reef-harness-release"
+SNAPSHOT_FILE = ".reef-harness-release"
 MAIN_GRAPH = "native/graphs/main.json"
 
 
@@ -67,11 +67,13 @@ def collect(work: Path) -> dict:
     commits = []
     for path in sorted((work / "agent-record").glob("*.sqlite3")) if (work / "agent-record").is_dir() else []:
         with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
-            rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY step").fetchall()
-        # ``CommitRecord`` reads every stored record format, also the formats of older runs.
+            rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY commit_number").fetchall()
+        # ``CommitRecord`` reads the current stored record format.
         commits.extend(CommitRecord.from_dict(json.loads(text)) for (text,) in rows)
     commits.sort(key=lambda commit: commit.recorded_at)
-    releases = [{"artifact_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
+    snapshots = [
+        {"artifact_id": "seed", "commit_number": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}
+    ]
     previous = seed_files
     # The tree of each artifact, so an activation or a new training start shows the tree it names.
     files_by_artifact: dict[str, dict] = {}
@@ -84,10 +86,10 @@ def collect(work: Path) -> dict:
             # Not a step: a person activated a snapshot or set the training start. The row carries no state.
             # No step made an artifact that this log does not list, except the seed.
             named = files_by_artifact.get(artifact_id, seed_files)
-            releases.append(
+            snapshots.append(
                 {
                     "artifact_id": artifact_id,
-                    "step": commit.step,
+                    "commit_number": commit.commit_number,
                     "kind": operation,
                     "recorded_at": commit.recorded_at,
                     "patch": [],
@@ -106,10 +108,10 @@ def collect(work: Path) -> dict:
         selection = metrics.get("selection") or {}
         patch = metrics.get("patch") or {}
         files = applied(previous, patch) if published else previous
-        releases.append(
+        snapshots.append(
             {
                 "artifact_id": artifact_id if published else None,
-                "step": commit.step,
+                "commit_number": commit.commit_number,
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
                 "recorded_at": commit.recorded_at,
@@ -160,7 +162,7 @@ def collect(work: Path) -> dict:
             )
     process = read_events(sessions_dir / "serve.jsonl") if (sessions_dir / "serve.jsonl").is_file() else []
     sessions.sort(key=lambda s: s["start"] or 0)
-    return {"releases": releases, "sessions": sessions, "process": process, "seed_files": seed_files}
+    return {"snapshots": snapshots, "sessions": sessions, "process": process, "seed_files": seed_files}
 
 
 PAGE = """<title>Harness Evolution Replay</title>
@@ -202,11 +204,11 @@ tr.mount td{background:color-mix(in srgb,var(--good) 14%,transparent)}tr.fail td
 <main>
 <h1>Harness evolution replay</h1>
 <p class="sub" id="sub"></p>
-<h2>Releases</h2>
+<h2>Snapshots</h2>
 <div class="chain" id="chain"></div>
 <h2>Loop graph, replayed from a session</h2>
 <div class="ctl">
-  <label>release <select id="relsel"></select></label>
+  <label>snapshot <select id="relsel"></select></label>
   <label>session <select id="sessel"></select></label>
   <button id="play">play</button>
   <input type="range" id="scrub" min="0" max="0" value="0" aria-label="event position">
@@ -226,10 +228,10 @@ const t0 = starts.length ? Math.min(...starts) : 0;
 const sec = ms => (typeof ms === 'number' ? ((ms - t0) / 1000).toFixed(1) : '-');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short = id => id ? String(id).slice(0, 8) : '-';
-const state = { release: 0, session: 0, pos: 0, timer: null };
+const state = { snapshot: 0, session: 0, pos: 0, timer: null };
 
 document.getElementById('sub').textContent =
-  `${D.releases.length} release(s), ${D.sessions.length} session(s), ${D.process.length} process event(s)` +
+  `${D.snapshots.length} snapshot(s), ${D.sessions.length} session(s), ${D.process.length} process event(s)` +
   (D.sessions[0] && D.sessions[0].model ? ` on ${D.sessions[0].model}` : '');
 
 function graphOf(files) {
@@ -239,24 +241,24 @@ function graphOf(files) {
 }
 function renderChain() {
   const el = document.getElementById('chain'); el.innerHTML = '';
-  D.releases.forEach((r, i) => {
-    const d = document.createElement('div'); d.className = 'rel' + (i === state.release ? ' sel' : ''); d.tabIndex = 0;
+  D.snapshots.forEach((r, i) => {
+    const d = document.createElement('div'); d.className = 'rel' + (i === state.snapshot ? ' sel' : ''); d.tabIndex = 0;
     const v = r.result || {};
-    const source = r.step ? 'method proposal' : 'the served tree before any step';
+    const source = r.commit_number ? 'method proposal' : 'the served tree before any step';
     const muts = r.diff ? '' : (r.patch || []).map(path => `<li>${esc(path)}</li>`).join('');
     const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(esc).join(', ')}</li>`).join('') : '';
-    d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.artifact_id) || '-')}</div>` +
+    d.innerHTML = `<div class="id">${r.commit_number ? 'commit ' + r.commit_number + ' · ' : ''}${esc(short(r.artifact_id) || '-')}</div>` +
       `<div class="k ${r.kind}">${esc(r.kind)}${r.skipped ? ': ' + esc(r.skipped) : ''}</div>` +
       `<div>${esc(source)}</div>` + (r.summary ? `<div>${esc(r.summary)}</div>` : '') +
       (v.wins != null ? `<div>W / L / T ${v.wins} / ${v.losses} / ${v.ties} · candidate ${v.candidate_score} vs current ${v.current_score}</div>` : '') +
       (muts ? `<ul>${muts}</ul>` : '') + (diff ? `<ul>${diff}</ul>` : '') +
       `<div class="id">${Object.keys(r.files||{}).length} files</div>`;
-    d.onclick = () => { state.release = i; renderChain(); renderGraph(); };
+    d.onclick = () => { state.snapshot = i; renderChain(); renderGraph(); };
     d.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); d.onclick(); } };
     el.appendChild(d);
   });
   const sel = document.getElementById('relsel'); sel.innerHTML = '';
-  D.releases.forEach((r, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (r.step ? 'step ' + r.step + ' ' : 'seed ') + short(r.artifact_id); o.selected = i === state.release; sel.appendChild(o); });
+  D.snapshots.forEach((r, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (r.commit_number ? 'commit ' + r.commit_number + ' ' : 'seed ') + short(r.artifact_id); o.selected = i === state.snapshot; sel.appendChild(o); });
 }
 function layout(g) {
   // Layers by breadth first walk from the start stage; a stage keeps the first layer it is reached in.
@@ -270,7 +272,7 @@ function layout(g) {
   return { pos, W, H, width, height };
 }
 function renderGraph() {
-  const r = D.releases[state.release];
+  const r = D.snapshots[state.snapshot];
   const box = document.getElementById('graph');
   if (!r) { box.innerHTML = '<div class="panel"><span class="empty">No snapshot on record: nothing was pulled or committed under work/ yet.</span></div>'; return; }
   const g = graphOf(r.files);
@@ -359,7 +361,7 @@ function renderProcess() {
   if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the run form writes none.</td></tr>';
 }
 function sync() { document.getElementById('scrub').value = state.pos; renderGraph(); renderDetail(); }
-document.getElementById('relsel').onchange = e => { state.release = +e.target.value; renderChain(); renderGraph(); };
+document.getElementById('relsel').onchange = e => { state.snapshot = +e.target.value; renderChain(); renderGraph(); };
 document.getElementById('sessel').onchange = e => { state.session = +e.target.value; state.pos = 0; renderSessionEvents(); sync(); };
 document.getElementById('scrub').oninput = e => { state.pos = +e.target.value; renderGraph(); renderDetail(); };
 document.getElementById('play').onclick = () => {
@@ -387,7 +389,7 @@ def main(argv=None) -> int:
     data = collect(work)
     out.write_text(render(data), encoding="utf-8")
     print(
-        f"{out}: {len(data['releases'])} release(s), {len(data['sessions'])} session(s), "
+        f"{out}: {len(data['snapshots'])} snapshot(s), {len(data['sessions'])} session(s), "
         f"{len(data['process'])} process event(s)"
     )
     return 0

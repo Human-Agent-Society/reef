@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+from reef.core.errors import InternalError
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree.checks import NAME, NATIVE_END_REASONS, validate_native_graph
 
@@ -107,7 +108,7 @@ SUMMARY_PROMPT = (
 )
 
 
-class GraphError(Exception):
+class GraphError(InternalError):
     """A graph the loop cannot run; the run ends with LOAD_ERROR like a broken tool."""
 
 
@@ -164,7 +165,7 @@ class _Stop(BaseException):
         self.outcome = outcome
 
 
-class _Escalate(Exception):
+class _EscalationError(InternalError):
     """A pre_execute hook asked inside an agent's turn; the parent graph is the one to answer."""
 
     def __init__(self, reason: str) -> None:
@@ -402,7 +403,7 @@ class Run:
                 decision = loop._decide(self.session, self.hooks["pre_execute"], "pre_execute", step, payload)
                 if decision.get("kind") == "ask" and self.parent is not None:
                     # An agent's turn has an answerer above it: the parent graph reads ask as an outcome.
-                    raise _Escalate(str(decision.get("reason") or f"{tool.name} needs approval"))
+                    raise _EscalationError(str(decision.get("reason") or f"{tool.name} needs approval"))
                 return decision
 
             result = loop._invoke(
@@ -627,7 +628,7 @@ def _walk(run: Run, graph: Graph) -> tuple[str, str]:
         if stop.exit_code != 0:
             raise
         return stop.outcome, _last_assistant_text(run.messages)
-    except _Escalate as ask:
+    except _EscalationError as ask:
         run.end_turn_quietly({"kind": "ask", "reason": ask.reason})
         return "ask", ask.reason
     run.close_step()

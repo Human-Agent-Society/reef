@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from reef.core.job_data import DelayedSample
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks.generator import FailedTask, RolledOutTask, check_rewards
-from reef.storage.tasks import TaskStore
+from reef.storage.data.tasks import TaskStore
 
 ROLLOUT_KEY_PREFIX = "rollout/"
 DELIVERED_KEY_PREFIX = "delivered/"

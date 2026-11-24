@@ -107,7 +107,10 @@ class EvaluatedActivation(ActivationRule):
         return False
 
     def activates_evaluated(self, artifact_id: str, evaluation: PolicyEvaluation) -> bool:
-        score = evaluation.mean_score
+        return self.meets_threshold(evaluation.mean_score)
+
+    def meets_threshold(self, score: float | None) -> bool:
+        """Whether the evaluation has a score at or above the threshold."""
         return score is not None and score >= self.min_mean_score
 
 
@@ -126,18 +129,7 @@ def activation_reference(value: object) -> PluginReference:
     The rule is built once from its config, so a bad config fails when the deployment loads. Raise
     ``PluginConfigError`` for any other value, and for a config that the rule refuses.
     """
-    if isinstance(value, Mapping) and isinstance(value.get("module"), str) and value["module"] in BUILT_IN_RULES:
-        unknown = sorted(str(key) for key in value if key not in ("module", "config"))
-        if unknown:
-            raise PluginConfigError(f"activation has unknown key(s) {', '.join(unknown)}; expected module and config")
-        config = value.get("config", {})
-        if not isinstance(config, Mapping):
-            raise PluginConfigError("activation.config must be a mapping")
-        reference = PluginReference(BUILT_IN_RULES[value["module"]], dict(config))
-    elif isinstance(value, str) and value in BUILT_IN_RULES:
-        reference = PluginReference(BUILT_IN_RULES[value], {})
-    else:
-        reference = ActivationRule.reference(value, setting="activation")
+    reference = ActivationRule.reference(value, setting="activation", builtins=BUILT_IN_RULES)
     build_activation_rule(reference)
     return reference
 

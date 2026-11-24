@@ -23,6 +23,7 @@ from reef.harness.tasks.trajectory import (
     DeepseekSessionReader,
     HermesSessionReader,
     TrajectoryError,
+    TrajectoryReader,
     final_assistant_text,
     read_opencode_session,
     read_pi_session,
@@ -438,9 +439,22 @@ def test_claude_codex_and_pi_sessions_convert_to_atif_with_harbors_converters(tm
         assert reader_for(format_).to_atif(tmp_path / "missing") == ()
 
 
-def test_a_format_without_a_converter_gives_no_atif(tmp_path: Path) -> None:
+class ReferencedReader(TrajectoryReader):
+    """A reader that Reef does not bundle, named by its reference; it has no ATIF converter."""
+
+    format = "referenced"
+
+    def __call__(self, path: Path) -> tuple[dict[str, object], ...]:
+        return ({"path": path.name},)
+
+
+def test_a_referenced_reader_class_reads_and_gives_no_atif_without_a_converter(tmp_path: Path) -> None:
     write_jsonl(tmp_path / "session.jsonl", [{"type": "message"}])
-    assert reader_for("json:loads").to_atif(tmp_path) == ()
+    reader = reader_for(f"{__name__}:ReferencedReader")
+    assert reader(tmp_path) == ({"path": tmp_path.name},)
+    assert reader.to_atif(tmp_path) == ()
+    with pytest.raises(TrajectoryError, match="must name a class that inherits TrajectoryReader"):
+        reader_for("json:loads")
 
 
 def atif_steps(document: dict[str, object]) -> list[tuple[object, ...]]:

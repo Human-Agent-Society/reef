@@ -11,7 +11,7 @@ from typing import Any, Literal, get_args
 from reef.core.errors import DeployConfigError, RuntimeConfigError
 from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
 from reef.execution.executor.arguments import normalize_native_options
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.component import training_component_factory_for
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
@@ -23,7 +23,7 @@ DefaultServing = Literal["engines", "trainer"]
 
 @dataclass(frozen=True)
 class EngineWeights:
-    """How Reef's engines serve releases that hold no weight files: what they load, and the plugin that fetches it.
+    """How Reef's engines serve snapshots that hold no weight files: what they load, and the plugin that fetches it.
 
     Values: ``artifact_format`` is the format of the files that ``weights`` gives for each snapshot. ``weights`` is a
     ``ArtifactWeights`` plugin reference, ``package.module:ClassName`` or a module and config. Purpose: a training
@@ -46,6 +46,9 @@ class TrainingDeployment(ABC):
     ``default_serving`` is the serving of a deployment that names none and
     sets no engine setting: ``engines`` or ``trainer``. A subclass that sets
     another value is refused when the class is defined.
+    ``requires_local_model`` is whether the host needs the model on disk when
+    no local engine serves it. A hosted integration sets False, and deployment
+    resolution then keeps the model identifier as written.
     """
 
     requires_local_model: bool = True
@@ -94,10 +97,10 @@ class TrainingDeployment(ABC):
         return None
 
     def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights | None:
-        """How Reef's engines (``inference.serving: engines``) get weights for releases that hold none, or None.
+        """How Reef's engines (``inference.serving: engines``) get weights for snapshots that hold none, or None.
 
         Reef asks only when the training component's ``artifact_format`` is ``None``. The default is None: engines
-        cannot serve such releases.
+        cannot serve such snapshots.
         """
         return None
 

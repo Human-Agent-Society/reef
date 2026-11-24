@@ -1,6 +1,6 @@
 """SPADE (arXiv:2608.19197): self play in adaptive synthetic executable environments, as a task generator.
 
-Reef knows one task format, Harbor, and writes and checks Harbor tasks and runs their rollouts in ``reef.record2sample.generator``.
+Reef knows one task format, Harbor, and writes and checks Harbor tasks and runs their rollouts in ``reef.samples.generator``.
 The built-in generated-task recipe runs the tasks and trains on them. What SPADE adds is the generator:
 the Environment Designer's adversarial experience section, the hint arm each task asks for, and the hint
 based regret as the Designer's signal.
@@ -27,9 +27,9 @@ from recipes.beta.spade.generation import (
     plateau_reward,
 )
 from recipes.beta.spade.generator import SpadeTaskGenerator
-from reef.train.algos.registry import register_objective_ref
+from reef.train.slime_backend.objectives import register_objective
 
-register_objective_ref("spade", "recipes.beta.spade.slime:SpadeObjective")
+register_objective("spade", "recipes.beta.spade.slime:SpadeObjective")
 
 __all__ = [
     "GenerationRecord",

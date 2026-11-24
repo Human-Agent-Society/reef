@@ -1,8 +1,7 @@
 schema_version: 2
 automatic_model: auto
-deployment:
-  # Local image used for the real-inference test; see README.md to build it on another host.
-  semantic_router_image: reef-direct-sr@sha256:090b81606403497c9b3cd48eb576ad1f4406024ee0f242cb714ba8fe3962dfe1
+# No semantic_router_image: reef serve builds the pinned router image on its first start (README.md, step 1).
+deployment: {}
 targets:
   code-student:
     provider_model: code-student

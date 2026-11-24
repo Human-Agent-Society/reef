@@ -9,14 +9,20 @@ import pytest
 from sqlalchemy import func, select
 from tests.support.conversations import conversation
 
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
-from reef.storage import sql_data
-from reef.storage.data import NewItem
-from reef.storage.record_items import record_item
-from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentNotFound, SegmentPartition, segment_lines
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
+from reef.storage.data.segments import (
+    LocalSegmentStore,
+    SegmentLine,
+    SegmentNotFoundError,
+    SegmentPartition,
+    segment_lines,
+)
+from reef.storage.data.store import NewItem
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import record_item
+from reef.storage.sql import data as sql_data
+from reef.storage.sql.data import PostgresDataStore, SQLiteDataStore
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}}
 
@@ -70,16 +76,16 @@ def segment_files(tmp_path) -> list:
 def test_a_segment_is_json_lines_and_a_reader_reads_only_its_lines(tmp_path):
     store = LocalSegmentStore(tmp_path)
     data, places = segment_lines("s1", ['{"a":1}', '{"b":"二"}'])
-    store.put("acme", "s1", data)
+    store.write("acme", "s1", data)
     assert [json.loads(line) for line in data.decode().splitlines()] == [{"a": 1}, {"b": "二"}]
     assert store.read("acme", list(reversed(places))) == ('{"b":"二"}'.encode(), b'{"a":1}')
-    with pytest.raises(SegmentNotFound):
+    with pytest.raises(SegmentNotFoundError):
         store.read("other", places)
-    with pytest.raises(SegmentNotFound):
+    with pytest.raises(SegmentNotFoundError):
         store.read("acme", [SegmentLine("s1", places[1].offset, 100)])
     store.delete("acme", "s1")
     store.delete("acme", "s1")
-    with pytest.raises(SegmentNotFound):
+    with pytest.raises(SegmentNotFoundError):
         store.read("acme", places)
     with pytest.raises(ValueError, match="newline"):
         segment_lines("s2", ["{}\n{}"])
@@ -118,6 +124,27 @@ def test_small_new_trajectory_items_wait_in_the_database_for_one_segment(open_st
         # A call with enough content writes its own segment.
         store.create("acme", [trajectory("t3", "3"), trajectory("t4", "4")])
         assert waiting_rows(store) == (0, 0) and len(segment_files(tmp_path)) == 2
+
+
+def test_a_failed_revision_releases_only_its_unpublished_segments(open_store, monkeypatch, tmp_path):
+    old, new = trajectory("old", "first"), trajectory("new", "second")
+    with closing(open_store()) as store:
+        store.create("acme", [old])
+        committed = segment_files(tmp_path)
+
+        def interrupted():
+            yield new
+            assert len(segment_files(tmp_path)) == 2
+            assert [item.item_id for item in store.query("acme")] == ["old"]
+            raise RuntimeError("source interrupted")
+
+        with pytest.raises(RuntimeError, match="source interrupted"):
+            store.replace_trajectories("acme", interrupted(), ["old"])
+        monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+        store.maintain()
+        assert segment_files(tmp_path) == committed
+        assert store.read("acme", "old").content == old.content
+        assert store.read("acme", "new") is None
 
 
 def test_a_read_of_many_items_reads_their_segment_lines_together(open_store, monkeypatch):
@@ -195,10 +222,26 @@ def test_maintain_deletes_only_segments_that_no_row_uses(open_store, monkeypatch
         assert len(segment_files(tmp_path)) == 2
         store.delete("acme", "t1")
         store.maintain()
+        # A deleted item keeps its segment until the purge.
+        assert len(segment_files(tmp_path)) == 2
+        assert store.purge("acme", "t1")
+        store.maintain()
         assert len(segment_files(tmp_path)) == 1
         assert [item.item_id for item in store.query("acme")] == ["t3"]
         with store.transaction() as connection:
             assert connection.scalar(select(func.count()).select_from(store.segment_table)) == 1
+
+
+def test_a_restored_item_reads_its_content_from_the_segment_that_its_delete_kept(open_store, monkeypatch, tmp_path):
+    monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+    with closing(open_store()) as store:
+        (created,) = store.create("acme", [trajectory("t1", "one")])
+        store.delete("acme", "t1")
+        store.maintain()
+        assert len(segment_files(tmp_path)) == 1
+        store.restore("acme", ["t1"])
+        assert store.read("acme", "t1").content == {**ATIF, "steps": [{"step_id": 1, "message": "one"}]}
+        assert store.read("acme", "t1").digest == created.digest
 
 
 def test_a_store_without_segments_refuses_to_guess_moved_content(open_store):
@@ -210,24 +253,8 @@ def test_a_store_without_segments_refuses_to_guess_moved_content(open_store):
             store.read("acme", "t1")
 
 
-def test_an_upgrade_adds_the_segment_columns(open_store):
-    with closing(open_store(segments=False)) as store:
-        store.create("acme", [*calls(1, 2), trajectory("t1", "one")])
-        with store.transaction() as connection:
-            # Remove the columns, as the earlier version kept the tables.
-            for table in (store.items_table, store.nodes_table):
-                index = next(index for index in table.indexes if "segment_id" in index.columns)
-                index.drop(connection)
-                for name in ("segment_id", "segment_offset", "segment_length"):
-                    connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN {name}")
-    with closing(open_store()) as store:
-        assert store.read("acme", "coding/call-2").content == calls(2)[0].content
-        store.create("acme", [trajectory("t2", "two")])
-        assert store.read("acme", "t2").content["steps"][0]["message"] == "two"
-
-
 def test_the_deployment_gives_its_segment_store_to_the_data_store(tmp_path):
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -243,4 +270,21 @@ def test_the_deployment_gives_its_segment_store_to_the_data_store(tmp_path):
         dispatcher.close()
     assert len(list((tmp_path / "records" / "segments").glob("*/*.jsonl"))) == 1
     with pytest.raises(ValueError, match="segment_backend"):
-        ServiceConfig(recipe="recipe", segment_backend="unknown")
+        ServiceSettings(recipe="recipe", segment_backend="unknown")
+
+
+def test_a_replaced_trajectory_goes_to_a_new_segment_and_maintain_deletes_the_old_one(
+    open_store, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+    with closing(open_store()) as store:
+        store.create("acme", [trajectory("t1", "a long copy")])
+        (old_segment,) = segment_files(tmp_path)
+        replaced = {**ATIF, "steps": [{"step_id": 1, "message": "short"}]}
+        store.replace_trajectory("acme", "t1", replaced)
+        assert store.read("acme", "t1").content == replaced
+        assert waiting_rows(store) == (0, 0)
+        store.maintain()
+        # No row uses the old segment, so maintain deletes it; the new one stays.
+        assert old_segment not in segment_files(tmp_path) and len(segment_files(tmp_path)) == 1
+        assert store.read("acme", "t1").content == replaced

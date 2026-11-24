@@ -12,14 +12,23 @@ from typing import Any
 from urllib.request import Request
 
 import pytest
-from tests.support.harness_steps import evolution_config
+from tests.support.harness_jobs import evolution_config
 
+from reef.control.scenario.live_objects import LiveObjects, harness_models
+from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.tasks.model_binding import (
+    DEFAULT_CONTEXT_WINDOW,
+    NO_KEY_PLACEHOLDER,
+    ModelBinding,
+    ModelBindings,
+    token_limits,
+)
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 
 
 class _Response(io.BytesIO):
@@ -204,10 +213,10 @@ def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monke
 
 
 def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch) -> None:
-    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, JobCalls
 
     record: list[dict[str, Any]] = []
-    budgeted = BudgetedBinding(ModelBinding("http://up", "m"), StepCalls(0, record))
+    budgeted = BudgetedBinding(ModelBinding("http://up", "m"), JobCalls(0, record))
     _capture(
         monkeypatch,
         {
@@ -223,7 +232,7 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
 
 def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -> None:
     from reef.harness.tree.checks import RECORD_TEXT_CAP
-    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, JobCalls
 
     response = {
         "id": "response-1",
@@ -240,7 +249,7 @@ def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -
     }
     record: list[dict[str, Any]] = []
     inner = ModelBinding("http://up", "m")
-    budgeted = BudgetedBinding(inner, StepCalls(0, record))
+    budgeted = BudgetedBinding(inner, JobCalls(0, record))
     _capture(monkeypatch, response)
     assert budgeted.chat([]) == "the answer"
     assert record[0]["reply"] == "the answer"
@@ -337,7 +346,7 @@ def test_responses_stream_keeps_reasoning_output_items(monkeypatch) -> None:
 
 
 def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text(monkeypatch) -> None:
-    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, JobCalls
 
     class CustomChat(ModelBinding):
         def chat(self, messages, **params):
@@ -348,7 +357,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
     inner.complete({"messages": []})
     assert inner.last_response() is not None
     record: list[dict[str, Any]] = []
-    assert BudgetedBinding(inner, StepCalls(0, record)).chat([]) == "custom text"
+    assert BudgetedBinding(inner, JobCalls(0, record)).chat([]) == "custom text"
     assert "response" not in record[0]
 
 
@@ -366,7 +375,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 def test_a_failed_call_retains_reasoning_when_the_provider_returns_no_final_text(monkeypatch) -> None:
     from reef.harness.tasks.model_binding import ModelBindingError
-    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, JobCalls
 
     record: list[dict[str, Any]] = []
     response = {
@@ -380,7 +389,7 @@ def test_a_failed_call_retains_reasoning_when_the_provider_returns_no_final_text
     }
     _capture(monkeypatch, response)
     with pytest.raises(ModelBindingError, match="non-text"):
-        BudgetedBinding(ModelBinding("http://up", "m"), StepCalls(0, record)).chat([])
+        BudgetedBinding(ModelBinding("http://up", "m"), JobCalls(0, record)).chat([])
     assert "error" in record[0] and "reply" not in record[0]
     assert record[0]["response"] == response
     assert record[0]["usage"] == {"input_tokens": 3, "output_tokens": 20}
@@ -455,14 +464,58 @@ def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> No
     )
 
 
+def test_opencode_binding_gives_the_model_its_limits_from_metadata_env_or_the_default() -> None:
+    """Without limits opencode never compacts a session, so the binding always writes them: the run's env wins
+    over the endpoint's metadata, and the default stands in for an unknown window."""
+
+    def limit(binding: ModelBinding) -> dict[str, int]:
+        ((_, data),) = binding.config_overlays(get_adapter("opencode"))
+        return data["provider"]["reef"]["models"]["served"]["limit"]
+
+    binding = ModelBinding("http://up", "served", api_key="k")
+    assert limit(binding) == {"context": DEFAULT_CONTEXT_WINDOW, "output": binding.max_output_tokens}
+    known = replace(binding, metadata=ModelMetadata(context_window=262144, reasoning=True))
+    assert limit(known) == {"context": 262144, "output": binding.max_output_tokens}
+    configured = known.with_env_limits({"REEF_CONTEXT_WINDOW": "65536", "REEF_MAX_OUTPUT_TOKENS": "8192"})
+    assert limit(configured) == {"context": 65536, "output": 8192}
+    files = render_tree(HarnessTree({}), get_adapter("opencode"), configured.config_overlays(get_adapter("opencode")))
+    assert (
+        json.loads(files["opencode/opencode.json"])["provider"]["reef"]["models"]["served"]["limit"]["context"]
+        == 65536
+    )
+
+
+def test_pi_and_codex_take_the_context_window_that_a_run_sets() -> None:
+    """pi gets the binding's window always. Codex's catalog gets an entry only for known metadata or an explicit
+    window: a guessed window would replace Codex's own handling of a model it does not know."""
+    binding = ModelBinding("http://up", "served", api_key="k", api="responses")
+    configured = binding.with_env_limits({"REEF_CONTEXT_WINDOW": "65536"})
+    assert models_overlay(configured)["providers"]["reef"]["models"][0]["contextWindow"] == 65536
+
+    def codex_models(binding: ModelBinding) -> object:
+        return dict(binding.config_overlays(get_adapter("codex")))["models"]["models"]
+
+    assert codex_models(binding) == {}
+    assert codex_models(configured) == {"served": {"context_window": 65536, "reasoning": False}}
+    known = replace(configured, metadata=ModelMetadata(context_window=262144, reasoning=True))
+    assert codex_models(known) == {"served": {"context_window": 65536, "reasoning": True}}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1e5", "big", ""])
+def test_a_token_limit_in_the_env_is_a_positive_integer(value: str) -> None:
+    with pytest.raises(ValueError, match="REEF_CONTEXT_WINDOW must be a positive number of tokens"):
+        token_limits({"REEF_CONTEXT_WINDOW": value})
+    assert token_limits({"OTHER": value}) == (None, None)
+
+
 def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:
     runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
     config = {
         "model": {"path": "small"},
         **evolution_config(adapter="codex", model_metadata={"small": {"context_window": 640_000, "reasoning": True}}),
     }
-    codex = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
-    assert codex.model_binding().metadata.context_window == 640_000
+    codex = load_recipe(HarnessEvolutionRecipe, config, {})
+    assert harness_models(codex, LiveObjects(runtime=runtime)).served().metadata.context_window == 640_000
 
 
 def test_unknown_api_is_refused() -> None:
@@ -550,10 +603,11 @@ def test_recipe_declares_named_models_under_evolution_models() -> None:
 
     def recipe(models: dict[str, Any], environ: dict[str, str]) -> HarnessEvolutionRecipe:
         config = {"model": {"path": "small"}, **evolution_config(models=models)}
-        return HarnessEvolutionRecipe.from_environment(environ, config=config, runtime=runtime)
+        return load_recipe(HarnessEvolutionRecipe, config, environ)
 
     teacher = {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}
-    models = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"}).model_bindings()
+    built = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"})
+    models = harness_models(built, LiveObjects(runtime=runtime)).bindings()
     assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
     with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
         recipe({"served": {"url": "http://x", "model": "m"}}, {})
@@ -574,6 +628,7 @@ def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
     models = models_overlay(binding)
     assert models["providers"]["reef"]["models"][0] == {
         "id": "anthropic/claude-sonnet-5",
+        "contextWindow": DEFAULT_CONTEXT_WINDOW,
         "maxTokens": 32000,
     }
     assert binding.max_output_tokens == 32000
@@ -698,8 +753,8 @@ def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pyt
 
 def test_budgeted_binding_keeps_model_metadata() -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, JobCalls
 
     binding = ModelBinding("http://up", "served", api="responses", metadata=ModelMetadata(640_000, True))
-    budgeted = BudgetedBinding(binding, StepCalls(0, []))
+    budgeted = BudgetedBinding(binding, JobCalls(0, []))
     assert budgeted.config_overlays(get_adapter("codex")) == binding.config_overlays(get_adapter("codex"))

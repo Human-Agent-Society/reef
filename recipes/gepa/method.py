@@ -1,23 +1,23 @@
-"""GEPA's reflective search as a harness evolution method, one GEPA iteration per step.
+"""GEPA's reflective search as a harness evolution method, one GEPA iteration per job.
 
 ``GEPA`` runs the part of an iteration that GEPA calls the reflective
 mutation. It samples a parent from the archive's Pareto front, takes the
 parent's minibatch, reflects on one component with the feedback that the
 minibatch produced, runs the child on the same minibatch, and accepts only a
-strict improvement. The accepted child is the step's candidate: the method
+strict improvement. The accepted child is the job's candidate: the method
 writes it to ``harness/``.
 
-The rest of the iteration is GEPA's validation pass, and the step's
+The rest of the iteration is GEPA's validation pass, and the job's
 evaluation runs it. The ``compare`` policy with ``statistic: mean`` scores
 the child on every evaluation task and keeps it only when its mean is
 strictly above the served tree's. The served tree's scores come from the
 history's score cache, so they are the scores it was validated with, as
-GEPA keeps them. The next step reads the validation and the decision from
-the history and folds them into the archive (``archive_for_step``) before it
+GEPA keeps them. The next job reads the validation and the decision from
+the history and folds them into the archive (``archive_for_job``) before it
 samples the next parent.
 
 The parent's minibatch costs no runs when the parent is the served
-tree: the step's traces are that tree's own run, scores included. Any other
+tree: the job's traces are that tree's own run, scores included. Any other
 parent and every child run through ``services.evaluate``. The archive counts
 metric calls the way GEPA does, whatever the cache saves: the seed's
 validation, every parent and child minibatch, and every accepted candidate's
@@ -39,7 +39,7 @@ from reef.core.plugins import ConfiguredPlugin, PluginSettings
 from reef.evaluation.harness import History
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree
-from reef.train.harness_backend import Method, Services, StepContext, Trace, Workspace
+from reef.train.harness_backend import Method, MethodJob, Services, Trace, Workspace
 
 from .archive import Archive
 from .components import candidate_tree, texts_of
@@ -117,7 +117,7 @@ class GEPASettings(PluginSettings):
     ``feedback`` is a plugin setting that names a ``Feedback``, ``None`` for
     ``ScoreFeedback``.
     Purpose: ``GEPA.from_config`` parses it from ``evolution.method.config``;
-    ``GEPA.step`` runs by it.
+    ``GEPA.run`` runs by it.
     """
 
     minibatch_size: int = config_option(3, help="The examples a parent and its child are compared on.")
@@ -150,13 +150,13 @@ class GEPASettings(PluginSettings):
 
 
 class GEPA(Method):
-    """GEPA's reflective search, one iteration per step.
+    """GEPA's reflective search, one iteration per job.
 
     Values: ``settings`` is the configuration, and ``feedback`` writes the
     feedback sentence of each reflective record.
     Purpose: a deployment names the class in ``evolution.method``, and the
-    backend calls ``step`` once per step. The search lives in the archive,
-    ``state/archive.json``, which the backend commits with each step.
+    backend calls ``run`` once per job. The search lives in the archive,
+    ``state/archive.json``, which the backend commits with each job.
     """
 
     def __init__(self, settings: GEPASettings | None = None, feedback: Feedback | None = None) -> None:
@@ -173,12 +173,12 @@ class GEPA(Method):
         )
         return cls(settings, feedback)
 
-    def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
+    def run(self, job: MethodJob) -> None:
+        workspace, services = job.workspace, job.services
         path = workspace.state / ARCHIVE_FILE
         tasks = workspace.tasks()
         head = workspace.tree()
-        archive = archive_for_step(
+        archive = archive_for_job(
             path.read_text(encoding="utf-8") if path.is_file() else None,
             workspace.history(),
             tasks,
@@ -194,10 +194,10 @@ class GEPA(Method):
     def iterate(
         self, archive: Archive, workspace: Workspace, services: Services, head: HarnessTree, valset_size: int
     ) -> tuple[str, dict[str, Any]]:
-        """One GEPA iteration on ``archive``: the step's summary and the iteration's record.
+        """One GEPA iteration on ``archive``: the job's summary and the iteration's record.
 
         An accepted child goes to ``harness/``. Every other ending leaves
-        ``harness/`` as it is, so the backend skips the step.
+        ``harness/`` as it is, so the backend skips the job.
         """
         settings = self.settings
         if settings.max_metric_calls is not None and archive.metric_calls >= settings.max_metric_calls:
@@ -223,8 +223,8 @@ class GEPA(Method):
         reflection = services.models.get(settings.reflection_model, services.models.served)
         reply = reflection.chat([{"role": "user", "content": prompt}])
         new_text = extract_new_text(reply)
-        # The step's calls.json keeps the prompt and the reply. The record leaves them out: it goes into the archive,
-        # which every step commits whole, and into the step's notes.
+        # The job's calls.json keeps the prompt and the reply. The record leaves them out: it goes into the archive,
+        # which every job commits whole, and into the job's notes.
         record: dict[str, Any] = {
             "parent": parent,
             "served": archive.served,
@@ -306,7 +306,7 @@ class GEPA(Method):
         ]
 
 
-def archive_for_step(
+def archive_for_job(
     text: str | None,
     history: History,
     tasks: Sequence[str],
@@ -315,18 +315,18 @@ def archive_for_step(
     repeats: int,
     rng_seed: int = 0,
 ) -> Archive:
-    """The archive as a step starts: the committed one, its pending candidate settled, its served candidate current.
+    """The archive as a job starts: the committed one, its pending candidate settled, its served candidate current.
 
     ``text`` is the committed ``archive.json``, ``None`` before the first
-    step. The pending candidate's validation pass is the evaluation of the
-    step that proposed it: ``history`` holds its scores on ``tasks``, the
-    scores of the tree that step served, and the step's decision. The
+    job. The pending candidate's validation pass is the evaluation of the
+    job that proposed it: ``history`` holds its scores on ``tasks``, the
+    scores of the tree that job served, and the job's decision. The
     evaluation runs ``repeats`` ≥ 1 runs per task and tree, so a task's
     score is the mean of its repeats, and a failed run reads as a zero,
-    never as a gap. A pending candidate whose step reached no decision (the
-    backend skipped the step) is dropped.
+    never as a gap. A pending candidate whose job reached no decision (the
+    backend skipped the job) is dropped.
 
-    ``served_texts`` are the evolvable texts of the tree the step serves. A
+    ``served_texts`` are the evolvable texts of the tree the job serves. A
     tree that does not hold the served candidate's texts moved without the
     method: a first boot, an operator edit or a new training start. It becomes a new
     parentless candidate, never a descendant of the last served one, and it
@@ -349,7 +349,7 @@ def archive_for_step(
                 repeats=repeats,
             )
     if archive.served is None or archive.candidates[archive.served].texts != dict(served_texts):
-        # GEPA scores its seed on the validation set before its first iteration; the step's evaluation runs that
+        # GEPA scores its seed on the validation set before its first iteration; the job's evaluation runs that
         # pass later, at the same price.
         archive.seed(served_texts)
         archive.charge(len(tasks) * repeats)
@@ -374,5 +374,5 @@ __all__ = [
     "Feedback",
     "GEPASettings",
     "ScoreFeedback",
-    "archive_for_step",
+    "archive_for_job",
 ]

@@ -47,7 +47,7 @@ the agent. Reef runs as a service, on the same machine or on a server.
 
 Each version of the harness is a *harness tree*: a directory of text files
 such as ``rules.md`` and ``skills/<name>/SKILL.md``. Reef stores every
-version as a *release*. The newest one is the *head*.
+version as a *snapshot*. The newest one is the *head*.
 
 Start Reef
 ----------
@@ -99,16 +99,25 @@ Tell Reef how it went
 ---------------------
 
 Reef learns from calls that have feedback. Score the session with one report
-that names its model calls: ``0`` for a failure, ``1`` for a success. The
-``feedback`` text says what went wrong. The commands use ``jq``.
+that names its last model call: ``0`` for a failure, ``1`` for a success. Reef
+adds the earlier calls of the session. The ``feedback`` text says what went
+wrong. These commands assume this session is the scenario's only active
+client. Run them immediately after it ends; they read the newest recorded
+call. The commands use ``jq``.
 
 .. code:: bash
 
-   CALLS=$(curl -s "http://127.0.0.1:8901/reef/scenarios/$SCENARIO/records?request_type=inference&limit=100" \
-     | jq -c '[.records[].agent_record_id]')
+   # The newest inference record. Reef lists the records oldest first, at most 100 for each request.
+   RECORDS="http://127.0.0.1:8901/reef/scenarios/$SCENARIO/records?request_type=inference&limit=100"
+   AFTER=0
+   while [ "$AFTER" != null ]; do
+     PAGE=$(curl -sf "$RECORDS&after_sequence=$AFTER") || break
+     AFTER=$(jq '.next_after_sequence' <<< "$PAGE")
+   done
+   LAST=$(jq -c '[.records[-1].agent_record_id]' <<< "$PAGE")
    curl -s -X POST http://127.0.0.1:8901/reef/report \
      -H "x-reef-scenario: $SCENARIO" -H "Content-Type: application/json" \
-     -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
+     -d "{\"references\": $LAST, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
 
 With a deployment token, add ``-H "Authorization: Bearer $REEF_TOKEN"`` to
 each ``curl``. A program that calls the model itself reads each call's
@@ -118,42 +127,32 @@ What Reef does next
 -------------------
 
 This deployment starts a training step for each report. The step does not
-change the head directly. It makes a candidate and tests it first.
+change the head directly:
 
-.. container:: flow
+#. The method gets a copy of the head and your session, and writes new rules
+   from what went wrong.
+#. Reef checks the copy, and refuses files that the agent cannot read.
+#. The copy and the head run the same tasks.
+#. A winning copy becomes the new head, and your next ``pi`` session starts
+   on it.
 
-   Copy
-       the method gets a copy of the head and your session
-
-   **Edit**
-       it writes new rules from what went wrong
-
-   Check
-       Reef refuses files the agent cannot read
-
-   Evaluate
-       candidate and head run the same tasks
-
-   Decide
-       the better one is the head
-
-A winning candidate becomes the new head, and your next ``pi`` session
-starts on it. List the steps and their results:
+List the steps and their results:
 
 .. code:: bash
 
    curl -s -H "x-reef-scenario: $SCENARIO" http://127.0.0.1:8901/reef/harness/artifacts
 
 Each step has a page, ``/reef/harness/artifacts/<step>/page``. A change to
-code, such as a pi extension, waits for you to promote it.
+code, such as a pi extension, waits until you `activate it
+<../user-guide/evolve-your-harness.rst#activate-an-inactive-artifact>`__.
 
 When you and Reef change the same file
 --------------------------------------
 
 You can edit Reef's files too, for example the rules in
 ``~/.local/share/reef-client/harness/my-agent/plugin/rules.md``. The client
-sends your edit with the next sync, and Reef merges it onto the active selection. Text
-files merge line by line:
+sends your edit with the next sync, and Reef merges it onto the active
+selection. Text files merge line by line:
 
 +---------------------------------+--------------------------------------+
 | You changed                     | Result                               |

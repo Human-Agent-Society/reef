@@ -22,14 +22,14 @@ from reef.core.job_data import TaskSample
 from reef.core.reports import ReportValidationError
 from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
-from reef.pipeline_context import PipelineContext
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.record2sample.traces import InferenceSamples, TraceSamples
-from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.storage.commits import CommitRecord
-from reef.storage.data import NewItem
-from reef.storage.samples import SampleStore, consumed_sample_id
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.samples.context import PipelineContext
+from reef.samples.traces import InferenceSamples, TraceSamples
+from reef.storage.data.store import NewItem
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id
+from reef.train.pipeline import PipelineSettings, TrainingPipeline
+from reef.train.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.train.types import JobData
 
 
@@ -56,20 +56,20 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
 
 #: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
 INFERENCE_STAGES = {
-    "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
+    "record2sample": {"module": "reef.samples.traces:InferenceSamples"},
 }
 
 
 def harness_stages(
     *, inference: bool = False, buffer_size: int | None = None, job_samples: int | None = None
-) -> PipelineConfig:
+) -> PipelineSettings:
     """The harness evolution stages as a deployment's ``pipeline`` section configures them."""
     section: dict = dict(INFERENCE_STAGES) if inference else {}
     sizes = {"buffer_size": buffer_size, "job_samples": job_samples}
     stage_config = {key: value for key, value in sizes.items() if value is not None}
     if stage_config:
         section["sample2job"] = {"config": stage_config}
-    return PipelineConfig.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
+    return PipelineSettings.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
 
 
 def reports_pipeline(
@@ -157,9 +157,9 @@ def test_trace_processor_carries_the_task_a_report_names() -> None:
 
 
 def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() -> None:
-    """A report over a whole run becomes one sample: the trajectory holds
-    every referenced payload in reference order, the payload is the last
-    exchange, and the feedback rides along verbatim."""
+    """A report over a whole run becomes one sample: the trajectory keeps a
+    summary of every referenced call in reference order, the payload is the
+    last exchange that the steps project, and the feedback rides along verbatim."""
     processor = _processor()
     first = {"messages": [{"role": "user", "content": "first"}]}
     second = {"messages": [{"role": "user", "content": "second"}]}
@@ -171,8 +171,8 @@ def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() ->
     batch = processor.build_job_data(1)
     (sample,) = batch.samples
     assert source_record_id(sample) == "inf-2"
-    assert recorded_payload(sample) == second
-    assert recorded_payloads(sample) == (first, second)
+    assert recorded_payload(sample)["messages"][-1] == second["messages"][-1]
+    assert recorded_payloads(sample) == ({}, {})
     assert sample.metadata.get("feedback") == "wrong file"
     assert sample.metadata.get("reward") == 0.0
 
@@ -185,8 +185,8 @@ def test_trace_processor_keeps_single_reference_trajectory_and_carries_feedback(
 
     batch = processor.build_job_data(1)
     (sample,) = batch.samples
-    assert recorded_payload(sample) == payload
-    assert recorded_payloads(sample) == (payload,)
+    assert recorded_payload(sample)["messages"] == payload["messages"]
+    assert recorded_payloads(sample) == ({},)
     assert sample.metadata.get("feedback") == {"reason": "timeout"}
 
 
@@ -235,7 +235,7 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     batch = processor.build_job_data(2)
     assert isinstance(batch, JobData)
     assert [source_record_id(s) for s in batch.samples] == ["inf-1", "inf-2"]
-    assert [recorded_payload(s) for s in batch.samples] == [first, second]
+    assert [recorded_payload(s)["messages"] for s in batch.samples] == [first["messages"], second["messages"]]
     assert {s.metadata.get("reward") for s in batch.samples} == {None}
 
     # The stored samples consume their records; the job data consumes the samples.
@@ -347,12 +347,12 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
     add_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     first = offline_pipeline(samples, job_samples=1)
     durable = first.build_job_data(1)
-    session.commit_step(
-        expected_step=0,
+    session.append_commit(
+        expected_commit_number=0,
         commit=CommitRecord(
             scenario="offline",
-            step=1,
-            snapshot=SnapshotRef("release:1", "base"),
+            commit_number=1,
+            snapshot=SnapshotRef("snapshot:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=0,
@@ -365,7 +365,7 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
     first.acknowledge(lost.data_id)
     first.close()
 
-    (trained,) = samples.get(("task-a",))
+    (trained,) = samples.read(("task-a",))
     assert task_names(durable) == ["task-a"] and trained.train_count("") == 1
     restarted = offline_pipeline(samples, job_samples=1)
     rest = []

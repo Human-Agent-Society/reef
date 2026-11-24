@@ -3,7 +3,7 @@ as the engine drew it.
 
 Two engines make the block: a training component's rollout engine for every call of a task rollout
 (``reef.train.slime_backend.engine_chat``), and the inference service for a served call that asks for it with
-``x-reef-record-training`` (``reef.inference.chat``). ``reef.record2sample.samples.make_policy_trajectory`` reads it.
+``x-reef-record-training`` (``reef.inference.chat``). ``reef.samples.samples.make_policy_trajectory`` reads it.
 The block names the ``SamplingDistribution`` of the sample when the call's sampling parameters fix it.
 """
 

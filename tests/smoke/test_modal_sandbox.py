@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from reef.execution.sandbox.modal import ModalExecutor, ModalSession
-from reef.execution.sandbox.process import ProgramTimeout, SandboxProgram
+from reef.execution.sandbox.process import ProgramTimeoutError, SandboxProgram
 from reef.execution.sandbox.remote import deployment_owner
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_MODAL") != "1", reason="opt-in paid Modal test")
@@ -66,8 +66,10 @@ def test_a_process_runs_jailed_in_a_modal_sandbox_and_reaches_the_host_through_t
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
     (workspace / "task.md").write_text("say hi")
+    # The first command reads the standard input to its end, as pi does: it must be empty, not open.
     script = (
-        "cowsay hi > answer.txt"
+        "cat > stdin.txt"
+        " && cowsay hi > answer.txt"
         f" && python3 -c \"import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:{host_server}/')"
         '.read().decode())" > fetched.txt'
         " && (touch /etc/reef-escape 2>/dev/null && echo writable || echo read-only) > jail.txt"
@@ -79,10 +81,11 @@ def test_a_process_runs_jailed_in_a_modal_sandbox_and_reaches_the_host_through_t
         outcome = session.launch(["/bin/sh", "-c", script], root=root, workspace=workspace, env={}, timeout=120)
         assert outcome.exit_code == 0, outcome.stderr
         assert outcome.stdout.strip() == "say hi"
+        assert (workspace / "stdin.txt").read_text() == ""
         assert "hi" in (workspace / "answer.txt").read_text()
         assert (workspace / "fetched.txt").read_text().strip() == ANSWER
         assert (workspace / "jail.txt").read_text().strip() == "read-only"
-        with pytest.raises(ProgramTimeout):
+        with pytest.raises(ProgramTimeoutError):
             session.launch(["sleep", "60"], root=root, workspace=workspace, env={}, timeout=3)
     finally:
         session.close()

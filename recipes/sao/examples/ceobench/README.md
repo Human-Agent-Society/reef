@@ -303,7 +303,7 @@ an earlier rollout, and the pacer on.
 | --- | --- |
 | Outcome | completed on day 497 (week 71) with final cash $257,682 and `reward` 0.258 |
 | Turns | 493 in 3h52m, of which 144 were decision turns and 125 of those were reported (19 were over the 24k window) |
-| Training | 15 releases, 2 critic-only steps and then 13 actor updates with the first served from week 9. The pacer held the game for 51 minutes in all and 370 s at most |
+| Training | 15 snapshots, 2 critic-only steps and then 13 actor updates with the first served from week 9. The pacer held the game for 51 minutes in all and 370 s at most |
 | Rewards | one positive week (week 6, +0.006) and every other week negative, with weeks 12 to 16 at the clip |
 
 Week 0 bought R&D for $178,070. Weeks 1 to 9 grew the base to 499

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,20 +15,34 @@ import pytest
 import sqlalchemy
 import sqlalchemy.event
 from sqlalchemy import func, select
-from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
+from tests.support.trajectories import policy_trajectory
 
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.core.atif_payloads import canonical_json
+from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
-from reef.storage.item_kinds import json_digest
-from reef.storage.job_data import job_data_key, read_job_data
-from reef.storage.record_items import (
+from reef.storage.data import store as data_module
+from reef.storage.data.item_kinds import TaskFilesReference, json_digest, task_partition
+from reef.storage.data.job_data import job_data_key
+from reef.storage.data.store import (
+    DeletedItem,
+    ItemConflictError,
+    ItemNotFoundError,
+    MemoryDataStore,
+    NewItem,
+    RecordLink,
+    ScenarioArchivedError,
+    ScenarioHold,
+    StoredItem,
+)
+from reef.storage.data.task_collections import TaskCollection, collection_benchmarks
+from reef.storage.data.tasks import FilesDigest, LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.scenario.record_items import (
     evaluation_call_item,
     evaluation_call_items,
     evaluation_trajectory_item,
@@ -35,17 +50,16 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
-from reef.storage.sql_records import TrajectoryNodes
-from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import LocalTaskFileStore, files_digest
+from reef.storage.sql.data import USES_TABLE, PostgresDataStore, SQLiteDataStore
+from reef.storage.sql.records import TrajectoryNodes
+from reef.storage.sql.setup import prefix_upper_bound
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
 
 
 def record_content(record_id: str) -> dict:
-    """The content of the record item of the inference ``record_id`` (``reef.storage.record_items``)."""
+    """The content of the record item of the inference ``record_id`` (``reef.storage.scenario.record_items``)."""
     return {
         "agent_record_id": record_id,
         "request_type": "inference",
@@ -126,9 +140,108 @@ def test_only_the_create_that_stores_an_item_marks_it_inserted(store):
 def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_that_stores_nothing(store):
     (first,) = store.create("acme", [trajectory("t1", "one")])
     assert store.create("acme", [trajectory("t1", "one")]) == (first,)
-    with pytest.raises(ItemConflict):
+    with pytest.raises(ItemConflictError):
         store.create("acme", [trajectory("t3", "three"), trajectory("t1", "changed")])
     assert [item.item_id for item in store.query("acme")] == ["t1"]
+
+
+@pytest.mark.parametrize("store", ["sqlite-memory", "sqlite", "postgres"], indirect=True)
+def test_trajectory_publication_preserves_the_previous_revision_on_interruption_or_conflict(store):
+    def ids():
+        return [item.item_id for item in store.query("acme", trajectory_set="tests", content=False)]
+
+    old = trajectory("old", trajectory_sets=["tests"])
+    a = trajectory("a", trajectory_sets=["tests"])
+    b = trajectory("b", trajectory_sets=["tests"])
+    store.create("acme", [old, trajectory("conflict", "other")])
+
+    def interrupted():
+        yield a
+        assert ids() == ["old"]
+        raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        store.replace_trajectories("acme", interrupted(), ["old"])
+    with pytest.raises(ItemConflictError):
+        store.replace_trajectories("acme", iter([a, trajectory("conflict", "changed")]), ["old"])
+    assert ids() == ["old"] and store.read("acme", "a") is None
+
+    def revision():
+        yield a
+        assert ids() == ["old"]
+        yield b
+
+    store.replace_trajectories("acme", revision(), previous_ids=["old"])
+    assert ids() == ["a", "b"]
+    store.replace_trajectories("acme", iter([a, b]), ["old"])
+    assert ids() == ["a", "b"] and store.read("acme", "old") is None
+    store.replace_trajectories("acme", iter(()), ["a", "b"])
+    assert ids() == []
+
+
+def test_a_store_without_atomic_publication_keeps_its_existing_api(tmp_path):
+    with closing(LocalTaskFileStore(tmp_path)) as files, closing(MemoryDataStore(files)) as store:
+        store.create("acme", [trajectory("existing")])
+        with pytest.raises(NotImplementedError, match="atomic trajectory publication"):
+            store.replace_trajectories("acme", iter([trajectory("new")]), ["existing"])
+        assert [item.item_id for item in store.query("acme")] == ["existing"]
+
+
+def test_a_concurrent_unrelated_write_survives_trajectory_publication(open_durable_store):
+    with closing(open_durable_store()) as writer, closing(open_durable_store()) as other:
+        writer.create("acme", [trajectory("old")])
+        staged, resume = threading.Event(), threading.Event()
+
+        def revision():
+            yield trajectory("new")
+            staged.set()
+            assert resume.wait(5)
+
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(writer.replace_trajectories, "acme", revision(), ["old"])
+            try:
+                assert staged.wait(5)
+                other.create("acme", [trajectory("independent")])
+            finally:
+                resume.set()
+            job.result(timeout=5)
+        assert [item.item_id for item in other.query("acme")] == ["independent", "new"]
+
+
+def test_a_reader_sees_only_whole_trajectory_revisions(open_durable_store, monkeypatch):
+    with closing(open_durable_store()) as writer, closing(open_durable_store()) as reader:
+        writer.create("acme", [trajectory("old")])
+        inserted, resume = threading.Event(), threading.Event()
+        original = writer.write_new_items
+
+        def wait_after_first_insert(connection, values):
+            result = original(connection, values)
+            if not inserted.is_set():
+                inserted.set()
+                assert resume.wait(5)
+            return result
+
+        monkeypatch.setattr(writer, "write_new_items", wait_after_first_insert)
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(
+                writer.replace_trajectories, "acme", iter([trajectory("one"), trajectory("two")]), ["old"]
+            )
+            try:
+                assert inserted.wait(5)
+                if isinstance(reader, SQLiteDataStore):
+                    # SQLiteDataStore serializes API operations with BEGIN IMMEDIATE. A plain WAL reader
+                    # can inspect the previous committed revision while that writer is still running.
+                    table = reader.items_table
+                    with reader.engine.connect() as connection:
+                        assert list(connection.scalars(select(table.c.item_id).where(table.c.owner == "acme"))) == [
+                            "old"
+                        ]
+                else:
+                    assert [r.item_id for r in reader.query("acme", content=False)] == ["old"]
+            finally:
+                resume.set()
+            job.result(timeout=5)
+        assert [r.item_id for r in reader.query("acme", content=False)] == ["one", "two"]
 
 
 def test_each_owner_sees_only_its_own_items(store):
@@ -184,7 +297,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),
-        # The content of each kind follows its rules (reef.storage.item_kinds).
+        # The content of each kind follows its rules (reef.storage.data.item_kinds).
         (NewItem("x", {"steps": []}, {"kind": "trajectory"}), "ATIF"),
         (NewItem("coding/x", {"request": {}}, {"kind": "record", "origin": ORIGIN}), "exactly the keys"),
         (NewItem("other/r1", record_content("r1"), {"kind": "record", "origin": ORIGIN}), "has the ID"),
@@ -217,13 +330,16 @@ def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tm
     def used(after=0):
         return [
             (item.item_id, sequence)
-            for sequence, item in store.scenario_items("acme", "coding", kinds=("trajectory", "task"), after=after)
+            for sequence, item in (
+                (use.sequence, use.item)
+                for use in store.scenario_items("acme", "coding", kinds=("trajectory", "task"), after=after)
+            )
         ]
 
     first = used()
     assert [item_id for item_id, _ in first] == ["t1", "t3"]
     assert store.scenario_items("acme", "coding", kinds=("task",)) == ()
-    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0][1].content == ATIF
+    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0].item.content == ATIF
     # An older item that joins later is read after the others; a metadata change keeps a use's sequence.
     store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
     store.update("acme", ["t1"], {"label": "week 43"})
@@ -243,29 +359,6 @@ def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tm
     assert [item_id for item_id, _ in used()] == ["t3", "fix-bug"]
 
 
-def test_an_upgrade_gives_each_use_its_own_sequence_and_split(open_durable_store):
-    with closing(open_durable_store()) as store:
-        store.create("acme", [trajectory("t1"), trajectory("t2", "two")])
-        uses = store.scenarios_table
-        # The table of a store from before RFC #1140: one row per use, without a sequence or a split.
-        legacy = sqlalchemy.Table(
-            uses.name,
-            sqlalchemy.MetaData(schema=uses.schema),
-            *(sqlalchemy.Column(name, sqlalchemy.Text, primary_key=True) for name in ("owner", "item_id", "scenario")),
-        )
-        with store.transaction() as connection:
-            uses.drop(connection)
-            legacy.create(connection)
-            connection.execute(legacy.insert(), [{"owner": "acme", "item_id": "t1", "scenario": "coding"}])
-    with closing(open_durable_store()) as store:
-        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == ["t1"]
-        store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
-        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == [
-            "t1",
-            "t2",
-        ]
-
-
 def index_names(store) -> set[str]:
     """The names of the indexes of the ``data_item`` table of the SQL data store ``store``."""
     items = store.items_table
@@ -279,15 +372,6 @@ def index_names(store) -> set[str]:
         return set(connection.execute(statement, {"schema": items.schema, "table": items.name}).scalars())
 
 
-def test_an_upgrade_replaces_the_evaluation_index_that_has_no_sequence(open_durable_store):
-    # The index of a store from before ``sequence`` was in it: a page of an evaluation's calls read every call.
-    with closing(open_durable_store()) as store, store.transaction() as connection:
-        sqlalchemy.Index("data_item_by_evaluation", store.items_table.c.owner).create(connection)
-    with closing(open_durable_store()) as store:
-        names = index_names(store)
-    assert "data_item_by_evaluation_sequence" in names and "data_item_by_evaluation" not in names
-
-
 def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store):
     store.create("acme", [trajectory("t1"), trajectory("t2")])
     for patch, reason in [
@@ -298,7 +382,7 @@ def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store
     ]:
         with pytest.raises(ValueError, match=reason):
             store.update("acme", ["t1"], patch)
-    with pytest.raises(ItemNotFound):
+    with pytest.raises(ItemNotFoundError):
         store.update("acme", ["t1", "missing"], {"scenarios": {"coding": "train"}})
     assert store.query("acme", scenario="coding") == ()
 
@@ -310,7 +394,7 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
         (directory / "instruction.md").write_text(text)
     (item,) = store.create("acme", [NewItem("fix-bug", first, {"kind": "task", "scenarios": {"coding": "train"}})])
     old_path = store.task_path(store.read("acme", "fix-bug"))
-    ((used_before, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+    used_before = store.scenario_items("acme", "coding", kinds=("task",))[0].sequence
 
     replaced = store.replace_task("acme", "fix-bug", second)
     assert (replaced.sequence, replaced.metadata, replaced.digest) == (
@@ -322,14 +406,14 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     # A reader that opened the old files can go on, and a trainer reads the task again after its cursor.
     assert (old_path / "instruction.md").read_text() == "Fix the bug.\n"
     assert [
-        found.item_id for _, found in store.scenario_items("acme", "coding", kinds=("task",), after=used_before)
+        use.item.item_id for use in store.scenario_items("acme", "coding", kinds=("task",), after=used_before)
     ] == ["fix-bug"]
     # The same files again change nothing, not even the use.
-    ((used_after, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+    (used_after,) = [use.sequence for use in store.scenario_items("acme", "coding", kinds=("task",))]
     assert store.replace_task("acme", "fix-bug", second) == replaced
-    assert store.scenario_items("acme", "coding", kinds=("task",))[0][0] == used_after
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0].sequence == used_after
 
-    with pytest.raises(ItemNotFound):
+    with pytest.raises(ItemNotFoundError):
         store.replace_task("acme", "missing", second)
     with pytest.raises(ValueError, match="same name"):
         store.replace_task("acme", "fix-bug", first.parent)
@@ -339,6 +423,85 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     with pytest.raises(ValueError, match="only a task's files"):
         store.replace_task("acme", "t1", trajectory_task)
     assert store.read("acme", "fix-bug").digest == replaced.digest
+
+
+def test_a_task_item_is_created_and_replaced_by_a_reference_to_files_in_the_owners_partition(store, tmp_path):
+    digests = {}
+    for name, text in (("fix-bug", "Fix the bug.\n"), ("fix-bug-2", "Fix the bug in parse.\n"), ("other", "Other.\n")):
+        directory = tmp_path / name / ("fix-bug" if name.startswith("fix-bug") else name)
+        directory.mkdir(parents=True)
+        (directory / "instruction.md").write_text(text)
+        # A client writes the files into the owner's partition itself.
+        digests[name] = store.task_files.write(task_partition("acme"), directory)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (item,) = store.create("acme", [NewItem("fix-bug", TaskFilesReference(digests["fix-bug"]), metadata)])
+    assert (item.digest, item.inserted) == (digests["fix-bug"], True)
+    assert (store.task_path(item) / "instruction.md").read_text() == "Fix the bug.\n"
+
+    # A digest that the partition does not hold, holds under another name, or holds for another owner stores
+    # nothing, also beside a good reference.
+    for owner, name, digest in (
+        ("acme", "new-task", "0" * 64),
+        ("acme", "new-task", digests["other"]),
+        ("rival", "fix-bug", digests["fix-bug"]),
+    ):
+        with pytest.raises(TaskFilesNotFoundError, match="holds no task directory"):
+            store.create(
+                owner,
+                [
+                    NewItem("other", TaskFilesReference(digests["other"]), {"kind": "task"}),
+                    NewItem(name, TaskFilesReference(digest), {"kind": "task"}),
+                ],
+            )
+    assert store.read("acme", "other") is None and store.read("rival", "fix-bug") is None
+
+    replaced = store.replace_task("acme", "fix-bug", TaskFilesReference(digests["fix-bug-2"]))
+    assert (replaced.sequence, replaced.digest) == (item.sequence, digests["fix-bug-2"])
+    assert (store.task_path(replaced) / "instruction.md").read_text() == "Fix the bug in parse.\n"
+    with pytest.raises(TaskFilesNotFoundError):
+        store.replace_task("acme", "fix-bug", TaskFilesReference(digests["other"]))
+    with pytest.raises(ItemNotFoundError):
+        store.replace_task("acme", "missing", TaskFilesReference(digests["fix-bug"]))
+    assert store.read("acme", "fix-bug").digest == digests["fix-bug-2"]
+    with pytest.raises(ValueError, match="64 lowercase hexadecimal"):
+        TaskFilesReference("../" + digests["fix-bug"])
+
+
+def test_a_trajectory_items_content_is_replaced_in_place_and_its_uses_are_read_again(store, tmp_path):
+    (item,) = store.create("acme", [trajectory("t1", "a long copy", scenarios={"coding": "train"})])
+    store.create("acme", [trajectory("t2", "after")])
+    used_before = store.scenario_items("acme", "coding", kinds=("trajectory",))[0].sequence
+    smaller = {**ATIF, "steps": [{"step_id": 1, "message": "short"}]}
+
+    replaced = store.replace_trajectory("acme", "t1", smaller)
+    assert (replaced.sequence, replaced.metadata, replaced.digest, replaced.content) == (
+        item.sequence,
+        item.metadata,
+        json_digest(smaller),
+        None,
+    )
+    assert store.read("acme", "t1").content == smaller
+    # The item keeps its place in the arrival order, and a trainer reads it again after its cursor.
+    assert [found.item_id for found in store.query("acme", kind="trajectory")] == ["t1", "t2"]
+    assert [
+        use.item.item_id for use in store.scenario_items("acme", "coding", kinds=("trajectory",), after=used_before)
+    ] == ["t1"]
+    # The same content again changes nothing, not even the use.
+    (used_after,) = [use.sequence for use in store.scenario_items("acme", "coding", kinds=("trajectory",))]
+    assert store.replace_trajectory("acme", "t1", smaller) == replaced
+    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0].sequence == used_after
+
+    with pytest.raises(ItemNotFoundError):
+        store.replace_trajectory("acme", "missing", smaller)
+    with pytest.raises(ValueError):
+        store.replace_trajectory("acme", "t1", {"steps": "not ATIF"})
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    (task / "instruction.md").write_text("Fix the bug.\n")
+    store.create("acme", [NewItem("fix-bug", task, {"kind": "task"})])
+    with pytest.raises(ValueError, match="only a trajectory's content"):
+        store.replace_trajectory("acme", "fix-bug", smaller)
+    assert store.read("acme", "t1").digest == replaced.digest
 
 
 def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path):
@@ -357,6 +520,34 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
         store.task_path(store.create("acme", [trajectory("t1")])[0])
 
 
+def test_a_legacy_task_retry_reuses_its_digest_only_with_the_same_executable_flags(store, tmp_path):
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    script = task / "run.sh"
+    body = b"#!/bin/sh\nexit 0\n"
+    script.write_bytes(body)
+    legacy = FilesDigest(task.name)
+    legacy.add_file(script.name, len(body))
+    legacy.update(body)
+    old_digest = legacy.hexdigest()
+    stored = store.task_files.scenario_directory(task_partition("acme")) / old_digest / task.name
+    shutil.copytree(task, stored)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (original,) = store.create("acme", [NewItem(task.name, TaskFilesReference(old_digest), metadata)])
+    used_before = store.scenario_items("acme", "coding", kinds=("task",))[0].sequence
+
+    assert store.create("acme", [NewItem(task.name, task, metadata)]) == (original,)
+    assert store.replace_task("acme", task.name, task) == original
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0].sequence == used_before
+
+    script.chmod(0o755)
+    changed = store.replace_task("acme", task.name, task)
+    assert changed.digest != old_digest
+    assert (store.task_path_for_digest("acme", changed.digest) / script.name).stat().st_mode & 0o111
+    assert (store.task_path_for_digest("acme", old_digest) / script.name).stat().st_mode & 0o111 == 0
+    assert store.replace_task("acme", task.name, task) == changed
+
+
 def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, tmp_path):
     def task(name: str, **metadata) -> NewItem:
         (tmp_path / name).mkdir()
@@ -372,11 +563,24 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
     assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
     assert store.query("acme", benchmark="unknown") == ()
     assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ()) == {}
+    with pytest.raises(ValueError, match="owner"):
+        store.benchmark_item_ids("", ())
+    assert store.benchmark_item_ids("acme", ["full", "lite", "unknown"]) == {
+        "full": {"add", "sort"},
+        "lite": {"add"},
+        "unknown": set(),
+    }
     # A patch replaces the list, and null removes it.
     store.update("acme", ["sort"], {"benchmarks": ["lite"]})
     store.update("acme", ["add"], {"benchmarks": None})
     assert [item.item_id for item in store.query("acme", benchmark="lite")] == ["sort"]
     assert store.query("acme", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ["full", "lite"]) == {"full": set(), "lite": {"sort"}}
+    assert store.delete("acme", "sort")
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": set()}
+    assert store.restore("acme", ["sort"])
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": {"sort"}}
     for benchmarks in ("lite", ["lite", "lite"], [""], [1]):
         with pytest.raises(ValueError, match="benchmarks"):
             store.update("acme", ["sort"], {"benchmarks": benchmarks})
@@ -388,13 +592,13 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
 
 def test_an_owner_stores_replaces_and_removes_its_collections(store):
     coding = TaskCollection("coding", benchmarks=("lite", "full"))
-    store.put_collection("acme", coding)
-    store.put_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
+    store.write_collection("acme", coding)
+    store.write_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
     assert store.collections("acme") == (TaskCollection("all", (), ("coding",), "benchmark"), coding)
     assert store.collections("globex") == ()
-    store.put_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
+    store.write_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
     assert [collection.benchmarks for collection in store.collections("acme")] == [(), ("lite",)]
-    assert store.remove_collection("acme", "coding") and not store.remove_collection("acme", "coding")
+    assert store.delete_collection("acme", "coding") and not store.delete_collection("acme", "coding")
     assert [collection.name for collection in store.collections("acme")] == ["all"]
 
 
@@ -478,12 +682,45 @@ def test_query_arguments_are_checked(store):
             store.query("acme", **arguments)
 
 
+def test_a_query_before_a_sequence_pages_backward_newest_first(store):
+    store.create("acme", [trajectory(f"t{n}", trajectory_sets=["a"] if n != 3 else []) for n in range(1, 6)])
+    sequence = {item.item_id: item.sequence for item in store.query("acme")}
+    # The trajectory before t4 in the set a is t2: t3 is in no set.
+    assert [item.item_id for item in store.query("acme", trajectory_set="a", before=sequence["t4"], limit=1)] == ["t2"]
+    assert [item.item_id for item in store.query("acme", before=sequence["t5"])] == ["t4", "t3", "t2", "t1"]
+    assert [item.item_id for item in store.query("acme", after=sequence["t1"], before=sequence["t4"])] == ["t3", "t2"]
+    assert store.query("acme", before=sequence["t1"]) == ()
+    # A scenario's items page backward too: t2 and t4 are the ones that coding uses.
+    store.update("acme", ["t2", "t4"], {"scenarios": {"coding": "train"}})
+    assert [item.item_id for item in store.query("acme", scenario="coding", before=sequence["t5"])] == ["t4", "t2"]
+    assert [item.item_id for item in store.query("acme", scenario="coding", before=sequence["t4"], limit=1)] == ["t2"]
+    for before in (0, -1, True, "2"):
+        with pytest.raises(ValueError, match="before"):
+            store.query("acme", before=before)
+
+
 def test_a_query_keeps_the_items_whose_id_starts_with_a_prefix(store):
     store.create("acme", [trajectory(item_id) for item_id in ("e1:1:1:0", "e1:1:10:0", "e1_1:1:0", "e1%1:1:0")])
     assert [item.item_id for item in store.query("acme", id_prefix="e1:1:1:")] == ["e1:1:1:0"]
     # A SQL pattern gives _ and % a meaning: the prefix matches them as characters only.
     assert [item.item_id for item in store.query("acme", id_prefix="e1_")] == ["e1_1:1:0"]
     assert [item.item_id for item in store.query("acme", id_prefix="e1%")] == ["e1%1:1:0"]
+
+
+def test_a_prefix_query_keeps_the_ids_at_the_edges_of_its_range(store):
+    # The query is the range from the prefix to prefix_upper_bound: "e1;" is the upper bound of "e1:", and an ID
+    # with a character after "e1:" that is larger than any ASCII character is still in the range.
+    item_ids = ("e1", "e1:", "e1:\U0010ffff", "e1;", "e1:\u00e9", "E1:0", "e10")
+    store.create("acme", [trajectory(item_id) for item_id in item_ids])
+    assert [item.item_id for item in store.query("acme", id_prefix="e1:")] == ["e1:", "e1:\U0010ffff", "e1:\u00e9"]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "bound"),
+    [("e1:", "e1;"), ("a\ud7ff", "a\ue000"), ("a\U0010ffff\U0010ffff", "b"), ("\U0010ffff", None), ("", None)],
+)
+def test_the_upper_bound_of_a_prefix_is_the_next_string_after_its_strings(prefix, bound):
+    assert prefix_upper_bound(prefix) == bound
 
 
 def calls(*turns: int) -> list[NewItem]:
@@ -547,6 +784,12 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-3": RecordLink("coding/call-1", entries[3]),
         "coding/retry-2": RecordLink("coding/call-1", entries[2]),
     }
+    # A restored ancestor is linked again.
+    store.restore("acme", ["coding/call-2"])
+    assert store.record_links("acme", ["coding/call-3", "coding/call-2"]) == {
+        "coding/call-2": RecordLink("coding/call-1", entries[2]),
+        "coding/call-3": RecordLink("coding/call-2", entries[3]),
+    }
 
 
 def test_writes_of_one_scenario_wait_and_writes_of_another_do_not(postgres_config, tmp_path):
@@ -601,7 +844,7 @@ def test_creates_that_wait_for_one_scenario_share_a_transaction(postgres_config,
         # A conflict in the shared transaction refuses only its own create.
         futures = held("e", "f", "a", "g")
         assert [future.exception(timeout=10) is None for future in futures] == [True, True, False, True]
-        assert isinstance(futures[2].exception(), ItemConflict)
+        assert isinstance(futures[2].exception(), ItemConflictError)
         assert {item.item_id for item in store.query("acme")} == set("abcdefg")
         # Two creates of one ID in one transaction: only the first stores it.
         futures = held("h", "i", "i")
@@ -616,7 +859,7 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
     with pytest.raises(ValueError, match="stays in 'coding'"):
         store.update("acme", [made.item_id], {"scenarios": {"coding": None}})
 
-    assert store.remove_scenario("acme", "coding") == 2
+    assert store.delete_scenario("acme", "coding") == 2
     assert store.query("acme", scenario="coding") == ()
     assert store.scenario_items("acme", "coding", kinds=("record", "trajectory")) == ()
     assert [(item.item_id, dict(item.scenarios)) for item in store.query("acme")] == [
@@ -624,8 +867,117 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
         ("t1", {"review": "train"}),
     ]
     assert store.scenarios_with_records("acme") == ("review",)
-    assert store.remove_scenario("acme", "coding") == 0
-    assert store.remove_scenario("globex", "review") == 0
+    assert store.delete_scenario("acme", "coding") == 0
+    assert store.delete_scenario("globex", "review") == 0
+
+
+def test_a_deleted_item_leaves_every_read_until_a_restore_brings_it_back(store):
+    store.create("acme", [trajectory("t0")])
+    (kept,) = store.create(
+        "acme", [trajectory("t1", "one", trajectory_sets=["week-1"], scenarios={"coding": "train"})]
+    )
+    store.hold("acme", "review", "trajectory_set", "week-1", "train")
+    last_use = store.last_use_sequence("acme", "coding")
+    started = time.time()
+
+    assert store.delete("acme", "t1") is True
+    assert store.read("acme", "t1") is None
+    assert [item.item_id for item in store.query("acme")] == ["t0"]
+    assert store.sets("acme", "trajectory_set") == ()
+    assert uses_of(store, "coding", kind="trajectory") == uses_of(store, "review", kind="trajectory") == []
+    assert store.delete("acme", "t1") is False
+    (deleted,) = store.deleted_items("acme")
+    assert deleted.item == replace(kept, inserted=False)
+    assert started <= deleted.deleted_at <= time.time()
+    assert store.read_deleted("acme", ["t1", "t0", "t1"]) == (deleted,)
+    assert store.deleted_items("globex") == ()
+
+    (restored,) = store.restore("acme", ["t1"])
+    assert restored == replace(kept, inserted=False)
+    assert store.read("acme", "t1").content["steps"][0]["message"] == "one"
+    assert [item.item_id for item in store.query("acme")] == ["t0", "t1"]
+    assert [group.value for group in store.sets("acme", "trajectory_set")] == ["week-1"]
+    # Each use comes back with a new sequence, so a trainer reads the item again.
+    assert uses_of(store, "coding", after=last_use, kind="trajectory") == [("t1", "train", None)]
+    assert uses_of(store, "review", kind="trajectory") == [("t1", "train", "week-1")]
+    assert store.deleted_items("acme") == ()
+
+
+def test_a_restore_is_all_or_none_and_refuses_an_id_without_a_deleted_item_or_with_a_stored_item(store):
+    store.create("acme", [trajectory("t1", "one"), trajectory("t2", "two")])
+    store.delete("acme", "t1")
+    store.delete("acme", "t2")
+    with pytest.raises(ItemNotFoundError, match="no deleted item 'gone'"):
+        store.restore("acme", ["t1", "gone"])
+    with pytest.raises(ItemNotFoundError):
+        store.restore("globex", ["t1"])
+    # A create can use the ID of a deleted item, and the deleted item cannot come back then.
+    store.create("acme", [trajectory("t2", "new")])
+    with pytest.raises(ItemConflictError, match="'t2'"):
+        store.restore("acme", ["t1", "t2"])
+    assert store.read("acme", "t1") is None
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme")] == ["t2", "t1"]
+    # A second delete of an ID keeps only the newer deleted item.
+    store.delete("acme", "t2")
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme")] == ["t2", "t1"]
+    store.restore("acme", ["t2"])
+    assert store.read("acme", "t2").content["steps"][0]["message"] == "new"
+
+
+def test_deleted_items_page_newest_first_by_kind(store):
+    (made,) = calls(1)
+    store.create("acme", [trajectory("t1"), made, trajectory("t2"), trajectory("t3")])
+    for item_id in ("t2", made.item_id, "t1", "t3"):
+        store.delete("acme", item_id)
+    listed = store.deleted_items("acme")
+    assert [deleted.item.item_id for deleted in listed] == ["t3", "t2", made.item_id, "t1"]
+    assert all(isinstance(deleted, DeletedItem) and deleted.item.content is None for deleted in listed)
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme", kind="record")] == [made.item_id]
+    page = store.deleted_items("acme", kind="trajectory", limit=2)
+    assert [deleted.item.item_id for deleted in page] == ["t3", "t2"]
+    after = store.deleted_items("acme", kind="trajectory", before=page[-1].item.sequence)
+    assert [deleted.item.item_id for deleted in after] == ["t1"]
+    for arguments in ({"kind": "note"}, {"before": 0}, {"limit": 0}, {"limit": 1001}):
+        with pytest.raises(ValueError):
+            store.deleted_items("acme", **arguments)
+
+
+def test_a_purge_ends_a_deleted_item_and_maintain_purges_the_old_ones(store, monkeypatch):
+    store.create("acme", [trajectory("t1"), trajectory("t2"), trajectory("t3")])
+    for item_id in ("t1", "t2", "t3"):
+        store.delete("acme", item_id)
+    assert store.purge("acme", "t1") is True
+    assert store.purge("acme", "t1") is False
+    assert store.purge("globex", "t2") is False
+    with pytest.raises(ItemNotFoundError):
+        store.restore("acme", ["t1"])
+    assert store.purge_deleted(time.time() - 3600) == 0
+    store.maintain()
+    assert [deleted.item.item_id for deleted in store.deleted_items("acme")] == ["t3", "t2"]
+    monkeypatch.setattr(data_module, "DELETED_ITEM_TTL_SECONDS", -1.0)
+    store.maintain()
+    assert store.deleted_items("acme") == ()
+
+
+def test_the_archive_of_a_scenario_removes_it_from_deleted_items(store):
+    store.create("acme", [trajectory("t1", scenarios={"coding": "train", "review": "train"})])
+    store.delete("acme", "t1")
+    assert store.delete_scenario("acme", "coding") == 0
+    (deleted,) = store.deleted_items("acme")
+    assert deleted.item.scenarios == {"review": "train"}
+    store.restore("acme", ["t1"])
+    assert uses_of(store, "coding", kind="trajectory") == []
+    assert uses_of(store, "review", kind="trajectory") == [("t1", "train", None)]
+
+
+def test_a_deleted_item_is_checked_at_construction():
+    item = StoredItem(1, "acme", "t1", {"kind": "trajectory"}, "d" * 64)
+    assert DeletedItem(item, 2.5).deleted_at == 2.5
+    for deleted_at in (True, "1", float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="deleted_at"):
+            DeletedItem(item, deleted_at)
+    with pytest.raises(ValueError, match="without its content"):
+        DeletedItem(replace(item, content={}), 1.0)
 
 
 def test_a_write_of_an_ended_generation_stores_nothing(store):
@@ -634,11 +986,11 @@ def test_a_write_of_an_ended_generation_stores_nothing(store):
     assert store.scenario_generation("globex", "coding") != generation
     first, second = calls(1, 2)
     assert store.create("acme", [first], generation=generation)[0].inserted
-    with pytest.raises(ScenarioArchived, match="no longer current"):
+    with pytest.raises(ScenarioArchivedError, match="no longer current"):
         store.create("acme", [second], generation="other")
 
-    store.remove_scenario("acme", "coding")
-    with pytest.raises(ScenarioArchived):
+    store.delete_scenario("acme", "coding")
+    with pytest.raises(ScenarioArchivedError):
         store.create("acme", [second], generation=generation)
     assert store.read("acme", second.item_id) is None
     renewed = store.scenario_generation("acme", "coding")
@@ -788,33 +1140,18 @@ def test_an_owner_keeps_a_node_while_a_record_item_needs_its_messages(open_durab
         store.create("acme", calls(1, 2, 3))
         store.create("other", calls(1))
         assert node_counts(store) == (3 + 1, 2 + 2 + 1 + 1)
+        # A deleted record keeps its node until the purge.
         store.delete("acme", "coding/call-3")
+        assert node_counts(store) == (3 + 1, 2 + 2 + 1 + 1)
+        assert store.purge("acme", "coding/call-3")
         assert node_counts(store) == (2 + 1, 2 + 1 + 1)
         # call-2 continues call-1, so call-1's node stays while call-2 is stored.
         store.delete("acme", "coding/call-1")
+        store.purge("acme", "coding/call-1")
         assert store.read("acme", "coding/call-2").content == calls(2)[0].content
         store.delete("acme", "coding/call-2")
+        store.purge("acme", "coding/call-2")
         assert node_counts(store) == (1, 1)
-
-
-def test_an_upgrade_links_the_stored_record_items(open_durable_store):
-    items = calls(1, 2, 3)
-    with closing(open_durable_store()) as store:
-        store.create("acme", [*items, trajectory("t1")])
-        table = store.items_table
-        with store.transaction() as connection:
-            # Write the rows back as the earlier version kept them: the whole content, and no node table.
-            for item in items:
-                connection.execute(
-                    table.update()
-                    .where(table.c.item_id == item.item_id)
-                    .values(content_json=canonical_json(item.content))
-                )
-            connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN message_field")
-            store.nodes_table.drop(connection)
-    with closing(open_durable_store()) as store:
-        assert [item.content for item in store.query("acme", kind="record")] == [item.content for item in items]
-        assert node_counts(store) == (3, 5)
 
 
 def test_query_and_count_keep_the_records_of_one_origin_and_request_type(store):
@@ -847,17 +1184,6 @@ def test_query_and_count_keep_the_records_of_one_origin_and_request_type(store):
         store.count("acme", kind="record", request_type="training")
 
 
-def test_an_upgrade_fills_the_request_type_of_the_stored_record_items(open_durable_store):
-    with closing(open_durable_store()) as store:
-        store.create("acme", calls(1, 2))
-        table = store.items_table
-        with store.transaction() as connection:
-            connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN request_type")
-    with closing(open_durable_store()) as store:
-        assert store.count("acme", kind="record", request_type="inference") == 2
-        assert store.count("acme", kind="record", request_type="report") == 0
-
-
 def test_items_survive_a_restart(open_durable_store):
     with closing(open_durable_store()) as first:
         first.create("acme", [trajectory("t1", scenarios={"coding": "train"})])
@@ -867,8 +1193,8 @@ def test_items_survive_a_restart(open_durable_store):
         assert second.delete("acme", "t1") is False
 
 
-def deployment(tmp_path, **storage) -> ServiceConfig:
-    return ServiceConfig(
+def deployment(tmp_path, **storage) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -884,7 +1210,7 @@ def deployment(tmp_path, **storage) -> ServiceConfig:
     [
         (None, SQLiteDataStore),
         ("sqlite", SQLiteDataStore),
-        ({"module": "reef.storage.data:MemoryDataStore"}, MemoryDataStore),
+        ({"module": "reef.storage.data.store:MemoryDataStore"}, MemoryDataStore),
     ],
 )
 def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, data_store, store_class):
@@ -905,14 +1231,14 @@ def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, d
     ("data_store", "reason"),
     [
         ("unknown", "storage.data_store"),
-        ("reef.storage.data:DataStore", "abstract"),
-        ({"module": "reef.storage.sqlite:SQLiteScenarioStorage"}, "DataStore"),
+        ("reef.storage.data.store:DataStore", "abstract"),
+        ({"module": "reef.storage.sql.sqlite:SQLiteScenarioStorage"}, "DataStore"),
         ("postgres", "record_backend: postgres"),
     ],
 )
 def test_the_deployment_refuses_an_invalid_data_store(data_store, reason):
     with pytest.raises(ValueError, match=reason):
-        ServiceConfig(recipe="recipe", data_store=data_store)
+        ServiceSettings(recipe="recipe", data_store=data_store)
 
 
 def test_archiving_a_scenario_never_moves_an_owners_task_files(tmp_path):
@@ -938,7 +1264,7 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
             text = "changed" if index == 7 else "same"
             try:
                 stores[index % len(stores)].create("acme", [trajectory(f"t{n}", text) for n in range(10)])
-            except ItemConflict:
+            except ItemConflictError:
                 return "conflict"
             return "created"
 
@@ -954,58 +1280,16 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
             store.close()
 
 
-def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable(store):
-    content = artifact_content("s3://bucket/weights", None)
-    legacy_content = {**content, "content_id": "old-checksum"}
-    item = NewItem("weights", legacy_content, {"kind": "artifact"})
-    (created,) = store.create("acme", [item])
-    assert store.read("acme", "weights").content == content
-    assert created.digest == json_digest(content)
-    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (created,)
-
-    # Seed a row written before the migration; a retry must not rewrite its immutable content or digest.
-    legacy = replace(created, content=legacy_content, digest=json_digest(legacy_content))
-    if isinstance(store, MemoryDataStore):
-        store.items["acme"]["weights"] = legacy
-    else:
-        table = store.items_table
-        with store.transaction() as connection:
-            connection.execute(
-                table.update()
-                .where(table.c.owner == "acme", table.c.item_id == "weights")
-                .values(content_json=canonical_json(legacy_content), digest=legacy.digest)
-            )
-    assert store.create("acme", [item]) == (replace(legacy, content=None),)
-    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (replace(legacy, content=None),)
-    with pytest.raises(ItemConflict, match="other content"):
-        store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
-    assert store.read("acme", "weights") == legacy
-
-
-def test_a_record_retry_with_a_new_time_matches_also_when_the_stored_digest_has_the_time(store):
+def test_a_record_retry_with_a_new_time_matches(store):
     (item,) = calls(1)
     (created,) = store.create("acme", [item])
     retry = NewItem(item.item_id, {**item.content, "created_at": item.content["created_at"] + 5}, item.metadata)
     assert store.create("acme", [retry]) == (created,)
-
-    # Seed the digest of a row written before, which had created_at in it.
     stored = store.read("acme", item.item_id)
-    legacy = replace(stored, digest=json_digest(stored.content))
-    if isinstance(store, MemoryDataStore):
-        store.items["acme"][item.item_id] = legacy
-    else:
-        table = store.items_table
-        with store.transaction() as connection:
-            connection.execute(
-                table.update()
-                .where(table.c.owner == "acme", table.c.item_id == item.item_id)
-                .values(digest=legacy.digest)
-            )
-    assert store.create("acme", [retry]) == (replace(legacy, content=None),)
     changed = {**item.content, "references": ["other"]}
-    with pytest.raises(ItemConflict, match="other content"):
+    with pytest.raises(ItemConflictError, match="other content"):
         store.create("acme", [NewItem(item.item_id, changed, item.metadata)])
-    assert store.read("acme", item.item_id) == legacy
+    assert store.read("acme", item.item_id) == stored
 
 
 def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
@@ -1014,18 +1298,18 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     # A job of the same samples, under another data ID, uses the same directory.
     again = store.write_job_directory(JobData("s:request:r1", (sample,)))
     assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
-    assert read_job_data(store.open_job_directory(again.to_dict()).path).samples == (sample,)
+    assert store.open_job_directory(again.to_dict()).read().samples == (sample,)
     other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
     assert other.uri != first.uri
     # A directory that no job used since the time goes; a used one stays.
-    store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    store.write_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
-        store.open_job_directory(first.to_dict())
-    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+        store.open_job_directory(first.to_dict()).read()
+    assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
     # The periodic work keeps a directory that a job used within the time to live.
     store.maintain()
-    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
 
 
 def evaluation_call(turns: int, attempt: int, index: int, status: int = 200, response: object = "reply"):
@@ -1047,10 +1331,66 @@ def test_the_calls_of_one_rollout_leave_out_the_other_rollouts_of_the_evaluation
         )
         return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
 
-    store.create("acme", [call_item(1, 1), call_item(1, 10), call_item(11, 1), call_item(1, 1, "verifier")])
+    store.create(
+        "acme",
+        [
+            call_item(1, 1, "verifier"),
+            call_item(1, 10),
+            call_item(11, 1),
+            call_item(1, 1),
+            trajectory("coding/e1:1:1:not-a-call"),
+            evaluation_call_item("other", "a1", "e1", evaluation_call(1, 1, 8)[0]),
+        ],
+    )
+    store.create("another-owner", [call_item(1, 1)])
     kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 1))
-    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:0", "coding/e1:1:1:1:verifier:0"]
+    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:verifier:0", "coding/e1:1:1:1:0"]
+    assert not list(evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 0)))
     assert len(list(evaluation_call_items(store, "acme", "coding", "e1", content=False))) == 4
+
+
+def test_sparse_rollout_reads_do_not_scan_the_other_calls_on_fresh_sqlite(tmp_path):
+    def call_item(task_index: int, index: int = 0) -> NewItem:
+        summary = EvaluationCallSummary(
+            task_index, 0, 1, index, "/v1/chat/completions", 200, 10.0, 0.5, None, None, None, 0
+        )
+        return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
+
+    with closing(SQLiteDataStore(None, LocalTaskFileStore(tmp_path))) as store:
+        with store.transaction(read_only=True) as connection:
+            sqlite = connection.connection.driver_connection
+        store.create("acme", [call_item(0), call_item(95)])
+
+        def read_sparse_rollouts() -> int:
+            progress = 0
+
+            def count() -> int:
+                nonlocal progress
+                progress += 1
+                return 0
+
+            sqlite.set_progress_handler(count, 100)
+            try:
+                found = [
+                    item.item_id
+                    for index in range(96)
+                    for item in evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(index, 0))
+                ]
+                assert found == ["coding/e1:0:0:1:0", "coding/e1:95:0:1:0"]
+                return progress
+            finally:
+                sqlite.set_progress_handler(None, 0)
+
+        sparse = read_sparse_rollouts()
+        store.create("acme", [call_item(index) for index in range(96, 2_096)])
+        crowded = read_sparse_rollouts()
+        assert crowded <= 2 * sparse + 10
+
+        # One rollout can span several storage pages. The cursor follows insertion order, not ID sort order.
+        new_calls = [call_item(0, index) for index in range(data_module.MAX_QUERY_LIMIT + 1, 0, -1)]
+        store.create("acme", new_calls)
+        kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(0, 0))
+        assert [item.item_id for item in kept] == ["coding/e1:0:0:1:0", *(call.item_id for call in new_calls)]
 
 
 def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):
@@ -1091,7 +1431,7 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
     assert [item.item_id for item in found] == ids
     assert all(item.scenarios == {} for item in found)
     assert [item.item_id for item in store.query("acme", scenario="coding")] == ["coding/call-1", "coding/call-2"]
-    assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("record",))] == [
+    assert [use.item.item_id for use in store.scenario_items("acme", "coding", kinds=("record",))] == [
         "coding/call-1",
         "coding/call-2",
     ]
@@ -1099,6 +1439,18 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
         store.update("acme", [ids[0]], {"scenarios": {"coding": "train"}})
     with pytest.raises(ValueError, match="never changes"):
         store.update("acme", [ids[0]], {"evaluation_id": "e2"})
+    if not isinstance(store, MemoryDataStore):
+        # The budget holds the bytes of the scenario's own calls and of their nodes, not of the evaluation calls.
+        items, nodes = store.items_table, store.nodes_table
+        own = items.c.item_id.in_(["coding/call-1", "coding/call-2"])
+        with store.transaction(read_only=True) as connection:
+            held = connection.execute(select(func.sum(func.length(items.c.content_json))).where(own)).scalar_one()
+            held += connection.execute(
+                select(func.sum(nodes.c.body_bytes))
+                .join(items, (items.c.owner == nodes.c.owner) & (items.c.sequence == nodes.c.node_sequence))
+                .where(own)
+            ).scalar_one()
+        assert store.prune_records(held) == 0
     # Pruning deletes and counts the scenario's own calls only; evaluation calls stay.
     assert store.prune_records(0) == 2
     assert store.record_loss("acme", "coding").record_count == 2
@@ -1197,3 +1549,340 @@ def test_the_metadata_of_an_evaluation_call_is_checked(store, change, message):
         store.create("acme", [NewItem(plain.item_id, plain.content, {**plain.metadata, "evaluation_id": "e1"})])
     explicit = {**plain.metadata, "origin": {**plain.metadata["origin"], "source": "inference"}}
     assert store.create("acme", [NewItem(plain.item_id, plain.content, explicit)])[0].inserted
+
+
+def benchmark_task(tmp_path, name: str, *benchmarks: str, **metadata) -> NewItem:
+    """The task item ``name`` in ``benchmarks``, with a directory of one file."""
+    directory = tmp_path / "tasks" / name
+    directory.mkdir(parents=True)
+    (directory / "instruction.md").write_text(f"Do {name}.\n")
+    return NewItem(name, directory, {"kind": "task", "benchmarks": list(benchmarks), **metadata})
+
+
+def uses_of(store, scenario: str, after: int = 0, kind: str = "task") -> list[tuple[str, str, str | None]]:
+    """Each use by ``scenario`` of an item of ``kind`` of acme after ``after``, in use order: item, split, held set."""
+    uses = store.scenario_items("acme", scenario, kinds=(kind,), after=after, content=False)
+    assert [use.sequence for use in uses] == sorted({use.sequence for use in uses}), "each use has its own sequence"
+    return [(use.item.item_id, use.split, use.held_set) for use in uses]
+
+
+def test_a_scenario_that_holds_a_benchmark_uses_its_tasks_without_a_write_to_them(store, tmp_path):
+    store.create("acme", [benchmark_task(tmp_path, "add", "math"), benchmark_task(tmp_path, "sub", "math", "old")])
+    store.create("acme", [benchmark_task(tmp_path, "sort", "lists")])
+    before = {item.item_id: item.metadata for item in store.query("acme", kind="task")}
+
+    held = ScenarioHold("coding", "benchmark", "math", "train", 2)
+    assert store.hold("acme", "coding", "benchmark", "math", "train") == held
+
+    assert uses_of(store, "coding") == [("add", "train", "math"), ("sub", "train", "math")]
+    assert {item.item_id: item.metadata for item in store.query("acme", kind="task")} == before
+    assert [item.item_id for item in store.query("acme", scenario="coding")] == ["add", "sub"]
+    assert store.item_splits("acme", "coding", ["add", "sort", "none"]) == {"add": frozenset({"train"})}
+    assert store.holds("acme", "coding") == (held,)
+    assert store.holds("acme", "other") == () and uses_of(store, "other") == []
+    assert store.holding_scenarios("acme", "benchmark", ["math", "lists"]) == ("coding",)
+    assert store.holding_scenarios("acme", "trajectory_set", ["math"]) == ()
+    # The same hold again changes nothing, and another owner's scenario holds nothing of acme.
+    last = store.last_use_sequence("acme", "coding")
+    store.hold("acme", "coding", "benchmark", "math", "train")
+    assert store.last_use_sequence("acme", "coding") == last
+    assert store.hold("other", "coding", "benchmark", "math", "train").item_count == 0
+    for arguments in (
+        ("coding", "benchmark", "", "train"),
+        ("", "benchmark", "math", "train"),
+        ("coding", "benchmark", "math", "test"),
+        ("coding", "collection", "math", "train"),
+        ("coding", "trajectory_set", "day-1", "eval"),
+    ):
+        with pytest.raises(ValueError, match="a hold"):
+            store.hold("acme", *arguments)
+
+
+def test_a_task_has_one_use_for_its_own_mark_and_one_for_each_held_benchmark_of_it(store, tmp_path):
+    store.create("acme", [benchmark_task(tmp_path, "add", "math", "easy", scenarios={"coding": "eval"})])
+    store.hold("acme", "coding", "benchmark", "math", "train")
+    store.hold("acme", "coding", "benchmark", "easy", "train")
+    # A task in two held benchmarks is there twice, and it can train and be evaluated at the same time.
+    assert uses_of(store, "coding") == [("add", "eval", None), ("add", "train", "math"), ("add", "train", "easy")]
+    assert store.item_splits("acme", "coding", ["add"]) == {"add": frozenset({"train", "eval"})}
+    assert [item.item_id for item in store.query("acme", scenario="coding")] == ["add"]
+
+    # A scenario can hold one benchmark in both splits: the holds are apart, and each gives its own use.
+    last = store.last_use_sequence("acme", "coding")
+    assert store.hold("acme", "coding", "benchmark", "easy", "eval").split == "eval"
+    assert uses_of(store, "coding", after=last) == [("add", "eval", "easy")]
+    assert [(hold.name, hold.split) for hold in store.holds("acme", "coding")] == [
+        ("easy", "eval"),
+        ("easy", "train"),
+        ("math", "train"),
+    ]
+
+    assert store.release("acme", "coding", "benchmark", "math", "train")
+    assert not store.release("acme", "coding", "benchmark", "math", "train")
+    assert not store.release("acme", "coding", "benchmark", "math", "eval")
+    assert store.release("acme", "coding", "benchmark", "easy", "train")
+    assert uses_of(store, "coding") == [("add", "eval", None), ("add", "eval", "easy")]
+    # The end of a scenario ends its holds, so a new scenario of that name uses nothing.
+    assert store.delete_scenario("acme", "coding") == 1
+    assert uses_of(store, "coding") == [] and store.holds("acme", "coding") == ()
+    assert store.holding_scenarios("acme", "benchmark", ["easy"]) == ()
+
+
+def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenario(store, tmp_path):
+    store.create("acme", [benchmark_task(tmp_path, "add", "math"), benchmark_task(tmp_path, "sort")])
+    store.hold("acme", "coding", "benchmark", "math", "train")
+    store.hold("acme", "review", "benchmark", "math", "eval")
+    last = store.last_use_sequence("acme", "coding")
+
+    # A patch of the benchmarks and a new item both give the holding scenarios a use, after the earlier uses.
+    store.update("acme", ["sort"], {"benchmarks": ["math", "lists"]})
+    store.create("acme", [benchmark_task(tmp_path, "mul", "math")])
+    assert uses_of(store, "coding", after=last) == [("sort", "train", "math"), ("mul", "train", "math")]
+    assert uses_of(store, "review") == [("add", "eval", "math"), ("sort", "eval", "math"), ("mul", "eval", "math")]
+    assert store.holds("acme", "coding")[0].item_count == 3
+    # One listing counts each held set: a task of two held benchmarks counts in each, and a set with no task has 0.
+    # A task without a benchmarks list is in no benchmark.
+    store.create("acme", [NewItem("loose", benchmark_task(tmp_path, "loose").content, {"kind": "task"})])
+    store.hold("acme", "coding", "benchmark", "lists", "eval")
+    store.hold("acme", "coding", "benchmark", "empty", "train")
+    assert [(hold.name, hold.split, hold.item_count) for hold in store.holds("acme", "coding")] == [
+        ("empty", "train", 0),
+        ("lists", "eval", 1),
+        ("math", "train", 3),
+    ]
+    store.release("acme", "coding", "benchmark", "lists", "eval")
+    store.release("acme", "coding", "benchmark", "empty", "train")
+
+    # A patch that leaves the benchmarks keeps the uses of the holds and their sequences.
+    kept = store.scenario_items("acme", "coding", kinds=("task",), content=False)
+    store.update("acme", ["add"], {"scenarios": {"coding": "eval"}, "note": "x"})
+    after = store.scenario_items("acme", "coding", kinds=("task",), content=False)
+    assert [(use.sequence, use.held_set) for use in after if use.held_set] == [
+        (use.sequence, use.held_set) for use in kept
+    ]
+    assert ("add", "eval", None) in uses_of(store, "coding")
+
+    store.update("acme", ["add"], {"benchmarks": []})
+    assert ("add", "train", "math") not in uses_of(store, "coding")
+    assert [use[0] for use in uses_of(store, "review")] == ["sort", "mul"]
+    # A deleted item and replaced files: the uses end, or begin again.
+    last = store.last_use_sequence("acme", "coding")
+    changed = tmp_path / "changed" / "mul"
+    changed.mkdir(parents=True)
+    (changed / "instruction.md").write_text("Multiply.\n")
+    store.replace_task("acme", "mul", changed)
+    assert uses_of(store, "coding", after=last) == [("mul", "train", "math")]
+    assert store.delete("acme", "sort")
+    assert [use[0] for use in uses_of(store, "review")] == ["mul"]
+
+
+def test_a_scenario_that_holds_a_trajectory_set_uses_its_trajectories(store, tmp_path):
+    store.create(
+        "acme",
+        [trajectory("t1", trajectory_sets=["day-1"]), trajectory("t2", trajectory_sets=["day-2"]), trajectory("t3")],
+    )
+    # A benchmark with the name of the set is another set: its task is no trajectory.
+    store.create("acme", [benchmark_task(tmp_path, "add", "day-1")])
+    held = store.hold("acme", "coding", "trajectory_set", "day-1", "train")
+    assert held == ScenarioHold("coding", "trajectory_set", "day-1", "train", 1)
+    assert uses_of(store, "coding", kind="trajectory") == [("t1", "train", "day-1")]
+    assert uses_of(store, "coding") == [] and store.read("acme", "t1").scenarios == {}
+
+    # A trajectory joins the set by a patch or by its create, and leaves it with another set.
+    last = store.last_use_sequence("acme", "coding")
+    store.update("acme", ["t3"], {"trajectory_sets": ["day-1"]})
+    store.create("acme", [trajectory("t4", "four", trajectory_sets=["day-1"])])
+    assert uses_of(store, "coding", after=last, kind="trajectory") == [
+        ("t3", "train", "day-1"),
+        ("t4", "train", "day-1"),
+    ]
+    store.update("acme", ["t1"], {"trajectory_sets": ["day-2"]})
+    assert [use[0] for use in uses_of(store, "coding", kind="trajectory")] == ["t3", "t4"]
+    assert store.holding_scenarios("acme", "trajectory_set", ["day-1", "day-2"]) == ("coding",)
+
+    # The scenario holds the benchmark of that name too: the release of the set keeps the task's use.
+    store.hold("acme", "coding", "benchmark", "day-1", "eval")
+    assert [(hold.kind, hold.item_count) for hold in store.holds("acme", "coding")] == [
+        ("benchmark", 1),
+        ("trajectory_set", 2),
+    ]
+    assert store.release("acme", "coding", "trajectory_set", "day-1", "train")
+    assert uses_of(store, "coding", kind="trajectory") == [] and uses_of(store, "coding") == [("add", "eval", "day-1")]
+
+
+def test_a_trajectory_is_in_each_of_its_sets_as_a_task_in_each_of_its_benchmarks(store, tmp_path):
+    store.create("acme", [trajectory("t0", trajectory_sets=["a"]), trajectory("t1", trajectory_sets=["a", "b"])])
+    store.create("acme", [trajectory("t2", set_id="c"), benchmark_task(tmp_path, "add", "lite", "full")])
+    store.create("other", [trajectory("o1", trajectory_sets=["a"])])
+
+    def listed(kind, **page):
+        return [(group.value, group.item_count) for group in store.sets("acme", kind, **page)]
+
+    # Newest first by the first item of each set. set_id is no set: it is metadata like any other key.
+    assert listed("trajectory_set") == [("b", 1), ("a", 2)]
+    # Both benchmarks begin with the one task, so their order is not defined.
+    assert sorted(listed("benchmark")) == [("full", 1), ("lite", 1)]
+    (newest,) = store.sets("acme", "trajectory_set", limit=1)
+    assert (newest.metadata["trajectory_sets"], listed("trajectory_set", before=newest.first_sequence)) == (
+        ["a", "b"],
+        [("a", 2)],
+    )
+    assert [item.item_id for item in store.query("acme", trajectory_set="a")] == ["t0", "t1"]
+    assert [item.item_id for item in store.query("acme", benchmark="full")] == ["add"]
+
+    # A scenario that holds both sets uses t1 once through each.
+    store.hold("acme", "coding", "trajectory_set", "a", "train")
+    store.hold("acme", "coding", "trajectory_set", "b", "train")
+    assert sorted(uses_of(store, "coding", kind="trajectory")) == [
+        ("t0", "train", "a"),
+        ("t1", "train", "a"),
+        ("t1", "train", "b"),
+    ]
+    # A listing for a scenario counts only the items that it uses, each once; a set without one is left out.
+    store.update("acme", ["t2"], {"scenarios": {"writing": "train"}, "trajectory_sets": ["a"]})
+    assert listed("trajectory_set", scenario="coding") == [("b", 1), ("a", 3)]
+    assert listed("trajectory_set", scenario="writing") == [("a", 1)]
+    assert listed("trajectory_set", scenario="unused") == []
+    store.update("acme", ["t2"], {"scenarios": {"writing": None}, "trajectory_sets": None})
+    # t1 leaves a and stays in b; a deleted item leaves its sets.
+    store.update("acme", ["t1"], {"trajectory_sets": ["b"]})
+    assert sorted(uses_of(store, "coding", kind="trajectory")) == [("t0", "train", "a"), ("t1", "train", "b")]
+    assert store.delete("acme", "t0")
+    assert listed("trajectory_set") == [("b", 1)]
+    assert [(hold.name, hold.item_count) for hold in store.holds("acme", "coding")] == [("a", 0), ("b", 1)]
+
+    for metadata in ({"trajectory_sets": "a"}, {"trajectory_sets": ["a", "a"]}, {"trajectory_sets": [""]}):
+        with pytest.raises(ValueError, match="trajectory_sets"):
+            store.create("acme", [trajectory("bad", **metadata)])
+    with pytest.raises(ValueError, match=r"only a trajectory item has metadata\.trajectory_sets"):
+        store.create("acme", [benchmark_task(tmp_path, "sub", trajectory_sets=["a"])])
+    with pytest.raises(ValueError, match="kind"):
+        store.sets("acme", "trajectory")
+
+
+def test_a_store_upgrades_the_uses_of_version_4_to_the_order_of_their_items(open_durable_store):
+    def read(store):
+        """What the store gives for the uses of coding: the records and items in item order, their counts, and the
+        newest record of coding."""
+        return (
+            [item.item_id for item in store.query("acme", kind="record", scenario="coding")],
+            [item.item_id for item in store.query("acme", kind="record", scenario="coding", origin="coding")],
+            [item.item_id for item in store.query("acme", scenario="coding", content=False)],
+            store.count("acme", scenario="coding"),
+            store.count("acme", kind="record", scenario="coding", origin="coding", after=1),
+            store.last_sequence("acme", kind="record", scenario="coding", origin="coding"),
+        )
+
+    with closing(open_durable_store()) as store:
+        store.create("acme", [record_item(conversation("other", 1, scenario="review"))])
+        store.create("acme", calls(1, 2))
+        # coding uses t1 twice: through its own metadata and through the held set a.
+        store.create("acme", [trajectory("t1", scenarios={"coding": "train"}, trajectory_sets=["a"])])
+        store.hold("acme", "coding", "trajectory_set", "a", "train")
+        store.update("acme", ["review/other"], {"scenarios": {"coding": "train"}})
+        before = read(store)
+        assert before == (
+            ["review/other", "coding/call-1", "coding/call-2"],
+            ["coding/call-1", "coding/call-2"],
+            ["review/other", "coding/call-1", "coding/call-2", "t1"],
+            4,
+            2,
+            store.read("acme", "coding/call-2").sequence,
+        )
+        schema = store.uses_table.schema
+        prefix = "" if schema is None else f"{schema}."
+        with store.transaction() as connection:
+            # A database of version 4: the uses have no item sequence, retention has no partial index, and a use
+            # of an item that no longer exists remains.
+            for index in ("data_item_use_by_item", "data_item_of_inference", "data_record_node_scenario_bytes"):
+                connection.exec_driver_sql(f"DROP INDEX {prefix}{index}")
+            connection.exec_driver_sql(f"ALTER TABLE {prefix}data_item_use DROP COLUMN item_sequence")
+            connection.exec_driver_sql(
+                f"INSERT INTO {prefix}data_item_use (owner, item_id, scenario, held_set, split)"
+                " VALUES ('acme', 'gone', 'coding', '', 'train')"
+            )
+            connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 4")
+    with closing(open_durable_store()) as store:
+        assert read(store) == before
+        uses = store.uses_table
+        with store.transaction(read_only=True) as connection:
+            assert connection.execute(select(func.count()).where(uses.c.item_id == "gone")).scalar_one() == 0
+            tables = sqlalchemy.inspect(connection)
+            assert "data_item_use_by_item" in {
+                index["name"] for index in tables.get_indexes(USES_TABLE, schema=schema)
+            }
+            nodes = {index["name"] for index in tables.get_indexes("data_record_node", schema=schema)}
+            assert "data_record_node_scenario_bytes" in nodes
+            versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
+            assert versions.fetchall() == [(7,)]
+        # A new use after the upgrade has its item's sequence too.
+        store.create("acme", calls(3))
+        assert read(store)[1] == ["coding/call-1", "coding/call-2", "coding/call-3"]
+
+
+def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_store, tmp_path):
+    with closing(open_durable_store()) as store:
+        sets = [["day-1"], ["day-1"], []]
+        store.create("acme", [trajectory(f"t{n}", trajectory_sets=sets[n - 1]) for n in (1, 2, 3)])
+        store.create("acme", [benchmark_task(tmp_path, "add", "lite")])
+        # A trajectory that a stage of coding made from its records, before such a sample joined a set.
+        made = {"scenario": "coding", "component": "", "records": ["r1"]}
+        store.create("acme", [trajectory("t4", origin=made)])
+        schema = store.uses_table.schema
+        prefix = "" if schema is None else f"{schema}."
+        with store.transaction() as connection:
+            # A database of version 1: the uses are in data_item_scenario, no table records the version,
+            # PostgreSQL has no index of the IDs in the "C" collation, retention has no partial index, no table holds
+            # the sets of the items, and a trajectory names its one set in set_id. A set_id that is no string is in
+            # no set.
+            connection.exec_driver_sql(f"DROP TABLE {prefix}data_schema_version")
+            for index in ("data_item_by_item_id", "data_item_of_inference", "data_record_node_scenario_bytes"):
+                connection.exec_driver_sql(f"DROP INDEX IF EXISTS {prefix}{index}")
+            connection.exec_driver_sql(f"DROP TABLE {prefix}data_item_set")
+            for item_id, set_id in (("t1", "day-1"), ("t2", "day-1"), ("t3", 7)):
+                old = {"kind": "trajectory", "owner": "acme", "scenarios": {}, "set_id": set_id}
+                connection.execute(
+                    sqlalchemy.text(
+                        f"UPDATE {prefix}data_item SET metadata_json = :metadata WHERE item_id = :item_id"
+                    ),
+                    {"metadata": canonical_json(old), "item_id": item_id},
+                )
+            connection.exec_driver_sql(
+                f"CREATE TABLE {prefix}data_item_scenario (sequence INTEGER PRIMARY KEY, owner TEXT, item_id TEXT,"
+                " scenario TEXT, split VARCHAR(8))"
+            )
+            connection.exec_driver_sql(
+                f"INSERT INTO {prefix}data_item_scenario (sequence, owner, item_id, scenario, split) VALUES"
+                " (7, 'acme', 't3', 'coding', 'train'), (9, 'acme', 't1', 'coding', 'train')"
+            )
+    for _ in range(2):
+        # The second open finds version 6 and changes nothing.
+        with closing(open_durable_store()) as store:
+            assert uses_of(store, "coding", kind="trajectory") == [("t3", "train", None), ("t1", "train", None)]
+            # A copied use has the sequence of its item, so a query of the scenario's items reads them in item order.
+            assert [item.item_id for item in store.query("acme", scenario="coding")] == ["t1", "t3"]
+            assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3", "t4"]
+            assert store.read("acme", "t1").metadata == {
+                "kind": "trajectory",
+                "owner": "acme",
+                "scenarios": {},
+                "trajectory_sets": ["day-1"],
+            }
+            assert store.read("acme", "t3").metadata["set_id"] == 7
+            assert store.read("acme", "t4").metadata["trajectory_sets"] == ["samples:coding"]
+            assert [(group.value, group.item_count) for group in store.sets("acme", "trajectory_set")] == [
+                ("samples:coding", 1),
+                ("day-1", 2),
+            ]
+            assert [(group.value, group.item_count) for group in store.sets("acme", "benchmark")] == [("lite", 1)]
+            with store.transaction(read_only=True) as connection:
+                tables = sqlalchemy.inspect(connection)
+                assert not tables.has_table("data_item_scenario", schema=schema)
+                indexes = {index["name"] for index in tables.get_indexes("data_item", schema=schema)}
+                assert ("data_item_by_item_id" in indexes) == (connection.dialect.name == "postgresql")
+                versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
+                assert versions.fetchall() == [(7,)]
+    with closing(open_durable_store()) as store, store.transaction() as connection:
+        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 8")
+    with pytest.raises(ReefError, match="a later Reef wrote them"):
+        open_durable_store()

@@ -5,6 +5,11 @@ The serving runtime ``reef.inference.tinker`` and the training component's rollo
 OpenAI text chat request into messages and sampling parameters, ``TinkerSampler`` renders and samples,
 and ``chat_completion`` shapes the answer with the training capture that Reef records: the token IDs,
 the loss mask, the sampled log probabilities and, when asked, the sampler's top-k at each sampled token.
+
+A request that names no reply limit may reply up to the rest of the model's context window, as on an
+OpenAI-compatible server, or ``DEFAULT_MAX_TOKENS`` when the sampler does not know the window. ``sample_chat``
+splits each reply into its reasoning and its answer as the token-native chat handlers do
+(``reef.core.reasoning``), so the answer's ``reasoning_content`` carries the reasoning of a thinking model.
 """
 
 from __future__ import annotations
@@ -18,7 +23,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.errors import UpstreamStatusError
-from reef.tinker.service import close_service, tinker_sdk
+from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
+from reef.tinker.service import close_service, served_context_windows, tinker_sdk
+
+#: The reply length of a request that names none, when the sampler does not know the model's context window.
+DEFAULT_MAX_TOKENS = 1024
+#: The OpenAI code and wording of a context overflow, which agents match to compact their history.
+CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded: the prompt exceeds this model's maximum context length."
 
 
 @dataclass(frozen=True)
@@ -69,7 +80,7 @@ class TinkerSampler(ABC):
     def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]: ...
 
     @abstractmethod
-    def decode(self, tokens: Sequence[int]) -> str: ...
+    def decode(self, tokens: Sequence[int], *, skip_special_tokens: bool = True) -> str: ...
 
     @abstractmethod
     def sample(
@@ -80,6 +91,16 @@ class TinkerSampler(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
+
+    def context_window(self) -> int | None:
+        """The model's context window in tokens, prompt and reply together, or None when the sampler does not know
+        it."""
+        return None
+
+
+#: Part of the message of Tinker's refusal on a sampling client that it poisoned, for example after the client sat idle
+#: too long. Only a new client samples again.
+POISONED_CLIENT = "SamplingClient is poisoned"
 
 
 class TinkerSDKSampler(TinkerSampler):
@@ -94,6 +115,8 @@ class TinkerSDKSampler(TinkerSampler):
     tokenizer: Any | None
     #: The sampling client of each sampler path, made at its first request.
     clients: dict[str, Any]
+    #: The context window of each model that the service serves, read at the first need.
+    context_windows: dict[str, int]
 
     def __init__(
         self,
@@ -115,6 +138,7 @@ class TinkerSDKSampler(TinkerSampler):
         self.base_client = None
         self.tokenizer = None
         self.clients = {}
+        self.context_windows = {}
 
     def base_sampler(self) -> Any:
         """The base model's sampling client, made at the first call."""
@@ -141,34 +165,54 @@ class TinkerSDKSampler(TinkerSampler):
             )
         )
 
-    def decode(self, tokens: Sequence[int]) -> str:
-        return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=True))
+    def decode(self, tokens: Sequence[int], *, skip_special_tokens: bool = True) -> str:
+        return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=skip_special_tokens))
 
-    def sample(
-        self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any], *, topk_logprobs: int
-    ) -> SampleResult:
+    def context_window(self) -> int | None:
+        if not self.context_windows:
+            self.context_windows = served_context_windows(self._service)
+        return self.context_windows.get(self._model)
+
+    def sampling_client(self, sampler_path: str | None) -> Any:
+        """The sampling client of ``sampler_path``, or of the base model for None, made at its first use."""
         if sampler_path is None:
-            sampler = self.base_sampler()
-        elif sampler_path in self.clients:
-            sampler = self.clients[sampler_path]
-        else:
+            return self.base_sampler()
+        if sampler_path not in self.clients:
             sampler = self._service.create_sampling_client(model_path=sampler_path)
             if sampler.get_base_model() != self._model:
                 raise ValueError("remote Tinker sampler checkpoint does not match the configured model")
             self.clients[sampler_path] = sampler
-        try:
-            result = sampler.sample(
-                prompt=self._sdk.ModelInput.from_ints(prompt),
-                num_samples=1,
-                sampling_params=self._sdk.SamplingParams(**params),
-                topk_sample_logprobs=topk_logprobs,
-            ).result(timeout=self._timeout_s)
-        except self._sdk.BadRequestError as exc:
-            # An overflow carries OpenAI's code and wording, which agents match to compact their history.
-            message = str(exc)
-            if "context window" in message:
-                message = f"context_length_exceeded: the prompt exceeds this model's maximum context length. {message}"
-            raise UpstreamStatusError(message, status=400) from exc
+        return self.clients[sampler_path]
+
+    def forget_client(self, sampler_path: str | None) -> None:
+        """Drop the kept sampling client of ``sampler_path``, so that the next use makes a new one."""
+        if sampler_path is None:
+            self.base_client = None
+        else:
+            self.clients.pop(sampler_path, None)
+
+    def sample(
+        self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any], *, topk_logprobs: int
+    ) -> SampleResult:
+        for attempt in range(2):
+            sampler = self.sampling_client(sampler_path)
+            try:
+                result = sampler.sample(
+                    prompt=self._sdk.ModelInput.from_ints(prompt),
+                    num_samples=1,
+                    sampling_params=self._sdk.SamplingParams(**params),
+                    topk_sample_logprobs=topk_logprobs,
+                ).result(timeout=self._timeout_s)
+                break
+            except self._sdk.BadRequestError as exc:
+                message = str(exc)
+                if POISONED_CLIENT in message and attempt == 0:
+                    # Tinker refuses every later call on a client that it poisoned, such as one left idle too long.
+                    self.forget_client(sampler_path)
+                    continue
+                if "context window" in message:
+                    message = f"{CONTEXT_LENGTH_EXCEEDED} {message}"
+                raise UpstreamStatusError(message, status=400) from exc
         if len(result.sequences) != 1:
             raise ValueError("Tinker returned an unexpected number of sequences")
         sequence = result.sequences[0]
@@ -193,9 +237,11 @@ def chat_completion(
     result: SampleResult,
     content: str,
     runtime_load_id: str,
+    reasoning: str = "",
 ) -> dict[str, Any]:
-    """An OpenAI chat completion plus the private training capture Reef records."""
-    message = {"role": "assistant", "content": content}
+    """An OpenAI chat completion plus the private training capture Reef records; a non-empty ``reasoning`` rides the
+    message's ``reasoning_content``, as an OpenAI-compatible server with a reasoning parser returns it."""
+    message = {"role": "assistant", "content": content, **({"reasoning_content": reasoning} if reasoning else {})}
     finish = "length" if result.stop_reason == "length" else "stop"
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -256,22 +302,27 @@ def chat_request(payload: dict[str, Any]) -> tuple[list[dict[str, str]], dict[st
         raise UpstreamStatusError("Tinker requires non-empty text messages", status=400)
     messages = []
     for message in raw:
+        # An assistant message may keep the reasoning_content that a Tinker answer carries, so a client can send its
+        # history back as it got it; the chat template renders it as that reply's thinking.
+        is_assistant = isinstance(message, dict) and message.get("role") == "assistant"
+        keys = {"role", "content", "reasoning_content"} if is_assistant else {"role", "content"}
         if (
             not isinstance(message, dict)
-            or set(message) != {"role", "content"}
-            or not isinstance(message["role"], str)
+            or not {"role", "content"} <= set(message) <= keys
             or message["role"] not in {"system", "user", "assistant"}
             or not isinstance(message["content"], str)
+            or not isinstance(message.get("reasoning_content", ""), str)
         ):
             raise UpstreamStatusError("Tinker currently supports text system/user/assistant messages", status=400)
         messages.append(dict(message))
     params: dict[str, Any] = {
         key: payload[key] for key in ("temperature", "top_p", "top_k", "seed", "stop") if key in payload
     }
-    params["max_tokens"] = payload.get("max_completion_tokens", payload.get("max_tokens", 1024))
-    maximum = params["max_tokens"]
-    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
-        raise UpstreamStatusError("Tinker max_tokens must be a positive integer", status=400)
+    maximum = payload.get("max_completion_tokens", payload.get("max_tokens"))
+    if maximum is not None:
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+            raise UpstreamStatusError("Tinker max_tokens must be a positive integer", status=400)
+        params["max_tokens"] = maximum
     template = payload.get("chat_template_kwargs", {})
     if (
         not isinstance(template, dict)
@@ -313,8 +364,10 @@ def sample_chat(
     A positive ``topk_logprobs`` records the sampler's top ``topk_logprobs`` log probabilities at each sampled
     token in the capture (``topk_indices``, ``topk_log_probs``). Those must be the log probabilities that the
     trainer reads, of the untruncated distribution at temperature 1, so such a request may set ``temperature``
-    only to 1, ``top_p`` only to 1 and ``top_k`` only to -1. Raise ``UpstreamStatusError`` (400) for a request
-    that Tinker cannot serve or that sets another value.
+    only to 1, ``top_p`` only to 1 and ``top_k`` only to -1. A request that names no reply limit may reply up to
+    the rest of the sampler's context window (``TinkerSampler.context_window``), or ``DEFAULT_MAX_TOKENS`` tokens
+    when the sampler does not know it. Raise ``UpstreamStatusError`` (400) for a request that Tinker cannot serve or
+    that sets another value, and with ``CONTEXT_LENGTH_EXCEEDED`` for such a request whose prompt fills the window.
     """
     messages, params = chat_request(payload)
     if topk_logprobs and (
@@ -328,6 +381,19 @@ def sample_chat(
     prompt = sampler.render(messages, template_kwargs=payload.get("chat_template_kwargs") or {})
     if not prompt:
         raise ValueError("Tinker chat template produced an empty prompt")
+    if "max_tokens" not in params:
+        # Like an OpenAI-compatible server, a request without a limit may use the rest of the context window.
+        window = sampler.context_window()
+        if window is None:
+            params["max_tokens"] = DEFAULT_MAX_TOKENS
+        elif window <= len(prompt):
+            raise UpstreamStatusError(
+                f"{CONTEXT_LENGTH_EXCEEDED} {len(prompt)} prompt tokens fill the context window of {window}",
+                status=400,
+            )
+        else:
+            params["max_tokens"] = window - len(prompt)
     result = sampler.sample(sampler_path, prompt, params, topk_logprobs=topk_logprobs)
-    content = sampler.decode(result.tokens)
-    return chat_completion(payload.get("model", model), messages, prompt, result, content, runtime_load_id)
+    pre_opened = is_reasoning_pre_opened(sampler.decode(prompt[-PROMPT_TAIL_TOKEN_COUNT:], skip_special_tokens=False))
+    reasoning, content = split_reasoning(sampler.decode(result.tokens), pre_opened=pre_opened)
+    return chat_completion(payload.get("model", model), messages, prompt, result, content, runtime_load_id, reasoning)

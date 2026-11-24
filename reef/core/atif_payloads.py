@@ -544,21 +544,62 @@ def reply_skeleton(messages: list[Any], provider: str) -> dict[str, Any]:
     return {"choices": [{"message": message} for message in messages]}
 
 
-def usage_metrics(response: Mapping[str, Any]) -> dict[str, int] | None:
-    """The ATIF metrics of a response's ``usage``: prompt, completion and cached tokens."""
+def response_metrics(response: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The ATIF metrics of a response, or ``None`` when it has none.
+
+    ``usage`` gives the prompt, completion and cached token counts. The other fields come from where each protocol
+    keeps the sampled tokens. ``prompt_token_ids`` is the top-level ``prompt_token_ids`` (vLLM, Reef) or that of the
+    first choice (SGLang). ``completion_token_ids`` is the first choice's ``token_ids`` (vLLM, Reef) or
+    ``response_token_ids`` (SGLang), or the top-level ``token_ids`` of an Anthropic message (Reef's extension).
+    ``logprobs`` is the ``logprob`` of each entry of the first choice's ``logprobs.content``, of an Anthropic
+    message's top-level ``logprobs.content``, or of the ``logprobs`` of each ``output_text`` part of an OpenAI
+    response, in order. A field whose value is not a non-empty list of integers, or of numbers for ``logprobs``, is
+    left out.
+    """
+
+    def _integer(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    metrics: dict[str, Any] = {}
     usage = response.get("usage")
-    if not isinstance(usage, Mapping):
-        return None
-    details = usage.get("prompt_tokens_details")
-    candidates = {
-        "prompt_tokens": usage.get("prompt_tokens", usage.get("input_tokens")),
-        "completion_tokens": usage.get("completion_tokens", usage.get("output_tokens")),
-        "cached_tokens": (details.get("cached_tokens") if isinstance(details, Mapping) else None)
-        or usage.get("cache_read_input_tokens"),
+    if isinstance(usage, Mapping):
+        details = usage.get("prompt_tokens_details")
+        counts = {
+            "prompt_tokens": usage.get("prompt_tokens", usage.get("input_tokens")),
+            "completion_tokens": usage.get("completion_tokens", usage.get("output_tokens")),
+            "cached_tokens": (details.get("cached_tokens") if isinstance(details, Mapping) else None)
+            or usage.get("cache_read_input_tokens"),
+        }
+        metrics.update((key, value) for key, value in counts.items() if _integer(value))
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
+    sources = {
+        "prompt_token_ids": (response.get("prompt_token_ids"), choice.get("prompt_token_ids")),
+        "completion_token_ids": (choice.get("token_ids"), choice.get("response_token_ids"), response.get("token_ids")),
     }
-    metrics = {
-        key: value for key, value in candidates.items() if isinstance(value, int) and not isinstance(value, bool)
-    }
+    for key, candidates in sources.items():
+        token_ids = next((value for value in candidates if value is not None), None)
+        if isinstance(token_ids, list) and token_ids and all(_integer(token_id) for token_id in token_ids):
+            metrics[key] = list(token_ids)
+    logprobs = choice.get("logprobs", response.get("logprobs"))
+    if isinstance(logprobs, Mapping):
+        entries = logprobs.get("content")
+    else:
+        output = response.get("output")
+        entries = [
+            entry
+            for item in (output if isinstance(output, list) else ())
+            if isinstance(item, Mapping) and isinstance(item.get("content"), list)
+            for part in item["content"]
+            if isinstance(part, Mapping)
+            and part.get("type") == "output_text"
+            and isinstance(part.get("logprobs"), list)
+            for entry in part["logprobs"]
+        ]
+    values = [entry.get("logprob") if isinstance(entry, Mapping) else None for entry in entries or ()]
+    log_probs = [float(value) for value in values if isinstance(value, int | float) and not isinstance(value, bool)]
+    if log_probs and len(log_probs) == len(values):
+        metrics["logprobs"] = log_probs
     return metrics or None
 
 
@@ -608,8 +649,8 @@ class AtifCall:
     ``system_entry``). ``agent`` is the ATIF agent fragment of ``tools`` (``atif_agent``), or ``None`` without
     tools. ``reply`` holds the ATIF elements of the response's reply messages, one entry per message, without
     patches. ``call`` holds the other request fields (``request``) and, when the payload has a response, the patch
-    that turns the reply's skeleton into it (``response_patch``); the reply's ATIF ``metrics`` are a view of its
-    usage.
+    that turns the reply's skeleton into it (``response_patch``); the reply's ATIF ``metrics`` are a view of the
+    response (``response_metrics``).
 
     Purpose: ``atif_call`` makes it from a payload; a SQL record store keeps it in its trajectory nodes, and
     ``make_trajectory`` folds calls into an ATIF document. ``provider_payload`` renders the payload back.
@@ -696,7 +737,7 @@ def atif_reply(
         )
         # A response without a patch keeps the key, so that the call still has a response.
         call["response_patch"] = patch_of(response, rendered)
-        metrics = usage_metrics(response) if isinstance(response, Mapping) else None
+        metrics = response_metrics(response) if isinstance(response, Mapping) else None
         if metrics and reply and reply[-1] and reply[-1][-1].get("source") == "agent":
             reply[-1][-1] = {**reply[-1][-1], "metrics": metrics}
     return tuple(reply), call
@@ -731,7 +772,7 @@ def provider_payload(call: AtifCall) -> dict[str, Any]:
 
 
 def without_metrics(element: Mapping[str, Any]) -> dict[str, Any]:
-    """An element without its ATIF ``metrics``, which are a view of the response's usage."""
+    """An element without its ATIF ``metrics``, which are a view of the response (``response_metrics``)."""
     return {key: value for key, value in element.items() if key != "metrics"}
 
 

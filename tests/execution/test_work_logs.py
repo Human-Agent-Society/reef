@@ -13,8 +13,8 @@ import pytest
 from reef.execution import work_logs
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.execution.workers import QueueWorker
-from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
-from reef.storage.work_queue import MAX_LOG_LINES, NewWork
+from reef.storage.coordination.work_queue import MAX_LOG_LINES, NewWork
+from reef.storage.sql.coordination import SQLiteCoordinationDatabase, SQLWorkQueue
 
 logger = logging.getLogger("reef.test.work_logs")
 
@@ -44,7 +44,7 @@ class LoggingWorker(QueueWorker):
 def queue():
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database, max_attempts={"jobs": 2})
-        queue.add(NewWork("jobs", "a", "s", "job"))
+        queue.append(NewWork("jobs", "a", "s", "job"))
         yield queue
 
 

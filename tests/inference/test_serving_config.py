@@ -7,18 +7,18 @@ from collections.abc import Mapping
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
+from reef.api.app import create_app
+from reef.api.inference_service import build_inference_app
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
+from reef.control.workers.serving import ServingWorker
 from reef.core.values import JsonValue
-from reef.dispatcher import Dispatcher
-from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
-from reef.service.app import create_app
-from reef.service.inference_service import build_inference_app
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
 HEADERS = {"x-reef-scenario": "math"}
@@ -68,7 +68,8 @@ class TemperatureHandler(InferenceHandler):
 def serving(tmp_path):
     runtime = ScalingRuntime()
     handler = TemperatureHandler()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     storage = SQLiteScenarioStorage(tmp_path / "records")
@@ -77,6 +78,7 @@ def serving(tmp_path):
         return Dispatcher(
             recipe,
             backends,
+            live=live,
             scenario_storage=storage,
             coordination=coordination,
             components=frozenset({"control"}),
@@ -84,7 +86,7 @@ def serving(tmp_path):
         )
 
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     inference = build_inference_app(coordination.served_models, storage, FixedEngineClients(handler), tokens=None)
     # Each test stops the worker before it closes control, which closes the coordination store.
