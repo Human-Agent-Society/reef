@@ -33,7 +33,10 @@ generation runs no rollouts:
    (``made_samples``). The task trains like every other sample: the training
    component rolls it out on its own sampler, at the job's start weights.
 5. When the commit of a job's end is durable, the stage reads the job's
-   ``rollout_rewards`` (``job_ended``) and saves each task's result.
+   ``rollout_rewards`` (``job_ended``) and saves the result of each task of
+   that job, and of an earlier job that a new training start cancelled. A
+   task of a job that started before the stage read the end waits for that
+   job's end.
 6. When every train task of a generation has a result, the stage calls
    ``record_results``.
 
