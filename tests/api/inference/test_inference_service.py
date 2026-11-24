@@ -472,10 +472,17 @@ class SampleEngines(EngineClients):
 
 
 async def ask_recording(
-    tmp_path: Path, body: dict[str, Any], *, engines: EngineClients, header: str = "1", sample: Any = SAMPLE
+    tmp_path: Path,
+    body: dict[str, Any],
+    *,
+    engines: EngineClients,
+    header: str = "1",
+    sample: Any = SAMPLE,
+    refusals: int = 0,
 ) -> tuple[int, Any, Any, int]:
     """A call with ``x-reef-record-training: header``: the status, the client's body, the record store, and the
-    number of calls that reached the engine."""
+    number of calls that reached the engine. The engine refuses the first ``refusals`` calls with 421, as an engine
+    that no longer serves the selected weights does."""
     storage = SQLiteScenarioStorage(tmp_path / "records")
     store = storage.open("math")
     store.append_commit(expected_commit_number=0, commit=commit("artifact-1"))
@@ -486,6 +493,8 @@ async def ask_recording(
 
     async def complete(request: web.Request) -> web.Response:
         calls.append(await request.json())
+        if len(calls) <= refusals:
+            return web.Response(status=421, text="the engine serves other weights")
         answer: dict[str, Any] = {"model": "math-v1", "choices": [{"message": {"role": "assistant", "content": "4"}}]}
         return web.json_response(answer if sample is None else {**answer, "training": sample})
 
@@ -510,6 +519,15 @@ def test_a_call_that_records_its_sample_keeps_it_in_the_record_and_never_returns
     (item,) = inference_records(records)
     assert item.payload["response"]["training"] == SAMPLE
     assert item.payload["metadata"]["tags"] == {"session": "s1"}
+
+
+@pytest.mark.unit
+def test_a_call_that_records_its_sample_is_retried_once_after_a_refused_binding(tmp_path: Path) -> None:
+    status, answer, records, calls = asyncio.run(ask_recording(tmp_path, SAMPLED, engines=SampleEngines(), refusals=1))
+
+    assert status == 200 and calls == 2 and "training" not in answer
+    (item,) = inference_records(records)
+    assert item.payload["response"]["training"] == SAMPLE
 
 
 @pytest.mark.unit
