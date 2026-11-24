@@ -5,8 +5,8 @@ Installation depends on what you want Reef to evolve:
 
 - **A harness, against a hosted model.** Install the package on your
   laptop; no GPU involved. See `Laptop, no GPU`_.
-- **Model weights, and optionally a harness.** Set up docker image that
-  contains GPU management stack. See `GPU image, for weight training`_.
+- **Model weights, and optionally a harness.** Build the Docker image that
+  contains the GPU training stack. See `GPU image, for weight training`_.
 - **Neither — you only call a Reef deployment.** See `Client only`_.
 
 Laptop, no GPU

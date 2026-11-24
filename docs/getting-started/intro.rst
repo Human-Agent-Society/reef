@@ -1,9 +1,9 @@
 Reef: continual learning for AI agents
 ======================================
 
-Reef is a continual learning infrastructure. It sits between your agent's
-harness and the model that harness calls. It records each request, its
-response, and the feedback about the response. Reef then use these signal to
+Reef is infrastructure for continual learning. It sits between your agent's
+harness and the model that the harness calls. It records each request, its
+response, and the feedback about the response. Reef then uses these signals to
 produce a better version of the model weights or of the agent's harness.
 
 .. figure:: ../assets/reef-overview-light.svg
@@ -15,14 +15,11 @@ produce a better version of the model weights or of the agent's harness.
 Why Reef
 --------
 
-AI agents constantly accumulate valuable feedback, from passing tests to user
-thumbs-downs and rubric scores. Traditionally, turning these signals into a
-smarter agent requires a cumbersome offline pipeline: exporting logs, building
-datasets, retraining, evaluating, and redeploying.
+AI agents accumulate feedback all the time: passing tests, user thumbs-downs,
+rubric scores. Turning these signals into a better agent usually needs an
+offline pipeline: export logs, build datasets, retrain, evaluate, redeploy.
 
-Reef eliminates this friction. By integrating continual learning directly into
-the serving lifecycle, Reef drastically reduces the complexity of maintaining
-offline pipelines.
+Reef puts that loop into the serving lifecycle:
 
 .. container:: flow
 
@@ -62,11 +59,11 @@ the whole thing:
 +----------------------------+-------------+---------------+----------+
 
 What Reef evolves
---------------------
+-----------------
 
-Reef is capable of evolve both the model weights and the `harness tree
-<../reference/glossary.rst#harness-tree>`__, controlled by a `recipe
-<../reference/glossary.rst#recipe>`__.
+Reef can evolve both the model weights and the `harness tree
+<../reference/glossary.rst#harness-tree>`__. A `recipe
+<../reference/glossary.rst#recipe>`__ controls which.
 
 - **Model weights.** Reef runs the training step and hot-swaps the result
   into the serving engine. See `Evolve your model

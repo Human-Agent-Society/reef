@@ -26,7 +26,7 @@ dependencies = [
     "huggingface_hub",
     # Harbor's environment contract backs reef.execution.sandbox; task directory rollouts, the task player and the
     # generator service play Harbor tasks with reef-eval.
-    "harbor>=0.25,<0.26",
+    "harbor>=0.25,<0.27",
     "pyyaml",
     "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
@@ -41,9 +41,9 @@ sglang = ["requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 # Python-side vLLM adapter; install native vLLM in its GPU environment.
 vllm = ["requests", "ray[default]", "psutil>=5.9"]
 tinker = [
-    "tinker==0.38.0",
+    "tinker==0.39.2",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
-    "tinker-cookbook==0.6.0",
+    "tinker-cookbook==0.7.0",
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
@@ -53,7 +53,7 @@ s3 = ["boto3"]
 # environment adds what its sandbox needs to build a task's image (dockerfile-parse). The e2b extra needs Harbor
 # 0.25: KillOnTimeoutE2BEnvironment in reef.execution.sandbox.e2b repeats the sandbox creation of that version's
 # E2B environment, and Harbor 0.24 lacks an attribute that it reads (_sandbox_timeout).
-e2b = ["harbor[e2b]>=0.25,<0.26", "e2b>=2.46", "connectrpc>=0.11.1,<0.14"]
+e2b = ["harbor[e2b]>=0.25,<0.27", "e2b>=2.46", "connectrpc>=0.11.1,<0.14"]
 modal = ["harbor[modal]", "modal>=1.6"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
@@ -97,7 +97,7 @@ dev = [
     "pytest-cov",
     # Runs the suite in parallel, as CI does (-n 8; addopts selects --dist worksteal).
     "pytest-xdist==3.8.0",
-    "ruff==0.17.4",
+    "ruff==0.17.6",
 ]
 
 [dependency-groups]

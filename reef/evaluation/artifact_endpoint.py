@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailableError, UpstreamStatusError
+from reef.core.errors import InferenceUnavailableError, ReefError, UpstreamStatusError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
@@ -156,10 +156,11 @@ class CandidateArtifacts(ABC):
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
     ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
+    ``task_owner(scenario)`` returns the owner that the record of ``scenario`` stores, whose data holds its tasks.
     ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
-    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
+    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.scenario.record_items.evaluation_call_item``).
     ``add_evaluation_trajectory(scenario, evaluation_id, trajectory)`` keeps one trajectory that a rollout's verifier
-    wrote as a trajectory item of that owner (``reef.storage.record_items.evaluation_trajectory_item``).
+    wrote as a trajectory item of that owner (``reef.storage.scenario.record_items.evaluation_trajectory_item``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
@@ -168,6 +169,19 @@ class CandidateArtifacts(ABC):
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` on this process's file system, which the task
         file store fetches when another process stored it. ``ReefError`` for a task that the scenario does not use."""
+
+    def candidate_task_for_digest(self, scenario: str, task_name: str, digest: str) -> Path:
+        """The directory of the pinned version of ``task_name`` in the scenario's owner's task file store."""
+        raise ReefError("this candidate provider cannot read a task by files digest")
+
+    def candidate_task_version(self, scenario: str, task_name: str) -> tuple[Path, str | None]:
+        """The current task directory and its stored files digest, or None when the digest is unavailable."""
+        return self.candidate_task(scenario, task_name), None
+
+    def task_owner(self, scenario: str) -> str | None:
+        """The owner that the record of ``scenario`` stores (``ScenarioSettings.owner``); None when the scenario does
+        not exist or its record stores no owner. It never puts the scenario's name in place of a missing owner."""
+        return None
 
     @abstractmethod
     def candidate(

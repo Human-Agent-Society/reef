@@ -23,14 +23,13 @@ step produced.
 | Example     | ``recipes/sao/examples/imo_answerbench/``                  |
 +-------------+------------------------------------------------------------+
 
-What it does
+How it works
 ------------
 
-SAO has no comparison group. A rollout is accepted as soon as its score
-arrives, without waiting for siblings and without a barrier, and
-``job_samples`` accepted rollouts, from as many prompts, form one training
-job of one optimizer step. It can be used
-for a stream of tasks where each attempt gets its own score.
+SAO has no comparison group. Reef accepts a rollout when its score arrives,
+without a barrier. ``job_samples`` accepted rollouts, each from its own
+prompt, form one training job. Use SAO for a stream of tasks where each
+attempt gets its own score.
 
 .. container:: flow
 
@@ -48,50 +47,36 @@ for a stream of tasks where each attempt gets its own score.
 
    :Loop: the next attempt runs on the updated weights
 
-How Reef implements it
-----------------------
-
-The record-to-sample stage turns every eligible ``ScoredRolloutReport`` into one
-``TrajectorySample``. "Single rollout" means one rollout per prompt, with no
-comparison group. ``pipeline.sample2job.config.job_samples`` such rollouts,
-from different prompts, form one job. Slime's ``--global-batch-size`` is the
-rollouts of one optimizer step; with the same value, one job is one step. The
-paper uses 128. Setting both to 1 makes
-every sample its own training step, which is convenient for a smoke run but
-is not the paper's estimator: the value model needs a full optimizer batch per step to
-learn, and without it the single-sample advantages are noise. The ``sao``
-loss family runs Slime's ``policy_loss`` with
-SAO's per-token primitive and a critic that shares the actor's GPUs. The
-critic supplies the values, and skip-observation GAE builds the advantages
-inside the training backend.
-
-The DIS ratio compares the current policy against the old-policy
-log-probabilities. Serving records no log-probabilities, so the training
-component renders each rollout with the model's chat template and the actor
-computes them with the weights of the job's start. The ratio is exact for
-``max_artifact_lag: 0``. Above 0 it measures the drift within the job, not the
-gap to the weights that sampled the rollout. Give the component the serving
-engine's chat template arguments (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__).
-
-The value model carries the paper's cold-start mitigations: it trains at its
-own, higher learning rate (``--critic-lr``) and the first
-``--num-critic-only-steps`` optimizer steps fit the zero-initialized value head
-before any policy update. Warmup steps still commit one training snapshot per
-step; the policy's weights first move after the warmup. An MoE value model
-trains its experts, layer norms, and value head while its self-attention stays
-frozen (paper Section 4). A dense value model trains every parameter unless
-``--sao-freeze-critic-attention`` applies the same freeze to it.
+- **Samples.** The record-to-sample stage, ``SAOSamples``, makes one sample
+  from every eligible report with a finite ``score``.
+- **Loss.** The ``sao`` loss family runs Slime's ``policy_loss`` with SAO's
+  per-token primitive and a critic that shares the actor's GPUs. The critic
+  supplies the values, and skip-observation GAE builds the advantages in the
+  training backend.
+- **Old-policy log-probabilities.** Serving records none. The training
+  component renders each rollout with the model's chat template, and the
+  actor computes them with the weights of the job's start. The DIS ratio is
+  exact for ``max_artifact_lag: 0``. Above 0 it measures the drift within the
+  job, not the gap to the weights that sampled the rollout. Give the
+  component the serving engine's chat template arguments (`Chat template
+  arguments <../../reference/configuration-inference.rst#chat-template-arguments>`__).
+- **Value model.** The critic trains at its own, higher learning rate
+  (``--critic-lr``). The first ``--num-critic-only-steps`` optimizer steps fit
+  the zero-initialized value head before any policy update. These warmup
+  steps still commit one training snapshot each; the policy's weights first
+  move after the warmup. An MoE value model trains its experts, layer norms,
+  and value head while its self-attention stays frozen (paper Section 4). A
+  dense value model trains every parameter unless
+  ``--sao-freeze-critic-attention`` applies the same freeze.
 
 Configuration
 -------------
 
-SAO's pipeline has two stages: ``SAOSamples`` and ``SAOJobData``. The
-deployment's ``pipeline`` section configures them. ``SAOSamples`` trains each
-report by itself. SAO updates asynchronously, so a rollout may train while the
-scenario serves a later artifact. Set that lag bound in the record-to-sample
-stage, the job size in the sample-to-job stage, and the optimizer batch in the
-training config:
+SAO's pipeline has two stages, ``SAOSamples`` and ``SAOJobData``. The
+deployment's ``pipeline`` section configures them. SAO updates asynchronously,
+so a rollout may train while the scenario serves a later artifact. Set that
+lag bound in the record-to-sample stage, the job size in the sample-to-job
+stage, and the optimizer batch in the training config:
 
 .. code:: yaml
 
@@ -114,7 +99,7 @@ training config:
        rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
 
    ``training.config.global_batch_size``
-       rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
+       rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. 1 trains on every rollout as it lands and is a smoke setting only: the value model needs a full optimizer batch per step to learn, and without it the single-sample advantages are noise.
 
    ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
        true trains every call of a report's trajectory, every reply; false trains only the reply of the trajectory's last call, with the earlier turns as context.
@@ -163,17 +148,12 @@ CEO-Bench
 
 The `CEO-Bench example <../../../recipes/sao/examples/ceobench>`__ trains the
 same recipe on `CEO-Bench <https://ceobench.com>`__, a 500-day simulated
-startup. The harness is the benchmark's own bash agent run from the host,
-its prompt, tools, and tool executor taken from the pinned checkout in the
-task image and its model calls served by Reef; the two simulator roles stay
-outside Reef, and the verifier reads final cash, survival days, and bankruptcy
-from the run's ``world.nmdb``. The reward is weekly and online: when the
-next week's dashboard appears, the finished week's decision turns (the tool
-calls that changed the company) are reported with the week's credit, its
-change in company value (cash plus the engine's subscription run-rate over
-the weeks left) and the discounted changes of the weeks after it, scaled
-against the weeks before, so the recipe trains while the rollout runs. The
-example's README records the reward-shaping choices and the recorded rollouts.
+startup. The harness is the benchmark's own bash agent, run from the host,
+with its model calls served by Reef. The reward is weekly and online: when the
+next week's dashboard appears, the harness reports the finished week's
+decision turns with the week's credit. Thus the recipe trains while the
+rollout runs. The example's README records the reward-shaping choices and the
+recorded rollouts.
 
 .. code:: bash
 
@@ -185,16 +165,20 @@ example's README records the reward-shaping choices and the recorded rollouts.
 Results
 -------
 
-The example's README records the batch-128 comparison on
-Qwen3-30B-A3B-Thinking-2507: SAO and a GRPO(+DIS) control trained from the
-same public checkpoint on a DeepMath pool, without tools, and evaluated on
-held-out AIME 2025, HMMT February 2025 and IMO-AnswerBench. The control is
-a reported baseline, not a shipped recipe. SAO trained
-stably for 99 steps and gained 2 to 4 points on AIME and IMO-AnswerBench,
-within per-checkpoint intervals. GRPO(+DIS) matched it through step 40, then
-shortened its responses and fell 5 to 13 points below SAO by step 80 and to
-a fraction of the base rate by step 140. The README lists the numbers and the
-distance from the paper's tool-integrated setting.
+The IMOAnswerBench example's README records a batch-128 comparison on
+Qwen3-30B-A3B-Thinking-2507. SAO and a GRPO(+DIS) control trained from the
+same public checkpoint on a DeepMath pool, without tools. Both were evaluated
+on held-out AIME 2025, HMMT February 2025 and IMO-AnswerBench. The control is
+a reported baseline, not a shipped recipe.
+
+- SAO trained stably for 99 steps and gained 2 to 4 points on AIME and
+  IMO-AnswerBench, within per-checkpoint intervals.
+- GRPO(+DIS) matched it through step 40, then shortened its responses. It
+  fell 5 to 13 points below SAO by step 80 and to a fraction of the base rate
+  by step 140.
+
+The README lists the numbers and the distance from the paper's
+tool-integrated setting.
 
 .. image:: ../../assets/sao/learning-curve.png
    :alt: Held-out accuracy and training dynamics of SAO and GRPO(+DIS) against optimizer step

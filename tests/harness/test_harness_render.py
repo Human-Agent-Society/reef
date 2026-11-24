@@ -647,7 +647,7 @@ BINDING_COPY = {
         "reef": {
             "npm": "@ai-sdk/openai-compatible",
             "options": {"baseURL": "http://127.0.0.1:9/v1", "apiKey": ""},
-            "models": {"x": {}},
+            "models": {"x": {"limit": {"context": 128000, "output": 32000}}},
         }
     },
     "model": "reef/x",
@@ -660,6 +660,10 @@ BINDING_COPY = {
         ({"provider": EVIL_PROVIDER}, "on provider in"),
         ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "on provider in"),
         (BINDING_COPY, "on provider in"),
+        (
+            {"provider": {"reef": {**BINDING_COPY["provider"]["reef"], "models": {"x": {"name": "other"}}}}},
+            "on provider in",
+        ),
         ({"model": "reef/other"}, "on model in"),
         ({"small_model": "reef/served"}, r"on small_model in plugin/config\.json: Reef's model binding"),
         ({"disabled_providers": ["reef"]}, "on disabled_providers in"),
@@ -686,6 +690,7 @@ def test_opencode_render_admits_the_model_binding(api: str) -> None:
     config_json = json.loads(files["opencode/opencode.json"])
     assert config_json["model"] == "reef/served"
     assert set(config_json["provider"]["reef"]["models"]) == {"served", "other/big"}
+    assert config_json["provider"]["reef"]["models"]["other/big"]["limit"]["output"] == binding.max_output_tokens
 
 
 def test_opencode_validation_refuses_a_tree_that_copies_the_binding() -> None:
@@ -706,7 +711,11 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
     """Without a provider list opencode also offers its own zen provider, so a model choice the check missed would
     leave Reef; the descriptor lists only the binding's provider. A run does not search the web, so the env
     does not register opencode's websearch tool."""
-    assert json.loads(render({}, OPENCODE)["opencode/opencode.json"])["enabled_providers"] == ["reef"]
+    files = render({}, OPENCODE)
+    assert json.loads(files["opencode/opencode.json"])["enabled_providers"] == ["reef"]
+    assert OPENCODE.env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
+    catalog = OPENCODE.env["OPENCODE_MODELS_PATH"].removeprefix("{root}/")
+    assert json.loads(files[catalog]) == {}
     assert "OPENCODE_ENABLE_EXA" not in OPENCODE.env
 
 
@@ -1121,6 +1130,24 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
     target = write_descriptor(tmp_path, {**descriptor_data("pi"), field: value})
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
+
+
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ({"stdin": "yes"}, "run task 'stdin' must be a boolean"),
+        ({"stdin": True, "argv": ["-p", "task: {task}"]}, "'stdin' needs an instruction in argv tokens that are"),
+    ],
+)
+def test_an_agent_that_reads_its_task_from_stdin_has_the_task_in_tokens_of_its_own(tmp_path, task, message) -> None:
+    data = descriptor_data("pi")
+    data["run"]["task"] = {**data["run"]["task"], **task}
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(write_descriptor(tmp_path, data))
+
+
+def test_opencode_alone_of_the_bundled_adapters_reads_its_task_from_stdin() -> None:
+    assert [name for name in BUILTIN_ADAPTERS if get_adapter(name).task_on_stdin] == ["opencode"]
 
 
 def test_no_bundled_adapter_keeps_host_environment_or_has_a_bind_mounted_root() -> None:

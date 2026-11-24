@@ -23,7 +23,9 @@ from weakref import WeakKeyDictionary
 from tests.support.strategies import resolve_method, resolve_task_scorer
 from tests.support.trajectories import recorded_trajectory
 
+from reef.api.assembly import with_harness_components
 from reef.artifact.artifact import ArtifactNotFoundError
+from reef.control.scenario.live_objects import LiveObjects, harness_models
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import EvaluationSettings, History, TaskCollector, TaskScorer
@@ -37,8 +39,6 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.scenario.live_objects import LiveObjects, harness_models
-from reef.service.assembly import with_harness_components
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 from reef.train.harness_backend import AgentExecution, Method, MethodJob, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings

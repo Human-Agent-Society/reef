@@ -3,12 +3,12 @@
 A deployment has one recipe, or one recipe for each component of a ``CompositeRecipe``
 (``reef.recipe.composite.component_recipes``). A caller that holds the deployment's recipe asks these functions,
 so no recipe class answers for another recipe. The questions that also need a live object are in
-``reef.scenario.live_objects``.
+``reef.control.scenario.live_objects``.
 """
 
 from __future__ import annotations
 
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import component_recipes
 from reef.recipe.harness import HarnessEvolutionRecipe
 
@@ -35,4 +35,9 @@ def harness_adapter(recipe: Recipe) -> str | None:
     return None if harness is None else harness[1].evolution.adapter
 
 
-__all__ = ["harness_adapter", "harness_recipe"]
+def refuses_images(recipe: Recipe) -> bool:
+    """Whether any deployment component trains weights. Weight training currently supports text only."""
+    return any(isinstance(child, WeightTrainingRecipe) for _, child in component_recipes(recipe))
+
+
+__all__ = ["harness_adapter", "harness_recipe", "refuses_images"]

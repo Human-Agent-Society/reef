@@ -11,9 +11,9 @@ from tests.support.conversations import conversation, turn
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.core.trajectory_index import CallKey, TrajectoryIndex, call_key, conversations, sha256_text, trajectory_calls
-from reef.storage.record_items import record_item
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.record_items import record_item
+from reef.storage.sql.data import SQLiteDataStore
 
 SYSTEM = {"role": "system", "content": "be brief"}
 USER = {"role": "user", "content": "海 🐟"}
