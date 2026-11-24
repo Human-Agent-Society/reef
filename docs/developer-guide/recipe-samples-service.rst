@@ -291,6 +291,12 @@ The rule of each built-in stage:
   reads what the served system did.
 - ``SAOSamples``: accepts a lag of ``max_artifact_lag`` artifacts
   (default 0).
+- ``GeneratedTaskSamples``: never marks a stored sample (``goes_stale =
+  False``): a task is never stale. Its rule accepts a lag of
+  ``max_artifact_lag`` artifacts (default 0) for the Designer replies that a
+  task job carries. They are not stored samples, so control judges them with
+  the rule when it builds the job data, against what the scenario serves
+  then (``TrainingPipeline.build_job_data``).
 
 A stage whose method accepts a bounded lag passes its bound to
 ``lags_behind``. Guarantees:
