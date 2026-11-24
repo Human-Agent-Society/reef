@@ -13,8 +13,8 @@ from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import Sample
 from reef.core.served_models import ServedArtifact
-from reef.core.values import JsonValue
 from reef.core.snapshot import RootSource
+from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceBackend, InferenceHandler, InferenceRuntime

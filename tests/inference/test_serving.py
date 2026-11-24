@@ -685,7 +685,10 @@ def test_checkpoint_slots_serve_two_checkpoints_and_switch_between_them_without_
     # A promotion and a rollback between the two bound checkpoints load nothing and keep both routes.
     calls = [len(engines.backend.events) for engines in slot_engines]
     assert serving.activate_checkpoint(b) == loaded_b and serving.served_model_name("math") == route_b.model_name
-    assert serving.activate_checkpoint(a) == loaded_a and serving.serve_artifact(b, scenario="math", serving_config={}) == route_b
+    assert (
+        serving.activate_checkpoint(a) == loaded_a
+        and serving.serve_artifact(b, scenario="math", serving_config={}) == route_b
+    )
     # Both slots are bound, so a third checkpoint gets none, neither beside the active one nor as the active one.
     with pytest.raises(ReefError, match=r"the 2 checkpoint slots .* \(a, b\), so artifact 'c' has no slot"):
         serving.serve_artifact(c, scenario="math", serving_config={})
@@ -787,7 +790,11 @@ def test_checkpoint_slots_release_only_the_bindings_that_no_retained_route_uses(
     serving.activate_checkpoint(a)
     route_a = serving.served_artifact("a", "math")
     route_b = serving.serve_artifact(b, scenario="math", serving_config={})
-    assert route_a is not None and route_b is not None and serving.serve_artifact(c, scenario="math", serving_config={}) is not None
+    assert (
+        route_a is not None
+        and route_b is not None
+        and serving.serve_artifact(c, scenario="math", serving_config={}) is not None
+    )
     # A route uses a binding through its URL and model name, whatever artifact it names. b waits for its stop.
     retained = [ServedArtifact("alias", route_a.url, route_a.model_name), route_b]
 
