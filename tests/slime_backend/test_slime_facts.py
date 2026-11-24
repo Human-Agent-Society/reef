@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from tests.slime_backend.test_slime_component import worker_args
 from tests.slime_backend.test_slime_launch import MODEL, SAO, deployment_config, settings_of
+from tests.support.carrying_objective import CARRYING_OBJECTIVE, CARRYING_OPTIONS
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.base_root import BASE_FILE, BaseRoot
@@ -18,9 +19,7 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.train.component import ScenarioRoot, training_backend_facts
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend.facts import SlimeFacts
-from reef.train.slime_backend.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.launch import SlimeDeployment, component_factory
-from reef.train.slime_backend.objectives import SlimeObjective
 
 FULL: dict = {}
 LORA = {"megatron-lora-rank": 8, "megatron-lora-target-modules": ["linear_qkv", "linear_proj"]}
@@ -122,21 +121,9 @@ def test_the_component_refuses_options_whose_written_facts_differ_from_the_parse
         component_factory(component_config(tmp_path, FULL), MODEL, {})
 
 
-class CarryingObjective(SlimeObjective):
-    """A method on the slime family that carries delayed samples, as SPADE's Designer objective does."""
-
-    name = "test-facts-carrying"
-    loss_family = "slime"
-    advantage_rule = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
-    carries_samples = True
-
-    def prepare(self, data, state):
-        raise AssertionError("a task job prepares nothing")
-
-
 HARBOR = {"environment": "modal", "concurrency": 4}
 #: The task parameters of an objective that carries samples, and of one that carries none.
-CARRYING = {"objective": f"{__name__}:CarryingObjective", "harbor": HARBOR}
+CARRYING = {"objective": CARRYING_OBJECTIVE, "harbor": HARBOR}
 NOT_CARRYING = {"objective": "slime_dataset", "harbor": HARBOR}
 #: Slime's options as written for a task job that carries samples: groups of 2 in rollouts of 4 prompts.
 CARRYING_WRITTEN = {
@@ -150,15 +137,7 @@ CARRYING_PARSED = {
     "loss_family": "slime",
     "loss_type": "policy_loss",
     "compute_advantages_and_returns": True,
-    "rollout_batch_size": 4,
-    "n_samples_per_prompt": 2,
-    "global_batch_size": 7,
-    "rollout_temperature": 0.6,
-    "use_tis": True,
-    "normalize_advantages": False,
-    "custom_advantage_function_path": None,
-    "use_dynamic_batch_size": True,
-    "custom_tis_function_path": None,
+    **CARRYING_OPTIONS,
 }
 
 

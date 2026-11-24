@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.carrying_objective import CARRYING_OBJECTIVE, CARRYING_OPTIONS, SPADE, CarryingObjective
 from tests.support.job_data import delayed_sample
 
 from reef.core.job_data import DelayedSampleLimit
@@ -25,7 +26,6 @@ from reef.storage.durable_files import write_json
 from reef.train.slime_backend import harbor_rollouts
 from reef.train.slime_backend.dataset import DATASET_FILE
 from reef.train.slime_backend.facts import SlimeFacts
-from reef.train.slime_backend.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.harbor_rollouts import (
     DELAYED_FUNCTION_PATH,
     DELAYED_POSITION_KEY,
@@ -44,20 +44,6 @@ from reef.train.slime_backend.objectives import SlimeObjective, register_objecti
 from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.slime_backend.task_advantages import ADVANTAGE_RULE_KEY, DELAYED_ADVANTAGE_KEY, TASK_ADVANTAGES_PATH
 from reef.train.task_rollouts import HarborSettings
-
-SPADE = GroupAdvantageRule(divide_by_std=True, std="population", epsilon=1e-8)
-
-
-class CarryingObjective(SlimeObjective):
-    """A method on the slime family that centers by SPADE's rule and carries delayed samples."""
-
-    name = "test-carrying"
-    loss_family = "slime"
-    advantage_rule = SPADE
-    carries_samples = True
-
-    def prepare(self, data: Any, state: Mapping[str, Any]) -> TrainingSignal:
-        raise AssertionError("a task job prepares nothing")
 
 
 class RuleObjective(SlimeObjective):
@@ -92,24 +78,7 @@ class Args(SimpleNamespace):
     """Slime's options that a task job of an objective that carries samples reads, with values that work."""
 
     def __init__(self, **overrides: Any) -> None:
-        values = {
-            "advantage_estimator": "grpo",
-            "n_samples_per_prompt": 2,
-            "rollout_batch_size": 4,
-            "global_batch_size": 7,
-            "use_tis": True,
-            "normalize_advantages": False,
-            "custom_advantage_function_path": None,
-            "use_dynamic_batch_size": True,
-            "custom_tis_function_path": None,
-            "use_rollout_logprobs": False,
-            "rollout_temperature": 0.6,
-            "rollout_top_p": 1.0,
-            "rollout_top_k": -1,
-            "use_score_centering": False,
-            "score_centering_top_k": 2,
-        }
-        super().__init__(**{**values, **overrides})
+        super().__init__(**{**CARRYING_OPTIONS, **overrides})
 
 
 class FakeSample:
@@ -261,7 +230,7 @@ def test_the_limit_keeps_the_samples_of_slimes_distribution_that_fit_the_first_s
 
 @pytest.mark.unit
 def test_the_facts_state_the_limit_of_the_options_as_written() -> None:
-    carrying = {"objective": f"{__name__}:CarryingObjective"}
+    carrying = {"objective": CARRYING_OBJECTIVE}
     written = [
         "--hf-checkpoint",
         "/models/m",

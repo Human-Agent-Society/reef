@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Self
@@ -27,6 +26,7 @@ from tests.recipe.support import (
     train_job,
 )
 from tests.support.harness_service import drive_job
+from tests.support.polling import wait_until
 from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
@@ -850,19 +850,21 @@ def designer_pipeline(key: str = "designer_delay") -> dict[str, object]:
 def test_the_recipe_refuses_a_designer_delay_that_the_training_component_cannot_train(key: str) -> None:
     recipe = generated_pipeline_recipe({}, designer_pipeline(key))
     assert recipe.carries_delayed_samples()
-    with pytest.raises(RecipeConfigError, match=r"carry delayed samples, but the stub training component trains none"):
+    trains_none = r"GeneratedTaskRecipe\.carries_delayed_samples\), but the stub training component trains none"
+    cannot_train = r"GeneratedTaskRecipe\.carries_delayed_samples\), which the stub training component cannot train"
+    with pytest.raises(RecipeConfigError, match=trains_none):
         check_recipe_objects(recipe, training_live())
-    with pytest.raises(RecipeConfigError, match=r"which the stub training component cannot train: .* needs --use-tis"):
+    with pytest.raises(RecipeConfigError, match=cannot_train + r": .* needs --use-tis"):
         check_recipe_objects(recipe, training_live(RefusingComponent()))
     check_recipe_objects(recipe, training_live(CarryingComponent()))
     # Control holds the facts and no component: the facts' limit decides there too.
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
     check_recipe_objects(recipe, LiveObjects(runtime=runtime, training_facts=StubFacts(CarryingComponent())))
-    with pytest.raises(RecipeConfigError, match=r"carry delayed samples, but the stub training component trains none"):
+    with pytest.raises(RecipeConfigError, match=trains_none):
         check_recipe_objects(recipe, LiveObjects(runtime=runtime, training_facts=StubFacts(StubTrainingComponent())))
     # A scenario's own config can turn the replies on after the load: its trainer refuses them the same way, so
     # the scenario registry keeps the stored config (set_record2sample_config).
-    with pytest.raises(RecipeConfigError, match=r"designer_delay above 0 .* stub training component cannot train"):
+    with pytest.raises(RecipeConfigError, match=cannot_train):
         read_trainer_spec(recipe, training_live(RefusingComponent()))
 
 
@@ -1658,11 +1660,11 @@ class CheckedComponent(StubTrainingComponent):
 
 def checked_data(component: CheckedComponent, count: int) -> JobData:
     """The data of the ``count``-th job that ``component`` checked, once the training service asked."""
-    deadline = time.monotonic() + 10
-    while len(component.checked) < count:
-        if time.monotonic() > deadline:
-            raise AssertionError(f"the training service checked {len(component.checked)} jobs, not {count}")
-        time.sleep(0.02)
+    wait_until(
+        lambda: len(component.checked) >= count,
+        interval_seconds=0.02,
+        message=f"the training service did not check {count} jobs",
+    )
     return component.checked[count - 1]
 
 

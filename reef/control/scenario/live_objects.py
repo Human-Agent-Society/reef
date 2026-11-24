@@ -214,18 +214,22 @@ def task_delayed_sample_limit(recipe: WeightTrainingRecipe, facts: TrainingBacke
     """
     if not recipe.carries_delayed_samples():
         return None
+    carrying = (
+        f"{type(recipe).__name__}'s configuration makes its task jobs carry delayed samples "
+        f"({type(recipe).__name__}.carries_delayed_samples)"
+    )
     try:
         limit = facts.delayed_sample_limit(recipe.parameters_by_kind()["task"])
     except ValueError as exc:
         raise RecipeConfigError(
-            f"the record-to-sample stage's designer_delay above 0 makes {type(recipe).__name__}'s task jobs carry "
-            f"delayed samples, which the {facts.name} training component cannot train: {exc}"
+            f"{carrying}, which the {facts.name} training component cannot train: {exc}; change the recipe's "
+            "configuration so that they carry none"
         ) from exc
     if limit is None:
         raise RecipeConfigError(
-            f"the record-to-sample stage's designer_delay above 0 makes {type(recipe).__name__}'s task jobs carry "
-            f"delayed samples, but the {facts.name} training component trains none with the task objective of "
-            "recipe.config.job_parameters; name an objective that carries samples, or set designer_delay to 0"
+            f"{carrying}, but the {facts.name} training component trains none with the task objective of "
+            "recipe.config.job_parameters; name an objective that carries samples, or change the recipe's "
+            "configuration so that they carry none"
         )
     return limit
 

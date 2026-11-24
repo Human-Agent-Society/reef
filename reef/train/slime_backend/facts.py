@@ -181,7 +181,8 @@ class SlimeRolloutOptions:
 
     @classmethod
     def from_parsed(cls, args: SlimeArguments) -> Self:
-        """The rollout options of Slime's parsed arguments ``args``."""
+        """The rollout options of Slime's parsed arguments ``args``. ``ValueError``: a value is outside the domain of
+        its field."""
         return cls(
             float(args.rollout_temperature),
             float(args.rollout_top_p),
@@ -279,8 +280,10 @@ class SlimeFacts(TrainingBackendFacts):
     def from_arguments(cls, arguments: Sequence[str]) -> Self:
         """The facts of the Slime argument list ``arguments``, read as written, without Slime's parser.
 
-        Each option is read by its full name (``option_values``). ``ValueError``: ``--hf-checkpoint`` is absent, or
-        a LoRA option is no value of ``SlimeFacts``.
+        Each option is read by its full name (``option_values``). ``ValueError``: ``--hf-checkpoint`` is absent, a
+        LoRA option is no value of ``SlimeFacts``, a rollout option is no number of its kind or is outside the domain
+        of its ``SlimeRolloutOptions`` field, or ``--num-steps-per-rollout`` is below 1
+        (``SlimeRolloutOptions.from_arguments``).
         """
         checkpoint = option_values(arguments, "--hf-checkpoint")
         if not checkpoint:
@@ -300,7 +303,11 @@ class SlimeFacts(TrainingBackendFacts):
 
     @classmethod
     def from_parsed(cls, args: SlimeArguments, *, lora: bool) -> Self:
-        """The facts of Slime's parsed arguments ``args``; ``lora`` is whether the actor trains a LoRA adapter."""
+        """The facts of Slime's parsed arguments ``args``; ``lora`` is whether the actor trains a LoRA adapter.
+
+        ``ValueError``: a LoRA value is no value of ``SlimeFacts``, or a rollout option is outside the domain of its
+        ``SlimeRolloutOptions`` field (``SlimeRolloutOptions.from_parsed``).
+        """
         rollout = SlimeRolloutOptions.from_parsed(args)
         if not lora:
             return cls(args.hf_checkpoint, rollout=rollout)
