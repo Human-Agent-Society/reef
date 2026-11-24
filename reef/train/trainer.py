@@ -751,8 +751,9 @@ class Trainer:
     def advance_job(self, *, train_from_artifact_id: str | None = None) -> TrainingCommit | None:
         """Move the trainer's jobs forward and return the next commit, if any: the result that waits for its commit,
         else news of a running job (``poll_jobs``), else the submission of the next job, which continues the
-        training start (``reserve_job``, ``submit_job``). A scenario gives the job of a request that names
-        ``train_from`` its own start (``Scenario.prepare_job``)."""
+        training start (``reserve_job``, ``submit_job``). It judges no delayed sample: a scenario builds its jobs
+        against what it serves, and gives the job of a request that names ``train_from`` its own start
+        (``Scenario.prepare_job``)."""
         result = self.pending_result() or self.poll_jobs()
         if result is not None or not self.trains:
             return result

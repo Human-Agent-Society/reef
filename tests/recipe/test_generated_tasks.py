@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 import sqlalchemy.exc
@@ -25,10 +26,15 @@ from tests.recipe.support import (
     submit_job,
     train_job,
 )
-from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
+from tests.support.harness_service import drive_job
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
+from tests.support.samples import data_storage
+from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
-from reef.artifact import SnapshotRef
+from reef.artifact import DirectorySource, InMemoryRepositoryBackend, SnapshotRef
+from reef.control.dispatcher import Dispatcher
 from reef.control.scenario.factory import read_trainer_spec
 from reef.control.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.core import AgentRecord, RequestType
@@ -39,6 +45,7 @@ from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_capture import SamplingDistribution
 from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import SupportsReceipt
+from reef.execution.workers import SERVICE_NAMES
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
@@ -75,7 +82,8 @@ from reef.samples.staleness import ServedArtifacts
 from reef.storage.data.tasks import TaskStorage
 from reef.storage.scenario.commits import CommitRecord
 from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
-from reef.train.component import TrainingComponent
+from reef.storage.sql.coordination import memory_coordination
+from reef.train.component import TrainingComponent, TrainingJob
 from reef.train.pipeline import TrainingPipeline
 
 MODULE = "tests.recipe.test_generated_tasks"
@@ -1613,6 +1621,130 @@ def test_the_pipeline_leaves_out_a_carried_reply_whose_data_is_stale(tmp_path: P
     assert data.delayed == () and [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00001-000"]
     # The samples service never marks a task stale, whatever the lag.
     assert not stage_of(p).goes_stale
+
+
+class InlineDesignerSamples(GeneratedTaskSamples):
+    """The generated-task stage that a scenario of a dispatcher builds from its config, with a scripted Designer and
+    an inline round worker: round 0 writes ``harbor-00000-000`` with the reply ``designer-0-0`` (advantage 1.0), and
+    round 1 writes ``harbor-00001-000``."""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        worker = InlineWorker()
+        stage = cls(
+            context,
+            GeneratedTaskSettings.parse(config, plugin_class=cls),
+            task_generator=DesignerGenerator([designer_tasks(0, 0), designer_tasks(1, 0)], {0: {"designer-0-0": 1.0}}),
+            worker=worker,
+        )
+        worker.generation = stage
+        return stage
+
+
+class CheckedComponent(StubTrainingComponent):
+    """A component whose task jobs train up to ``DELAYED_LIMIT`` delayed samples, and that keeps the data of each
+    job that the training service asks it to check. It saves no checkpoint, so each job fails at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.checked: list[JobData] = []
+
+    def delayed_sample_limit(self, parameters: Mapping[str, object]) -> DelayedSampleLimit | None:
+        return DELAYED_LIMIT
+
+    def check_job(self, job: TrainingJob) -> None:
+        self.checked.append(job.read_data())
+
+
+def checked_data(component: CheckedComponent, count: int) -> JobData:
+    """The data of the ``count``-th job that ``component`` checked, once the training service asked."""
+    deadline = time.monotonic() + 10
+    while len(component.checked) < count:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the training service checked {len(component.checked)} jobs, not {count}")
+        time.sleep(0.02)
+    return component.checked[count - 1]
+
+
+def imported_artifact(dispatcher: Dispatcher, tmp_path: Path, name: str) -> str:
+    """Import full weights named ``name`` into scenario ``tasks``; the artifact's ID. Nothing serves it yet."""
+    weights = tmp_path / "weights" / name
+    weights.mkdir(parents=True)
+    (weights / "config.json").write_text("{}")
+    (weights / "model.safetensors").write_bytes(name.encode())
+    stored = tmp_path / "imports" / name
+    stored.mkdir(parents=True)
+    source = DirectorySource(weights, source_version="", link=False)
+    imported = dispatcher.import_artifact(
+        "tasks", source, None, source={"uri": weights.as_uri(), "version": ""}, directory=stored
+    )
+    return imported.artifact_id
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("max_artifact_lag", "carried_replies"), [(0, []), (2, [("designer-0-0", 1.0)])])
+def test_control_leaves_a_carried_reply_out_of_the_job_when_two_artifacts_served_after_the_one_that_drew_it(
+    tmp_path: Path, max_artifact_lag: int, carried_replies: list[tuple[str, float]]
+) -> None:
+    """Scenario.prepare_job judges the carried replies against what the scenario serves when it builds the job."""
+    stages = {
+        "record2sample": {
+            "module": f"{MODULE}:InlineDesignerSamples",
+            "config": {
+                "rounds": 2,
+                "description": DESCRIPTION,
+                "generator_url": "http://127.0.0.1:9",
+                "designer_delay": 1,
+                "max_artifact_lag": max_artifact_lag,
+            },
+        },
+        "sample2job": {"module": "reef.recipe.generated_tasks:GeneratedTaskJobData", "config": {"buffer_size": 2}},
+    }
+    component = CheckedComponent()
+    storage = data_storage(tmp_path / "records")
+    dispatcher = Dispatcher(
+        generated_pipeline_recipe({}, stages),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(
+            runtime=StubInferenceRuntime(),
+            training_component=component,
+            training_facts=StubFacts(component),
+            data_store=storage.data,
+        ),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+        components=frozenset(SERVICE_NAMES) - {"samples"},
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("tasks")
+        assert scenario is not None
+        wait_for_serving(dispatcher, "tasks")
+        drew_reply = scenario.serving_artifact_id()
+        scenario.records.append_result(designer_call("designer-0-0", artifact_id=drew_reply))
+        for _ in range(3):
+            make_samples(scenario)
+        # Round 0's job ends, and its generation's delivery saves the reply for round 1's first job.
+        drive_job(scenario)
+        for _ in range(3):
+            make_samples(scenario)
+        stage = scenario.trainer.pipeline.record2sample
+        assert isinstance(stage, InlineDesignerSamples) and stage.task_store is not None
+        assert designer_replies(stage.task_store, 0) is not None
+        for name in ("B", "C"):
+            dispatcher.activate("tasks", imported_artifact(dispatcher, tmp_path, name))
+        assert scenario.served_artifacts().artifact_ids[0] == drew_reply
+        assert len(scenario.served_artifacts().artifact_ids) == 3
+        make_samples(scenario)
+
+        assert scenario.prepare_job(None) is None, "the first submission waits for the training service's check"
+        data = checked_data(component, 2)
+        assert [sample.metadata["task"]["name"] for sample in data.samples] == ["harbor-00001-000"]
+        assert carried(data) == carried_replies
+    finally:
+        dispatcher.close()
 
 
 def test_with_a_training_pool_only_the_first_job_of_the_carrier_round_carries_its_replies(tmp_path: Path) -> None:
