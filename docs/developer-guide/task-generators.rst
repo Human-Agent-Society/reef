@@ -156,27 +156,42 @@ task counts under ``task_store``.
 Designer replies
 ----------------
 
-With ``pipeline.record2sample.config.designer_delay`` above 0, the task jobs
-also train the replies of the generator's Designer, as delayed samples
-(``JobData.delayed``). The generator reads only its ``GeneratorState``; the
-stage does the rest:
+With ``pipeline.record2sample.config.designer_delay`` d above 0, the task
+jobs also train the replies of the generator's Designer, as delayed samples
+(``JobData.delayed``). The generator gives only the advantages
+(``designer_advantages``); the stage does the rest:
 
-- The delivery of generation g calls ``designer_advantages(g)``, makes the
-  delayed sample of each reply from its inference record, which the samples
-  service holds until then, and saves the replies as the task store document
-  ``designer/<g>`` before it marks g delivered.
-- ``GeneratedTaskJobData`` reads the replies from the task store into the
-  first task job of round g + ``designer_delay``, so control builds the job
-  data in its own process.
-- Every service refuses ``designer_delay`` at its start when the training
-  backend's facts give no delayed sample limit for the recipe's task
-  parameters (``TrainingBackendFacts.delayed_sample_limit``,
-  ``check_recipe_objects``). The job data holds only the delayed samples
-  that the limit keeps, and the pipeline leaves out a reply whose data lags
-  more than ``max_artifact_lag`` artifacts behind the served one.
+- **Save.** When the generator has taken the results of generation g, the
+  delivery calls ``designer_advantages(g)``. It makes the delayed sample of
+  each reply that has an advantage from the reply's inference record, which
+  the samples service holds until then. It saves the replies as the task
+  store document ``designer/<g>`` before it marks g delivered. A record
+  without its exact sample is skipped. The operational metrics count the
+  saved replies and the skipped records.
+- **Carry.** The tasks of round g + d wait for ``designer/<g>``. The first
+  task job that holds a task of that round carries the replies of g, with
+  their advantages, beside its tasks. A round that published no train task
+  passes them to the next round that did. With ``pool_capacity`` above 0, a
+  later use of a task of that round carries nothing. ``GeneratedTaskJobData``
+  reads the replies from the task store, so control builds the job data in
+  its own process.
+- **Train once.** A carrying job that fails, or that a new training start
+  cancels, does not train them again. The last d generations of a run have
+  no carrying round. Their replies stay in the task store, so a run that
+  continues with more rounds trains them.
+- **Limits.** Every service refuses ``designer_delay`` at its start when the
+  training backend states no delayed sample limit for the recipe's task
+  parameters (``delayed_sample_limit`` in `Backend facts
+  <training-backends.rst#backend-facts>`__). A job carries only the replies
+  that the limit keeps: those sampled from the distribution that the job
+  trains under, up to the number that one job takes. When control builds the
+  job's data, the pipeline also leaves out each reply whose data lags more
+  than ``max_artifact_lag`` artifacts behind the served one. Both leave the
+  other replies out with a warning in the log.
 
 A reply trains only when its served call kept its exact sample
-(``x-reef-record-training``): SPADE's generator asks for it with
+(``x-reef-record-training``, see `Headers
+<../reference/http-api.rst#headers>`__): SPADE's generator asks for it with
 ``train_designer``. See `Generated tasks
 <../reference/configuration-generated-tasks.rst#generated-tasks>`__ for the
 keys.

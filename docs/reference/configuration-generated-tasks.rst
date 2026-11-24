@@ -137,15 +137,14 @@ Two limits of the training pool:
 - When the trainer starts the next job before the stage reads the end of a failed task job, the tasks of the next job also get a use with no rewards, and their rewards in that job are not kept. This also holds with ``pool_capacity`` 0.
 - The tasks of a job that a new training start cancelled return to the pool only when a later job ends. When that job held so many tasks that fewer than ``job_samples`` wait and the pool is full, no job and no round can start, also after a restart. Restart with a larger ``pool_capacity``.
 
-**Designer replies.** With ``designer_delay`` d above 0, the task jobs also train the Designer's replies:
+**Designer replies.** With ``designer_delay`` d above 0, the task jobs also train the Designer's replies, with the advantages that the generator gives them:
 
-- When the generator has taken the results of generation g, it gives the advantage of each Designer reply of g that trains (``TaskGenerator.designer_advantages``). The samples service makes each reply's delayed sample from its inference record and saves the replies in the task store. It holds the records until then.
-- The tasks of round g + d wait for these replies. The first task job that holds a task of that round carries the replies of g, with their advantages, beside its tasks. A round that published no train task passes them to the next round that did. Control reads the replies from the task store, so it can run in another process.
-- With ``pool_capacity`` above 0, a later use of a task of that round carries nothing: only the first job that trains a task of the round carries its replies.
-- A carrying job that fails, or that a new training start cancels, does not train them again. A reply whose data lags more than ``max_artifact_lag`` artifacts behind the served one when control builds the job does not train.
-- Each reply trains from the sample that its served call kept, so the generator must ask for it (SPADE's ``train_designer``). A reply without its sample is skipped. The operational metrics count the saved replies and the skipped records.
-- The last d generations of a run have no carrying round. Their replies stay in the task store, so a run that continues with more rounds trains them.
-- The training backend and the task jobs' objective must train delayed samples beside a task job's rollouts: every service refuses ``designer_delay`` at its start when the backend's facts give no delayed sample limit for the task parameters (``TrainingBackendFacts.delayed_sample_limit``), and the training service also checks the options of its component. A job carries only the replies that the backend trains: those sampled from its rollout distribution, up to the number that one job takes. The others are left out with a warning in the log.
+- The first task job of round g + d trains the replies of generation g beside its tasks. A round that published no train task passes them to the next round that did. A carrying job that fails, or that a new training start cancels, does not train them again.
+- Each reply trains from the exact sample that its served call kept, so the generator must ask for it (SPADE's ``train_designer``). A reply without its sample is skipped.
+- The training backend and the task jobs' objective must train delayed samples beside a task job's rollouts. Every service refuses ``designer_delay`` at its start otherwise.
+- A job leaves out, with a warning in the log, the replies that the backend cannot take: replies sampled from another distribution than the job's, and replies over the number that one job takes. It also leaves out a reply that lags more than ``max_artifact_lag`` artifacts behind the served one.
+
+See `Designer replies <../developer-guide/task-generators.rst#designer-replies>`__ for the whole flow.
 
 **Task jobs.** The saved train tasks become task items that the scenario uses, ``<scenario>.generated-tasks.<task name>``, and train like every other sample. ``GeneratedTaskJobData`` makes one task job of the next job's tasks, whatever Tinker's batch size (``training.options.batch-size``) is:
 

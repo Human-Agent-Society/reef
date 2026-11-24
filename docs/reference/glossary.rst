@@ -218,10 +218,10 @@ A trajectory that a served artifact sampled through the inference service and
 that trains in a later task job, beside the job's task rollouts, with an
 advantage that the recipe gives it: a ``DelayedSample`` in ``JobData.delayed``
 (``reef.core.job_data``). It keeps the exact tokens, log-probs and sampling
-distribution of a served call that sent ``x-reef-record-training``. SPADE's
-Designer replies are delayed samples. A task job trains the delayed samples
-that the training backend's ``delayed_sample_limit`` keeps. See `Generated
-tasks <configuration-generated-tasks.rst#generated-tasks>`__.
+distribution of a served call that sent ``x-reef-record-training``. A task job
+trains the delayed samples that the training backend's ``delayed_sample_limit``
+keeps. SPADE's Designer replies are delayed samples; see `Designer replies
+<../developer-guide/task-generators.rst#designer-replies>`__.
 
 Training job
 ------------

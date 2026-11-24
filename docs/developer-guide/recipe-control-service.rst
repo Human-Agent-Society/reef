@@ -85,6 +85,17 @@ submits the job to the training service.
   data from ``samples``, in store order, with the ID ``data_id``. The job's
   commit consumes every sample of the tuple, also the samples that the
   stage leaves out. Do not call models or train here.
+- ``JobData.delayed``: optional. Data whose samples are all tasks can also
+  carry delayed samples (``DelayedSample``): trajectories that train beside
+  the job's task rollouts, each with its advantage. Keep them within
+  ``context.delayed_sample_limit``, the limit of the training backend (see
+  `Backend facts <training-backends.rst#backend-facts>`__); the component
+  refuses data outside it. Control builds the data against what the scenario
+  serves then, and the pipeline leaves out each delayed sample that the
+  record-to-sample stage's ``is_stale`` finds stale (see `Staleness
+  <recipe-samples-service.rst#staleness>`__). The generated-task recipe
+  carries `Designer replies <task-generators.rst#designer-replies>`__ this
+  way.
 - ``job_parameters(data)``: the job's parameters. The default is the
   recipe's parameters for the kind of the samples, with the request's
   ``parameters`` merged over them (see `Job parameters

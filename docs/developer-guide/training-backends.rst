@@ -189,8 +189,12 @@ Stating the facts builds no component, starts nothing, calls no service and impo
      - Raise ``ValueError`` for a published snapshot that the component's ``import_start`` refuses. It reads the ``start_files`` and writes nothing. Control calls it for a ``train-from`` and for a request's ``train_from``.
    * - ``check_artifact(files)``
      - Check the files of an import against the layout of the backend's snapshots, as far as the files and the settings decide. Return ``None`` when that is the whole check. Return a JSON object when something must also resolve on the backend's service; the component's ``check_remote_artifact`` gets it. The default checks ``artifact_format`` and returns ``None``.
+   * - ``delayed_sample_limit(parameters)``
+     - The delayed samples (``JobData.delayed``) that a task job with ``parameters`` trains beside its tasks, as a ``DelayedSampleLimit``: the most samples that one job's data holds, and the sampling distribution that each must come from. ``None`` when the job trains none; the default is ``None``. Raise ``ValueError`` when the settings do not allow the delayed samples of the job's objective. Control builds each job's data within this limit, and every service refuses a recipe whose task jobs carry delayed samples when the member raises or returns ``None``.
 
 The component holds a value of the same type and answers these members from it, so the facts and the component give the same answers. The facts are the one place that states the default start: Reef asks no component for a root.
+
+``delayed_sample_limit`` is the one member that the component can answer from other values: a backend can derive some of its options when it parses them. The component's ``delayed_sample_limit(parameters)`` must equal the facts' answer for each ``parameters`` that its ``check_task_jobs`` accepts. A component whose values can differ checks the equality in ``check_task_jobs``: ``SlimeTrainingComponent.check_task_jobs`` refuses the recipe's task jobs when the limit of Slime's options as written differs from the limit of the options that Slime parsed.
 
 Everything else stays a call to the component in the training service, because it needs the backend's service, its files or its framework: ``root_start``, ``import_start``, ``check_remote_artifact``, ``check_task_jobs``, ``check_job``, ``changed_parts`` and the jobs.
 
