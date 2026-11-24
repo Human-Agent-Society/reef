@@ -118,7 +118,6 @@ from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 from reef.train.task_rollouts import HarborSettings, task_name
 
-
 #: The rollout a job trains and the job's optimizer steps through it, written before the workers train it.
 ROLLOUT_FILE = "rollout.json"
 #: The settings a job's driver starts with, in the job's directory.

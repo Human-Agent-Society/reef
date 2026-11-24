@@ -362,11 +362,11 @@ Requirements
 - **Samples.** Each trained sample must carry the top-K that its sampler
   recorded, at least ``score-centering-top-k`` entries per trained position,
   in ``extra.reef.training`` (``topk_indices`` and ``topk_log_probs``).
-  Serving records no tensors, except for a call with
-  ``x-reef-record-training`` (see `Headers
-  <../reference/http-api.rst#headers>`__), which records no top-K either. So
-  a sample that serving recorded has none, and the component fails the job. The Spindle full-parameter component's
-  task rollouts record them when its ``score_centering`` option is on.
+  Serving records no top-K, also for a call with ``x-reef-record-training``
+  (see `Headers <../reference/http-api.rst#headers>`__), so a sample that
+  serving recorded has none, and the component fails the job. The Spindle
+  full-parameter component's task rollouts record them when its
+  ``score_centering`` option is on.
 - **Task jobs on Slime.** A task job trains the ``slime`` family, which
   refuses this term. It uses Slime's own ``--use-score-centering`` instead
   (see `Task jobs on Slime

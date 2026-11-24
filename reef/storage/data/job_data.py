@@ -24,8 +24,8 @@ component that runs the job elsewhere mounts or copies the URI there and takes t
 access to the store, by the ``files`` of each line. It reads neither path, so Reef makes no local copy for it.
 
 ``key`` is ``job_data_key`` of the samples and the delayed samples, so two jobs of the same data share one
-directory. A directory does not change after it is written. The data store keeps the directories (``DataStore.write_job_directory``), and deletes a
-directory that no job used for the time to live.
+directory. A directory does not change after it is written. The data store keeps the directories
+(``DataStore.write_job_directory``), and deletes a directory that no job used for the time to live.
 """
 
 from __future__ import annotations
