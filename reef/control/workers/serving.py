@@ -360,7 +360,13 @@ class ServingWorker(QueueWorker):
                 logger.info("stopped serving artifact %s at %s", served.artifact_id, served.url)
             return {}
         if item.kind == SERVE_ARTIFACT_KIND:
-            return self.serve_artifact(item, runtime)
+            # An item that its rollout cancelled loses its lease: the runtime stops at its next check, and does not
+            # start the artifact for a rollout that is gone.
+            try:
+                with serving_work(lease_lost, redeploy=False):
+                    return self.serve_artifact(item, runtime)
+            except StartupStoppedError as error:
+                raise WorkLeaseLostError("the serve item ended while inference started its artifact") from error
         selected = self.routes.current_request(item.scenario)
         if selected is None or selected.id != item.id or not item.payload:
             return {}
@@ -526,7 +532,14 @@ class ServingWorker(QueueWorker):
         component = require_text(item.payload.get("component"), "component")
         components = scenario_components(self.recipe, self.live, item.scenario)
         artifact = components.component_artifact(self.repository(item.scenario).select(selection), component)
-        runtime.apply_serving_config(item.scenario, self.routes.read_serving_config(item.scenario))
+        # The newest request of the scenario carries the config that a person set last. The published config is
+        # older until that request publishes its routes, and an artifact's engine must not start with it.
+        request = self.routes.current_request(item.scenario)
+        if request is not None and request.payload:
+            config = serving_config_of(request.payload)
+        else:
+            config = dict(self.routes.read_serving_config(item.scenario))
+        runtime.apply_serving_config(item.scenario, config)
         served = runtime.serve_artifact(artifact, scenario=item.scenario)
         return {"served": None if served is None else dict(served.to_json())}
 
