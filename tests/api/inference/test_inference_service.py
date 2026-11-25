@@ -10,12 +10,25 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
+from reef.api.inference_service import (
+    ARTIFACT_HEADER,
+    ATTEMPT_HEADER,
+    BINDING_HEADER,
+    RECORD_HEADER,
+    build_inference_app,
+)
 from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
-from reef.inference.interfaces import EngineClients, InferenceHandler, StartupStep, StartupSteps
+from reef.inference.interfaces import (
+    EngineClients,
+    EngineReplica,
+    EngineReplicas,
+    InferenceHandler,
+    StartupStep,
+    StartupSteps,
+)
 from reef.storage.coordination.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.scenario.commits import CommitRecord
 from reef.storage.sql.coordination import memory_coordination
@@ -219,6 +232,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "error": None,
                     "engine": None,
                     "engine_detail": None,
+                    "engine_replicas": None,
                     # RFC #1283: a startup that waits is in its prepare phase from the request.
                     "startup": {
                         "steps": [
@@ -265,6 +279,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "error": None,
                     "engine": None,
                     "engine_detail": None,
+                    "engine_replicas": None,
                     "startup": None,
                 }
         finally:
@@ -295,6 +310,7 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                     "error": "The inference engine did not start. Check the service logs.",
                     "engine": None,
                     "engine_detail": None,
+                    "engine_replicas": None,
                     "startup": None,
                 }
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
@@ -406,6 +422,7 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                         "error": None,
                         "engine": None,
                         "engine_detail": None,
+                        "engine_replicas": None,
                         "startup": {"steps": [prepare], "estimate_seconds": None},
                     }
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
@@ -445,16 +462,46 @@ def test_inference_records_do_not_need_snapshot_history(tmp_path):
         coordination.close()
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: EngineReplicas(1, 0, (EngineReplica("a", "starting"),)),
+        lambda: EngineReplica("", "serving"),
+        lambda: EngineReplica("a", "idle"),  # type: ignore[arg-type]
+        lambda: EngineReplica("a", "serving", started_at=-1.0),
+        lambda: EngineReplicas(-1, 0),
+    ],
+)
+def test_engine_replicas_refuse_names_that_do_not_match_their_counts_and_bad_values(make) -> None:
+    with pytest.raises(ValueError):
+        make()
+
+
 class ColdHandler(HttpInferenceHandler):
     """A handler whose engine scales to zero: it reports a state and never calls the engine."""
 
     state: Any = "idle"
+    adding = False
 
     def engine_state(self, served: ServedArtifact) -> Any:
         return self.state
 
     def engine_detail(self, served: ServedArtifact) -> str:
         return "Loading weights · 0:42"
+
+    def engine_replicas(self, served: ServedArtifact) -> EngineReplicas:
+        if self.adding:
+            # A warm engine names its replicas: one serves, and one starts with its own phases.
+            return EngineReplicas(
+                1,
+                1,
+                (
+                    EngineReplica("ta-1", "serving", started_at=50.0),
+                    EngineReplica("ta-2", "starting", started_at=100.0, startup=self.engine_steps(served)),
+                ),
+            )
+        return EngineReplicas(serving=int(self.state == "warm"), starting=int(self.state == "starting"))
 
     def engine_steps(self, served: ServedArtifact) -> StartupSteps:
         return StartupSteps((StartupStep("start", 100.0, 108.0), StartupStep("load", 108.0, detail="5 of 6")), 60.0)
@@ -488,14 +535,263 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                     assert status["engine"] == state
                     # Only a starting engine says what it does now.
                     assert status["engine_detail"] == ("Loading weights · 0:42" if state == "starting" else None)
+                    # The replicas come in every engine state: a warm engine can add replicas.
+                    assert status["engine_replicas"] == {
+                        "serving": int(state == "warm"),
+                        "starting": int(state == "starting"),
+                        "replicas": [],
+                    }
                     # RFC #1283: and its phases, with their times.
                     load = {"phase": "load", "started_at": 108.0, "ended_at": None, "detail": "5 of 6"}
                     start = {"phase": "start", "started_at": 100.0, "ended_at": 108.0, "detail": None}
                     expected = {"steps": [start, load], "estimate_seconds": 60.0}
                     assert status["startup"] == (expected if state == "starting" else None)
+                # A warm engine that adds a replica gives the replica's step and phases.
+                ColdHandler.adding = True
+                response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                status = await response.json()
+                assert (status["engine"], status["engine_detail"]) == ("warm", "Loading weights · 0:42")
+                assert status["engine_replicas"] == {
+                    "serving": 1,
+                    "starting": 1,
+                    "replicas": [
+                        {"id": "ta-1", "state": "serving", "started_at": 50.0, "startup": None},
+                        {"id": "ta-2", "state": "starting", "started_at": 100.0, "startup": expected},
+                    ],
+                }
+                assert status["startup"] == expected
         finally:
-            ColdHandler.state = "idle"
+            ColdHandler.state, ColdHandler.adding = "idle", False
             storage.close()
             coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "replaced",
+        "removed",
+        "scenario",
+        "missing-header",
+        "stream",
+        "route",
+        "config",
+        "database",
+        "changing",
+        "invalid-attempt",
+        "protocol",
+    ],
+)
+def test_bound_chat_checks_target_before_execution(
+    tmp_path: Path, change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def check() -> None:
+        calls = []
+
+        async def complete(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            return web.json_response(
+                {"choices": [{"message": {"content": "4"}}], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}
+            )
+
+        engine = web.Application()
+        engine.router.add_post("/v1/chat/completions", complete)
+        coordination = memory_coordination()
+        table = coordination.served_models
+        lease = coordination.control_lease.acquire("control").number
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        storage.open("math").append_commit(expected_commit_number=0, commit=commit("artifact-1"))
+        async with TestServer(engine) as upstream:
+            served = ServedArtifact("artifact-1", str(upstream.make_url("/")), "load-1")
+            for scenario in ("math", "other"):
+                for name in (ACTIVE, "artifact-1"):
+                    table.write(ScenarioModel(scenario, name), served, control_lease_number=lease)
+            async with TestClient(TestServer(build_inference_app(table, storage, Engines(), tokens=TOKEN))) as client:
+                target_path = "/reef/scenarios/math/inference/target"
+                assert (await client.get(target_path)).status == 401
+                assert (await client.get(target_path + "?model=missing", headers=HEADERS)).status == 404
+                selected = await client.get(target_path + "?model=artifact-1", headers=HEADERS)
+                target = await selected.json()
+                assert selected.headers["Cache-Control"] == "no-store"
+                assert target == {
+                    "contract_version": 1,
+                    "model": "artifact-1",
+                    "artifact_id": "artifact-1",
+                    "binding_id": target["binding_id"],
+                    "protocol": "openai_chat_completions",
+                    "streaming": False,
+                }
+                assert len(target["binding_id"]) == 64
+                assert not calls
+                headers = {**HEADERS, BINDING_HEADER: target["binding_id"], ATTEMPT_HEADER: "attempt-1"}
+                path = "/reef/scenarios/math/artifacts/artifact-1/v1/chat/completions/attempt"
+                body = {"model": "ignored", "messages": [{"role": "user", "content": "2+2"}]}
+                expected = 200
+                if change == "replaced":
+                    table.write(
+                        ScenarioModel("math", "artifact-1"),
+                        ServedArtifact("artifact-1", served.url, "load-2"),
+                        control_lease_number=lease,
+                    )
+                    expected = 409
+                elif change == "removed":
+                    table.delete(ScenarioModel("math", "artifact-1"), control_lease_number=lease)
+                    expected = 404
+                elif change == "scenario":
+                    path = path.replace("/math/", "/other/")
+                    expected = 409
+                elif change == "missing-header":
+                    headers.pop(ATTEMPT_HEADER)
+                    expected = 400
+                elif change == "stream":
+                    body["stream"] = True
+                    expected = 400
+                elif change == "route":
+                    path = "/v1/chat/completions"
+                    expected = 400
+                elif change == "invalid-attempt":
+                    headers[ATTEMPT_HEADER] = "two attempts"
+                    expected = 400
+                elif change == "protocol":
+                    path = path.replace("chat/completions", "responses")
+                    expected = 404
+                elif change == "config":
+                    monkeypatch.setattr(table, "read_serving_config", lambda scenario: {"temperature": 0.5})
+                    expected = 409
+                elif change == "database":
+                    # Populate the normal cache first; strict calls must not reuse it on read failure.
+                    assert (await client.post(path.removesuffix("/attempt"), headers=HEADERS, json=body)).status == 200
+                    calls.clear()
+
+                    def unavailable(scenario: str):
+                        raise OSError("database unavailable")
+
+                    monkeypatch.setattr(table, "read_scenario", unavailable)
+                    expected = 503
+                elif change == "changing":
+
+                    def changing(scenario: str):
+                        table.write(
+                            ScenarioModel("math", "artifact-1"),
+                            ServedArtifact("artifact-1", served.url, "load-2"),
+                            control_lease_number=lease,
+                        )
+                        return {}
+
+                    monkeypatch.setattr(table, "read_serving_config", changing)
+                    expected = 503
+                else:
+                    # A new active model does not change the retained artifact's binding.
+                    table.write(
+                        ScenarioModel("math", ACTIVE),
+                        ServedArtifact("artifact-2", served.url, "load-2"),
+                        control_lease_number=lease,
+                    )
+                assert (
+                    await client.post(
+                        "/reef/scenarios/math/artifacts/artifact-1/v1/chat/completions/attempt",
+                        headers=HEADERS,
+                        json=body,
+                    )
+                ).status == 400
+                response = await client.post(path, headers=headers, json=body)
+                assert response.status == expected, await response.text()
+                if expected == 200:
+                    assert response.headers[ARTIFACT_HEADER] == "artifact-1"
+                    assert response.headers[BINDING_HEADER] == target["binding_id"]
+                    assert response.headers[ATTEMPT_HEADER] == "attempt-1"
+                    assert (await response.json())["usage"] == {"prompt_tokens": 3, "completion_tokens": 1}
+                    assert len(calls) == 1 and calls[0]["model"] == "load-1"
+                else:
+                    assert calls == []
+        coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["mismatch", "abort"])
+def test_bound_chat_does_not_retry_engine_execution(tmp_path: Path, failure: str) -> None:
+    async def check() -> None:
+        calls = []
+
+        async def complete(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            if failure == "mismatch":
+                return web.json_response({"error": {"message": "binding changed"}}, status=421)
+            return web.json_response({"choices": [{"finish_reason": "abort"}]})
+
+        engine = web.Application()
+        engine.router.add_post("/v1/chat/completions", complete)
+        coordination = memory_coordination()
+        table = coordination.served_models
+        lease = coordination.control_lease.acquire("control").number
+        async with TestServer(engine) as upstream:
+            table.write(
+                ScenarioModel("math", "artifact-1"),
+                ServedArtifact("artifact-1", str(upstream.make_url("/")), "load-1"),
+                control_lease_number=lease,
+            )
+            app = build_inference_app(table, SQLiteScenarioStorage(tmp_path / "records"), Engines(), tokens=TOKEN)
+            async with TestClient(TestServer(app)) as client:
+                target = await (
+                    await client.get("/reef/scenarios/math/inference/target?model=artifact-1", headers=HEADERS)
+                ).json()
+                response = await client.post(
+                    "/reef/scenarios/math/artifacts/artifact-1/evaluation/v1/chat/completions/attempt",
+                    headers={**HEADERS, BINDING_HEADER: target["binding_id"], ATTEMPT_HEADER: "attempt-1"},
+                    json={"messages": [{"role": "user", "content": "2+2"}]},
+                )
+                assert response.status == (503 if failure == "mismatch" else 409), await response.text()
+                assert len(calls) == 1
+        coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+def test_bound_request_keeps_its_target_during_activation(tmp_path: Path) -> None:
+    async def check() -> None:
+        started, finish = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def complete(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            started.set()
+            await finish.wait()
+            return web.json_response({"choices": [{"message": {"content": "old answer"}}]})
+
+        engine = web.Application()
+        engine.router.add_post("/v1/chat/completions", complete)
+        coordination = memory_coordination()
+        table = coordination.served_models
+        lease = coordination.control_lease.acquire("control").number
+        async with TestServer(engine) as upstream:
+            served = ServedArtifact("artifact-1", str(upstream.make_url("/")), "load-1")
+            table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=lease)
+            app = build_inference_app(table, SQLiteScenarioStorage(tmp_path / "records"), Engines(), tokens=TOKEN)
+            async with TestClient(TestServer(app)) as client:
+                target = await (await client.get("/reef/scenarios/math/inference/target", headers=HEADERS)).json()
+                headers = {**HEADERS, BINDING_HEADER: target["binding_id"], ATTEMPT_HEADER: "attempt-1"}
+                path = "/reef/scenarios/math/artifacts/active/evaluation/v1/chat/completions/attempt"
+                request = asyncio.create_task(client.post(path, headers=headers, json={"messages": []}))
+                await asyncio.wait_for(started.wait(), 5)
+                table.write(
+                    ScenarioModel("math", ACTIVE),
+                    ServedArtifact("artifact-2", served.url, "load-2"),
+                    control_lease_number=lease,
+                )
+                finish.set()
+                response = await asyncio.wait_for(request, 5)
+                assert response.status == 200
+                assert response.headers[ARTIFACT_HEADER] == "artifact-1"
+                assert len(calls) == 1 and calls[0]["model"] == "load-1"
+                assert (await client.post(path, headers=headers, json={"messages": []})).status == 409
+                assert len(calls) == 1
+        coordination.close()
 
     asyncio.run(check())

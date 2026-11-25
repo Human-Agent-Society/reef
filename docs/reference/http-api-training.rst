@@ -6,7 +6,7 @@ Queue a training request for a scenario in ``manual`` mode, read and cancel the 
 Manual training
 ---------------
 
-``POST /reef/train`` queues one training request for a scenario in ``data.training_mode: manual``. In harness evolution, every method takes it. A request is not a record: it waits in the deployment's training request queue until a training commit consumes it, and the commit keeps it in its ``training_request`` metrics. The request needs no inference receipts and no score.
+``POST /reef/train`` queues one training request for a scenario. A request trains in both training modes; in ``manual`` mode, only a request starts a job. In harness evolution, every method takes it. A request is not a record: it waits in the deployment's training request queue until a training commit consumes it, and the commit keeps it in its ``training_request`` metrics. The request needs no inference receipts and no score.
 
 .. code:: bash
 
@@ -29,7 +29,7 @@ The body takes these fields:
 
 The response is ``{agent_record_id, scenario, request_type: "train"}``, plus ``page_path``, the request's page with the query that a browser opens it by (`Request page <http-api-harness.rst#request-page>`__). HTTP 200 acknowledges durable acceptance, not successful training. The normal bearer authentication applies. Reef returns:
 
-- 400 for empty text, text longer than 4000 characters, missing or non-string ``session`` or ``artifact_id``, or a request to an ``auto`` scenario;
+- 400 for empty text, text longer than 4000 characters, or missing or non-string ``session`` or ``artifact_id``;
 - 400 for text that carries a credential-shaped literal or phrasing that overrides instructions. The reason names the rule, never the text, and Reef stores nothing;
 - 400 from a weight recipe for a request without ``samples``;
 - 404 for an unknown scenario. The route never creates a scenario, whatever ``reef.allow_implicit_scenario_creation`` says.
@@ -134,7 +134,7 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as ``2026
 - ``created_at``: when control added the job.
 - ``started_at``: when a training worker first took the job; ``null`` until then, and for a job from a store that an older Reef wrote.
 - ``ended_at``: when the job finished or failed; ``null`` until then.
-- ``experiment``: ``{tracker, project, entity, run_id, url}`` of the experiment run that records the job, such as ``{"tracker": "wandb", ...}``. Control writes it when its tracker records the first commit of the job. ``entity`` and ``url`` are ``null`` when the tracker does not know them. It is ``null`` until then, and always ``null`` without an experiment tracker. See `Configuration <configuration.rst>`__, "Commit correlation", for how W&B gives the run's URL.
+- ``experiment``: ``{tracker, project, entity, run_id, url}`` of the experiment run that records the job, such as ``{"tracker": "wandb", ...}``. Control writes it when its tracker records the first commit of the job. ``entity`` and ``url`` are ``null`` when the tracker does not know them. It is ``null`` until then, and always ``null`` without an experiment tracker. See `Commit correlation <configuration-observability.rst#commit-correlation>`__ for how W&B gives the run's URL.
 
 For example:
 

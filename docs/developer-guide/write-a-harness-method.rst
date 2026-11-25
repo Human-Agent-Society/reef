@@ -304,6 +304,14 @@ publication policy
 Runs that the method already ran through ``services.evaluate`` count:
 the evaluation reuses them.
 
+A run's score depends on its context as well as on the tree and the
+task: the served model and the models of ``evolution.models``; the
+adapter, its version and ``evolution.binary``; the scorer setting;
+``task_timeout_s`` and ``forbid_residue``; and ``evolution.executor``
+with ``evolution.sandbox``. The history reuses a scored run only in
+the context it ran in. A change of one of these settings evaluates
+the head again.
+
 Score a run
 ~~~~~~~~~~~
 

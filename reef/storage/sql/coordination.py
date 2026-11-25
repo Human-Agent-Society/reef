@@ -77,6 +77,7 @@ from reef.storage.coordination.served_models import (
 )
 from reef.storage.coordination.store import Coordination, CoordinationResource
 from reef.storage.coordination.work_queue import (
+    DEFERRED_ATTEMPTS,
     FINAL_STATES,
     HELD_STATES,
     WORK_STATES,
@@ -1260,11 +1261,12 @@ class SQLWorkQueue(WorkQueue):
         *,
         retryable: bool,
         now: float | None = None,
+        attempt: int | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
             again = retryable and self.has_attempts_left(item)
             return self.write_item(
                 connection,
@@ -1287,13 +1289,20 @@ class SQLWorkQueue(WorkQueue):
         now: float | None = None,
         available_at: float | None = None,
         error: str = "the worker stopped",
+        deferred: bool = False,
+        attempt: int | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         if available_at is not None and not is_finite_time(available_at):
             raise ValueError("available_at is a finite time or None")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            # The count grows from the stored row in the give-back's own change, so a deferral counts once, and an
+            # attempt that no longer holds the item counts none.
+            metadata = dict(item.metadata)
+            if deferred:
+                metadata[DEFERRED_ATTEMPTS] = item.deferred_attempt_count + 1
             return self.write_item(
                 connection,
                 counter,
@@ -1305,6 +1314,7 @@ class SQLWorkQueue(WorkQueue):
                 lease_expires_at=None,
                 available_at=moment if available_at is None else available_at,
                 stopped_attempt_count=item.stopped_attempt_count + 1,
+                metadata_json=canonical_json(metadata),
             )
 
     def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:

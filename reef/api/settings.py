@@ -52,7 +52,10 @@ class ServiceSettings:
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset.",
+        help=(
+            "Recipe of the deployment: recipe (records only), a package.module:ClassName, or the name"
+            " of a YAML preset under REEF_RECIPE_CONFIG_DIR."
+        ),
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
@@ -62,42 +65,70 @@ class ServiceSettings:
     allow_unauthenticated: bool = config_option(
         False,
         public_path=("reef", "allow_unauthenticated"),
-        help="Serve without bearer tokens on an address that other machines can reach.",
+        help=(
+            "Serve without bearer tokens on an address that other machines can reach. When false, "
+            "startup refuses a reef.host that is not loopback unless a token is set."
+        ),
     )
     served_url: str | None = config_option(
         None,
         public_path=("reef", "served_url"),
-        help="URL the recipe's own evaluation calls reach this service at (default: loopback on the bind port).",
+        help=(
+            "URL at which a composite recipe's own evaluation calls reach this service (default: the "
+            "bind address, loopback for a wildcard). Set it when the tasks run on another host; other"
+            " recipes ignore it."
+        ),
     )
     harness_inference_url: str | None = config_option(
         None,
         public_path=("harness", "inference_url"),
         help=(
-            "URL clients reach the inference service at: a client's harness layer sends its model calls there "
-            "(default: the address the client gave)."
+            "URL at which clients reach the inference service: a client's harness layer sends its"
+            " model calls there (default: the address the client gave). Set it when the inference"
+            " service has its own address."
         ),
     )
     console_origins: tuple[str, ...] = config_option(
-        (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
+        (),
+        public_path=("reef", "console_origins"),
+        help=(
+            "Exact HTTP(S) origins of the browser consoles that may call the service, as a JSON/YAML "
+            "list, with no path or wildcard. Empty allows no console."
+        ),
     )
     routing_manifest: str | None = config_option(
         None,
         public_path=("reef", "routing_manifest"),
-        help="External-target routing manifest for a record-only recipe; see reef.routing_deployment.lifecycle.",
+        help=(
+            "Path of the manifest that routes requests among external targets, for a record-only "
+            "recipe. Unset turns routing off; reef.routing-deployment holds the router's settings."
+        ),
     )
     routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
-    ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
+    ray_address: str | None = config_option(
+        None,
+        public_path=("training", "ray_address"),
+        help=(
+            "Ray cluster address that Slime's training workers and the inference component join; an "
+            "in-process backend such as tinker refuses it. Unset: the RAY_ADDRESS variable, else Reef starts"
+            " a local cluster."
+        ),
+    )
     ray_namespace: str = config_option(
         "reef", public_path=("training", "ray_namespace"), help="Ray namespace of the training component."
     )
-    inference_url: str | None = config_option(None, public_path=("inference", "url"), help="Local inference endpoint.")
+    inference_url: str | None = config_option(
+        None,
+        public_path=("inference", "url"),
+        help="Reserved. Startup refuses a value, because Reef starts or names its engines itself.",
+    )
     model_path: str | None = config_option(
         None, public_path=("inference", "model_path"), help="Local model directory or Hugging Face repository ID."
     )
     inference_backend: str | None = config_option(
         None,
         public_path=("inference", "backend"),
-        help="Managed local inference backend (default: sglang); none trains without an inference engine.",
+        help=("Managed inference engine: sglang (default), vllm, or none. none trains without an inference engine."),
     )
     tensor_parallel_size: int | None = config_option(
         None,
@@ -108,21 +139,28 @@ class ServiceSettings:
         None,
         public_path=("inference", "num_gpus"),
         help=(
-            "Total inference GPUs, or those of each component with inference.remote.slot-urls; defaults to "
-            "tensor-parallel-size. Slime can launch multiple engines."
+            "Total inference GPUs, or those of each component with inference.remote.slot-urls; "
+            "defaults to inference.tensor-parallel-size. A positive multiple of that size; "
+            "standalone and vLLM serving need them equal."
         ),
     )
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,
-        metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
+        metadata=config_metadata(
+            (
+                "Native options of the inference engine, by flag name without the leading dashes. Reef "
+                "refuses the options that it sets itself."
+            ),
+            public_path=("inference", "options"),
+        ),
     )
     inference_remote: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Run the engines that inference.backend names on a remote inference component: url, slot-urls, "
-            "control-token-env, inference-token-env and startup-timeout-s. url is the component's base URL; "
-            "slot-urls lists further components, so that a full-weight scenario serves one checkpoint on each. "
-            "See the inference section of the configuration reference.",
+            (
+                "Run the engines that inference.backend names on a remote inference component, in "
+                "place of a local one."
+            ),
             public_path=("inference", "remote"),
         ),
     )
@@ -130,29 +168,34 @@ class ServiceSettings:
         None,
         public_path=("inference", "serving"),
         help=(
-            "How a weight-training deployment serves its snapshots: engines (Reef's engines on an inference "
-            "component), trainer (the training backend's own serving, such as Tinker's sampler), none, or a "
-            "module:Factory runtime factory. Default: engines when engine settings are given, else the "
-            "training backend's default."
+            "How a weight-training deployment serves its snapshots: engines, trainer (the "
+            "training backend's own serving), none (nothing serves) or a module:Factory runtime. "
+            "Default: engines when an engine setting is set, else the training backend's default."
         ),
     )
     inference_serving_config: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "The settings of a module:Factory serving runtime.", public_path=("inference", "serving_config")
+            "The settings of a module:Factory serving runtime; refused without one.",
+            public_path=("inference", "serving_config"),
         ),
     )
     inference_max_loaded_adapters: int = config_option(
         1,
         public_path=("inference", "max_loaded_adapters"),
-        help="Adapters the serving engines keep resident when the snapshots are PEFT adapters.",
+        help=(
+            "Adapters the serving engines keep resident when the snapshots are PEFT adapters. Set at "
+            "least the number of training scenarios; one more lets a new adapter load beside the "
+            "served one."
+        ),
     )
     inference_prefix_sharing: bool = config_option(
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share the prefix cache among requests on the same snapshot (default: false). The engines finish their "
-            "requests and clear the cache before each snapshot load."
+            "Share the engines' prefix cache among requests on the same snapshot; false turns the"
+            " prefix cache off. The engines finish their requests and clear the cache before each"
+            " snapshot load."
         ),
     )
     teacher_model_path: str | None = config_option(
@@ -172,15 +215,31 @@ class ServiceSettings:
         metadata=config_metadata("Native SGLang teacher options.", public_path=("teacher", "options")),
     )
     training_backend: str | None = config_option(
-        None, public_path=("training", "backend"), help="Managed weight-training backend (default: slime)."
+        None,
+        public_path=("training", "backend"),
+        help=(
+            "Managed weight-training backend: slime, tinker, spindle_full, an installed "
+            "reef.training_backends entry-point name, or the package.module:ClassName of a "
+            "TrainingDeployment class. Default: slime."
+        ),
     )
     training_ready_timeout: int = config_option(
-        3600, public_path=("training", "ready_timeout"), help="Training component startup deadline in seconds."
+        3600,
+        public_path=("training", "ready_timeout"),
+        help=(
+            "Startup deadline in seconds of the inference component and the teacher engine; a "
+            "positive integer. With Slime or serving engines, reef.ready-timeout is at least this "
+            "value."
+        ),
     )
     training_backend_options: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Options owned by the selected training backend.", public_path=("training", "options")
+            (
+                "Options owned by the selected training backend. For Slime, they are its native flags"
+                " without the leading dashes."
+            ),
+            public_path=("training", "options"),
         ),
     )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
@@ -190,7 +249,7 @@ class ServiceSettings:
     #: evaluation rollouts from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
     upstream_url: str | None = config_option(
-        None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."
+        None, public_path=("inference", "upstream_url"), help="Upstream provider base URL, without the /v1 suffix."
     )
     upstream_api_key: str | None = config_option(
         None, public_path=("inference", "upstream_api_key"), help="Upstream provider credential."
@@ -200,41 +259,69 @@ class ServiceSettings:
     )
     #: The provider's API dialect: ``openai`` (default), ``responses``, or ``anthropic``.
     upstream_api: str = config_option(
-        "openai", public_path=("inference", "upstream_api"), help="Provider API dialect."
+        "openai",
+        public_path=("inference", "upstream_api"),
+        help=(
+            "Provider API dialect: openai (Chat Completions), responses (OpenAI Responses) or "
+            "anthropic (Anthropic Messages)."
+        ),
     )
     inference_timeout_s: float = config_option(
-        300.0, public_path=("inference", "timeout_s"), help="Inference request timeout in seconds."
+        300.0, public_path=("inference", "timeout_s"), help="Inference request timeout in seconds; a positive number."
     )
     train_timeout_s: float | None = config_option(
-        None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
+        None,
+        public_path=("training", "timeout_s"),
+        help=(
+            "Seconds that one call to Slime's training workers or to the Tinker service may take; a "
+            "positive number. Unset: 14400 with Slime; Tinker waits as long as its SDK does."
+        ),
     )
     #: The jobs of one training component that one process of the training service runs at the same time.
     training_max_jobs: int = config_option(
         1,
         public_path=("training", "max_jobs"),
-        help="The training jobs that one process of the training service runs at once for each training component.",
+        help=(
+            "The training jobs that one process of the training service runs at once for each "
+            "training component. Jobs of one scenario run together only on a component that allows "
+            "it, such as Tinker."
+        ),
     )
     #: Unset, or a ``TrainingManager`` plugin: ``package.module:ClassName`` or module and config.
     training_manager: str | Mapping[str, Any] | None = config_option(
         None,
         public_path=("training", "manager"),
-        help="A TrainingManager plugin reference: it decides what the scenarios in auto mode train.",
+        help=(
+            "A TrainingManager plugin reference: it decides what the scenarios in auto mode train. "
+            "Unset: a scenario in auto mode starts a job when job_samples untrained samples wait."
+        ),
     )
     inference_handler_factory: str | None = config_option(
         None,
         public_path=("inference", "handler_factory"),
-        help="InferenceHandler subclass as package.module:ClassName.",
+        help=(
+            "InferenceHandler subclass as package.module:ClassName. Engine serving accepts only the "
+            "built-in handler of inference.backend."
+        ),
     )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Inference request handler options as a JSON/YAML object.", public_path=("inference", "handler_config")
+            (
+                "Options of the engines' request handler as a JSON/YAML object: tool_call_parser, "
+                "sampling_defaults, chat_template_kwargs and force_reasoning. It does not configure "
+                "the engine process."
+            ),
+            public_path=("inference", "handler_config"),
         ),
     )
     inference_retry_initial_s: float = config_option(
         0.05,
         public_path=("inference", "retry_initial_s"),
-        help="Initial retry delay for a routed request, in seconds.",
+        help=(
+            "Initial retry delay for a routed request, in seconds. Greater than 0 and at most "
+            "inference.retry-max-s."
+        ),
     )
     inference_retry_max_s: float = config_option(
         1.0, public_path=("inference", "retry_max_s"), help="Maximum retry delay for a routed request, in seconds."
@@ -242,7 +329,7 @@ class ServiceSettings:
     inference_retry_timeout_s: float = config_option(
         300.0,
         public_path=("inference", "retry_timeout_s"),
-        help="Retry deadline for a routed request, in seconds. Defaults to the inference timeout.",
+        help="Retry deadline for a routed request, in seconds. Unset takes inference.timeout-s.",
     )
     #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
     #: and config.
@@ -254,7 +341,10 @@ class ServiceSettings:
     artifact_repository: str = config_option(
         ".reef/artifacts.git",
         public_path=("storage", "artifact_repository"),
-        help="Git LFS artifact repository location.",
+        help=(
+            "Git LFS artifact repository location, for storage.artifact-backend git_lfs. Startup "
+            "refuses another value than the default with a plugin backend."
+        ),
     )
     artifact_work_dir: str = config_option(
         ".reef/artifact-work", public_path=("storage", "artifact_work_dir"), help="Artifact working directory."
@@ -272,21 +362,32 @@ class ServiceSettings:
     evaluation_agent_host: str = config_option(
         "host.docker.internal",
         public_path=("evaluation", "agent_host"),
-        help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
+        help=(
+            "The address at which a task's container reaches this host, for an evaluation with a "
+            "harness tree on docker. Other environments do not use it."
+        ),
     )
     #: The rollouts that one process of the evaluation service runs at once, across evaluations. Each one holds a
     #: sandbox of its task.
     evaluation_max_sandboxes: int = config_option(
         4,
         public_path=("evaluation", "max_sandboxes"),
-        help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
+        help=(
+            "The task sandboxes that one process of the evaluation service holds at once, across "
+            "all evaluations: one for each rollout. Set it to the provider's quota divided by the"
+            " evaluation processes."
+        ),
     )
     #: What a stopping process of the evaluation service does with the rollouts that it runs (``ON_STOP_CHOICES`` of
     #: ``reef.evaluation.rollout_worker``): ``requeue`` gives them back to the queue at once, ``finish`` finishes them.
     evaluation_on_stop: str = config_option(
         "requeue",
         public_path=("evaluation", "on_stop"),
-        help="requeue or finish: what a stopping evaluation process does with the rollouts that it runs.",
+        help=(
+            "requeue or finish: what a stopping evaluation process does with the rollouts that it "
+            "runs. requeue cancels them and gives them back to the queue; finish takes no new rollout"
+            " and lets them end."
+        ),
     )
     #: With ``evaluation_on_stop`` ``finish``: the seconds from the start of a stop to the cancellation of the rollouts
     #: that still run, which go back to the queue. None waits for every rollout.
@@ -294,8 +395,8 @@ class ServiceSettings:
         None,
         public_path=("evaluation", "finish_timeout_s"),
         help=(
-            "With evaluation.on_stop: finish, the seconds that a stopping evaluation process lets its running "
-            "rollouts finish; it then gives the rest back to the queue. Default: no limit."
+            "With evaluation.on-stop finish, the seconds that a stopping evaluation process lets "
+            "its rollouts finish before it requeues the rest; unset is no limit."
         ),
     )
     #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
@@ -308,7 +409,10 @@ class ServiceSettings:
     evaluation_task_template_builder: str | Mapping[str, Any] | None = config_option(
         None,
         public_path=("evaluation", "task_template_builder"),
-        help="A TaskTemplateBuilder plugin reference that makes the sandbox templates of each task of an e2b evaluation.",
+        help=(
+            "A TaskTemplateBuilder plugin reference that makes the sandbox templates of each task of "
+            "an e2b evaluation. Unset builds them from the task's Dockerfiles."
+        ),
     )
     #: Whether a rollout of an e2b evaluation runs a trial only from its task's prepared templates: a task whose
     #: template item failed runs no trial, and a trial builds no missing template.
@@ -316,17 +420,27 @@ class ServiceSettings:
         False,
         public_path=("evaluation", "require_prepared_templates"),
         help=(
-            "Run each e2b evaluation rollout only from the templates that its task's template item prepared; "
-            "a trial then never builds a template. Default: false."
+            "Run each e2b evaluation rollout only from the templates that its task's template "
+            "item prepared; a trial then builds no template. A rollout whose template item failed"
+            " reports that error and runs no trial."
         ),
     )
     evaluation_pin_task_files: bool = config_option(
         False,
         public_path=("evaluation", "pin_task_files"),
-        help="Use the task files selected at evaluation acceptance for all attempts. Default: false.",
+        help=(
+            "Use the task files selected at evaluation acceptance for all attempts of that "
+            "evaluation. Startup refuses true with an evaluation.task-template-builder that does not "
+            "override build_for_version."
+        ),
     )
     agent_record_dir: str = config_option(
-        ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
+        ".reef/agent-record",
+        public_path=("storage", "agent_record_dir"),
+        help=(
+            "Directory of the SQLite scenario storage: records, commits and settings. The SQLite data"
+            " store, the SQLite coordination tables and the local segments are also under it."
+        ),
     )
     #: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin: ``package.module:ClassName`` or module and config.
     record_backend: str | Mapping[str, Any] = config_option(
@@ -340,7 +454,11 @@ class ServiceSettings:
     data_store: str | Mapping[str, Any] | None = config_option(
         None,
         public_path=("storage", "data_store"),
-        help="Data store of the deployment's items (RFC #1028): sqlite, postgres, or a DataStore plugin reference.",
+        help=(
+            "Data store of the deployment's items: sqlite, postgres, or a DataStore plugin reference."
+            " Unset follows storage.record-backend; postgres needs storage.record-backend postgres "
+            "and uses its URL with the schema reef_data."
+        ),
     )
     #: ``sqlite`` or ``postgres``: where the coordination tables (served models, work queues, the control lease) live.
     #: Unset follows a built-in ``record_backend``; a plugin record backend must name it, because every process of
@@ -348,7 +466,11 @@ class ServiceSettings:
     coordination_backend: str | None = config_option(
         None,
         public_path=("storage", "coordination_backend"),
-        help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
+        help=(
+            "Coordination tables of the services: sqlite (one host) or postgres "
+            "(storage.record-database-url). Unset follows storage.record-backend; a plugin record backend requires "
+            "this key."
+        ),
     )
     #: How many times a worker takes one work item before the item fails, for every queue. An attempt that ends
     #: because its worker stops, such as at a restart of the service, does not count.
@@ -385,8 +507,9 @@ class ServiceSettings:
         None,
         public_path=("storage", "segment_backend"),
         help=(
-            "Store of the segment files that keep the content of trajectory items and record trajectories outside "
-            "the data store's database: unset (keep it in the database), local, or a SegmentStore plugin reference."
+            "Store of the segment files that keep trajectory content outside the data store's "
+            "database: unset (in the database), local (under storage.agent-record-dir), or a "
+            "SegmentStore plugin reference."
         ),
     )
     task_file_dir: str = config_option(
@@ -404,30 +527,54 @@ class ServiceSettings:
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
-        help="Split manifest of the Harbor tasks that each scenario imports into its samples.",
+        help=(
+            "Split manifest of the Harbor tasks that each scenario imports into its samples. Set it "
+            "together with task-import.tasks-root."
+        ),
     )
     task_import_tasks_root: str | None = config_option(
         None,
         public_path=("task_import", "tasks_root"),
-        help="Directory that holds a Harbor task directory for each task name of task-import.manifest.",
+        help=(
+            "Directory that holds a Harbor task directory for each task name of task-import.manifest."
+            " Set both keys or neither."
+        ),
     )
     record_database_url: str | None = field(
         default=None,
         repr=False,
-        metadata=config_metadata("PostgreSQL connection URL.", public_path=("storage", "record_database_url")),
+        metadata=config_metadata(
+            (
+                "PostgreSQL connection URL. Required when storage.record-backend or "
+                "storage.coordination-backend is postgres; startup refuses it otherwise."
+            ),
+            public_path=("storage", "record_database_url"),
+        ),
     )
     record_database_schema: str = config_option(
-        "reef_records", public_path=("storage", "record_database_schema"), help="PostgreSQL schema."
+        "reef_records",
+        public_path=("storage", "record_database_schema"),
+        help=(
+            "PostgreSQL schema of the scenario storage. The coordination tables use the schema of "
+            "this name with the suffix _coordination."
+        ),
     )
     agent_record_retention_max_bytes: int = config_option(
         20 * 1024**3,
         public_path=("storage", "agent_record_retention_max_bytes"),
-        help="Maximum retained record bytes.",
+        help=(
+            "Maximum bytes of the record items in the data store, for all owners and scenarios, "
+            "archived ones included. Above it, Reef deletes the oldest record items, consumed or "
+            "not."
+        ),
     )
     allow_implicit_scenario_creation: bool = config_option(
         True,
         public_path=("reef", "allow_implicit_scenario_creation"),
-        help="Allow requests to create scenarios implicitly.",
+        help=(
+            "Let a report or a record import create a scenario that does not exist yet. When false, "
+            "such a request gets HTTP 404."
+        ),
     )
     scenario_idle_unload_s: float | None = config_option(
         None,
@@ -447,42 +594,71 @@ class ServiceSettings:
     scenario_admission: str | Mapping[str, Any] | None = config_option(
         None,
         public_path=("reef", "scenario_admission"),
-        help="ScenarioAdmission plugin reference. The plugin decides whether a scenario is created or loaded.",
+        help=(
+            "ScenarioAdmission plugin reference. The plugin decides whether a scenario is created or "
+            "loaded, in place of reef.max-loaded-scenarios and reef.max-scenarios; startup refuses it"
+            " with either."
+        ),
     )
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
     wandb_config: Mapping[str, Any] = field(
         default_factory=dict,
-        metadata=config_metadata("W&B settings as a JSON/YAML object.", path=("observability", "wandb")),
+        metadata=config_metadata("W&B experiment tracking, as a JSON/YAML object.", path=("observability", "wandb")),
     )
     #: OpenTelemetry record tracing settings, sourced from ``observability.tracing``.
     tracing_config: Mapping[str, Any] = field(
         default_factory=dict,
-        metadata=config_metadata("Record tracing settings as a JSON/YAML object.", path=("observability", "tracing")),
+        metadata=config_metadata(
+            "Record tracing over OpenTelemetry, as a JSON/YAML object.", path=("observability", "tracing")
+        ),
     )
     training_settings: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Training settings as a JSON/YAML object.", path=("training",), public_path=("training", "config")
+            (
+                "Workload variables that the file's other values reference, such as "
+                "${training.config.global_batch_size}. Reef passes none of them to the training "
+                "backend."
+            ),
+            path=("training",),
+            public_path=("training", "config"),
         ),
     )
     #: The rule that activates the artifacts that training makes, for any recipe.
     activation_settings: Mapping[str, Any] | None = field(
         default=None,
-        metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
+        metadata=config_metadata(
+            (
+                "Activation rule of new artifacts as a JSON/YAML object: module (always, never, evaluated"
+                " or a package.module:ClassName) and config (review_kinds for always, min_mean_score for "
+                "evaluated). Omitted is always."
+            ),
+            path=("activation",),
+        ),
     )
     #: The stage classes that replace a weight-training recipe's own: ``record2sample`` and ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2sample and sample2job, each with module and config.",
+            (
+                "Pipeline stages as a JSON/YAML object: record2sample and sample2job, each with "
+                "config and an optional module, a package.module:ClassName. Without module, the stage"
+                " is the recipe's own class."
+            ),
             path=("pipeline",),
         ),
     )
     #: The generator service ``reef serve`` starts beside the HTTP service; ``reef.deploy.generator`` parses it.
     generator_settings: Mapping[str, Any] | None = field(
         default=None,
-        metadata=config_metadata("Generator service settings as a JSON/YAML object.", path=("generator",)),
+        metadata=config_metadata(
+            (
+                "The generator service, as a JSON/YAML object. With this section, reef serve starts the "
+                "generator before the HTTP service."
+            ),
+            path=("generator",),
+        ),
     )
     #: The flat ``reef`` config section, interpolated; recipes read their own
     #: config fields from it (see the class docstring).
@@ -663,7 +839,8 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
             "object",
             False,
             {},
-            "Semantic Router settings; reef serve owns the router unless the lifecycle is external.",
+            "Semantic Router settings as a JSON/YAML object; reef serve owns the router unless the lifecycle is "
+            "external.",
             public_path=("reef", "routing_deployment"),
         ),
         ConfigArgument(
@@ -672,7 +849,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
             "str",
             True,
             None,
-            "One accepted bearer token.",
+            "One accepted bearer token. The service also accepts each token of reef.tokens.",
             public_path=("reef", "token"),
         ),
     )

@@ -170,6 +170,9 @@ class ServingWorker(QueueWorker):
         self.recovered = False
         self.release_due = False
         self.activated: dict[str, str] = {}
+        # The last start of each candidate, by scenario and serve_artifact payload: when it began, and its result.
+        # Other serving work clears it, because a later start can give another endpoint.
+        self.candidate_starts: dict[tuple[str, str], tuple[float, Mapping[str, JsonValue]]] = {}
         # Retirement waits for serving work to commit its routes.
         self.serving_work_changed = threading.Condition()
         self.starting_items: set[int] = set()
@@ -340,6 +343,8 @@ class ServingWorker(QueueWorker):
                 self.open_runtime(runtime)
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
             raise WorkLeaseLostError("the serving worker lost its lease")
+        if item.kind != SERVE_ARTIFACT_KIND:
+            self.candidate_starts.clear()
         if item.kind == STOP_SERVING_KIND:
             served = ServedArtifact.from_json(item.payload["served"])
             due = any(
@@ -360,13 +365,22 @@ class ServingWorker(QueueWorker):
                 logger.info("stopped serving artifact %s at %s", served.artifact_id, served.url)
             return {}
         if item.kind == SERVE_ARTIFACT_KIND:
+            # Each rollout of an evaluation asks for its candidate, and the items of one candidate run one at a time.
+            # A start that began after an item was made serves that item too, so the item gets its result at once.
+            key = (item.scenario, json.dumps(item.payload, sort_keys=True))
+            start = self.candidate_starts.get(key)
+            if start is not None and item.created_at < start[0]:
+                return start[1]
+            began = time.time()
             # An item that its rollout cancelled loses its lease: the runtime stops at its next check, and does not
             # start the artifact for a rollout that is gone.
             try:
                 with serving_work(lease_lost, redeploy=False):
-                    return self.serve_artifact(item, runtime)
+                    result = self.serve_artifact(item, runtime)
             except StartupStoppedError as error:
                 raise WorkLeaseLostError("the serve item ended while inference started its artifact") from error
+            self.candidate_starts[key] = (began, result)
+            return result
         selected = self.routes.current_request(item.scenario)
         if selected is None or selected.id != item.id or not item.payload:
             return {}
