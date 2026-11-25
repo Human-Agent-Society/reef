@@ -52,6 +52,8 @@ Every other member has a default. Override one only for a capability that the ru
 
 The docstring of each member in ``reef.inference.interfaces`` gives its default, its result and its errors.
 
+A handler in front of several engine replicas can read ``REQUEST_SESSION_KEY`` (``reef.inference.interfaces``) to send the calls of one conversation to one replica. An evaluation sets it to each rollout, so rollouts whose first messages are the same still go to different replicas.
+
 Automatic weight training waits while the selected artifact has no served route. Manual training does not wait, because a request names its samples.
 
 When a binding is in doubt, the runtime must fail safely:

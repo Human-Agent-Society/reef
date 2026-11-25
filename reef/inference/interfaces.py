@@ -20,6 +20,7 @@ import json
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -390,6 +391,13 @@ class StartupSteps:
 
     def to_json(self) -> dict[str, JsonValue]:
         return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
+
+
+#: The session key of the model call that runs in this context, or None. All calls of one conversation have the same
+#: key, and calls of other conversations have other keys. A handler can send the calls of one key to the same engine
+#: replica, so that each turn reuses the prefix cache of the turns before it. An evaluation's ``ArtifactEndpoint`` sets
+#: it to its rollout. A service can set it from the ``x-reef-session-key`` header of a request.
+REQUEST_SESSION_KEY: ContextVar[str | None] = ContextVar("REQUEST_SESSION_KEY", default=None)
 
 
 class InferenceHandler(Plugin, ABC):

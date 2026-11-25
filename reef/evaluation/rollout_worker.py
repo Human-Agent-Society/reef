@@ -426,8 +426,10 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
+        # Each rollout is its own conversation, also when the tasks of an evaluation start with the same messages.
+        session_key = f"evaluation:{rollout.evaluation_id}:{rollout.task_index}:{rollout.repeat}"
         with ArtifactEndpoint(
-            runtime, artifact, served, log_probs=rollout.log_probs, cooldowns=self.cooldowns
+            runtime, artifact, served, log_probs=rollout.log_probs, cooldowns=self.cooldowns, session_key=session_key
         ) as endpoint:
             yield CandidateEndpoint(endpoint.url, None)
 

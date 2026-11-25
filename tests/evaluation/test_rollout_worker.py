@@ -79,6 +79,33 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
     )
 
 
+def test_each_rollout_opens_its_candidate_with_its_own_session_key(monkeypatch) -> None:
+    from reef.evaluation import rollout_worker
+
+    opened = []
+
+    class RecordedEndpoint:
+        def __init__(self, *args, session_key: str | None, **kwargs) -> None:
+            opened.append(session_key)
+            self.url = "http://127.0.0.1:1"
+
+        def __enter__(self) -> RecordedEndpoint:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(rollout_worker, "ArtifactEndpoint", RecordedEndpoint)
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.candidate.return_value = (Mock(), Mock())
+    endpoints = LocalCandidateEndpoints(artifacts)
+    for value in (rollout(0), rollout(1), rollout(0)):
+        with endpoints.open(value, None):
+            pass
+    # The repeats of one task are other conversations; an attempt again of one rollout is the same one.
+    assert opened == ["evaluation:e1:2:0", "evaluation:e1:2:1", "evaluation:e1:2:0"]
+
+
 class ServedWorker(EvaluationRolloutWorker):
     """A worker whose candidate needs no start."""
 
