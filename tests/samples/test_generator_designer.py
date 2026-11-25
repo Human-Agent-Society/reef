@@ -8,8 +8,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from reef_client.client import ReefClientError
 from tests.harness.test_task_rollout_runner import StandInReef
 
+import reef.samples.generator.designer as designer_module
 from reef.samples.generator import (
     DesignerError,
     DesignerReplyError,
@@ -279,6 +281,36 @@ def test_a_refused_designer_call_is_a_designer_error() -> None:
         reef.close()
     with pytest.raises(DesignerError, match="timeout_s"):
         ReefDesigner(reef_url="http://127.0.0.1:1", timeout_s=0)
+
+
+def test_a_designer_call_waits_while_the_engine_starts_and_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    starting = ReefClientError(503, '{"error": {"type": "inference_starting"}}')
+    outcomes: list[object] = [starting, starting, ({"choices": [{"message": {"content": "ls"}}]}, "rec-3")]
+    designer = ReefDesigner(reef_url="http://127.0.0.1:1")
+    calls: list[str] = []
+
+    def inference_with_record(*args: object, **kwargs: object) -> object:
+        calls.append("call")
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, ReefClientError):
+            raise outcome
+        return outcome
+
+    waits: list[float] = []
+    monkeypatch.setattr(designer.client, "inference_with_record", inference_with_record)
+    monkeypatch.setattr(designer_module.time, "sleep", waits.append)
+    answer = designer.answer(designer_messages(request()), scenario="spade", model="m", tags={})
+    assert answer.text == "ls" and answer.record_id == "rec-3" and len(calls) == 3
+    assert waits == [designer_module.STARTUP_RETRY_S] * 2
+
+    monkeypatch.setattr(designer_module, "STARTUP_WAIT_S", 0.0)
+    outcomes[:] = [starting]
+    with pytest.raises(DesignerError, match=r"refused \(503\).*inference_starting"):
+        designer.answer(designer_messages(request()), scenario="spade", model="m", tags={})
+    outcomes[:] = [ReefClientError(503, "The inference route is unavailable.")]
+    with pytest.raises(DesignerError, match=r"refused \(503\)"):
+        designer.answer(designer_messages(request()), scenario="spade", model="m", tags={})
+    assert waits == [designer_module.STARTUP_RETRY_S] * 2, "only a starting engine is waited out"
 
 
 def test_designer_wraps_shared_inputs() -> None:

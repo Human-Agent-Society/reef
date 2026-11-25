@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -29,6 +30,10 @@ DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12
 GROUNDING_CHARS = 6000
 DESIGNER_TIMEOUT_S = 1800.0
+# While the scenario's engine starts, Reef answers 503 inference_starting with Retry-After 30
+# (reef/api/inference_service.py); a first generation that runs on the served policy waits it out.
+STARTUP_WAIT_S = 1800.0
+STARTUP_RETRY_S = 30.0
 CHAT_PATH = "/v1/chat/completions"
 RESPONSES_PATH = "/v1/responses"
 SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -332,10 +337,18 @@ class ReefDesigner(Designer):
         else:
             path = CHAT_PATH
             request = {"messages": [dict(message) for message in messages]}
+        deadline = time.monotonic() + STARTUP_WAIT_S
         try:
-            body, record_id = self.client.inference_with_record(
-                scenario, path, {**self.request_options, "model": model, **request}, extra_headers=headers
-            )
+            while True:
+                try:
+                    body, record_id = self.client.inference_with_record(
+                        scenario, path, {**self.request_options, "model": model, **request}, extra_headers=headers
+                    )
+                    break
+                except ReefClientError as exc:
+                    if exc.status != 503 or "inference_starting" not in exc.body or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(STARTUP_RETRY_S)
         except ReefClientError as exc:
             raise DesignerError(f"the designer call was refused ({exc.status}): {exc.body[:300]}") from exc
         except OSError as exc:
