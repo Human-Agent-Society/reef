@@ -1336,7 +1336,8 @@ class RolloutMeanActivation(EvaluatedActivation):
         ("benchmark", (0.0, 1.0, 1.0), 0.6, EvaluatedActivation, 0.5, False),
         ("benchmark", (1.0, 0.0, 0.0), 0.4, EvaluatedActivation, 0.5, True),
         ("task", (0.0, 1.0, 1.0), 0.6, EvaluatedActivation, 2 / 3, True),
-        ("benchmark", (None, 1.0, 1.0), 0.6, EvaluatedActivation, 1.0, True),
+        # Every rollout of the benchmark lite fails, so the benchmark average has no mean.
+        ("benchmark", (None, 1.0, 1.0), 0.6, EvaluatedActivation, None, False),
         ("benchmark", (None, None, None), 0.6, EvaluatedActivation, None, False),
         ("benchmark", (0.0, 1.0, 1.0), 0.6, RolloutMeanActivation, 0.5, True),
     ],

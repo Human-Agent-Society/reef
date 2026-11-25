@@ -82,6 +82,25 @@ def test_an_evaluation_on_a_collection_scores_each_benchmark_and_averages_as_the
         replace(request, task_names=("add",))
 
 
+@pytest.mark.parametrize(("average", "mean"), [("task", 0.4), ("benchmark", None)])
+def test_a_benchmark_whose_rollouts_all_failed_leaves_the_benchmark_average_without_a_mean(average, mean):
+    collection = EvaluationCollection(average=average, name="coding", benchmarks=(("a", ("add",)), ("b", ("sort",))))
+    request = replace(REQUEST, task_names=("add", "sort"), collection=collection)
+    scores = RolloutScores(
+        (
+            ("add", (RolloutScore.scored(0.4), RolloutScore.scored(0.4))),
+            ("sort", (RolloutScore.failed(), RolloutScore.failed())),
+        )
+    )
+    result = replace(RESULT, scores=scores)
+    answer = StoredEvaluation("e1", "service-a", request, "finished", 10.0, 15.0, result=result).to_json()
+    assert answer["benchmark_scores"] == [
+        {"benchmark": "a", "task_count": 1, "mean_score": 0.4},
+        {"benchmark": "b", "task_count": 1, "mean_score": None},
+    ]
+    assert answer["mean_score"] == mean
+
+
 def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(storage):
     with closing(storage.open("math")) as session, closing(storage.open("other")) as other:
         evaluations = session.evaluations

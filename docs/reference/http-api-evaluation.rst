@@ -108,7 +108,7 @@ Read an evaluation
 
 ``GET /reef/scenarios/{scenario}/evaluations`` lists the evaluations, newest first, at most ``limit`` (50 by default).
 
-For an evaluation on a collection, the stored ``collection`` is ``{"name", "average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark", "task_names"}`` for each benchmark that has a task in the evaluation. ``benchmark_scores`` gives ``{"benchmark", "task_count", "mean_score"}`` for each of them: the number of its tasks in the evaluation, and the mean of their rollouts that have a score. A task in two benchmarks counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts that have a score. With ``benchmark``, it is the mean of the benchmark scores. Reef skips benchmarks without a score. The built-in ``evaluated`` activation rule compares this mean score with ``min_mean_score``. ``benchmark_scores`` is empty for another evaluation.
+For an evaluation on a collection, the stored ``collection`` is ``{"name", "average", "benchmarks"}``. ``benchmarks`` gives ``{"benchmark", "task_names"}`` for each benchmark that has a task in the evaluation. ``benchmark_scores`` gives ``{"benchmark", "task_count", "mean_score"}`` for each of them: the number of its tasks in the evaluation, and the mean of their rollouts that have a score. A task in two benchmarks counts in both. With the average ``task``, ``mean_score`` is the mean of all rollouts that have a score. With ``benchmark``, it is the mean of the benchmark scores. It is null when a benchmark has no score because all its rollouts failed. The built-in ``evaluated`` activation rule compares this mean score with ``min_mean_score``. ``benchmark_scores`` is empty for another evaluation.
 
 ``progress`` counts the rollouts of the evaluation, also while it runs. It is null when the evaluations queue no longer holds them:
 
@@ -116,7 +116,7 @@ For an evaluation on a collection, the stored ``collection`` is ``{"name", "aver
 - ``ended`` counts the rollouts that finished or failed. ``scored`` counts the ended rollouts with a score, and ``failed`` the others.
 - ``cancelled`` counts the rollouts that a cancel or a stop for failed rollouts ended. They are not in ``ended``.
 - ``running`` counts the rollouts that a worker holds now.
-- ``mean_score`` applies the evaluation's weighting to the scores so far. It is null when there are no scores.
+- ``mean_score`` applies the evaluation's weighting to the scores so far. It is null when there are no scores. With the ``benchmark`` average, it is also null while a benchmark has no score.
 - ``eta_seconds`` estimates the seconds until every rollout ends: the rollouts left at the rate at which rollouts ended in the last 20 minutes. It is null when no rollout ended in that time, or when the evaluation ended.
 - ``benchmarks`` gives the progress of each benchmark of an evaluation on a collection, in the collection's order: ``{"benchmark", "total", "ended", "scored", "failed", "cancelled", "running", "mean_score"}``, with the same meaning for the rollouts of the benchmark's tasks. A task in two benchmarks counts in both. It is empty for another evaluation.
 
