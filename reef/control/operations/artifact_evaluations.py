@@ -456,9 +456,10 @@ def attempt_trajectories(
     Supply the rollout's calls for one caller in attempt and call-index order. Only HTTP 200 responses contribute.
     Each conversation excludes calls that a retry replaced. Set ``include_records=False`` to omit ``extra.reef.records``.
 
-    Only the agent trajectories from a finished rollout's final attempt carry its reward, which is null if scoring failed.
+    Only the agent trajectories from a finished rollout's final attempt carry its reward, and only for a number score.
     Each trajectory's ``extra.reef.evaluation`` identifies the evaluation, task, task index, repeat, attempt, caller,
-    conversation and scoring status. Conversation numbers start at zero within each attempt.
+    conversation and scoring status: ``scored`` is true if and only if the trajectory carries the reward.
+    Conversation numbers start at zero within each attempt.
     Use ``iter_attempt_trajectories`` to read one conversation at a time.
     """
     return list(
@@ -512,7 +513,7 @@ def iter_attempt_trajectories(
             builder = TrajectoryBuilder(include_records)
             for _ in group_positions:
                 builder.add(call_record(scenario, evaluation_id, next(members)))
-            scored = caller == "agent" and finished and attempt == item.attempt_count
+            scored = caller == "agent" and score is not None and attempt == item.attempt_count
             trajectory = builder.sample(reward=score if scored else None).trajectory
             evaluation = {
                 "evaluation_id": evaluation_id,

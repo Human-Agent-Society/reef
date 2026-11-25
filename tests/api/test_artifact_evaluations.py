@@ -2192,6 +2192,37 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
     ]
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(("score", "reward", "scored"), [("failed", None, False), (0.0, 0.0, True)])
+def test_only_a_rollout_with_a_number_score_has_scored_trajectories(
+    score: float | str, reward: float | None, scored: bool
+) -> None:
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": score},
+    )
+    calls = [
+        chat_call(1, 0, [{"role": "user", "content": "solve add"}], "ls"),
+        chat_call(1, 1, [{"role": "user", "content": "summarize"}], "done"),
+    ]
+    trajectories = attempt_trajectories("s", "e1", item, calls)
+    assert [
+        (trajectory["extra"]["reef"]["reward"], trajectory["extra"]["reef"]["evaluation"]["scored"])
+        for trajectory in trajectories
+    ] == [(reward, scored), (reward, scored)]
+
+
 class Messages(list):
     """A request's message list that a weak reference can follow."""
 
