@@ -541,12 +541,18 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
+#: The longest wait before retrying a lease extension after a transient failure, in seconds.
+LEASE_RETRY_MAX_SECONDS = 2.0
+
+
 class LeaseExtender:
     """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
 
     Values: ``queue`` holds the item; ``item`` is the item that ``worker_id`` holds; ``done`` ends the extension.
-    The thread ends at ``stop`` or when the worker no longer holds the item, and then sets ``lease_lost``; a failed
-    extension that is no lost lease is logged and tried again at the next third.
+    The thread ends at ``stop`` or when the worker no longer holds the item, and then sets ``lease_lost``.
+    After a transient failure that is not ``WorkLeaseLostError``, it logs the error and retries after
+    ``min(LEASE_RETRY_MAX_SECONDS, queue.lease_seconds / 10)`` seconds until extension succeeds, ``stop`` runs,
+    or the lease is lost.
 
     Purpose: a worker opens one around work that can take longer than the lease (``with LeaseExtender(...)``).
     """
@@ -573,7 +579,10 @@ class LeaseExtender:
             self.thread.join()
 
     def run(self) -> None:
-        while not self.done.wait(self.queue.lease_seconds / 3):
+        normal_wait_seconds = self.queue.lease_seconds / 3
+        retry_wait_seconds = min(LEASE_RETRY_MAX_SECONDS, self.queue.lease_seconds / 10)
+        wait_seconds = normal_wait_seconds
+        while not self.done.wait(wait_seconds):
             try:
                 self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
             except WorkLeaseLostError:
@@ -581,12 +590,16 @@ class LeaseExtender:
                 return
             except Exception:
                 logger.exception("could not extend the lease of %s", self.item.id)
+                wait_seconds = retry_wait_seconds
+            else:
+                wait_seconds = normal_wait_seconds
 
 
 __all__ = [
     "DEFERRED_ATTEMPTS",
     "FINAL_STATES",
     "HELD_STATES",
+    "LEASE_RETRY_MAX_SECONDS",
     "MAX_LOG_LINES",
     "MAX_LOG_MESSAGE",
     "WORK_STATES",
