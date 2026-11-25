@@ -673,6 +673,7 @@ class InferenceReplica:
         name: str | None = None,
         record: bool,
         rollout: bool = False,
+        single_attempt: bool = False,
     ) -> web.StreamResponse:
         """Answer one model request; see the module rules. ``scenario`` overrides the scenario header (a route
         names it), ``name`` the row; ``record`` keeps a record; ``rollout`` marks a call of Reef's own rollouts, which
@@ -685,7 +686,9 @@ class InferenceReplica:
         payload = await read_object(request)
         binding_id = request.headers.get(BINDING_HEADER)
         attempt_id = request.headers.get(ATTEMPT_HEADER)
-        strict = binding_id is not None or attempt_id is not None
+        strict = single_attempt
+        if not strict and (binding_id is not None or attempt_id is not None):
+            raise web.HTTPBadRequest(text="Use the chat completions attempt route with binding headers.")
         strict_config: Mapping[str, JsonValue] = {}
         if strict:
             if (
@@ -970,6 +973,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
             scenario=request.match_info["scenario"],
             name=request.match_info["artifact_id"],
             record=True,
+            single_attempt="attempt" in request.match_info,
         )
 
     async def artifact_evaluation(request: web.Request) -> web.StreamResponse:
@@ -981,6 +985,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
             name=request.match_info["artifact_id"],
             record=False,
             rollout=True,
+            single_attempt="attempt" in request.match_info,
         )
 
     for path in INFERENCE_PATHS:
@@ -990,6 +995,14 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
     app.router.add_post("/reef/scenarios/{scenario}/v1/{route:.+}", scenario_inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
+    # Register before the broad routes. Older replicas reject these suffixes before executing a model.
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:chat/completions}/{attempt:attempt}", artifact
+    )
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:chat/completions}/{attempt:attempt}",
+        artifact_evaluation,
+    )
     app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", artifact)
     app.router.add_post(
         "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:.+}", artifact_evaluation

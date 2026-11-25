@@ -567,7 +567,7 @@ def test_bound_chat_checks_target_before_execution(
                 assert len(target["binding_id"]) == 64
                 assert not calls
                 headers = {**HEADERS, BINDING_HEADER: target["binding_id"], ATTEMPT_HEADER: "attempt-1"}
-                path = "/reef/scenarios/math/artifacts/artifact-1/v1/chat/completions"
+                path = "/reef/scenarios/math/artifacts/artifact-1/v1/chat/completions/attempt"
                 body = {"model": "ignored", "messages": [{"role": "user", "content": "2+2"}]}
                 expected = 200
                 if change == "replaced":
@@ -597,13 +597,13 @@ def test_bound_chat_checks_target_before_execution(
                     expected = 400
                 elif change == "protocol":
                     path = path.replace("chat/completions", "responses")
-                    expected = 400
+                    expected = 404
                 elif change == "config":
                     monkeypatch.setattr(table, "read_serving_config", lambda scenario: {"temperature": 0.5})
                     expected = 409
                 elif change == "database":
                     # Populate the normal cache first; strict calls must not reuse it on read failure.
-                    assert (await client.post(path, headers=HEADERS, json=body)).status == 200
+                    assert (await client.post(path.removesuffix("/attempt"), headers=HEADERS, json=body)).status == 200
                     calls.clear()
 
                     def unavailable(scenario: str):
@@ -630,6 +630,13 @@ def test_bound_chat_checks_target_before_execution(
                         ServedArtifact("artifact-2", served.url, "load-2"),
                         control_lease_number=lease,
                     )
+                assert (
+                    await client.post(
+                        "/reef/scenarios/math/artifacts/artifact-1/v1/chat/completions/attempt",
+                        headers=HEADERS,
+                        json=body,
+                    )
+                ).status == 400
                 response = await client.post(path, headers=headers, json=body)
                 assert response.status == expected, await response.text()
                 if expected == 200:
@@ -674,7 +681,7 @@ def test_bound_chat_does_not_retry_engine_execution(tmp_path: Path, failure: str
                     await client.get("/reef/scenarios/math/inference/target?model=artifact-1", headers=HEADERS)
                 ).json()
                 response = await client.post(
-                    "/reef/scenarios/math/artifacts/artifact-1/evaluation/v1/chat/completions",
+                    "/reef/scenarios/math/artifacts/artifact-1/evaluation/v1/chat/completions/attempt",
                     headers={**HEADERS, BINDING_HEADER: target["binding_id"], ATTEMPT_HEADER: "attempt-1"},
                     json={"messages": [{"role": "user", "content": "2+2"}]},
                 )
@@ -709,7 +716,7 @@ def test_bound_request_keeps_its_target_during_activation(tmp_path: Path) -> Non
             async with TestClient(TestServer(app)) as client:
                 target = await (await client.get("/reef/scenarios/math/inference/target", headers=HEADERS)).json()
                 headers = {**HEADERS, BINDING_HEADER: target["binding_id"], ATTEMPT_HEADER: "attempt-1"}
-                path = "/reef/scenarios/math/artifacts/active/evaluation/v1/chat/completions"
+                path = "/reef/scenarios/math/artifacts/active/evaluation/v1/chat/completions/attempt"
                 request = asyncio.create_task(client.post(path, headers=headers, json={"messages": []}))
                 await asyncio.wait_for(started.wait(), 5)
                 table.write(

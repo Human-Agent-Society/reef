@@ -201,7 +201,7 @@ This read does not execute a model, reserve an engine, or extend an artifact's l
    * - ``streaming``
      - ``false``. This contract does not yet support streams.
 
-Then send the ordinary provider body to ``/reef/scenarios/{scenario}/artifacts/{model}/v1/chat/completions`` with both headers:
+Then send the ordinary provider body to ``/reef/scenarios/{scenario}/artifacts/{model}/v1/chat/completions/attempt`` with both headers:
 
 - ``X-Reef-Binding-Id``: the returned 64-character lowercase hexadecimal identifier.
 - ``X-Reef-Attempt-Id``: a caller-owned identifier of 1 to 128 letters, digits or ``._:-``.
@@ -210,11 +210,13 @@ For example, resolve ``model=artifact-1``, then call the ``artifacts/artifact-1`
 The response preserves the provider body, including any reported usage.
 It adds the two request headers and the existing ``X-Reef-Artifact-Id`` header on success.
 Recorded calls also keep their existing record receipt.
+Use ``/artifacts/{model}/evaluation/v1/chat/completions/attempt`` under the same scenario prefix for an unrecorded call.
 
 Reef reads the current row and settings without its stale-read fallback.
 A missing row returns 404. A changed binding returns 409 before execution.
 An unavailable or concurrently changing serving table returns 503 before execution.
-Malformed headers, other protocols, default routes and streaming requests return 400 before execution.
+Malformed headers, default routes and streaming requests return 400 before execution.
+Unsupported attempt routes return 404.
 An accepted request keeps its selected row and settings, even if another artifact becomes active.
 An engine binding refusal returns 503; an engine abort returns 409. The replica does not retry either response.
 It invokes the configured inference handler at most once per accepted HTTP request.
@@ -228,7 +230,8 @@ The response does not invent token counts or token limits. Callers must validate
 The caller owns durable admission, retry decisions and result recovery.
 After a timeout or lost response, it must treat execution as uncertain rather than resend the same attempt.
 This addition changes no stored format, service configuration, dependencies or payment behavior.
-It can be rolled out before callers opt in. An older server lacks the target endpoint and cannot satisfy this contract.
+It can be rolled out before callers opt in. Older servers reject both new paths without calling a model.
+Thus a mixed deployment can return an unsupported-route error, but cannot silently run a strict call through the old retry loop.
 
 
 Restore a scenario selection
