@@ -380,5 +380,11 @@ keep unrelated working-tree changes intact.
   `.venv/bin/python .github/scripts/check_readme_i18n.py --write`, then
   `.venv/bin/python .github/scripts/check_readme_i18n.py`, and include the
   updated `README.i18n.yaml` with the change.
+- The settings reference, `docs/reference/configuration-settings.rst`, is
+  generated from the settings that the code declares; do not edit it by hand.
+  Give each new setting a `help` text: it is the setting's description. After
+  you add or change a setting, run
+  `.venv/bin/python .github/scripts/check_settings_reference.py --write` and
+  include the updated page with the change.
 - Update affected API, configuration, and user documentation alongside code.
   Keep this guide concise and link detailed rules to their owning documents.

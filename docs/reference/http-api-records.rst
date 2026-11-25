@@ -8,7 +8,7 @@ Record
 
 Reef stores every inference exchange and every report as an ``AgentRecord`` with a record ID. The same ID with different content returns a conflict; it never overwrites. Reef tracks consumed records, so retried reports, and late reports whose references already trained, are not counted twice.
 
-Records remain readable after training consumes them (`Record and commit history`_). Retention deletes the oldest record items only when the shared capacity budget is exceeded (20 GiB by default), and keeps durable loss totals. See `Configuration <configuration.rst>`__ and `Python API <python-api.rst>`__.
+Records remain readable after training consumes them (`Record and commit history`_). Retention deletes the oldest record items only when the shared capacity budget is exceeded (20 GiB by default), and keeps durable loss totals. See `Record retention <../user-guide/storage.rst#record-retention>`__.
 
 Import records for cold-start learning
 --------------------------------------

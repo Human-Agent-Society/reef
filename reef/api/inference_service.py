@@ -78,6 +78,7 @@ from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.core.values import JsonValue
 from reef.inference.interfaces import (
     EngineClients,
+    EngineReplicas,
     EngineState,
     InferenceArtifact,
     InferenceHandler,
@@ -508,7 +509,9 @@ class InferenceReplica:
             state = "pending"
         else:
             state = "starting"
-        engine, detail, steps = self.engine_state(scenario, model) if state == "ready" else (None, None, None)
+        engine, detail, steps, replicas = (
+            self.engine_state(scenario, model) if state == "ready" else (None, None, None, None)
+        )
         if state in ("pending", "starting"):
             steps = reported_steps(item.progress, artifact_id, item.created_at, None)
         return {
@@ -517,21 +520,26 @@ class InferenceReplica:
             "error": startup_error(item.error) if state == "failed" else None,
             "engine": engine,
             "engine_detail": detail,
+            "engine_replicas": None if replicas is None else replicas.to_json(),
             "startup": None if steps is None else steps.to_json(),
         }
 
-    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None, StartupSteps | None]:
-        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), and for a starting engine
-        what it does now (``engine_detail``) and its phases (``engine_steps``); None without a route or a handler."""
+    def engine_state(
+        self, scenario: str, model: str
+    ) -> tuple[EngineState | None, str | None, StartupSteps | None, EngineReplicas | None]:
+        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), for a starting engine or
+        one with starting replicas what it does now (``engine_detail``) and its phases (``engine_steps``), and its
+        replicas (``engine_replicas``); None without a route or a handler."""
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
         except (NotServedError, StaleServedModelsError, LookupError):
-            return None, None, None
-        engine = handler.engine_state(served)
-        if engine != "starting":
-            return engine, None, None
-        return engine, handler.engine_detail(served), handler.engine_steps(served)
+            return None, None, None, None
+        engine, replicas = handler.engine_state(served), handler.engine_replicas(served)
+        # A warm engine that adds replicas also says how the replicas that start go on.
+        if engine != "starting" and (replicas is None or replicas.starting == 0):
+            return engine, None, None, replicas
+        return engine, handler.engine_detail(served), handler.engine_steps(served), replicas
 
     async def resolve(
         self,

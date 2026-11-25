@@ -80,6 +80,9 @@ gets what it needs from its ``config`` and from these calls only.
 - A config that names a generator is refused when the scenario has no task
   storage.
 
+A generator that calls a remote service reads its credentials through
+environment references in its ``config``, not as literal values.
+
 Results
 ~~~~~~~
 
@@ -101,6 +104,9 @@ Each ``GeneratedTaskResult`` is one of four cases:
 The training component scores a rollout whose verifier ran past its timeout
 with ``rollout.verifier_timeout_reward``, 0 by default, so such a rollout
 trains.
+
+With a training pool, a task trains many times, but the generator receives
+only the first rollout of each task.
 
 Durable state
 ~~~~~~~~~~~~~

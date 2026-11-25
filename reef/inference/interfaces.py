@@ -260,6 +260,73 @@ class InferenceArtifact:
 #: yet, ``idle`` runs no engine, and a request starts one.
 EngineState = Literal["warm", "starting", "idle"]
 
+
+#: The state of one replica behind a route: ``serving`` answers now, ``starting`` runs but does not answer yet.
+EngineReplicaState = Literal["serving", "starting"]
+
+
+@dataclass(frozen=True)
+class EngineReplica:
+    """One replica behind a route, such as one container of a server that scales.
+
+    Values: ``id`` is the replica's non-empty name, such as its container ID. ``state`` is an ``EngineReplicaState``.
+    ``started_at`` is when the replica started, in epoch seconds, or None. ``startup`` is its own ``start`` and
+    ``load`` phases while it starts (``StartupSteps``), or None."""
+
+    id: str
+    state: EngineReplicaState
+    started_at: float | None = None
+    startup: StartupSteps | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("an engine replica has a non-empty id")
+        if self.state not in ("serving", "starting"):
+            raise ValueError("an engine replica is serving or starting")
+        started = self.started_at
+        if started is not None and (isinstance(started, bool) or not isinstance(started, (int, float)) or started < 0):
+            raise ValueError("an engine replica's start time is epoch seconds of at least 0, or None")
+        if self.startup is not None and not isinstance(self.startup, StartupSteps):
+            raise ValueError("an engine replica's startup is StartupSteps, or None")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "state": self.state,
+            "started_at": self.started_at,
+            "startup": None if self.startup is None else self.startup.to_json(),
+        }
+
+
+@dataclass(frozen=True)
+class EngineReplicas:
+    """The engine replicas behind a route, such as the containers of a server that scales: ``serving`` answer now,
+    and ``starting`` run but do not answer yet. Both are integers of at least 0. ``replicas`` names each one
+    (``EngineReplica``), as many as the two counts and in any order, or is empty when the handler gives only the
+    counts. ``InferenceHandler.engine_replicas`` gives them, and the inference status shows them (``to_json``)."""
+
+    serving: int
+    starting: int
+    replicas: tuple[EngineReplica, ...] = ()
+
+    def __post_init__(self) -> None:
+        for value in (self.serving, self.starting):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("engine replicas are integers of at least 0")
+        if not all(isinstance(replica, EngineReplica) for replica in self.replicas):
+            raise ValueError("engine replicas name each replica with an EngineReplica")
+        states = [replica.state for replica in self.replicas]
+        if states and (states.count("serving"), states.count("starting")) != (self.serving, self.starting):
+            raise ValueError("the named engine replicas must match the serving and starting counts")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "serving": self.serving,
+            "starting": self.starting,
+            "replicas": [replica.to_json() for replica in self.replicas],
+        }
+
+
 #: The phases of an artifact's startup, in their order (RFC #1283): ``prepare`` (the serving work waits, deploys the
 #: engine, and converts or quantizes the weights), ``start`` (a machine and the weights) and ``load`` (GPU memory,
 #: kernels, CUDA graphs and warm-up). ``reef.inference.startup`` reports them.
@@ -385,16 +452,23 @@ class InferenceHandler(Plugin, ABC):
         """
         return None
 
+    def engine_replicas(self, served: ServedArtifact) -> EngineReplicas | None:
+        """The engine replicas that answer at ``served`` (``EngineReplicas``), or None when the handler cannot tell,
+        the default. It must not start an engine. It may block: the inference service calls it in a thread, for the
+        status of a ready artifact, in every ``engine_state``."""
+        return None
+
     def engine_detail(self, served: ServedArtifact) -> str | None:
         """What the starting engine at ``served`` does now, as one short line for a person, such as "Loading weights
         · 0:42"; None when the handler cannot tell, the default. Reef asks it only while ``engine_state`` is
-        ``starting``, under the same rules."""
+        ``starting``, or while ``engine_replicas`` has replicas that start, under the same rules."""
         return None
 
     def engine_steps(self, served: ServedArtifact) -> StartupSteps | None:
         """The ``start`` and ``load`` phases of the starting engine at ``served`` (RFC #1283), when a ready artifact's
-        engine starts again from zero; None when the handler cannot tell, the default. Reef asks it only while
-        ``engine_state`` is ``starting``, under the same rules."""
+        engine starts again from zero, or of a replica that starts beside one that answers; None when the handler
+        cannot tell, the default. Reef asks it only while ``engine_state`` is ``starting``, or while
+        ``engine_replicas`` has replicas that start, under the same rules."""
         return None
 
     async def inference_stream(
