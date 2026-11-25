@@ -42,7 +42,7 @@ from typing import Any, TypeVar, cast
 
 from reef_client.serve import CapturedTurn
 
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, UpstreamLimit
 from reef.core.evaluation import (
     EvaluationCall,
     EvaluationCallSummary,
@@ -55,7 +55,7 @@ from reef.core.evaluation import (
 from reef.core.job_data import FILES_DIGEST_PATTERN
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
-from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts, ProviderCooldowns, refusal_limit
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS
@@ -387,12 +387,13 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     """The candidate's model, on loopback in the process of the evaluation worker: an ``ArtifactEndpoint`` that
     sends each call to the engine that inference started, or to its scenario's runtime for an engine with no address.
 
-    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation worker opens it around each
-    rollout.
+    Values: ``artifacts`` finds the candidate of each rollout. ``cooldowns`` holds the rate-limit waits that the
+    endpoints of all its rollouts share. Purpose: the evaluation worker opens it around each rollout.
     """
 
     def __init__(self, artifacts: CandidateArtifacts) -> None:
         self.artifacts = artifacts
+        self.cooldowns = ProviderCooldowns()
 
     def task_directory(self, rollout: EvaluationRollout) -> Path:
         if rollout.task_digest is None:
@@ -422,7 +423,9 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
-        with ArtifactEndpoint(runtime, artifact, served, log_probs=rollout.log_probs) as endpoint:
+        with ArtifactEndpoint(
+            runtime, artifact, served, log_probs=rollout.log_probs, cooldowns=self.cooldowns
+        ) as endpoint:
             yield CandidateEndpoint(endpoint.url, None)
 
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
@@ -484,12 +487,13 @@ def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int
 
     The call started ``turn.duration_s`` seconds before the proxy captured it at ``turn.at``. Its summary fields come
     from the reply of a 200 call (``reply_summary``); a failed call has none, and 0 tool calls. The kept response has
-    no ``training`` block: it holds token IDs for training, which nobody reads in a call log.
+    no ``training`` block: it holds token IDs for training, which nobody reads in a call log. A body that is not a
+    JSON object is kept as None.
     """
+    request = turn.request if isinstance(turn.request, Mapping) else None
+    response = turn.response if isinstance(turn.response, Mapping) else None
     prompt, completion, finish, tool_calls = (
-        reply_summary(turn.path, turn.response)
-        if turn.status == 200 and turn.response is not None
-        else (None, None, None, 0)
+        reply_summary(turn.path, response) if turn.status == 200 and response is not None else (None, None, None, 0)
     )
     summary = EvaluationCallSummary(
         task_index=rollout.task_index,
@@ -505,10 +509,9 @@ def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int
         finish_reason=finish,
         tool_calls=tool_calls,
     )
-    response = turn.response
     if response is not None and "training" in response:
         response = {key: value for key, value in response.items() if key != "training"}
-    return EvaluationCall(summary, turn.request, response)
+    return EvaluationCall(summary, request, response)
 
 
 def verifier_call(line: str, rollout: EvaluationRollout, attempt: int, index: int) -> EvaluationCall:
@@ -614,13 +617,49 @@ def verifier_rewards(rewards: Mapping[str, float]) -> dict[str, JsonValue] | Non
     return dict(list(kept.items())[:MAX_VERIFIER_REWARDS]) or None
 
 
+@dataclass(frozen=True)
+class ModelCallRefusal:
+    """A model call of a rollout that a provider's limit refused, as its capture shows it.
+
+    Values: ``limit`` is the ``UpstreamLimit`` of the refusal (``refusal_limit``), ``status`` the answer's HTTP status,
+    an int from 400 to 599, and ``retry_after_seconds`` the answer's ``Retry-After``, an int of at least 0, or None.
+    It holds no text of the answer. Purpose: ``RolloutCalls`` makes it for the last captured call, and
+    ``EvaluationRolloutWorker.score`` fails an unscored rollout with its ``reason``.
+    """
+
+    limit: UpstreamLimit
+    status: int
+    retry_after_seconds: int | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.limit, UpstreamLimit):
+            raise TypeError("limit is an UpstreamLimit")
+        if isinstance(self.status, bool) or not isinstance(self.status, int) or not 400 <= self.status < 600:
+            raise ValueError("status is an HTTP error status from 400 to 599")
+        wait = self.retry_after_seconds
+        if wait is not None and (isinstance(wait, bool) or not isinstance(wait, int) or wait < 0):
+            raise ValueError("retry_after_seconds is a number of seconds of at least 0, or None")
+
+    def reason(self) -> str:
+        """The error of a rollout that this refusal left with no score, made from the fields alone."""
+        text = f"the model provider refused the last model call with HTTP {self.status} ({self.limit.value})."
+        if self.retry_after_seconds is not None:
+            text += f" Retry after {self.retry_after_seconds} s."
+        if self.limit is UpstreamLimit.PAYMENT and self.status == 403:
+            text += " Check the provider's spending cap, or wait until it resets, before retrying."
+        elif self.limit is UpstreamLimit.PAYMENT:
+            text += " Check the provider balance or key limit, or reduce the request size before retrying."
+        return text
+
+
 class RolloutCalls(CaptureObserver):
     """Keeps each call of one attempt of an evaluation rollout in the data store, as the call ends.
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
     the index of the next call. ``answered`` is the number of those calls that answered 200, from 0 to
-    ``next_index``.
+    ``next_index``. ``last_refusal`` is the ``ModelCallRefusal`` of the call captured last, when a provider's limit
+    refused it; it is None before the first call, and when the last call answered or failed in another way.
 
     Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
     One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
@@ -633,14 +672,23 @@ class RolloutCalls(CaptureObserver):
         self.attempt = attempt
         self.next_index = 0
         self.answered = 0
+        self.last_refusal: ModelCallRefusal | None = None
         self.lock = threading.Lock()
         self.writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-evaluation-calls")
 
     def call_captured(self, turn: CapturedTurn) -> None:
+        # The proxy keeps whatever JSON the endpoint answered; only an object can name a refusal.
+        response = turn.response if isinstance(turn.response, Mapping) else None
+        limit = refusal_limit(turn.status, response)
+        error = response.get("error") if response is not None else None
+        wait = error.get("retry_after_seconds") if isinstance(error, Mapping) else None
+        if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
+            wait = None
         with self.lock:
             index = self.next_index
             self.next_index += 1
             self.answered += turn.status == 200
+            self.last_refusal = None if limit is None else ModelCallRefusal(limit, turn.status, wait)
             self.writer.submit(self.keep, evaluation_call(turn, self.rollout, self.attempt, index))
 
     def keep(self, call: EvaluationCall) -> None:
@@ -715,7 +763,8 @@ class EvaluationRolloutWorker(QueueWorker):
     to the queue, as with ``requeue``; a rollout whose trial has ended keeps its result. A failed rollout is retried: a
     trial fails for reasons outside its input, such as a sandbox that did not start. A rollout of a harness tree whose
     task needs what the tree's agent does not give it (``task_agent_tools``) fails for good, and so does a rollout
-    that requires prepared templates when its task's template item did not finish.
+    that requires prepared templates when its task's template item did not finish, and one that a provider's limit
+    left with no score (``score``).
 
     Purpose: the evaluation service starts one (``start``), lets it begin to stop as soon as the process begins to
     stop (``begin_stop``), and stops it (``stop``).
@@ -856,7 +905,10 @@ class EvaluationRolloutWorker(QueueWorker):
         1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``).
 
         A rollout that requires prepared templates runs only when its task's template item finished, and its trial
-        builds no template. Else it fails for good with the template item's error, before its candidate is served."""
+        builds no template. Else it fails for good with the template item's error, before its candidate is served.
+
+        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), and the trial failed or no
+        call was answered, the rollout fails for good with no score (``ModelCallRefusal.reason``)."""
         if rollout.requires_prepared_templates:
             template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
@@ -933,6 +985,9 @@ class EvaluationRolloutWorker(QueueWorker):
                     result.error,
                 ),
             )
+            if calls.last_refusal is not None and (result.error or not calls.answered):
+                # A score would judge the provider, and a new sandbox at once would meet the same refusal.
+                raise ItemFailedError(calls.last_refusal.reason())
             if not calls.answered:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
                 # trial whose sandbox did not start makes no call either. When the sandbox service had no capacity,
@@ -1090,6 +1145,7 @@ __all__ = [
     "EvaluationRollout",
     "EvaluationRolloutWorker",
     "LocalCandidateEndpoints",
+    "ModelCallRefusal",
     "RolloutCalls",
     "TaskTemplateWorker",
     "TreeHarness",
