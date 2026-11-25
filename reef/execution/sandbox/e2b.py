@@ -27,6 +27,7 @@ requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -460,6 +461,17 @@ class E2BSession(RemoteSession):
                 logger.warning("could not copy %s back from the failed E2B process", root.name)
 
 
+#: The part of a session ID that Harbor gives a separate verifier environment of a trial
+#: (``Trial._separate_verifier_session_id`` in Harbor 0.25).
+VERIFIER_SESSION_MARKER = "__verifier__"
+#: The share of an environment's start time limit (``build_timeout_sec``) in which a verifier environment waits for
+#: sandbox capacity. The rest is for its other start steps, so the wait ends before Harbor's limit.
+VERIFIER_CAPACITY_WAIT_SHARE = 0.8
+#: The first and the longest pause between two create calls of a verifier environment that waits for capacity.
+VERIFIER_CAPACITY_FIRST_PAUSE_SECONDS = 15.0
+VERIFIER_CAPACITY_MAX_PAUSE_SECONDS = 120.0
+
+
 class TemplateNotPreparedError(InternalError):
     """A trial that builds no template (``KillOnTimeoutE2BEnvironment.builds_templates`` false) found its template
     missing, or not ready on AgentENV."""
@@ -509,6 +521,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
             raise TypeError("builds_templates is a bool")
         super().__init__(*args, **kwargs)
         self.builds_templates = builds_templates
+        #: The ``time.monotonic()`` value when ``start`` began, or None before it.
+        self.started_at: float | None = None
         self.dockerfile_build = dockerfile_build(os.environ)
         runs_compose = compose_mode(os.environ) == "aenv"
         if runs_compose and self.dockerfile_build != "aenv":
@@ -528,6 +542,7 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
 
     @override
     async def start(self, force_build: bool) -> None:
+        self.started_at = time.monotonic()
         if self.compose_ops is not None:
             await self.start_compose(force_build)
             return
@@ -773,15 +788,36 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
             memory_mb=self._effective_memory_mb,
         )
 
-    # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The body is
-    # Harbor's create call with one more argument, and the decorator is Harbor's retry policy, because Harbor's
-    # decorator wraps its own method and not this one. When Harbor adds an argument to the call, add it here too: the
-    # parity test in tests/sandbox/test_task_environment.py compares the two calls.
-    # A refusal for want of capacity becomes ``SandboxCapacityError``, so that an evaluation waits for capacity
-    # instead of failing the rollout.
+    # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The decorator
+    # is Harbor's retry policy, because Harbor's decorator wraps its own method and not this one. The create call, in
+    # create_sandbox_once, is Harbor's call with one more argument. When Harbor adds an argument to the call, add it
+    # there too: the parity test in tests/sandbox/test_task_environment.py compares the two calls. A refusal for want
+    # of capacity becomes ``SandboxCapacityError``, so that an evaluation waits for capacity instead of failing.
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
     @override
     async def _create_sandbox(self) -> None:
+        """Create the sandbox. A separate verifier environment runs after the agent, so it does not give up the
+        agent's work at the first refusal for want of capacity: it calls again, with pauses of 15 s doubling to 2 min,
+        until ``VERIFIER_CAPACITY_WAIT_SHARE`` of its start time limit has passed since ``start``. Then it raises the
+        last ``SandboxCapacityError``. Another environment raises it at once."""
+        verifier = VERIFIER_SESSION_MARKER in self.session_id
+        started_at = time.monotonic() if self.started_at is None else self.started_at
+        wait_ends_at = started_at + VERIFIER_CAPACITY_WAIT_SHARE * self.task_env_config.build_timeout_sec
+        pause_seconds = VERIFIER_CAPACITY_FIRST_PAUSE_SECONDS
+        while True:
+            try:
+                await self.create_sandbox_once()
+                return
+            except SandboxCapacityError as exc:
+                if not verifier or time.monotonic() + pause_seconds > wait_ends_at:
+                    raise
+                logger.info("verifier sandbox %s waits %.0f s for capacity: %s", self.session_id, pause_seconds, exc)
+                await asyncio.sleep(pause_seconds)
+                pause_seconds = min(2 * pause_seconds, VERIFIER_CAPACITY_MAX_PAUSE_SECONDS)
+
+    async def create_sandbox_once(self) -> None:
+        """Ask the sandbox service for the sandbox once. Raise ``SandboxCapacityError`` when the service refused it
+        for want of capacity."""
         # Keep these optional SDK imports inside sandbox creation.
         import httpx
         from e2b import AsyncSandbox, RateLimitException, ServiceBusyException

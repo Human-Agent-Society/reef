@@ -268,6 +268,54 @@ def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("session", "refusals", "pauses", "created"),
+    [
+        # A separate verifier waits for capacity, so the agent's work is kept.
+        ("t__verifier__tests", 2, [15, 30], True),
+        # Its wait ends before 80% of its start time limit (96 of 120 s); Harbor's retry starts it once more.
+        ("t__verifier__tests", 99, [15, 30, 15, 30], False),
+        # The agent's environment does not wait: its rollout goes back to the queue (EvaluationRolloutWorker).
+        ("t__env", 99, [], False),
+    ],
+    ids=["verifier-gets-capacity", "verifier-gives-up", "agent-environment"],
+)
+def test_reefs_e2b_verifier_sandbox_waits_for_capacity_within_its_start_time_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, refusals: int, pauses: list[int], created: bool
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    environment.session_id = session
+    clock = {"seconds": 1000.0}
+    environment.started_at = clock["seconds"]
+    slept: list[float] = []
+    calls: list[int] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["seconds"] += seconds
+
+    async def create(**options: object) -> object:
+        calls.append(1)
+        if len(calls) <= refusals:
+            raise e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available")
+        return "sandbox"
+
+    monkeypatch.setattr(reef_e2b, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(reef_e2b, "time", SimpleNamespace(monotonic=lambda: clock["seconds"]))
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    if created:
+        asyncio.run(environment._create_sandbox())
+        assert environment._sandbox == "sandbox"
+    else:
+        with pytest.raises(SandboxCapacityError):
+            asyncio.run(environment._create_sandbox())
+    assert slept == pauses
+
+
+@pytest.mark.unit
 def test_reefs_e2b_start_waits_for_the_tmp_cleanup_of_systemd_after_harbors_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

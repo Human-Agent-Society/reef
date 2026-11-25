@@ -296,6 +296,38 @@ def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp
     }
 
 
+class CalledThenNoVerifierCapacityLab(CalledThenFailedLab):
+    """A lab whose agent calls the model, and whose separate verifier then finds no sandbox capacity, as Harbor
+    records it in the trial's ``result.json`` under ``root``."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        trial = self.root / key
+        trial.mkdir(parents=True)
+        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        (trial / "result.json").write_text(json.dumps(result))
+        error = "the sandbox service has no capacity now: 503"
+        return RolloutRow(rewards={}, error=error, trial_uri=trial.as_uri())
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_verifier_found_no_sandbox_capacity_runs_again_and_gets_no_score(tmp_path):
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = CalledThenNoVerifierCapacityLab(tmp_path / "trials")
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    # The agent called the model, but the rollout gets no score of 0: it waits for capacity and runs again.
+    assert (item.state, item.result) == ("queued", None)
+    assert item.error == "waiting for sandbox capacity: the sandbox service has no capacity now: 503"
+    assert item.stopped_attempt_count == item.attempt_count == 1
+
+
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
     return CapturedTurn("", path, status, {"messages": []}, response, None, False, 2.0, at=100.0)
 
