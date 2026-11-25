@@ -56,6 +56,7 @@ from reef.core.job_data import FILES_DIGEST_PATTERN
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts, ProviderCooldowns, refusal_limit
+from reef.evaluation.call_route import RolloutCallRoute
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SANDBOX_REQUEST_ERRORS
@@ -814,7 +815,9 @@ class EvaluationRolloutWorker(QueueWorker):
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
-    address at which a task's container reaches this host. ``on_stop`` is one of ``ON_STOP_CHOICES``: what the worker
+    address at which a task's container reaches this host. ``call_route`` is this process's route of rollout calls:
+    with one, a tree's agent in a remote sandbox calls its rollout's capture proxy at a signed public URL; with None,
+    a relay in the sandbox bridges its calls (RFC #986). ``on_stop`` is one of ``ON_STOP_CHOICES``: what the worker
     does with the rollouts that run when it begins to stop (``begin_stop``). With ``requeue``, it cancels each one and
     gives it back to the queue. With ``finish``, it takes no new rollout, and ``stop`` returns when each running one
     has finished, so a process that a scale-down or a deploy stops loses no work in its grace period.
@@ -843,6 +846,7 @@ class EvaluationRolloutWorker(QueueWorker):
         lab: TaskLab | None = None,
         trial_observer: TrialObserver | None = None,
         agent_host: str = DEFAULT_AGENT_HOST,
+        call_route: RolloutCallRoute | None = None,
         poll_seconds: float = 0.5,
         slots: int = 1,
         on_stop: str = "requeue",
@@ -863,6 +867,7 @@ class EvaluationRolloutWorker(QueueWorker):
         self.lab = lab
         self.trial_observer = trial_observer
         self.agent_host = agent_host
+        self.call_route = call_route
         self.on_stop = on_stop
         self.finish_timeout_s = finish_timeout_s
         #: The event that cancels the running rollouts: the worker's stop with ``requeue``; with ``finish``, the end of
@@ -998,8 +1003,9 @@ class EvaluationRolloutWorker(QueueWorker):
                     "does not give its agent"
                 )
         served = self.served_candidate(rollout, lease_lost)
-        # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
-        bridged = rollout.tree is not None and rollout.environment != "docker"
+        # A tree in a remote environment calls the capture proxy at its public route, or through the bridge without one.
+        remote = rollout.tree is not None and rollout.environment != "docker"
+        bridged = remote and self.call_route is None
         calls = RolloutCalls(self.endpoints, rollout, attempt)
         with (
             tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
@@ -1014,7 +1020,8 @@ class EvaluationRolloutWorker(QueueWorker):
                 work_dir=Path(work),
                 agent=rollout.tree.agent(Path(work), bridge=bridged) if rollout.tree is not None else rollout.agent,
                 # A tree's agent on Docker runs in the task's container, which reaches the capture proxy at this address.
-                agent_host=None if rollout.tree is None or bridged else self.agent_host,
+                agent_host=None if rollout.tree is None or remote else self.agent_host,
+                call_route=self.call_route if remote else None,
                 environment=rollout.environment,
                 is_reporting=False,
                 is_unrecorded=True,

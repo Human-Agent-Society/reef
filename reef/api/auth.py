@@ -12,6 +12,7 @@ from aiohttp import web
 from aiohttp.typedefs import Handler
 
 from reef.control.operations.scenario_files import MAX_DOWNLOAD_URL_SECONDS
+from reef.evaluation.call_route import is_rollout_call
 
 
 def normalize_tokens(tokens: str | Iterable[str] | None) -> frozenset[str]:
@@ -264,8 +265,10 @@ def create_authentication_middleware(
     @web.middleware
     async def authenticate(request: web.Request, handler):
         # /healthz and /readyz stay reachable without credentials: probes (the
-        # bundled configs' ready checks, orchestrators) cannot authenticate.
-        if accepted and request.path not in ("/healthz", "/readyz") and not _authorized(request):
+        # bundled configs' ready checks, orchestrators) cannot authenticate. A rollout call carries a ticket that its
+        # route checks against the same tokens (``RolloutCallRoute``).
+        unguarded = request.path in ("/healthz", "/readyz") or is_rollout_call(request.path)
+        if accepted and not unguarded and not _authorized(request):
             raise web.HTTPUnauthorized(text="invalid service token")
         return await handler(request)
 

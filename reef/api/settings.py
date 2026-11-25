@@ -367,6 +367,26 @@ class ServiceSettings:
             "harness tree on docker. Other environments do not use it."
         ),
     )
+    #: The public URL of the rollout call route (``reef.evaluation.call_route``), or None to bridge each call through
+    #: the sandbox's relay.
+    evaluation_call_url: str | None = config_option(
+        None,
+        public_path=("evaluation", "call_url"),
+        help=(
+            "The public URL at which an agent in a remote sandbox calls its rollout's model. The deployment's "
+            "ingress sends this URL's paths to /reef/rollout-calls of its evaluation processes. Unset, the "
+            "evaluation bridges each call through a relay in the sandbox."
+        ),
+    )
+    #: The address at which the other evaluation processes reach this one, for ``evaluation_call_url``.
+    evaluation_call_address: str | None = config_option(
+        None,
+        public_path=("evaluation", "call_address"),
+        help=(
+            "The address at which the other evaluation processes reach this one, with evaluation.call_url. Unset, "
+            "it is the address of this host's name, which is the Pod's address on Kubernetes."
+        ),
+    )
     #: The rollouts that one process of the evaluation service runs at once, across evaluations. Each one holds a
     #: sandbox of its task.
     evaluation_max_sandboxes: int = config_option(

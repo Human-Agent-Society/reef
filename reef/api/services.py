@@ -42,6 +42,7 @@ from reef.api.assembly import (
     load_deployment,
     open_scenario_storage,
     open_service_coordination,
+    rollout_call_route_for,
     with_harness_components,
 )
 from reef.api.auth import evaluation_token_for
@@ -51,6 +52,7 @@ from reef.api.settings import ServiceSettings
 from reef.api.web import service_application
 from reef.control.scenario.live_objects import RecipeChecks, ServedEndpoint, close_runtimes
 from reef.control.workers.serving import ServingWorker
+from reef.evaluation.call_route import register_rollout_call_route
 from reef.execution.workers import SERVICE_NAMES
 from reef.inference.engine_clients import DeploymentEngineClients
 from reef.observability import build_record_observer
@@ -304,7 +306,8 @@ class TrainingApp(ServiceApp):
 class QueueServiceApp(ServiceApp):
     """A service that only takes work from a queue (samples, evaluation): a dispatcher that runs only the
     service's own workers on the shared store, and answers ``/healthz`` alone. The evaluation service loads each
-    rollout's scenario on demand, resolves the candidate artifact and serves it itself.
+    rollout's scenario on demand, resolves the candidate artifact and serves it itself; with ``evaluation.call_url``
+    it also answers the calls of its rollouts' agents in remote sandboxes (``register_rollout_call_route``).
 
     Values: ``name`` is the service.
     """
@@ -313,8 +316,14 @@ class QueueServiceApp(ServiceApp):
         self.name = name
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
+        # The evaluation service takes the calls of its rollouts' agents in remote sandboxes (``evaluation.call_url``).
+        call_route = rollout_call_route_for(settings) if self.name == "evaluation" else None
+        dispatcher = build_dispatcher(
+            settings, environ=environ, components=frozenset({self.name}), rollout_call_route=call_route
+        )
         app = service_application(settings.tokens)
+        if call_route is not None:
+            register_rollout_call_route(app, call_route)
 
         async def stop_taking_work(app: web.Application) -> None:
             # Shutdown hooks run right after the signal and before the HTTP drain, so a stop deadline starts here.

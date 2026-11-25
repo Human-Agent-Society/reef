@@ -28,8 +28,9 @@ from reef.core.errors import ReefError, UpstreamLimit
 from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel, RolloutScore
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
-from reef.evaluation import artifact_endpoint
+from reef.evaluation import artifact_endpoint, rollout_worker
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
+from reef.evaluation.call_route import RolloutCallRoute
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
@@ -80,8 +81,6 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
 
 
 def test_each_rollout_opens_its_candidate_with_its_own_session_key(monkeypatch) -> None:
-    from reef.evaluation import rollout_worker
-
     opened = []
 
     class RecordedEndpoint:
@@ -496,6 +495,36 @@ class ToolTaskEndpoints(OpenEndpoints):
             '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
         )
         return task
+
+
+class RunnerBuiltError(Exception):
+    """Raised by a stand-in runner once the worker built it, so the test reads the runner's arguments."""
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("environment", "routed"), [("e2b", True), ("docker", False)])
+def test_a_tree_agent_in_a_remote_sandbox_calls_its_public_route_and_on_docker_the_agent_host(
+    monkeypatch, tmp_path, environment, routed
+):
+    built: dict[str, object] = {}
+
+    def runner(**arguments: object) -> None:
+        built.update(arguments)
+        raise RunnerBuiltError
+
+    monkeypatch.setattr(rollout_worker, "TaskRolloutRunner", runner)
+    route = RolloutCallRoute("https://calls.example", ["token"], address="10.0.0.1", server_port=8900)
+    value = replace(rollout(), agent=None, tree=TreeHarness("codex", "openai-responses", {}), environment=environment)
+    worker = EvaluationRolloutWorker(
+        memory_coordination().work_queue, OpenEndpoints(tmp_path), worker_id="w", call_route=route
+    )
+    monkeypatch.setattr(worker, "served_candidate", lambda rollout, lease_lost: None)
+    with pytest.raises(RunnerBuiltError):
+        worker.score(value, threading.Event(), 1)
+    # A remote sandbox calls the route, with no relay; the task's container on Docker reaches this host.
+    assert built["call_route"] is (route if routed else None)
+    assert built["agent_host"] == (None if routed else worker.agent_host)
+    assert cast(Mapping[str, Mapping[str, object]], built["agent"])["kwargs"]["bridge"] is False
 
 
 @pytest.mark.unit

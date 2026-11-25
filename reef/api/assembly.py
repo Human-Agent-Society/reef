@@ -21,7 +21,7 @@ from typing import Any
 from aiohttp import web
 
 from reef.api.app import create_app
-from reef.api.auth import evaluation_token_for
+from reef.api.auth import evaluation_token_for, normalize_tokens
 from reef.api.lifecycle import LifecycleSettings
 from reef.api.routed_inference import InferenceRetryPolicy
 from reef.api.serving import serving_runtime_config
@@ -44,6 +44,7 @@ from reef.control.scenario.live_objects import (
     harness_models,
 )
 from reef.control.workers.served_models import wait_for_control_lease
+from reef.evaluation.call_route import RolloutCallRoute, register_rollout_call_route
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
@@ -559,6 +560,16 @@ def build_artifact_backend(settings: ServiceSettings) -> ConfigurableRepositoryB
     return backend_factory
 
 
+def rollout_call_route_for(settings: ServiceSettings) -> RolloutCallRoute | None:
+    """The route of the rollout calls of this evaluation process (``evaluation.call_url``), or None without one."""
+    return RolloutCallRoute.from_settings(
+        settings.evaluation_call_url,
+        normalize_tokens(settings.tokens),
+        address=settings.evaluation_call_address,
+        server_port=settings.port,
+    )
+
+
 def build_dispatcher(
     settings: ServiceSettings,
     *,
@@ -567,6 +578,7 @@ def build_dispatcher(
     evaluation_token: str | None = None,
     new_artifacts: NewArtifacts | None = None,
     components: frozenset[str] = frozenset(SERVICE_NAMES),
+    rollout_call_route: RolloutCallRoute | None = None,
 ) -> Dispatcher:
     """Build the dispatcher of a service.
 
@@ -582,7 +594,8 @@ def build_dispatcher(
     before composites, and neither applies to it.
 
     ``components`` names the services that this process runs (``SERVICE_NAMES``); the default is all of them,
-    the one-process layout.
+    the one-process layout. ``rollout_call_route`` is this process's route of rollout calls
+    (``rollout_call_route_for``), None to bridge the calls of remote sandboxes through their relay.
     """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
@@ -680,6 +693,7 @@ def build_dispatcher(
                         )
                     ),
                     agent_host=settings.evaluation_agent_host,
+                    call_route=rollout_call_route,
                     slots=settings.evaluation_max_sandboxes,
                     on_stop=settings.evaluation_on_stop,
                     finish_timeout_s=settings.evaluation_finish_timeout_s,
@@ -800,6 +814,7 @@ def build_app(
     # never a service token. Every process derives the same one from the service tokens.
     evaluation_token = evaluation_token_for(settings.tokens)
     new_artifacts = NewArtifacts()
+    call_route = rollout_call_route_for(settings) if "evaluation" in components else None
     dispatcher = build_dispatcher(
         settings,
         environ=environ,
@@ -807,6 +822,7 @@ def build_app(
         evaluation_token=evaluation_token,
         new_artifacts=new_artifacts,
         components=components,
+        rollout_call_route=call_route,
     )
     evaluations = ArtifactEvaluations(
         dispatcher,
@@ -843,6 +859,8 @@ def build_app(
         with suppress(Exception):
             dispatcher.close()
         raise
+    if call_route is not None:
+        register_rollout_call_route(app, call_route)
     app.cleanup_ctx.append(EndOnLeaseLoss(dispatcher).run)
     return app
 

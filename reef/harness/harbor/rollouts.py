@@ -37,6 +37,7 @@ from reef_client.client import ReefClient, ReefClientError
 from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
+from reef.evaluation.call_route import RolloutCallRoute
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import environment_config
 from reef.harness.capture import CaptureObserver, CaptureProxy
@@ -328,6 +329,10 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
 
     ``builds_templates`` false makes each trial and each environment build of an ``e2b`` runner start only from
     templates that exist (``environment_config``); a runner on another environment refuses it.
+
+    ``call_route``, when set, gives the agent the public URL of its rollout's capture proxy
+    (``RolloutCallRoute.open``) in place of a loopback one, for an agent in a remote sandbox. The trial's network
+    policy then allows the route's host, and ``agent_host`` must be None.
     """
 
     def __init__(
@@ -352,6 +357,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         capture_observer: CaptureObserver | None = None,
         keeps_turns: bool = True,
         builds_templates: bool = True,
+        call_route: RolloutCallRoute | None = None,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -367,6 +373,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             raise TaskRolloutError("an unrecorded rollout reports nothing")
         if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
             raise TaskRolloutError("agent_host must be a non-empty host name or address")
+        if call_route is not None and agent_host is not None:
+            raise TaskRolloutError("a runner with a call_route gives its agent the route's URL, not agent_host")
         if not builds_templates and environment != "e2b":
             raise TaskRolloutError(f"only an e2b runner can refuse to build templates, not a {environment!r} runner")
         self.reef_url = reef_url.rstrip("/")
@@ -396,6 +404,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.concurrency = concurrency
         self.capture_observer = capture_observer
         self.builds_templates = builds_templates
+        self.call_route = call_route
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -517,8 +526,14 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         )
         proxy.start()
         try:
-            base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
+            if self.call_route is not None:
+                base_url = self.call_route.open(proxy.port)
+            else:
+                base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
+            if self.call_route is not None:
+                # A task without network, or with an allowlist, lets its agent reach the route's host alone.
+                agent["extra_allowed_hosts"] = [self.call_route.host]
             # The environment config reads the agent's own time limits, so a cloud sandbox lives for them. They are
             # numbers, which bound_agent leaves as they are, so the task's build gets the same config.
             overrides: dict[str, object] = {
@@ -530,6 +545,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)
         finally:
+            if self.call_route is not None:
+                self.call_route.close(proxy.port)
             turns = proxy.drain()
             proxy.stop()
         receipts: tuple[str, ...] = ()
