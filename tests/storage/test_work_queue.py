@@ -442,6 +442,44 @@ def test_lease_extender_stop_wakes_promptly_during_wait():
 
 
 @pytest.mark.unit
+def test_extending_a_lease_refreshes_expiry_without_taking_the_sequence_counter(open_coordination, monkeypatch):
+    queue = open_coordination().queue
+    queue.append(job("a"), now=0)
+    taken = queue.take("jobs", "w1", ["training_job:tinker"], now=0)
+
+    def refuse_counter(connection, sequence):
+        raise AssertionError(f"extend_lease must not acquire sequence counter {sequence}")
+
+    monkeypatch.setattr(queue.database, "counter", refuse_counter)
+    extended = queue.extend_lease("jobs", "a", "w1", now=5)
+
+    assert extended.lease_expires_at == 15
+    assert extended.changed_sequence == taken.changed_sequence
+    assert queue.read("jobs", "a") == extended
+    assert queue.read_changes("jobs", taken.changed_sequence) == ()
+
+
+@pytest.mark.unit
+def test_extending_a_lease_rejects_reassigned_ownership_without_mutating_the_item(open_coordination):
+    queue = open_coordination(max_attempts={"jobs": 2}).queue
+    queue.append(job("a"), now=0)
+    queue.take("jobs", "w1", ["training_job:tinker"], now=0)
+    assert queue.requeue_expired(now=16)[0].state == "queued"
+    reassigned = queue.take("jobs", "w2", ["training_job:tinker"], now=17)
+
+    with pytest.raises(WorkLeaseLostError):
+        queue.extend_lease("jobs", "a", "w1", now=18)
+
+    current = queue.read("jobs", "a")
+    assert (current.worker_id, current.attempt_count, current.lease_expires_at, current.changed_sequence) == (
+        reassigned.worker_id,
+        reassigned.attempt_count,
+        reassigned.lease_expires_at,
+        reassigned.changed_sequence,
+    )
+
+
+@pytest.mark.unit
 def test_a_new_attempt_with_the_same_worker_id_fences_checkpoint_writes(open_coordination):
     queue = open_coordination().queue
     queue.append(job("a"))

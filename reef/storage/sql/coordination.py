@@ -23,7 +23,7 @@ import time
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -974,8 +974,9 @@ def item_from_row(row: RowMapping) -> WorkItem:
 class SQLWorkQueue(WorkQueue):
     """Work queues in a coordination database.
 
-    Every change holds the ``WORK_SEQUENCE`` counter row, so the changes of all queues are serialized: two workers
-    that take at once never get the same item. ``take`` selects the oldest item that the worker can take.
+    Every numbered change holds the ``WORK_SEQUENCE`` counter row, so those changes across all queues are serialized:
+    two workers that take at once never get the same item. Lease-only extensions (``extend_lease``) lock only the
+    item row and take no counter. ``take`` selects the oldest item that the worker can take.
     """
 
     def __init__(
@@ -1200,9 +1201,15 @@ class SQLWorkQueue(WorkQueue):
 
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
-        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+        lease_expires_at = moment + self.lease_seconds
+        # A lease extension numbers no change, so it takes no counter. ``held`` locks the item's row (PostgreSQL) or
+        # the database (SQLite), so no other write changes the item between the check and the update.
+        with self.database.connection(write=True) as connection:
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.write_item(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
+            connection.execute(
+                update(self.table).where(*self.key(item.queue, item.id)).values(lease_expires_at=lease_expires_at)
+            )
+            return replace(item, lease_expires_at=lease_expires_at)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)

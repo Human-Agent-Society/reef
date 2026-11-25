@@ -79,7 +79,7 @@ class WorkItem:
       retry count of a serving request (``ServedModelsWriter.request``), or when a worker gives it back for want of
       capacity (``DEFERRED_ATTEMPTS``).
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
-      change.
+      change except lease-only extensions (``WorkQueue.extend_lease``).
 
     Purpose: a ``WorkQueue`` makes it; workers read the payload and progress, and readers read the result, the
     times and the metadata.
@@ -232,10 +232,10 @@ class WorkQueue(ABC):
     """A set of work queues in one store.
 
     Values: the state is a finite set of ``WorkItem`` values with distinct ``(queue, id)`` pairs, and a sequence
-    counter that numbers every change across the store. ``lease_seconds`` is the lease length that ``take`` and
-    ``extend_lease`` give. A worker can take one item of a queue ``max_attempts[queue]`` times, or
-    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int. An attempt
-    that its worker gave back (``give_back``) is not one of these times.
+    counter that numbers every change across the store except lease-only extensions (``extend_lease``).
+    ``lease_seconds`` is the lease length that ``take`` and ``extend_lease`` give. A worker can take one item of a
+    queue ``max_attempts[queue]`` times, or ``default_attempts`` times for a queue that ``max_attempts`` does not
+    name; each is a positive int. An attempt that its worker gave back (``give_back``) is not one of these times.
 
     Purpose: control and the services add work (``append``, ``request``); workers take, extend, progress, finish,
     fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``read``)
@@ -319,8 +319,8 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item; else raise
-        ``WorkLeaseLostError``."""
+        """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item, without changing
+        ``changed_sequence``; else raise ``WorkLeaseLostError``."""
 
     @abstractmethod
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
