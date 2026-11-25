@@ -70,6 +70,8 @@ def test_a_ticket_names_its_rollout_and_no_other_key_or_changed_byte_opens_it() 
     assert route("https://calls.example", 8900, ["a-new-token", *TOKENS]).read(ticket) is not None
     owner.close(41000)
     assert not owner.is_open(target)
+    # An unset ${VAR} in the config leaves the setting empty: no route.
+    assert RolloutCallRoute.from_settings("", TOKENS, address=None, server_port=8900) is None
     with pytest.raises(ValueError):
         RolloutCallRoute("https://calls.example", [], address="127.0.0.1", server_port=8900)
     with pytest.raises(ValueError):

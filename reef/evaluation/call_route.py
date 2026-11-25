@@ -90,10 +90,10 @@ class RolloutCallRoute:
     def from_settings(
         cls, call_url: str | None, tokens: Iterable[str], *, address: str | None, server_port: int
     ) -> RolloutCallRoute | None:
-        """The route of ``evaluation.call_url``, or None without one. ``tokens`` are the service tokens
-        (``normalize_tokens``). ``address`` is ``evaluation.call_address``; None takes the address of this host's
-        name, which is the Pod's address on Kubernetes."""
-        if call_url is None:
+        """The route of ``evaluation.call_url``, or None when it is unset or empty, as an unset ``${VAR}`` makes it.
+        ``tokens`` are the service tokens (``normalize_tokens``). ``address`` is ``evaluation.call_address``; None
+        takes the address of this host's name, which is the Pod's address on Kubernetes."""
+        if not call_url:
             return None
         return cls(
             call_url, tokens, address=address or socket.gethostbyname(socket.gethostname()), server_port=server_port

@@ -737,7 +737,7 @@ The evaluation service, and the Harbor tasks that each scenario imports.
        The address at which a task's container reaches this host, for an evaluation with a harness tree on docker. Other environments do not use it.
 
    ``evaluation.call-url`` : string : unset
-       The public URL at which an agent in a remote sandbox calls its rollout's model. The deployment's ingress sends this URL's paths to /reef/rollout-calls of its evaluation processes. Unset, the evaluation bridges each call through a relay in the sandbox.
+       The public URL at which an agent in a remote sandbox calls its rollout's model. The deployment's ingress sends this URL's paths to /reef/rollout-calls of its evaluation processes. Unset or empty, the evaluation bridges each call through a relay in the sandbox.
 
    ``evaluation.call-address`` : string : unset
        The address at which the other evaluation processes reach this one, with evaluation.call_url. Unset, it is the address of this host's name, which is the Pod's address on Kubernetes.

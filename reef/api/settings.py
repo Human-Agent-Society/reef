@@ -374,8 +374,8 @@ class ServiceSettings:
         public_path=("evaluation", "call_url"),
         help=(
             "The public URL at which an agent in a remote sandbox calls its rollout's model. The deployment's "
-            "ingress sends this URL's paths to /reef/rollout-calls of its evaluation processes. Unset, the "
-            "evaluation bridges each call through a relay in the sandbox."
+            "ingress sends this URL's paths to /reef/rollout-calls of its evaluation processes. Unset or empty, "
+            "the evaluation bridges each call through a relay in the sandbox."
         ),
     )
     #: The address at which the other evaluation processes reach this one, for ``evaluation_call_url``.
