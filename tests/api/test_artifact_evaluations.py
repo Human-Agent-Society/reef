@@ -10,6 +10,7 @@ import logging
 import math
 import tarfile
 import time
+import urllib.error
 import urllib.request
 import uuid
 import weakref
@@ -48,7 +49,7 @@ from reef.control.operations.data import DataAccess
 from reef.control.scenario.live_objects import LiveObjects
 from reef.control.scenario.snapshots import ScenarioSnapshots
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, UpstreamLimit, UpstreamStatusError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -2018,6 +2019,81 @@ def test_after_a_failure_stop_a_retry_runs_the_failed_rollouts_and_a_resume_the_
             ended_all(None)
             answer = await finished(client, accepted["evaluation_id"])
             assert (answer["state"], answer["mean_score"]) == ("finished", 1.0)
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_max_failed_fraction_stops_an_evaluation_when_402_refusals_are_followed_by_auxiliary_calls(
+    tmp_path: Path,
+) -> None:
+    class RefusingToolsHandler(ArtifactHandler):
+        """Refuses main-loop calls that carry tool definitions with HTTP 402 and answers auxiliary calls."""
+
+        async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if payload.get("tools"):
+                raise UpstreamStatusError("insufficient credits", status=402, limit=UpstreamLimit.PAYMENT)
+            return await super().inference(artifact, path, payload)
+
+    class RefusedThenTitleLab(TaskLab):
+        """Sends a tool-bearing main call (402) and a trailing title call without tools (200), then exits cleanly."""
+
+        def __init__(self) -> None:
+            self.runs = 0
+
+        async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+            self.runs += 1
+            api_base = agent["kwargs"]["api_base"]
+            payloads = [
+                {
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "solve"}],
+                    "tools": [{"type": "function", "function": {"name": "bash"}}],
+                },
+                {"model": "m", "messages": [{"role": "user", "content": "title"}]},
+            ]
+            for payload in payloads:
+                request = urllib.request.Request(
+                    f"{api_base}/chat/completions",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with contextlib.suppress(urllib.error.HTTPError):
+                    await asyncio.to_thread(lambda req=request: urllib.request.urlopen(req, timeout=10).read())
+            return RolloutRow(rewards={"reward": 0.0}, error=None)
+
+        async def build_environment(self, task_path, *, overrides) -> str:
+            return ""
+
+    runtime = ArtifactRuntime()
+    runtime.handler = RefusingToolsHandler()
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=runtime))
+    lab = RefusedThenTitleLab()
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_concurrent_rollouts": 1,
+                "max_failed_fraction": 0.5,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            answer = await finished(client, accepted["evaluation_id"])
+            assert answer["state"] == "failed"
+            assert answer["error"] == "too many rollouts failed: 10 of 10 ended (100%), over the limit of 50%"
+            assert (
+                answer["progress"]["total"],
+                answer["progress"]["ended"],
+                answer["progress"]["scored"],
+                answer["progress"]["failed"],
+                answer["progress"]["cancelled"],
+            ) == (12, 10, 0, 10, 0)
+            assert lab.runs == 10
 
     asyncio.run(run())
 

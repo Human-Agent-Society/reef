@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from reef_client.serve import CapturedTurn
+from reef_client.serve import CapturedTurn, has_tools
 
 from reef.core.errors import ReefError, UpstreamLimit
 from reef.core.evaluation import (
@@ -660,12 +660,15 @@ class RolloutCalls(CaptureObserver):
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
-    the index of the next call. ``answered`` is the number of those calls that answered 200, from 0 to
-    ``next_index``. ``last_refusal`` is the ``ModelCallRefusal`` of the call captured last, when a provider's limit
-    refused it; it is None before the first call, and when the last call answered or failed in another way.
-    ``service_failures`` is the number of calls that the inference service failed (an HTTP status of 500 or more),
-    ``service_failure_seconds`` their total duration, and ``last_failed`` whether the call captured last was one.
-    ``first_started_at`` and ``last_ended_at`` bound the calls in wall-clock seconds; both are None before the first.
+    the index of the next call. ``all_answered`` counts calls that answered 200 and ``all_last_refusal`` holds the
+    ``ModelCallRefusal`` of the call captured last, or None. ``tool_calls_seen`` is True once a call carried a
+    non-empty ``tools`` field (``has_tools``); ``tool_answered`` and ``tool_last_refusal`` track those tool-bearing
+    calls alone. ``answered`` and ``last_refusal`` read the tool-bearing counters when ``tool_calls_seen`` is True,
+    else the all-call counters, so auxiliary calls without tools (such as title generation) neither mask a main-loop
+    refusal nor fail a completed main loop. ``service_failures`` is the number of calls that the inference service
+    failed (an HTTP status of 500 or more), ``service_failure_seconds`` their total duration, and ``last_failed``
+    whether the call captured last was one. ``first_started_at`` and ``last_ended_at`` bound the calls in wall-clock
+    seconds; both are None before the first.
 
     Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
     One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
@@ -677,8 +680,11 @@ class RolloutCalls(CaptureObserver):
         self.rollout = rollout
         self.attempt = attempt
         self.next_index = 0
-        self.answered = 0
-        self.last_refusal: ModelCallRefusal | None = None
+        self.all_answered = 0
+        self.all_last_refusal: ModelCallRefusal | None = None
+        self.tool_calls_seen = False
+        self.tool_answered = 0
+        self.tool_last_refusal: ModelCallRefusal | None = None
         self.service_failures = 0
         self.service_failure_seconds = 0.0
         self.last_failed = False
@@ -686,6 +692,16 @@ class RolloutCalls(CaptureObserver):
         self.last_ended_at: float | None = None
         self.lock = threading.Lock()
         self.writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-evaluation-calls")
+
+    @property
+    def answered(self) -> int:
+        with self.lock:
+            return self.tool_answered if self.tool_calls_seen else self.all_answered
+
+    @property
+    def last_refusal(self) -> ModelCallRefusal | None:
+        with self.lock:
+            return self.tool_last_refusal if self.tool_calls_seen else self.all_last_refusal
 
     def call_captured(self, turn: CapturedTurn) -> None:
         # The proxy keeps whatever JSON the endpoint answered; only an object can name a refusal.
@@ -695,11 +711,17 @@ class RolloutCalls(CaptureObserver):
         wait = error.get("retry_after_seconds") if isinstance(error, Mapping) else None
         if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
             wait = None
+        refusal = None if limit is None else ModelCallRefusal(limit, turn.status, wait)
+        is_tool_call = isinstance(turn.request, dict) and has_tools(turn.request) and bool(turn.request["tools"])
         with self.lock:
             index = self.next_index
             self.next_index += 1
-            self.answered += turn.status == 200
-            self.last_refusal = None if limit is None else ModelCallRefusal(limit, turn.status, wait)
+            self.all_answered += turn.status == 200
+            self.all_last_refusal = refusal
+            if is_tool_call:
+                self.tool_calls_seen = True
+                self.tool_answered += turn.status == 200
+                self.tool_last_refusal = refusal
             started = turn.at - turn.duration_s
             self.first_started_at = started if self.first_started_at is None else min(self.first_started_at, started)
             self.last_ended_at = turn.at if self.last_ended_at is None else max(self.last_ended_at, turn.at)
@@ -943,10 +965,11 @@ class EvaluationRolloutWorker(QueueWorker):
         A rollout that requires prepared templates runs only when its task's template item finished, and its trial
         builds no template. Else it fails for good with the template item's error, before its candidate is served.
 
-        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), and the trial failed or no
-        call was answered, the rollout fails for good with no score (``ModelCallRefusal.reason``). When the inference
-        service failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score, and the
-        rollout is retried as any other failed attempt."""
+        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), the rollout fails for good
+        with no score (``ModelCallRefusal.reason``). When a rollout makes tool-bearing calls, auxiliary calls without
+        tools do not mask or trigger this check. When the inference service failed its model calls
+        (``RolloutCalls.service_failure``), the attempt fails with no score, and the rollout is retried as any other
+        failed attempt."""
         if rollout.requires_prepared_templates:
             template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
@@ -1028,9 +1051,11 @@ class EvaluationRolloutWorker(QueueWorker):
             # verifier that found no sandbox (it waits for one first) gave no score of the candidate.
             if trial_exception_type(result.trial_uri) in SANDBOX_CAPACITY_ERRORS:
                 raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
-            if calls.last_refusal is not None and (result.error or not calls.answered):
-                # A score would judge the provider, and a new sandbox at once would meet the same refusal.
-                raise ItemFailedError(calls.last_refusal.reason())
+            last_refusal = calls.last_refusal
+            if last_refusal is not None:
+                # The agent stopped on a provider refusal, so a score, 0 above all, would judge the provider, and a
+                # new sandbox at once would meet the same refusal.
+                raise ItemFailedError(last_refusal.reason())
             service_failure = calls.service_failure()
             if service_failure is not None:
                 # The agent stopped on a failed call or lost much of its time to them, so a score, 0 above all, would
