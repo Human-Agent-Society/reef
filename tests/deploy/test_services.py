@@ -532,6 +532,10 @@ def test_the_inference_service_serves_an_activated_artifact_without_a_training_c
                 assert asyncio.get_running_loop().time() < deadline, status
                 await asyncio.sleep(0.05)
             assert status["artifact_id"] == artifact_id
+            image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+            body = {"model": "m", "messages": [{"role": "user", "content": [image]}]}
+            call = await client.post("/v1/chat/completions", headers={**auth, "x-reef-scenario": "math"}, json=body)
+            assert call.status == 400 and "does not train on images" in await call.text()
         assert inference_runtime.activated_ids == [artifact_id]
         assert control_runtime.activated_ids == []
 

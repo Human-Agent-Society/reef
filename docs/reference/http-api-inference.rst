@@ -75,6 +75,7 @@ Reef answers the request from the scenario's row in ``served_models``:
 - To require a specific artifact, use ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/chat/completions``.
 - ``/reef/scenarios/{scenario}/v1/{route}`` is the same call as ``/v1/{route}``, with the scenario in the path instead of the header. A client install's model binding calls it.
 - On a weight-serving deployment, the engine handler selects the served adapter itself, and it replaces a ``lora_path`` that the body names.
+- When the deployment's recipes include a weight-training recipe, a recorded call with an image returns 400 before any engine call, because training renders text only. An evaluation call keeps no record, so Reef does not check it.
 
 `Run the services in separate processes <../user-guide/split-services.rst>`__ gives the status codes of an inference request.
 

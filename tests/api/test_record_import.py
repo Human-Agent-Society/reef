@@ -447,6 +447,9 @@ def test_a_weight_recipe_refuses_an_imported_image_and_stores_nothing(tmp_path):
             assert response.status == 400, "a batch stores nothing"
             assert dispatcher.get_or_create_scenario("s").records.count("s") == 0
             assert (await client.post("/reef/records", headers=HEADERS, json=imported("text"))).status == 200
+            # A model call is refused before any engine call.
+            call = await client.post("/v1/chat/completions", headers=HEADERS, json=image_payload())
+            assert call.status == 400 and "does not train on images" in await call.text()
 
     try:
         asyncio.run(run())

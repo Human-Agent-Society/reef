@@ -62,7 +62,9 @@ class FixedSamplingHandler(EchoHandler):
         return {**payload, "temperature": 0.6}
 
 
-def replica_client(tmp_path: Path, handler: InferenceHandler) -> tuple[TestClient, SQLiteScenarioStorage]:
+def replica_client(
+    tmp_path: Path, handler: InferenceHandler, *, refuses_images: bool = False
+) -> tuple[TestClient, SQLiteScenarioStorage]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
     coordination = memory_coordination()
     number = coordination.control_lease.acquire("control-1").number
@@ -71,7 +73,12 @@ def replica_client(tmp_path: Path, handler: InferenceHandler) -> tuple[TestClien
         ServedArtifact("artifact-1", "http://engine.invalid", "engine-model"),
         control_lease_number=number,
     )
-    replica = InferenceReplica(ServedModelsCache(coordination.served_models), storage, FixedEngineClients(handler))
+    replica = InferenceReplica(
+        ServedModelsCache(coordination.served_models),
+        storage,
+        FixedEngineClients(handler),
+        refuses_images=refuses_images,
+    )
     app = web.Application()
     add_inference_routes(app, replica)
     return TestClient(TestServer(app)), storage
@@ -144,5 +151,52 @@ def test_by_default_the_engine_receives_and_the_record_holds_the_clients_body(tm
             assert response.status == 200
         assert handler.received == [{**body, "model": "engine-model"}]
         assert recorded_requests(storage) == [{**body, "artifact_id": "artifact-1"}]
+
+    asyncio.run(run())
+
+
+IMAGE_BODY = {
+    "model": "m",
+    "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}
+    ],
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_deployment_that_refuses_images_answers_400_before_the_engine_and_the_record(
+    tmp_path: Path, stream: bool
+) -> None:
+    handler = EchoHandler()
+
+    async def run() -> None:
+        client, storage = replica_client(tmp_path, handler, refuses_images=True)
+        async with client:
+            response = await post(client, {**IMAGE_BODY, "stream": stream})
+            assert response.status == 400
+            assert "does not train on images" in await response.text()
+            assert (await post(client, {"model": "m", "messages": [{"role": "user", "content": "hi"}]})).status == 200
+        assert len(handler.received) == 1 and len(recorded_requests(storage)) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_an_unrecorded_call_and_a_deployment_that_keeps_images_pass_an_image(tmp_path: Path) -> None:
+    handler = EchoHandler()
+
+    async def run() -> None:
+        client, storage = replica_client(tmp_path / "refuses", handler, refuses_images=True)
+        async with client:
+            evaluation = await client.post(
+                f"/reef/scenarios/{SCENARIO}/evaluation/v1/chat/completions", json=IMAGE_BODY
+            )
+            assert evaluation.status == 200, await evaluation.text()
+        assert recorded_requests(storage) == []
+        client, storage = replica_client(tmp_path / "keeps", handler)
+        async with client:
+            assert (await post(client, IMAGE_BODY)).status == 200
+        assert len(recorded_requests(storage)) == 1 and len(handler.received) == 2
 
     asyncio.run(run())
