@@ -37,10 +37,10 @@ from reef_client.client import ReefClient, ReefClientError
 from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
-from reef.evaluation.call_route import RolloutCallRoute
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import environment_config
 from reef.harness.capture import CaptureObserver, CaptureProxy
+from reef.harness.harbor.call_route import RolloutCallRoute
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
 #: LiteLLM routes to api_base only under a provider prefix and strips it before the call, so Reef sees the model name.

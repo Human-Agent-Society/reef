@@ -56,7 +56,6 @@ from reef.core.job_data import FILES_DIGEST_PATTERN
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts, ProviderCooldowns, refusal_limit
-from reef.evaluation.call_route import RolloutCallRoute
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SANDBOX_REQUEST_ERRORS
@@ -64,6 +63,7 @@ from reef.execution.workers import ItemDeferredError, ItemFailedError, QueueWork
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
+from reef.harness.harbor.call_route import RolloutCallRoute
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner, trial_exception_type
 from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree

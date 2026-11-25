@@ -44,11 +44,11 @@ from reef.control.scenario.live_objects import (
     harness_models,
 )
 from reef.control.workers.served_models import wait_for_control_lease
-from reef.evaluation.call_route import RolloutCallRoute
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_NAMES, ServiceSet
+from reef.harness.harbor.call_route import RolloutCallRoute
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeRegistry

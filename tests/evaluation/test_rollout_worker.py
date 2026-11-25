@@ -31,7 +31,6 @@ from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation import artifact_endpoint, rollout_worker
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
-from reef.evaluation.call_route import RolloutCallRoute
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
@@ -57,6 +56,7 @@ from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTempla
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv.build import AgentEnvBuildError
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
+from reef.harness.harbor.call_route import RolloutCallRoute
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime

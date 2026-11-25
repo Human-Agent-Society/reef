@@ -19,13 +19,13 @@ from reef_client.serve import CapturedTurn
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.evaluation.call_route import ROLLOUT_CALL_PATH, RolloutCallRoute
 from reef.execution.sandbox.task_environment import (
     HARBOR_E2B_ENVIRONMENT,
     HARBOR_MODAL_ENVIRONMENT,
     environment_config,
 )
 from reef.harness.capture import CaptureObserver, TaggedStore
+from reef.harness.harbor.call_route import ROLLOUT_CALL_PATH, RolloutCallRoute
 from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
     ReefEvalLab,

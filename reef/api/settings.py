@@ -367,7 +367,7 @@ class ServiceSettings:
             "harness tree on docker. Other environments do not use it."
         ),
     )
-    #: The public URL of the rollout call route (``reef.evaluation.call_route``), or None to bridge each call through
+    #: The public URL of the rollout call route (``reef.harness.harbor.call_route``), or None to bridge each call through
     #: the sandbox's relay.
     evaluation_call_url: str | None = config_option(
         None,

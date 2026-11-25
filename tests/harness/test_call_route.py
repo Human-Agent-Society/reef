@@ -11,7 +11,7 @@ import urllib.request
 import pytest
 from aiohttp import web
 
-from reef.evaluation.call_route import FORWARDED_HEADER, ROLLOUT_CALL_PATH, RolloutCallRoute
+from reef.harness.harbor.call_route import FORWARDED_HEADER, ROLLOUT_CALL_PATH, RolloutCallRoute
 
 TOKENS = ["service-token"]
 
