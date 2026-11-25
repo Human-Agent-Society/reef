@@ -70,14 +70,24 @@ class SandboxUnavailableError(ReefError):
 
 
 class SandboxCapacityError(ReefError):
-    """A sandbox service refused a new sandbox for want of capacity now: no node or no memory for it (HTTP 503), too
-    many requests (HTTP 429), or no placement before a gateway or the client stopped waiting (HTTP 504, or a request
-    timeout). The service adds capacity for the demand that it refused, so a later try can pass."""
+    """A sandbox service refused a new sandbox for want of capacity now. On E2B: no node or no memory for it (HTTP
+    503), too many requests (HTTP 429), or no placement before a gateway or the client stopped waiting (HTTP 504, or a
+    request timeout). On Modal: its ``ResourceExhaustedError`` when it creates the sandbox. A later try can pass, and
+    an evaluation tries again a bounded number of times (``QueueWorker.max_deferrals``)."""
+
+
+class SandboxRequestError(ReefError):
+    """A sandbox service answered that the request of a new sandbox is bad, such as a size that it does not support:
+    HTTP 400 on E2B, ``InvalidError`` on Modal when it creates the sandbox. The same request fails again. The message
+    holds the service's reason."""
 
 
 #: The class names of the errors that say that a sandbox service has no capacity now: ``SandboxCapacityError`` and
 #: its subclasses. A trial keeps only the class name of the error that ended it, so an evaluation reads these.
 SANDBOX_CAPACITY_ERRORS = frozenset({"SandboxCapacityError", "TransientStartError"})
+#: The class names of the errors that say that a sandbox service refused the sandbox's request as invalid
+#: (``SandboxRequestError``), which an evaluation reads in the same way.
+SANDBOX_REQUEST_ERRORS = frozenset({"SandboxRequestError"})
 
 
 @dataclass(frozen=True)

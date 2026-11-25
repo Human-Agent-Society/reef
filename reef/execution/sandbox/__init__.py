@@ -9,7 +9,9 @@ and open sessions through that interface, without knowing the sandbox kind.
 needs, and makes the environment config of a Harbor trial. For the ``e2b``
 environment type, that config names a class in ``e2b``: Harbor's E2B
 task environment, which also asks the service to delete each sandbox at its
-timeout. ``remote`` owns cloud sessions, file transfer and gateway
+timeout. For ``modal``, it names the class in ``modal_trial``: Harbor's Modal
+task environment, whose sandbox creation raises Reef's sandbox errors for
+Modal's refusals. ``remote`` owns cloud sessions, file transfer and gateway
 tunnels for any provider, and the credentials of the remote Harbor task
 environments; ``e2b`` and ``modal`` add each provider's sandbox. ``environment`` adapts any executor to
 ``harbor.environments.base.BaseEnvironment``. Harness rendering and evaluation

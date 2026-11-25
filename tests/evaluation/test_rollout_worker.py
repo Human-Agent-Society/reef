@@ -185,30 +185,78 @@ def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing
     assert (failed in caplog.text) == failing
 
 
-class NoCapacityLab(NoSandboxLab):
-    """A lab whose trial ends as Harbor records a sandbox that the service refused for want of capacity."""
+class SandboxErrorLab(NoSandboxLab):
+    """A lab whose trial of a task in ``tasks`` (of every task when it is None) ends as Harbor records an error of the
+    class ``exception_type`` that ended the trial, with the error ``error``. A trial of another task ends as
+    ``NoSandboxLab``'s, with no result file."""
+
+    def __init__(self, root: Path, exception_type: str, error: str, tasks: frozenset[str] | None = None) -> None:
+        super().__init__(root)
+        self.exception_type = exception_type
+        self.error = error
+        self.tasks = tasks
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         row = await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
-        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        if self.tasks is not None and Path(task_path).name not in self.tasks:
+            return row
+        result = {"exception_info": {"exception_type": self.exception_type, "exception_message": self.error}}
         (self.root / key / "result.json").write_text(json.dumps(result))
-        return row
+        return replace(row, error=self.error)
 
 
 @pytest.mark.unit
-def test_a_rollout_whose_sandbox_found_no_capacity_waits_in_the_queue_and_keeps_its_attempts(tmp_path):
+def test_a_rollout_whose_sandbox_found_no_capacity_waits_and_its_worker_runs_other_rollouts(tmp_path):
+    queue = memory_coordination().work_queue
+    # A large task finds no capacity, and a small task after it can start.
+    large = replace(rollout(), task_index=0, task_name="large")
+    small = replace(rollout(), task_index=1, task_name="small")
+    for value in (large, small):
+        queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = SandboxErrorLab(tmp_path / "t", "SandboxCapacityError", "no node has 12 vCPUs free", frozenset({"large"}))
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    taken_at = time.time()
+    assert worker.run_once()
+    waiting = queue.read(EVALUATIONS_QUEUE, large.item_id())
+    assert (waiting.state, waiting.error) == ("queued", "waiting for sandbox capacity: no node has 12 vCPUs free")
+    assert waiting.available_at >= taken_at + worker.first_deferral_seconds
+    assert waiting.deferred_attempt_count == waiting.stopped_attempt_count == waiting.attempt_count == 1
+    # The same worker starts the small rollout at once: only the refused rollout waits.
+    assert worker.run_once()
+    other = queue.read(EVALUATIONS_QUEUE, small.item_id())
+    assert (other.attempt_count, other.stopped_attempt_count) == (1, 0)
+    assert other.error == "ReefError: the rollout reached no model: the sandbox did not start"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exception_type", "state", "error", "given_back"),
+    [
+        # A refusal for want of capacity at a sandbox's start, in Reef's names: E2B's and Modal's, and AgentENV
+        # Compose's. The rollout waits, and the attempt does not count.
+        ("SandboxCapacityError", "queued", "waiting for sandbox capacity: {reason}", 1),
+        ("TransientStartError", "queued", "waiting for sandbox capacity: {reason}", 1),
+        # A sandbox request that the service refused as invalid: the rollout fails at once, with the reason.
+        ("SandboxRequestError", "failed", "the sandbox service refused the sandbox: {reason}", 0),
+        # Modal's own error, which comes from after the sandbox's creation, such as from a command of the agent: an
+        # ordinary failed attempt, retried as any other.
+        ("ResourceExhaustedError", "queued", "ReefError: the rollout reached no model: {reason}", 0),
+    ],
+    ids=["capacity", "compose-capacity", "invalid-request", "other-provider-error"],
+)
+def test_the_error_that_ended_a_trial_decides_whether_its_rollout_waits_fails_or_retries(
+    tmp_path, exception_type, state, error, given_back
+):
     queue = memory_coordination().work_queue
     value = rollout()
     queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=NoCapacityLab(tmp_path / "t"))
-    taken_at = time.time()
+    reason = "the service's reason"
+    lab = SandboxErrorLab(tmp_path / "t", exception_type, reason)
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
     assert worker.run_once()
-    waiting = queue.read(EVALUATIONS_QUEUE, value.item_id())
-    assert (waiting.state, waiting.error) == ("queued", "waiting for sandbox capacity: the sandbox did not start")
-    assert waiting.available_at >= taken_at + worker.first_deferral_seconds
-    assert waiting.stopped_attempt_count == waiting.attempt_count == 1
-    # The worker starts no other rollout while the service adds capacity.
-    assert not worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.result, item.error) == (state, None, error.format(reason=reason))
+    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (1, given_back, given_back)
 
 
 class AnsweringEndpoints(OpenEndpoints):
@@ -296,36 +344,50 @@ def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp
     }
 
 
-class CalledThenNoVerifierCapacityLab(CalledThenFailedLab):
-    """A lab whose agent calls the model, and whose separate verifier then finds no sandbox capacity, as Harbor
-    records it in the trial's ``result.json`` under ``root``."""
+class CalledThenVerifierSandboxErrorLab(CalledThenFailedLab):
+    """A lab whose agent calls the model, and whose separate verifier's sandbox then ends the trial with an error of
+    the class ``exception_type`` and the error ``error``, as Harbor records it in the trial's ``result.json`` under
+    ``root``."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, exception_type: str, error: str) -> None:
         self.root = root
+        self.exception_type = exception_type
+        self.error = error
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
         trial = self.root / key
         trial.mkdir(parents=True)
-        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        result = {"exception_info": {"exception_type": self.exception_type, "exception_message": self.error}}
         (trial / "result.json").write_text(json.dumps(result))
-        error = "the sandbox service has no capacity now: 503"
-        return RolloutRow(rewards={}, error=error, trial_uri=trial.as_uri())
+        return RolloutRow(rewards={}, error=self.error, trial_uri=trial.as_uri())
 
 
 @pytest.mark.unit
-def test_a_rollout_whose_verifier_found_no_sandbox_capacity_runs_again_and_gets_no_score(tmp_path):
+@pytest.mark.parametrize(
+    ("exception_type", "state", "error", "given_back"),
+    [
+        # It waits for capacity and runs again.
+        ("SandboxCapacityError", "queued", "waiting for sandbox capacity: {reason}", 1),
+        # The verifier's sandbox request fails the same way again, so the rollout fails at once.
+        ("SandboxRequestError", "failed", "the sandbox service refused the sandbox: {reason}", 0),
+    ],
+    ids=["no-capacity", "invalid-request"],
+)
+def test_a_rollout_whose_verifier_sandbox_was_refused_gets_no_score(
+    tmp_path, exception_type, state, error, given_back
+):
     queue = memory_coordination().work_queue
     value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
     queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    lab = CalledThenNoVerifierCapacityLab(tmp_path / "trials")
+    reason = "the service's reason"
+    lab = CalledThenVerifierSandboxErrorLab(tmp_path / "trials", exception_type, reason)
     worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
     assert worker.run_once() is True
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
-    # The agent called the model, but the rollout gets no score of 0: it waits for capacity and runs again.
-    assert (item.state, item.result) == ("queued", None)
-    assert item.error == "waiting for sandbox capacity: the sandbox service has no capacity now: 503"
-    assert item.stopped_attempt_count == item.attempt_count == 1
+    # The agent called the model, but the rollout gets no score of 0.
+    assert (item.state, item.result, item.error) == (state, None, error.format(reason=reason))
+    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (1, given_back, given_back)
 
 
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:

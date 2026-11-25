@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import sys
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,12 @@ import httpx
 import pytest
 
 from reef.execution.sandbox.agentenv_compose import TransientStartError
-from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SandboxCapacityError
+from reef.execution.sandbox.process import (
+    SANDBOX_CAPACITY_ERRORS,
+    SANDBOX_REQUEST_ERRORS,
+    SandboxCapacityError,
+    SandboxRequestError,
+)
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import (
     HARBOR_TASK_ENVIRONMENTS,
@@ -246,25 +252,68 @@ def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_
     e2b = pytest.importorskip("e2b")
     environment = harbor_e2b_environments(tmp_path)["reef"]
     errors = {
+        # A generic "no nodes available" says nothing of the sandbox's size: it is a refusal for want of capacity.
         "busy": e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available"),
         "rate": e2b.RateLimitException("429: too many requests"),
         # A gateway's 504 answer has an HTML body, which the SDK cannot read as JSON.
         "gateway": json.JSONDecodeError("Expecting value", "<html>504 Gateway Time-out</html>", 0),
         "client": httpx.ReadTimeout("timed out"),
     }
+    calls: list[dict[str, object]] = []
 
     async def create(**options: object) -> object:
+        calls.append(options)
         raise errors[refusal]
 
     monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
     with pytest.raises(SandboxCapacityError) as raised:
         asyncio.run(environment._create_sandbox())
-    assert raised.value.__cause__ is errors[refusal]
+    assert raised.value.__cause__ is errors[refusal] and len(calls) == 2
     # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it.
     assert type(raised.value).__name__ in SANDBOX_CAPACITY_ERRORS
     assert TransientStartError.__name__ in SANDBOX_CAPACITY_ERRORS and issubclass(
         TransientStartError, SandboxCapacityError
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "raised", "creates"),
+    [
+        # A bad request fails at once, with the service's reason, and is not sent again.
+        (400, SandboxRequestError, 1),
+        # A credential error stays the SDK's, with Harbor's one more try.
+        (401, None, 2),
+    ],
+    ids=["bad-request", "credentials"],
+)
+def test_reefs_e2b_create_reads_the_status_of_the_services_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, raised: type[Exception] | None, creates: int
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from e2b.api import handle_api_exception
+    from e2b.api.client.types import Response
+
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    # The SDK's own error of the create call's answer.
+    body = json.dumps({"code": status, "message": "the template needs 64 vCPUs"}).encode()
+    error = handle_api_exception(Response(status_code=HTTPStatus(status), content=body, headers={}, parsed=None))
+    calls: list[dict[str, object]] = []
+
+    async def create(**options: object) -> object:
+        calls.append(options)
+        raise error
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    with pytest.raises(type(error) if raised is None else raised) as created:
+        asyncio.run(environment._create_sandbox())
+    assert len(calls) == creates
+    if raised is None:
+        assert created.value is error
+    else:
+        assert isinstance(error, e2b.SandboxException) and error.status_code == 400
+        assert created.value.__cause__ is error and "the template needs 64 vCPUs" in str(created.value)
+        assert type(created.value).__name__ in SANDBOX_REQUEST_ERRORS
 
 
 @pytest.mark.unit
@@ -313,6 +362,153 @@ def test_reefs_e2b_verifier_sandbox_waits_for_capacity_within_its_start_time_lim
         with pytest.raises(SandboxCapacityError):
             asyncio.run(environment._create_sandbox())
     assert slept == pauses
+
+
+def harbor_modal_environment(tmp_path: Path) -> object:
+    """Reef's Modal environment, made by Harbor's factory as a trial makes it, from the config of
+    ``environment_config`` for one task with a Dockerfile."""
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.config import NetworkMode, NetworkPolicy
+    from harbor.models.task.task import Task
+    from harbor.models.trial.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    task_path = tmp_path / "task"
+    (task_path / "environment").mkdir(parents=True)
+    (task_path / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    (task_path / "tests").mkdir()
+    (task_path / "tests" / "test.sh").write_text("#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n")
+    (task_path / "instruction.md").write_text("Write nothing.\n")
+    (task_path / "task.toml").write_text(E2B_TASK_TOML)
+    task = Task(task_path)
+    return EnvironmentFactory.create_environment_from_config(
+        config=EnvironmentConfig.model_validate(environment_config("modal", task_path)),
+        environment_dir=task.paths.environment_dir,
+        environment_name=task.short_name,
+        session_id="t__env",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=task.config.environment.model_copy(deep=True),
+        network_policy=NetworkPolicy(network_mode=NetworkMode.PUBLIC),
+    )
+
+
+@pytest.mark.unit
+def test_a_modal_trial_gets_reefs_class_on_harbors_modal_environment(tmp_path: Path) -> None:
+    pytest.importorskip("modal")
+    from harbor.environments.modal import ModalEnvironment
+
+    from reef.execution.sandbox.modal_trial import ModalTrialEnvironment
+
+    environment = harbor_modal_environment(tmp_path)
+    assert type(environment) is ModalTrialEnvironment and isinstance(environment, ModalEnvironment)
+    assert environment.type() == ModalEnvironment.type() == "modal"
+
+
+def modal_errors() -> dict[str, Exception]:
+    """One Modal error of each kind that the tests of Reef's Modal class raise, by name."""
+    modal = pytest.importorskip("modal")
+    return {
+        "no-resources": modal.exception.ResourceExhaustedError("no machine has 64 CPUs free"),
+        "invalid-request": modal.exception.InvalidError("a sandbox has at most 64 CPUs"),
+        "credentials": modal.exception.AuthError("the token was refused"),
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("refusal", "raised", "names"),
+    [
+        ("no-resources", SandboxCapacityError, SANDBOX_CAPACITY_ERRORS),
+        ("invalid-request", SandboxRequestError, SANDBOX_REQUEST_ERRORS),
+        # Any other error of the creation stays Modal's, and an evaluation counts it as an ordinary failed attempt.
+        ("credentials", None, frozenset()),
+    ],
+    ids=["no-resources", "invalid-request", "credentials"],
+)
+def test_reefs_modal_sandbox_creation_raises_reefs_error_for_modals_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+    raised: type[Exception] | None,
+    names: frozenset[str],
+) -> None:
+    modal = pytest.importorskip("modal")
+
+    error = modal_errors()[refusal]
+    created = object()
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    async def create_sandbox(*entrypoint: str, **options: object) -> object:
+        calls.append((entrypoint, options))
+        if len(calls) > 1:
+            raise error
+        return created
+
+    monkeypatch.setattr(modal.Sandbox, "create", SimpleNamespace(aio=create_sandbox))
+    environment = harbor_modal_environment(tmp_path)
+    creation = environment._create_sandbox(
+        entrypoint=["sleep", "60"], block_network=True, experimental_options={"probe": 1}
+    )
+    assert asyncio.run(creation) is created
+    entrypoint, options = calls[0]
+    assert entrypoint == ("sleep", "60")
+    assert options["block_network"] is True and options["experimental_options"] == {"probe": 1}
+    with pytest.raises(type(error) if raised is None else raised) as refused:
+        asyncio.run(environment._create_sandbox())
+    assert len(calls) == 3  # Harbor retries the failed create once.
+    if raised is None:
+        assert refused.value is error
+        assert type(error).__name__ not in SANDBOX_CAPACITY_ERRORS | SANDBOX_REQUEST_ERRORS
+    else:
+        # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it; the message keeps
+        # Modal's reason.
+        assert type(refused.value).__name__ in names
+        assert refused.value.__cause__ is error and str(error) in str(refused.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("step", "refusal", "raised"),
+    [
+        # Modal refuses the sandbox itself.
+        ("creation", "no-resources", SandboxCapacityError),
+        ("creation", "invalid-request", SandboxRequestError),
+        # A step after the creation, such as the image's stream or the setup, fails with Modal's error: it stays
+        # Modal's, so a rollout whose sandbox exists does not fail for good or wait for capacity.
+        ("after-creation", "invalid-request", None),
+        ("after-creation", "no-resources", None),
+    ],
+    ids=["refused-creation", "rejected-creation", "invalid-after-creation", "exhausted-after-creation"],
+)
+def test_reefs_modal_start_names_only_the_refusals_of_the_sandbox_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, refusal: str, raised: type[Exception] | None
+) -> None:
+    pytest.importorskip("modal")
+    from harbor.environments.modal import ModalEnvironment
+
+    error = modal_errors()[refusal]
+
+    async def create_sandbox(environment: ModalEnvironment, **options: object) -> object:
+        if step == "creation":
+            raise error
+        return object()
+
+    environment = harbor_modal_environment(tmp_path)
+
+    async def start_strategy(*arguments: object, **options: object) -> None:
+        # Harbor's start strategy creates the sandbox, then runs its later steps.
+        await environment._create_sandbox()
+        raise error
+
+    monkeypatch.setattr(ModalEnvironment, "_create_sandbox", create_sandbox)
+    # Harbor's own start runs, and calls its strategy.
+    monkeypatch.setattr(environment._strategy, "start", start_strategy)
+    with pytest.raises(type(error) if raised is None else raised) as started:
+        asyncio.run(environment.start(force_build=False))
+    if raised is None:
+        assert started.value is error
+    else:
+        assert started.value.__cause__ is error
 
 
 @pytest.mark.unit

@@ -125,7 +125,12 @@ Use ``score_levels=true`` when reading one evaluation to add ``score_levels`` to
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts`` answers ``{scenario, evaluation_id, rollouts}``, also while the evaluation runs: each rollout in task and repeat order, as ``{task, task_index, repeat, state, attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting`` while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also when a retry runs the rollout again. On ``e2b``, it is also ``waiting`` while the task's sandbox templates build.
-- A rollout whose sandbox the sandbox service refused for want of capacity (HTTP 503 or 429, or no placement before a gateway's 504 or the request's timeout) goes back to ``queued``, and its ``error`` starts with ``waiting for sandbox capacity``. The attempt does not count toward the retry limit or the evaluation's failures. The rollout waits 30 seconds, and twice as long after each later refusal, at most 10 minutes. In that time its worker starts no other rollout, so the service can add capacity. After 24 such waits, a refusal counts as a failed attempt. A separate verifier, which starts after the agent, first waits for capacity in place, for up to 80% of its start time limit. When it still finds none, its rollout goes back to the queue in the same way and runs again from the start, with no score from that attempt.
+- If the sandbox service has no capacity, the rollout returns to ``queued``. Its ``error`` starts with ``waiting for sandbox capacity``.
+  Other rollouts can start while it waits. The retry delay starts at 30 seconds and doubles up to 10 minutes.
+  After 24 capacity waits, another refusal counts as a failed attempt.
+  If a separate verifier cannot get a sandbox, the rollout starts over without a score from that attempt.
+  On ``e2b``, the verifier first waits for up to 80% of its start time limit.
+- If the service rejects the sandbox request as invalid, the rollout fails without a score. Its ``error`` gives the service's reason.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at`` when it finished or failed, in epoch seconds. Each is null until then.
 - ``score`` is the rollout's score once it finished, else null.

@@ -83,6 +83,7 @@ from reef.execution.sandbox.process import (
     ProgramTimeoutError,
     SandboxCapacityError,
     SandboxProgram,
+    SandboxRequestError,
     SandboxUnavailableError,
     parse_env_from,
 )
@@ -789,17 +790,25 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         )
 
     # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The decorator
-    # is Harbor's retry policy, because Harbor's decorator wraps its own method and not this one. The create call, in
-    # create_sandbox_once, is Harbor's call with one more argument. When Harbor adds an argument to the call, add it
-    # there too: the parity test in tests/sandbox/test_task_environment.py compares the two calls. A refusal for want
-    # of capacity becomes ``SandboxCapacityError``, so that an evaluation waits for capacity instead of failing.
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    # preserves Harbor's retry for transient failures. A bad request can fail immediately.
+    # The create call, in create_sandbox_once, is Harbor's call with one more argument.
+    # When Harbor adds an argument to the call, add it there too: the parity test in
+    # tests/sandbox/test_task_environment.py compares the two calls. A refusal for want of capacity becomes
+    # ``SandboxCapacityError``, so that an evaluation waits for capacity instead of failing, and a bad request becomes
+    # ``SandboxRequestError``.
+    @retry(
+        retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(SandboxRequestError),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     @override
     async def _create_sandbox(self) -> None:
         """Create the sandbox. A separate verifier environment runs after the agent, so it does not give up the
         agent's work at the first refusal for want of capacity: it calls again, with pauses of 15 s doubling to 2 min,
         until ``VERIFIER_CAPACITY_WAIT_SHARE`` of its start time limit has passed since ``start``. Then it raises the
-        last ``SandboxCapacityError``. Another environment raises it at once."""
+        last ``SandboxCapacityError``. Another environment raises it at once. Any environment raises a
+        ``SandboxRequestError`` at once."""
         verifier = VERIFIER_SESSION_MARKER in self.session_id
         started_at = time.monotonic() if self.started_at is None else self.started_at
         wait_ends_at = started_at + VERIFIER_CAPACITY_WAIT_SHARE * self.task_env_config.build_timeout_sec
@@ -817,10 +826,11 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
 
     async def create_sandbox_once(self) -> None:
         """Ask the sandbox service for the sandbox once. Raise ``SandboxCapacityError`` when the service refused it
-        for want of capacity."""
+        for want of capacity, and ``SandboxRequestError`` with the service's reason when it answered that the request
+        is bad (HTTP 400)."""
         # Keep these optional SDK imports inside sandbox creation.
         import httpx
-        from e2b import AsyncSandbox, RateLimitException, ServiceBusyException
+        from e2b import AsyncSandbox, RateLimitException, SandboxException, ServiceBusyException
 
         try:
             self._sandbox = await AsyncSandbox.create(
@@ -844,6 +854,12 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
             raise SandboxCapacityError(
                 "the sandbox service gave no JSON answer, as its gateway does when it times out"
             ) from exc
+        except SandboxException as exc:
+            # The SDK keeps the HTTP status of the service's answer. Only a bad request is definite and final; the
+            # other answers, such as a credential error, stay the SDK's.
+            if exc.status_code != 400:
+                raise
+            raise SandboxRequestError(f"the sandbox service refused the sandbox's request: {exc}") from exc
 
 
 async def build_task_template(task_path: Path) -> str:

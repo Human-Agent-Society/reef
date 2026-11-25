@@ -201,7 +201,8 @@ alone. For ``e2b`` and ``modal``, it also holds the sandbox's lifetime. For
 ``modal``, it selects Modal's VM runtime when the task has
 ``environment/docker-compose.yaml`` and asks for no GPU. For ``e2b``, it
 names the class ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``
-in Harbor's ``import_path`` field.
+in Harbor's ``import_path`` field. For ``modal``, Reef also supplies an
+environment class so evaluations can wait when Modal has no capacity.
 
 **Lifetime.** ``sandbox_timeout_secs`` is the sum of the task's build, agent
 and verifier time limits, plus one hour, at most one day. A nonzero

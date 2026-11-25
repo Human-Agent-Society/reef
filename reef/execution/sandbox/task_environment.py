@@ -48,6 +48,9 @@ SANDBOX_LIFETIME_MAX_S = 24 * 60 * 60
 MODAL_SANDBOX_DEFAULT_S = 2 * 60 * 60
 #: The Harbor environment class of an ``e2b`` trial: Harbor's own, with its sandbox deleted at its timeout.
 HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+#: The Harbor environment class of a ``modal`` trial: Harbor's own, whose sandbox creation names Modal's refusals with
+#: Reef's sandbox errors.
+HARBOR_MODAL_ENVIRONMENT = "reef.execution.sandbox.modal_trial:ModalTrialEnvironment"
 
 
 class ReadinessProbe(ABC):
@@ -288,16 +291,16 @@ class HarborEnvironmentConfig(TypedDict):
     """The ``environment`` section of a Harbor trial config, as ``environment_config`` makes it.
 
     Values: ``type`` is the Harbor environment type that the caller selected. ``import_path`` is present if and only
-    if ``type`` is ``e2b``, and then it is ``HARBOR_E2B_ENVIRONMENT``. ``kwargs`` is present if and only if it is not
-    empty. Its keys are ``sandbox_timeout_secs``, on ``e2b`` and ``modal``, an integer number of seconds at most
-    ``SANDBOX_LIFETIME_MAX_S``; ``modal_vm_runtime``, on ``modal`` only, True; and ``builds_templates``, on ``e2b``
-    only, False. A ``modal`` value always has ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if the
-    trial's agent has a time limit.
+    if ``type`` is ``e2b`` or ``modal``, and then it is ``HARBOR_E2B_ENVIRONMENT`` or ``HARBOR_MODAL_ENVIRONMENT``
+    respectively. ``kwargs`` is present if and only if it is not empty. Its keys are ``sandbox_timeout_secs``, on
+    ``e2b`` and ``modal``, an integer number of seconds at most ``SANDBOX_LIFETIME_MAX_S``; ``modal_vm_runtime``, on
+    ``modal`` only, True; and ``builds_templates``, on ``e2b`` only, False. A ``modal`` value always has
+    ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if the trial's agent has a time limit.
     Purpose: ``environment_config`` makes one, and two callers read it. The task rollout runner gives the whole value
     to an in-process Harbor trial as its environment config, through reef-eval's overrides. Harbor then makes the
-    class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check reads
-    ``import_path`` and ``kwargs`` for the ``-e`` and ``--ek`` options of its ``harbor run`` child. The config that
-    Harbor's command line makes from those options has the import path and no ``type``.
+    class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check on
+    ``e2b`` reads ``import_path`` and ``kwargs`` for the ``-e`` and ``--ek`` options of its ``harbor run`` child. The
+    config that Harbor's command line makes from those options has the import path and no ``type``.
     """
 
     type: str
@@ -322,6 +325,9 @@ def environment_config(
       timeout (:mod:`reef.execution.sandbox.e2b`). Harbor's own class leaves the timeout to the service, and a
       self-hosted service can pause the sandbox instead. Harbor makes the class of ``import_path`` and does not read
       ``type`` then. That class is an ``e2b`` environment too.
+    - ``import_path`` on ``modal``: ``HARBOR_MODAL_ENVIRONMENT``, Harbor's Modal environment whose sandbox creation
+      raises Reef's sandbox errors for Modal's refusals (:mod:`reef.execution.sandbox.modal_trial`). That class is a
+      ``modal`` environment too.
     - ``kwargs.builds_templates`` on ``e2b``: False when ``builds_templates`` is false. Harbor gives it to the class of
       the trial's environment and of each of its separate verifier environments.
     - ``kwargs.modal_vm_runtime`` on ``modal``: True when the task has ``environment/docker-compose.yaml`` and its
@@ -374,8 +380,10 @@ def environment_config(
         config["import_path"] = HARBOR_E2B_ENVIRONMENT
         if not builds_templates:
             kwargs["builds_templates"] = False
-    elif (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
-        kwargs["modal_vm_runtime"] = True
+    else:
+        config["import_path"] = HARBOR_MODAL_ENVIRONMENT
+        if (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
+            kwargs["modal_vm_runtime"] = True
     # Harbor 0.25.0 (``Trial._compute_agent_timeout_sec``): the override, or the task's limit; None is no limit.
     agent_timeout_seconds = agent_limits.override_timeout_sec or task.get("agent", {}).get("timeout_sec")
     if agent_timeout_seconds is None:
@@ -405,6 +413,7 @@ __all__ = [
     "HARBOR_BUILD_TIMEOUT_S",
     "HARBOR_E2B_ENVIRONMENT",
     "HARBOR_E2B_NAMES",
+    "HARBOR_MODAL_ENVIRONMENT",
     "HARBOR_TASK_ENVIRONMENTS",
     "HARBOR_VERIFIER_TIMEOUT_S",
     "MODAL_SANDBOX_DEFAULT_S",

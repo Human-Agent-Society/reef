@@ -74,6 +74,7 @@ from reef.evaluation.rollout_worker import (
     template_item_id,
 )
 from reef.evaluation.task_templates import TaskTemplateBuilder
+from reef.execution.sandbox.task_environment import HARBOR_MODAL_ENVIRONMENT
 from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import TreeAgent
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
@@ -2399,7 +2400,11 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
             assert answer["state"] == "finished", answer
 
     asyncio.run(run())
-    assert lab.overrides["environment"] == {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}
+    assert lab.overrides["environment"] == {
+        "type": "modal",
+        "import_path": HARBOR_MODAL_ENVIRONMENT,
+        "kwargs": {"sandbox_timeout_secs": 7200},
+    }
     assert lab.agent is not None and lab.agent.bridge_port is not None
     assert f"http://127.0.0.1:{lab.agent.bridge_port}" in "".join(lab.rendered.values())
 
