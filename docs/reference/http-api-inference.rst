@@ -44,7 +44,7 @@ A newer request, such as one for a changed serving config, replaces the current 
 
 ``engine`` is null in every other state, and when the handler cannot tell. While ``engine`` is ``starting``, ``engine_detail`` can give one short line about what the engine does now, such as ``Loading weights · 0:42``. It is null otherwise.
 
-``engine_replicas`` counts the engine replicas behind the route of a ``ready`` artifact, such as the containers of a server that scales, when the handler reports them: ``{"serving": 1, "starting": 2}``. ``serving`` replicas answer now, and ``starting`` ones run but do not answer yet. It is null in every other state, and when the handler cannot tell. An engine can be ``warm`` while more replicas start.
+``engine_replicas`` counts the engine replicas behind the route of a ``ready`` artifact, such as the containers of a server that scales, when the handler reports them: ``{"serving": 1, "starting": 2}``. ``serving`` replicas answer now, and ``starting`` ones run but do not answer yet. It is null in every other state, and when the handler cannot tell. An engine can be ``warm`` while more replicas start. Then ``engine_detail`` and the ``start`` and ``load`` phases of ``startup`` describe a replica that starts.
 
 ``startup`` gives the artifact's startup in three fixed phases, the same for every backend:
 
