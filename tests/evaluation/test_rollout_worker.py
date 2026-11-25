@@ -617,11 +617,20 @@ class ProviderRuntime(InferenceRuntime):
 
 
 class CallingLab(TaskLab):
-    """A lab whose agent makes ``calls`` chat calls through its endpoint, one at a time, and keeps the status of each
-    in ``statuses``. When ``tool_calls`` is given, step ``i`` includes tool definitions iff ``tool_calls[i]`` is True;
-    without it, no call carries tool definitions. It goes on after a refused call. Its trial ends with ``reward``, and
-    with an agent error when its last call was refused and ``fails_after_refusal`` is set. ``runs`` counts its trials.
-    It starts no sandbox."""
+    """A test ``TaskLab`` that sends a fixed schedule of chat calls to the rollout's endpoint and starts no sandbox.
+
+    Values: ``calls`` is a positive int (number of requests per trial); ``reward`` is the float reward written by each
+    trial; ``fails_after_refusal`` is a bool controlling whether a non-200 final status produces an agent error;
+    ``tool_calls`` is None (no call carries ``tools``) or a tuple of bools with ``len(tool_calls) == calls`` where
+    ``tool_calls[i]`` says whether step ``i`` carries a non-empty ``tools`` list; ``statuses`` records the HTTP status
+    of every call across trials in call order; ``runs`` is the non-negative count of ``run`` calls.
+
+    Purpose: rollout-worker tests pass it to ``provider_rollouts`` to simulate an agent's call sequence against a
+    scripted provider. ``run`` requires ``agent["kwargs"]["api_base"]``, sends ``calls`` ``POST /chat/completions``
+    requests (continuing after non-200 replies), increments ``runs``, and returns
+    ``RolloutRow(rewards={"reward": reward}, error=..., trial_uri=None)`` with an ``AgentError`` string iff
+    ``statuses[-1] != 200`` and ``fails_after_refusal`` is True, else ``error=None``. ``build_environment`` returns
+    ``""``. Construction raises ``ValueError`` if ``calls < 1`` or ``tool_calls`` does not have one bool per step."""
 
     def __init__(
         self,
@@ -631,10 +640,17 @@ class CallingLab(TaskLab):
         fails_after_refusal: bool = True,
         tool_calls: Sequence[bool] | None = None,
     ) -> None:
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1:
+            raise ValueError("calls is a positive integer")
+        schedule: tuple[bool, ...] | None = None
+        if tool_calls is not None:
+            schedule = tuple(tool_calls)
+            if len(schedule) != calls or not all(isinstance(flag, bool) for flag in schedule):
+                raise ValueError("tool_calls has one bool for each call")
         self.calls = calls
         self.reward = reward
         self.fails_after_refusal = fails_after_refusal
-        self.tool_calls = tuple(tool_calls) if tool_calls is not None else None
+        self.tool_calls = schedule
         self.statuses: list[int] = []
         self.runs = 0
 
@@ -744,31 +760,34 @@ def test_a_refused_last_call_fails_the_rollout_even_without_an_agent_error(tmp_p
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("replies", "tool_calls", "expected_state", "expected_error"),
+    ("replies", "tool_calls", "fails_after_refusal", "expected_state", "expected_error"),
     [
         # Main-loop 402 masked by a trailing 200 OK auxiliary title-generation call (no tools).
-        ([WRAPPED_402, ANSWER], [True, False], "failed", PAYMENT_ERROR),
+        ([WRAPPED_402, ANSWER], [True, False], False, "failed", PAYMENT_ERROR),
         # Earlier main-loop turn succeeded, next main-loop turn hit 402, then trailing 200 OK title call.
-        ([ANSWER, WRAPPED_402, ANSWER], [True, True, False], "failed", PAYMENT_ERROR),
+        ([ANSWER, WRAPPED_402, ANSWER], [True, True, False], False, "failed", PAYMENT_ERROR),
         # Exhausted 429 on main-loop call masked by a trailing 200 OK auxiliary call.
         (
             [(429, {"error": {"message": "concurrency limit"}}, {"Retry-After": "600"}), ANSWER],
             [True, False],
+            False,
             "failed",
             RATE_LIMITED_ERROR,
         ),
-        # Auxiliary title call failed with 402 before or after a clean tool-bearing main loop: score is kept.
-        ([WRAPPED_402, ANSWER, ANSWER], [False, True, True], "finished", None),
-        ([ANSWER, ANSWER, WRAPPED_402], [True, True, False], "finished", None),
+        # Auxiliary title call failed with 402 before or after a clean tool-bearing main loop (no trial error): kept.
+        ([WRAPPED_402, ANSWER, ANSWER], [False, True, True], False, "finished", None),
+        ([ANSWER, ANSWER, WRAPPED_402], [True, True, False], False, "finished", None),
+        # Required tool-less step refused after a tool-bearing 200, failing the trial with result.error: rollout fails.
+        ([ANSWER, WRAPPED_402], [True, False], True, "failed", PAYMENT_ERROR),
     ],
 )
 def test_auxiliary_calls_without_tools_do_not_mask_or_trigger_provider_refusal_failures(
-    tmp_path, replies, tool_calls, expected_state, expected_error
+    tmp_path, replies, tool_calls, fails_after_refusal, expected_state, expected_error
 ):
     lab = CallingLab(
         len(replies),
         reward=1.0 if expected_state == "finished" else 0.0,
-        fails_after_refusal=False,
+        fails_after_refusal=fails_after_refusal,
         tool_calls=tool_calls,
     )
     with scripted_provider(replies) as (url, _):

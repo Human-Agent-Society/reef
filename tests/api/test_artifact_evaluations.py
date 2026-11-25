@@ -2028,7 +2028,17 @@ def test_max_failed_fraction_stops_an_evaluation_when_402_refusals_are_followed_
     tmp_path: Path,
 ) -> None:
     class RefusingToolsHandler(ArtifactHandler):
-        """Refuses main-loop calls that carry tool definitions with HTTP 402 and answers auxiliary calls."""
+        """An ``ArtifactHandler`` that refuses tool-bearing chat calls with HTTP 402 and answers tool-less calls.
+
+        Values: inherits ``artifact_ids: list[str]`` and ``models: list[str]`` from ``ArtifactHandler`` (both initially
+        empty). Invariant: only answered (tool-less) calls are recorded in ``artifact_ids`` and ``models``; refused
+        calls raise before ``super().inference`` runs.
+
+        Purpose: used by this circuit-breaker test to model a provider that rejects main-loop calls with payment
+        refusals while answering auxiliary title calls. ``inference(artifact, path, payload)`` raises
+        ``UpstreamStatusError(..., status=402, limit=UpstreamLimit.PAYMENT)`` iff ``bool(payload.get("tools"))`` is
+        True, and otherwise delegates to ``ArtifactHandler.inference`` to record the call and return a 200 reply.
+        """
 
         async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
             if payload.get("tools"):
@@ -2036,7 +2046,17 @@ def test_max_failed_fraction_stops_an_evaluation_when_402_refusals_are_followed_
             return await super().inference(artifact, path, payload)
 
     class RefusedThenTitleLab(TaskLab):
-        """Sends a tool-bearing main call (402) and a trailing title call without tools (200), then exits cleanly."""
+        """A test ``TaskLab`` that sends a refused tool-bearing call followed by a tool-less call and exits cleanly.
+
+        Values: ``runs`` is a non-negative int (initially 0) counting how many times ``run`` was invoked.
+
+        Purpose: used by this circuit-breaker test to reproduce a harness (such as OpenCode) whose main-loop call hits
+        HTTP 402 and whose trailing title call returns 200 before the trial finishes without an error. ``run`` requires
+        ``agent["kwargs"]["api_base"]`` as a base URL string, increments ``runs``, posts two ``/chat/completions``
+        requests (the first with a non-empty ``tools`` list, the second without ``tools``) while suppressing
+        ``urllib.error.HTTPError``, and always returns ``RolloutRow(rewards={"reward": 0.0}, error=None)``.
+        ``build_environment`` starts no sandbox and returns ``""``.
+        """
 
         def __init__(self) -> None:
             self.runs = 0

@@ -965,11 +965,12 @@ class EvaluationRolloutWorker(QueueWorker):
         A rollout that requires prepared templates runs only when its task's template item finished, and its trial
         builds no template. Else it fails for good with the template item's error, before its candidate is served.
 
-        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), the rollout fails for good
-        with no score (``ModelCallRefusal.reason``). When a rollout makes tool-bearing calls, auxiliary calls without
-        tools do not mask or trigger this check. When the inference service failed its model calls
-        (``RolloutCalls.service_failure``), the attempt fails with no score, and the rollout is retried as any other
-        failed attempt."""
+        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), or refused a trailing
+        no-tools call on a trial that failed with an error (``RolloutCalls.all_last_refusal``), the rollout fails for
+        good with no score (``ModelCallRefusal.reason``). When a rollout makes tool-bearing calls, auxiliary calls
+        without tools do not mask a main-loop refusal and do not fail a trial that finished with no error. When the
+        inference service failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score,
+        and the rollout is retried as any other failed attempt."""
         if rollout.requires_prepared_templates:
             template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
@@ -1052,6 +1053,10 @@ class EvaluationRolloutWorker(QueueWorker):
             if trial_exception_type(result.trial_uri) in SANDBOX_CAPACITY_ERRORS:
                 raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
             last_refusal = calls.last_refusal
+            if last_refusal is None and result.error:
+                # A required tool-less agent step (such as a native sub-agent with ``tools: []``) still fails the
+                # trial with ``result.error``; keep its terminal refusal rather than scoring 0.
+                last_refusal = calls.all_last_refusal
             if last_refusal is not None:
                 # The agent stopped on a provider refusal, so a score, 0 above all, would judge the provider, and a
                 # new sandbox at once would meet the same refusal.
