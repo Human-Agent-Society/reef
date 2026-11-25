@@ -295,7 +295,7 @@ must equal ``groups_per_step x rollouts_per_group``.
 Training starts only after all coordinates have arrived. Completion length and
 evaluator concurrency determine GPU memory, host memory, and CPU use. Test the
 intended grid for one step before you request a long run. A reduced smoke run
-can use two groups of two rollouts, one step, and thinking disabled.
+can use two groups of three rollouts, one step, and thinking disabled.
 
 Results
 -------
