@@ -50,15 +50,16 @@ class Sample2JobSettings(PluginSettings):
     buffer_size: int | None = config_option(
         None,
         help=(
-            "The most samples that one automatic job takes, beside the rest of a group; at least "
-            "job_samples. Omitted takes job_samples."
+            "The most samples that one automatic job takes, beside the rest of a group; a "
+            "positive integer, at least job-samples. Omitted takes job-samples; on the "
+            "generated-task stage it takes 4 when that is more."
         ),
     )
     job_samples: int | None = config_option(
         None,
         help=(
-            "The fewest samples one job trains. Required for weight training; a harness evolution "
-            "stage defaults it to 1."
+            "The fewest samples one job trains, a positive integer. Required for weight training;"
+            " the generated-task stage and a harness evolution stage default it to 1."
         ),
     )
 

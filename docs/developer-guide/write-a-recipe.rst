@@ -125,6 +125,11 @@ The path of a record through the plug-ins:
        CTRL3 -->|"active snapshot"| INF["inference"]
        class SAMP,CTRL2,TRAIN,CTRL3 user-owned
 
+Record retention can delete a record between two reads of it (`Record
+retention <../user-guide/storage.rst#record-retention>`__). A plug-in that
+reads records more than once, such as the records that a report references,
+must accept a record that is no longer stored.
+
 Choose the kind of method
 -------------------------
 
@@ -235,6 +240,19 @@ The deployment selects the class and sets the job size:
 
 ``recipes/sdft/examples/skill_stream/serve.yaml`` is the complete config.
 
+**Metrics from a stage.** A pipeline stage logs finite numeric metrics through
+the scenario's experiment logger. A ``Record2Sample`` stage reads it as
+``context.experiment_logger`` from the ``PipelineContext`` that ``from_config``
+receives; a ``Sample2Job`` stage reads ``self.experiment_logger``. The logger
+does nothing when tracking is off.
+
+.. code:: python
+
+   self.experiment_logger.log({"accepted": 12}, namespace="processor")
+
+Each namespace lands under ``<namespace>/*``, on its own ``<namespace>/event``
+axis. Reef drops values that are not finite numbers.
+
 A minimal harness method
 ------------------------
 
@@ -340,7 +358,7 @@ The ``recipe`` section selects the method. A deployment config also needs:
 - ``storage``: the record store, the artifact repository and the work
   directories.
 
-`Configuration <../reference/configuration-files.rst#configuration-file-layout>`__
+`Settings reference <../reference/configuration-settings.rst>`__
 lists every section and key. `Evolve your model
 <../user-guide/evolve-your-model.rst>`__ and `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ give complete configs to copy.

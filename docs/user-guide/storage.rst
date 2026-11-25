@@ -74,7 +74,7 @@ The storage backend keeps the records, commits and settings of each scenario. Th
 - The database must exist. Reef creates its tables in the selected schema, so the role needs permission to create that schema and its tables at the first start.
 - Give independent deployments distinct schemas (default: ``reef_records``).
 - PostgreSQL 14 and newer are supported.
-- Archived scenarios stay in PostgreSQL under their old storage identifier, and a recreated scenario gets a new one. The retention settings apply to all active and archived stores of the schema, and preserve active records and retry hashes.
+- Archived scenarios stay in PostgreSQL under their old storage identifier, and a recreated scenario gets a new one. Record retention does not use this schema: it applies to the record items of the data store, of active and archived scenarios (`Record retention`_).
 
 **A plugin.** Subclass ``reef.storage.scenario.store.ScenarioStorage`` and implement all abstract methods, including ``from_config``:
 
@@ -166,7 +166,7 @@ Choose the data store
 
 The data store keeps the deployment's data items with their metadata: the trajectories and tasks that clients create, and a record item for each inference call and report (`Data items <../reference/http-api-data-items.rst#http-api-data-items>`__). Each item belongs to an owner, and its metadata names the scenarios that use it. The task file store keeps the files of task items.
 
-The data store grows until clients delete items: archiving a scenario does not delete its items, and record items stay when record retention removes the records from a scenario's record store.
+The data store grows until clients delete items or record retention deletes record items (`Record retention`_). Archiving a scenario deletes none of its items.
 
 Without ``storage.data-store``, the store follows ``storage.record-backend``:
 
@@ -193,6 +193,16 @@ To use another database or schema, or your own store, name a subclass of ``reef.
        config:
          database_url: ${REEF_DATA_DATABASE_URL}
          schema: reef_data
+
+Record retention
+~~~~~~~~~~~~~~~~
+
+``storage.agent-record-retention-max-bytes`` is one budget for the record items of the data store: all owners and scenarios, archived scenarios included. Deployments that use one PostgreSQL data store, such as the default ``reef_data`` schema of one database, share one budget. A plugin data store applies the budget in its own ``prune_records``.
+
+- The budget counts the stored records only. It is not a disk quota: indexes and database overhead need more disk, and writes can go above the budget between two sweeps.
+- SQLite does not make its file smaller when Reef deletes records. It uses the free pages again for new data.
+- After a deletion, the ``processor`` status of the scenario (`Status <../reference/http-api-status.rst#status>`__) shows ``record_data_incomplete``, ``evicted_record_count`` and ``evicted_body_bytes``. The operational metrics show ``records/evicted_count``, ``records/evicted_body_bytes`` and ``records/data_incomplete``.
+- Reef skips a pending report whose referenced records are no longer stored, and logs a warning.
 
 Keep large content in segment files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
