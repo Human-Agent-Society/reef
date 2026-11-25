@@ -136,7 +136,7 @@ Use ``score_levels=true`` when reading one evaluation to add ``score_levels`` to
 
 When a provider rate-limits a model call, Reef retries it in the same sandbox, up to five attempts in total. Reef honors ``Retry-After``. If the next attempt cannot start within 60 seconds of the original call and before its inference timeout expires, the agent receives the refusal.
 
-If a rate or payment limit blocks the last model call and the trial fails or receives no model answer, the rollout ends with a null ``score``. Its ``error`` gives the HTTP status and the reason. Use ``retry`` to run failed rollouts again. For ``rate_limit``, wait before retrying. For ``payment_required``, check the provider balance, spending cap or request size first.
+If a rate or payment limit blocks the last model call, the rollout ends with a null ``score``. When a rollout makes tool-bearing calls, auxiliary calls without tools (such as title generation) do not mask a main-loop refusal, and a refused trailing call without tools fails the rollout only if the trial itself ended with an error. Its ``error`` gives the HTTP status and the reason. Use ``retry`` to run failed rollouts again. For ``rate_limit``, wait before retrying. For ``payment_required``, check the provider balance, spending cap or request size first.
 
 When the inference service fails model calls of a rollout (HTTP 500 or more), the attempt has no score if the last call failed, or if the failed calls took at least 5% of the time from the rollout's first model call to the end of its last. Its ``error`` says how many calls the inference service failed. The rollout runs again as after any failed attempt, and when no attempt is left, it ends with a null ``score``. Fewer or shorter failures leave the score as it is.
 
