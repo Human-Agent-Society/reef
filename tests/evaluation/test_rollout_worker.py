@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -679,14 +679,40 @@ class ProviderRuntime(InferenceRuntime):
 
 
 class CallingLab(TaskLab):
-    """A lab whose agent makes ``calls`` chat calls through its endpoint, one at a time, and keeps the status of each
-    in ``statuses``. It goes on after a refused call. Its trial ends with ``reward``, and with an agent error when its
-    last call was refused and ``fails_after_refusal`` is set. ``runs`` counts its trials. It starts no sandbox."""
+    """A test ``TaskLab`` that sends a fixed schedule of chat calls to the rollout's endpoint and starts no sandbox.
 
-    def __init__(self, calls: int, reward: float, *, fails_after_refusal: bool = True) -> None:
+    Values: ``calls`` is a positive int (number of requests per trial); ``reward`` is the float reward written by each
+    trial; ``fails_after_refusal`` is a bool controlling whether a non-200 final status produces an agent error;
+    ``tool_calls`` is None (no call carries ``tools``) or a tuple of bools with ``len(tool_calls) == calls`` where
+    ``tool_calls[i]`` says whether step ``i`` carries a non-empty ``tools`` list; ``statuses`` records the HTTP status
+    of every call across trials in call order; ``runs`` is the non-negative count of ``run`` calls.
+
+    Purpose: rollout-worker tests pass it to ``provider_rollouts`` to simulate an agent's call sequence against a
+    scripted provider. ``run`` requires ``agent["kwargs"]["api_base"]``, sends ``calls`` ``POST /chat/completions``
+    requests (continuing after non-200 replies), increments ``runs``, and returns
+    ``RolloutRow(rewards={"reward": reward}, error=..., trial_uri=None)`` with an ``AgentError`` string iff
+    ``statuses[-1] != 200`` and ``fails_after_refusal`` is True, else ``error=None``. ``build_environment`` returns
+    ``""``. Construction raises ``ValueError`` if ``calls < 1`` or ``tool_calls`` does not have one bool per step."""
+
+    def __init__(
+        self,
+        calls: int,
+        reward: float,
+        *,
+        fails_after_refusal: bool = True,
+        tool_calls: Sequence[bool] | None = None,
+    ) -> None:
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1:
+            raise ValueError("calls is a positive integer")
+        schedule: tuple[bool, ...] | None = None
+        if tool_calls is not None:
+            schedule = tuple(tool_calls)
+            if len(schedule) != calls or not all(isinstance(flag, bool) for flag in schedule):
+                raise ValueError("tool_calls has one bool for each call")
         self.calls = calls
         self.reward = reward
         self.fails_after_refusal = fails_after_refusal
+        self.tool_calls = schedule
         self.statuses: list[int] = []
         self.runs = 0
 
@@ -694,7 +720,9 @@ class CallingLab(TaskLab):
         self.runs += 1
         api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
         for step in range(self.calls):
-            body = {"model": "m", "messages": [{"role": "user", "content": f"step {step}"}]}
+            body: dict[str, object] = {"model": "m", "messages": [{"role": "user", "content": f"step {step}"}]}
+            if self.tool_calls is not None and self.tool_calls[step]:
+                body["tools"] = [{"type": "function", "function": {"name": "bash"}}]
             request = urllib.request.Request(
                 f"{api_base}/chat/completions",
                 data=json.dumps(body).encode(),
@@ -777,11 +805,11 @@ def test_a_failed_trial_after_a_402_fails_its_rollout_once_and_spares_the_other_
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("replies", "reward", "error"),
-    [([ANSWER, WRAPPED_402], 0.0, None), ([ANSWER, WRAPPED_402], 1.0, None), ([WRAPPED_402], 1.0, PAYMENT_ERROR)],
+    ("replies", "reward"),
+    [([ANSWER, WRAPPED_402], 0.0), ([ANSWER, WRAPPED_402], 1.0), ([WRAPPED_402], 1.0)],
 )
-def test_a_refused_last_call_keeps_a_completed_score_only_after_an_answered_call(tmp_path, replies, reward, error):
-    # Each trial ends without an agent error, and its verifier writes a reward.
+def test_a_refused_last_call_fails_the_rollout_even_without_an_agent_error(tmp_path, replies, reward):
+    # Each trial exits with no agent error (as OpenCode does on HTTP 402/429), and its verifier writes a reward.
     lab = CallingLab(len(replies), reward=reward, fails_after_refusal=False)
     with scripted_provider(replies) as (url, bodies):
         queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
@@ -789,17 +817,127 @@ def test_a_refused_last_call_keeps_a_completed_score_only_after_an_answered_call
     # The provider got each call once: no 402 is sent again.
     assert len(bodies) == len(replies)
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
-    if error is not None:
-        assert (item.state, item.attempt_count, item.result, item.error) == ("failed", 1, None, error)
-        return
-    assert (item.state, item.error, RolloutScore.from_json(item.result["score"]).value) == ("finished", None, reward)
+    assert (item.state, item.attempt_count, item.result, item.error) == ("failed", 1, None, PAYMENT_ERROR)
 
 
-def timed_turn(status: int, started_at: float, duration_s: float) -> CapturedTurn:
-    """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
-    return CapturedTurn(
-        "", "/v1/chat/completions", status, {"messages": []}, None, None, False, duration_s, at=started_at + duration_s
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("replies", "tool_calls", "fails_after_refusal", "expected_state", "expected_error"),
+    [
+        # Main-loop 402 masked by a trailing 200 OK auxiliary title-generation call (no tools).
+        ([WRAPPED_402, ANSWER], [True, False], False, "failed", PAYMENT_ERROR),
+        # Earlier main-loop turn succeeded, next main-loop turn hit 402, then trailing 200 OK title call.
+        ([ANSWER, WRAPPED_402, ANSWER], [True, True, False], False, "failed", PAYMENT_ERROR),
+        # Exhausted 429 on main-loop call masked by a trailing 200 OK auxiliary call.
+        (
+            [(429, {"error": {"message": "concurrency limit"}}, {"Retry-After": "600"}), ANSWER],
+            [True, False],
+            False,
+            "failed",
+            RATE_LIMITED_ERROR,
+        ),
+        # Auxiliary title call failed with 402 before or after a clean tool-bearing main loop (no trial error): kept.
+        ([WRAPPED_402, ANSWER, ANSWER], [False, True, True], False, "finished", None),
+        ([ANSWER, ANSWER, WRAPPED_402], [True, True, False], False, "finished", None),
+        # Required tool-less step refused after a tool-bearing 200, failing the trial with result.error: rollout fails.
+        ([ANSWER, WRAPPED_402], [True, False], True, "failed", PAYMENT_ERROR),
+    ],
+)
+def test_auxiliary_calls_without_tools_do_not_mask_or_trigger_provider_refusal_failures(
+    tmp_path, replies, tool_calls, fails_after_refusal, expected_state, expected_error
+):
+    lab = CallingLab(
+        len(replies),
+        reward=1.0 if expected_state == "finished" else 0.0,
+        fails_after_refusal=fails_after_refusal,
+        tool_calls=tool_calls,
     )
+    with scripted_provider(replies) as (url, _):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.attempt_count) == (expected_state, 1)
+    if expected_state == "finished":
+        assert item.error is None
+        assert RolloutScore.from_json(item.result["score"]).value == 1.0
+        return
+    assert item.result is None
+    if isinstance(expected_error, re.Pattern):
+        assert expected_error.fullmatch(item.error or "") is not None
+    else:
+        assert item.error == expected_error
+
+
+def timed_turn(
+    status: int, started_at: float, duration_s: float, *, with_tools: bool | list[object] = False
+) -> CapturedTurn:
+    """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
+    request: dict[str, object] = {"messages": []}
+    if isinstance(with_tools, list):
+        request["tools"] = with_tools
+    elif with_tools:
+        request["tools"] = [{"type": "function", "function": {"name": "bash"}}]
+    response: dict[str, object] | None = None
+    if status == 402:
+        response = {"error": {"code": "payment_required"}}
+    elif status == 429:
+        response = {"error": {"code": "rate_limit"}}
+    return CapturedTurn(
+        "", "/v1/chat/completions", status, request, response, None, False, duration_s, at=started_at + duration_s
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("turns", "expected_refusal", "expected_answered"),
+    [
+        # Transient recovered 429s (1/4, 4/9, and 7/10) followed by 200 OK main-loop completion clear last_refusal.
+        ([(200, True), (429, True), (200, True), (200, True)], None, 3),
+        (
+            [
+                (429, True),
+                (429, True),
+                (200, True),
+                (200, True),
+                (429, True),
+                (200, True),
+                (429, True),
+                (200, True),
+                (200, True),
+            ],
+            None,
+            5,
+        ),
+        (
+            [
+                (429, True),
+                (429, True),
+                (429, True),
+                (429, True),
+                (429, True),
+                (429, True),
+                (200, True),
+                (200, True),
+                (429, True),
+                (200, True),
+            ],
+            None,
+            3,
+        ),
+        # A trailing 200 OK auxiliary call (no tools or empty tools list) does not clear a terminal 402 on the main loop.
+        ([(402, True), (200, False)], ModelCallRefusal(PAYMENT, 402, None), 0),
+        ([(200, True), (402, True), (200, False)], ModelCallRefusal(PAYMENT, 402, None), 1),
+        ([(200, True), (402, True), (200, [])], ModelCallRefusal(PAYMENT, 402, None), 1),
+    ],
+)
+def test_rollout_calls_keep_recovered_transient_429s_and_ignore_trailing_auxiliary_calls(
+    turns, expected_refusal, expected_answered
+):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    for index, (status, with_tools) in enumerate(turns):
+        calls.call_captured(timed_turn(status, 1000.0 + index, 0.2, with_tools=with_tools))
+    calls.close()
+    assert (calls.last_refusal, calls.answered) == (expected_refusal, expected_answered)
 
 
 @pytest.mark.unit
