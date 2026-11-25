@@ -20,12 +20,13 @@ from slime.utils.reloadable_process_group import monkey_patch_torch_dist
 monkey_patch_torch_dist()
 
 # isort: split
+from megatron.core import mpu
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
 from slime.observability.timer import Timer
 from torch_memory_saver import torch_memory_saver
 
 from reef.train.slime_backend.distill.teacher import TEACHER_TAG
-from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY
+from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, check_step_counts, rank_step_counts
 from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
@@ -120,6 +121,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
 
     def _get_rollout_data(self, rollout_data_ref):
         rollout_data = super()._get_rollout_data(rollout_data_ref)
+        self.check_step_plan(rollout_data)
         from slime.backends.megatron_utils.cp_utils import slice_log_prob_with_cp
 
         # A job whose family or schedule state differs from the workers' current
@@ -155,6 +157,24 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 )
             ]
         return rollout_data
+
+    def check_step_plan(self, rollout_data: Mapping[str, Any]) -> None:
+        """Raise ``RuntimeError`` on every rank before a rollout trains if its steps drop samples or train no token.
+
+        Each data-parallel rank holds a part of each step, so the ranks sum their counts first. ``raw_reward`` holds
+        one entry per sample that Slime converted; Reef's own data carries none (``check_step_counts``).
+        """
+        loss_masks = rollout_data["loss_masks"]
+        loss_token_counts = torch.stack([mask.sum() for mask in loss_masks]).tolist()
+        counts = rank_step_counts(
+            loss_token_counts, rollout_data["micro_batch_indices"], rollout_data["num_microbatches"]
+        )
+        summed = torch.tensor(counts, dtype=torch.long, device=loss_masks[0].device)
+        torch.distributed.all_reduce(summed, group=mpu.get_data_parallel_group())
+        raw_rewards = rollout_data.get("raw_reward")
+        check_step_counts(
+            summed.tolist(), rollout_data["global_batch_sizes"], None if raw_rewards is None else len(raw_rewards)
+        )
 
     def pop_metrics(self) -> dict[str, float]:
         return drain_worker_metrics()

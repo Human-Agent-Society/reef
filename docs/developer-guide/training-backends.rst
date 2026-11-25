@@ -337,6 +337,7 @@ A driver records each saved checkpoint in the job's directory, where the compone
 - The job's ``objective`` parameter selects the loss family, and ``learning_rate_schedule`` the learning-rate schedule. The actor workers switch to them when they receive the job's data.
 - The job's last checkpoint records the objective's state after the job's data. An earlier checkpoint records the state of the job's start, because the objective computes its state for the whole data. When the objective skips the job's data, the job saves no checkpoint, so the next job continues the start's weights and objective state. The Tinker component does the same.
 - The optimizer state carries from one job to the next in the Megatron checkpoint.
+- Before the workers train a rollout, they check Slime's step plan. The job fails when an optimizer step has no token with loss, for example when Slime removed each sample of the step. It also fails when the plan leaves out samples that Slime converted for the rollout.
 
 **Starts.** Every driver loads Slime's latest checkpoint, so a job starts from the component's latest checkpoint. Because the jobs continue one save root, a Slime deployment trains one scenario.
 

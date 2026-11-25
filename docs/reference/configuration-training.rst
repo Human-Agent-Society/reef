@@ -91,7 +91,7 @@ Rules of a task job:
 - **Rollout count.** The job runs ``ceil(tasks / rollout-batch-size)`` Slime rollouts, so each task runs at least once. The last batch wraps to the first tasks when the tasks do not fill it. To train the tasks again, submit another job.
 - **Checkpoints.** ``save_interval`` counts Slime rollouts.
 - **Model calls.** The engines answer OpenAI text chat: system, user and assistant text messages, no tools. Each call samples with Slime's ``rollout-temperature``, ``rollout-top-p`` and ``rollout-top-k``, whatever the agent asks, and ``rollout-max-response-len`` bounds each response.
-- **Failed rollouts.** When no group of a Slime rollout can train, the job fails before the workers train it, with the error of the first rollout.
+- **Failed rollouts.** When no group of a Slime rollout can train, the job fails before the workers train it, with the error of the first rollout. When one optimizer step has only failed rollouts, the job fails before the step trains (`Dataset jobs on Slime`_).
 - **Score centering.** Slime's ``use-score-centering`` works: each sampled token carries the engines' top ``score-centering-top-k`` log probabilities.
 - **Where rollouts run.** The rollouts run in a Ray actor of Slime's serving session. Its node needs the ``harbor`` package and the Harbor environment, and ``agent_host`` names that node. The actor gets ``E2B_API_KEY``, ``E2B_API_URL``, ``E2B_SANDBOX_URL``, ``E2B_DOMAIN``, ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` from the environment of the training service.
 
@@ -128,3 +128,5 @@ The deployment selects the built-in recipe ``reef.recipe.dataset:DatasetRecipe``
 - The recipe's ``job-parameters`` can set a default ``dataset``. Slime's own options in ``training.options`` configure the rest, for example ``input-key``, ``apply-chat-template`` and ``rollout-batch-size``.
 - A rollout function, a reward model (``custom-rm-path`` or ``rm-type``) and a hook on the rollout data (``rollout-data-postprocess-path``) are Slime's plugins and run in Slime's processes.
 - Reef sets ``data-source-path`` itself, so it refuses the option. It also refuses ``disable-compute-advantages-and-returns``.
+- The job fails before a rollout trains when one of its optimizer steps has no token with loss, for example when Slime removed each sample of the step. The error gives the step's rollouts, samples, removed or fully masked samples and tokens with loss.
+- Slime trains only full steps of ``global-batch-size`` rollouts. Set ``rollout-batch-size`` times ``n-samples-per-prompt`` to a multiple of ``global-batch-size``. Slime drops the rollouts after the last full step, so the job fails before such a rollout trains.
