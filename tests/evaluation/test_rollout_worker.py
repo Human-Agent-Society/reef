@@ -1017,6 +1017,25 @@ def test_rollout_calls_count_each_refusal_that_reached_the_agent_and_ignore_auxi
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("turns", "refused"),
+    [
+        # A failed trial counts each refused auxiliary call, also one that tool-bearing answers followed.
+        ([(402, False), (200, True), (429, False), (200, True)], (ModelCallRefusal(RATE, 429, None), 2)),
+        # A refused tool-bearing call counts alone, as for a trial that did not fail.
+        ([(402, False), (429, True), (200, True)], (ModelCallRefusal(RATE, 429, None), 1)),
+        ([(200, False), (200, True)], None),
+    ],
+)
+def test_a_failed_trial_counts_the_refused_auxiliary_calls_when_no_tool_bearing_call_was_refused(turns, refused):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    for index, (status, with_tools) in enumerate(turns):
+        calls.call_captured(timed_turn(status, 1000.0 + index, 0.2, with_tools=with_tools))
+    calls.close()
+    assert calls.refusal(trial_failed=True) == (None if refused is None else refused[0].reason(refused[1]))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("turns", "failure"),
     [
         # No failed call, and a refusal of a provider's limit is no failure of the service.
@@ -1126,6 +1145,28 @@ def test_a_403_fails_the_rollout_once_as_a_spending_cap_or_a_refusal_of_access(t
         return
     # Any other 403 refuses access, so another sandbox would meet the same refusal.
     assert (item.error, kept_codes(artifacts)) == (ACCESS_ERROR.format(status=403), [(403, "access_denied")])
+
+
+#: OpenRouter's 403 for an input that its moderation flagged.
+MODERATED_403 = {
+    "error": {
+        "code": 403,
+        "message": "the input was flagged",
+        "metadata": {"reasons": ["violence"], "flagged_input": "...", "provider_name": "p", "model_slug": "m"},
+    }
+}
+
+
+@pytest.mark.unit
+def test_a_moderation_403_refuses_no_access_and_fails_only_the_attempt(tmp_path):
+    lab = CallingLab(1, reward=0.0)
+    with scripted_provider([(403, MODERATED_403, {})]) as (url, bodies):
+        queue, (value,), worker, artifacts = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    # The provider refused the content, not the key: the queue runs the rollout again, as after any failed attempt.
+    assert lab.statuses == [403] and len(bodies) == 1
+    assert (item.state, item.attempt_count, kept_codes(artifacts)) == ("queued", 1, [(403, None)])
 
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "judge"}, "steps": [{"source": "user"}]}

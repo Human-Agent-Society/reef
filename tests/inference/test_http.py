@@ -182,7 +182,7 @@ def test_a_retry_after_header_is_whole_seconds_or_an_http_date(value: str | None
     assert retry_after_seconds(value, NOW) == seconds
 
 
-RATE, PAYMENT = UpstreamLimit.RATE, UpstreamLimit.PAYMENT
+RATE, PAYMENT, ACCESS = UpstreamLimit.RATE, UpstreamLimit.PAYMENT, UpstreamLimit.ACCESS
 UNTYPED_402 = b'{"error": {"code": 402, "message": "Insufficient credits"}}'
 # A gateway that wraps the provider's refusal: the code is text, and the provider's number is in the message.
 WRAPPED = json.dumps(
@@ -223,13 +223,17 @@ def limited(**metadata: object) -> bytes:
         (402, limited(limit_source="another_budget"), "4", RATE, 4.0),
         # A limit_source that is no string names no limit.
         (402, limited(limit_source={"name": "openrouter_credits"}), "4", RATE, 4.0),
-        # OpenRouter's 403 for a spending cap is a payment refusal, also with a wait; any other 403 names no limit.
+        # OpenRouter's 403 for a spending cap is a payment refusal, also with a wait.
         (403, limited(limit_source="openrouter_guardrail_budget"), None, PAYMENT, None),
         (403, limited(limit_source="openrouter_workspace_budget"), "5", PAYMENT, 5.0),
         (403, limited(limit_source="openrouter_key_limit"), None, PAYMENT, None),
-        (403, limited(limit_source="openrouter_credits"), None, None, None),
-        (403, b'{"error": {"code": 403, "message": "Forbidden"}}', "5", None, 5.0),
-        (401, b'{"error": {"code": 401, "message": "No auth credentials found"}}', None, None, None),
+        # OpenRouter's 403 for flagged input refused the content, so it names no limit.
+        (403, limited(reasons=["violence"], flagged_input="..."), None, None, None),
+        # A 401, and any other 403, refuse the key.
+        (403, limited(limit_source="openrouter_credits"), None, ACCESS, None),
+        (403, b'{"error": {"code": 403, "message": "Forbidden"}}', "5", ACCESS, 5.0),
+        (403, b"Forbidden", None, ACCESS, None),
+        (401, b'{"error": {"code": 401, "message": "No auth credentials found"}}', None, ACCESS, None),
         (503, b"{}", "7", None, 7.0),
     ],
 )
