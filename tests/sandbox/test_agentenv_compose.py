@@ -1,4 +1,4 @@
-"""``reef.execution.sandbox.agentenv_compose``: the Compose project that an AgentENV sandbox runs for a task, the
+"""``reef.execution.sandbox.agentenv.compose``: the Compose project that an AgentENV sandbox runs for a task, the
 ``aenv`` commands that start it, and the trial's operations on its ``main`` service."""
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.execution.sandbox.agentenv_build import AgentEnvTemplates
-from reef.execution.sandbox.agentenv_compose import (
+from reef.execution.sandbox.agentenv.build import AgentEnvTemplates
+from reef.execution.sandbox.agentenv.compose import (
     GUEST_BASH_COMMAND,
     ComposeSandbox,
     ComposeStartError,

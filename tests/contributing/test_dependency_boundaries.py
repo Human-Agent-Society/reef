@@ -394,9 +394,9 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
 
 
 def test_executor_config_and_the_e2b_module_do_not_require_the_e2b_package() -> None:
-    # The executor config imports reef.execution.sandbox.e2b for every deployment, and that module defines a
-    # subclass of Harbor's E2B environment. A base installation has no e2b package. The modules still import, a
-    # local executor is built and the E2B settings are read; only the E2B startup check names the missing extra.
+    # The executor config imports the E2B executor for every deployment, and its package, reef.execution.sandbox.e2b,
+    # gives a subclass of Harbor's E2B environment. A base installation has no e2b package. The modules still import,
+    # a local executor is built and the E2B settings are read; only the E2B startup check names the missing extra.
     _assert_isolated_import(
         "import sys\n"
         "sys.modules['e2b'] = None\n"
@@ -413,6 +413,44 @@ def test_executor_config_and_the_e2b_module_do_not_require_the_e2b_package() -> 
         "    assert 'reef-infra[e2b]' in str(error), error\n"
         "else:\n"
         "    raise AssertionError('the E2B startup check passed without the e2b package')\n"
+    )
+
+
+def test_executor_config_and_the_modal_executor_do_not_require_the_modal_package() -> None:
+    # Only Harbor's factory loads Reef's Modal trial environment, which imports Modal's SDK. The executor config and
+    # the provider packages import without any provider SDK; only the Modal startup check names the missing extra.
+    _assert_isolated_import(
+        "import sys\n"
+        "sys.modules.update(dict.fromkeys(('modal', 'e2b')))\n"
+        "import reef.execution.sandbox.agentenv\n"
+        "import reef.execution.sandbox.e2b\n"
+        "import reef.execution.sandbox.modal\n"
+        "from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor\n"
+        "from reef.execution.sandbox.modal import NODE_IMAGE, ModalExecutor, ModalSession\n"
+        "from reef.execution.sandbox.process import SandboxUnavailableError\n"
+        "assert REMOTE_EXECUTORS['modal'] is ModalExecutor and ModalSession and NODE_IMAGE\n"
+        "assert 'reef.execution.sandbox.modal.trial' not in sys.modules\n"
+        "executor = remote_executor('modal', {'modal_app': 'custom'}, {})\n"
+        "assert isinstance(executor, ModalExecutor) and executor.app_name == 'custom'\n"
+        "try:\n"
+        "    executor.preflight()\n"
+        "except SandboxUnavailableError as error:\n"
+        "    assert 'reef-infra[modal]' in str(error), error\n"
+        "else:\n"
+        "    raise AssertionError('the Modal startup check passed without the modal package')\n"
+    )
+
+
+def test_the_agentenv_build_and_compose_helpers_load_without_the_e2b_package() -> None:
+    # Reef's E2B trials use these helpers on AgentENV, but the helpers need neither the E2B SDK nor the trial module.
+    _assert_isolated_import(
+        "import sys\n"
+        "sys.modules['e2b'] = None\n"
+        "from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, dockerfile_build\n"
+        "from reef.execution.sandbox.agentenv.compose import ComposeSandbox, TransientStartError, compose_mode\n"
+        "assert (dockerfile_build({}), compose_mode({})) == ('e2b', 'off')\n"
+        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError\n"
+        "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
 
 

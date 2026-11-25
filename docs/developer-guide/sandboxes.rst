@@ -202,7 +202,8 @@ alone. For ``e2b`` and ``modal``, it also holds the sandbox's lifetime. For
 ``modal``, it selects Modal's VM runtime when the task has
 ``environment/docker-compose.yaml`` and asks for no GPU. For ``e2b``, it
 names the class ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``
-in Harbor's ``import_path`` field.
+in Harbor's ``import_path`` field. For ``modal``, Reef also supplies an
+environment class so evaluations can wait when Modal has no capacity.
 
 **Lifetime.** ``sandbox_timeout_secs`` is the sum of the task's build, agent
 and verifier time limits, plus one hour, at most one day. A nonzero
@@ -220,9 +221,8 @@ and ``e2b`` gets none, so Harbor's default of one day applies.
 - E2B's Dockerfile parser drops ``COPY --chmod``. The class adds a ``chmod``
   after each such copy, so the files keep their modes.
 - AgentENV's E2B template builds refuse every ``COPY`` step. With
-  ``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class builds the Dockerfile with
-  ``aenv build`` (``reef.execution.sandbox.agentenv_build``), which has
-  Docker's semantics, multi-stage builds included.
+  ``REEF_E2B_DOCKERFILE_BUILD=aenv``, Reef runs ``aenv build``, which supports
+  multi-stage Dockerfiles.
 
 With ``aenv``, the class uses a ready template and waits for a build that
 another trial runs. It deletes and rebuilds a failed template, and a template
@@ -241,9 +241,8 @@ A task can name more services next to ``main`` in
 challenge. By default, an ``e2b`` trial starts only the task's image, and the
 agent reaches no other service. With ``REEF_E2B_COMPOSE=aenv``, which needs
 ``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class runs the project in one sandbox
-with ``aenv compose up`` (``reef.execution.sandbox.agentenv_compose``). The
-agent's commands and files go to ``main``, and the services reach one another
-by name, as under Docker Compose.
+with ``aenv compose up``. The agent's commands and files go to ``main``, and
+the services reach one another by name, as under Docker Compose.
 
 Before you set ``REEF_E2B_COMPOSE=aenv``, check the tools that manage the
 repository of the AgentENV deployment. ``aenv build --image`` and

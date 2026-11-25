@@ -37,6 +37,10 @@ WorkState = Literal["queued", "assigned", "running", "finished", "failed"]
 WORK_STATES: tuple[WorkState, ...] = ("queued", "assigned", "running", "finished", "failed")
 FINAL_STATES: frozenset[str] = frozenset({"finished", "failed"})
 HELD_STATES: frozenset[str] = frozenset({"assigned", "running"})
+#: The metadata key of a work item that a worker gave back because its work found no capacity of a service that it
+#: needs (``WorkQueue.give_back`` with ``deferred``): the number of such give-backs, a positive int. An item without
+#: the key, such as one that an earlier Reef gave back, has the count 0.
+DEFERRED_ATTEMPTS = "deferred_attempts"
 
 
 class WorkConflictError(ReefError):
@@ -64,15 +68,16 @@ class WorkItem:
     - ``state`` is one of ``WORK_STATES``. ``worker_id`` and ``lease_expires_at`` are set exactly when ``state`` is
       ``assigned`` or ``running``.
     - ``attempt_count`` is the number of times a worker took the item, an integer from 0.
-    - ``stopped_attempt_count`` is the number of those attempts that the worker gave back because it stopped
-      (``WorkQueue.give_back``), an integer from 0 to ``attempt_count``.
+    - ``stopped_attempt_count`` is the number of those attempts that the worker gave back (``WorkQueue.give_back``),
+      because it stopped or because the work found no capacity, an integer from 0 to ``attempt_count``.
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
-    - ``metadata`` is a JSON object of facts about the item that are not inputs of the work, so no worker reads it.
-      A reader of the item records one after the item exists (``WorkQueue.write_metadata``), such as the experiment
-      run that records a training job. A store can record one when it adds the item, such as the automatic retry
-      count of a serving request (``ServedModelsWriter.request``).
+    - ``metadata`` is a JSON object of facts about the item that are not inputs of the work, so no worker's work
+      reads it. A reader of the item records one after the item exists (``WorkQueue.write_metadata``), such as the
+      experiment run that records a training job. A store can record one when it adds the item, such as the automatic
+      retry count of a serving request (``ServedModelsWriter.request``), or when a worker gives it back for want of
+      capacity (``DEFERRED_ATTEMPTS``).
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
       change.
 
@@ -145,6 +150,16 @@ class WorkItem:
         """Whether the item finished or failed. After that only its ``metadata`` changes, until its producer queues
         it again (``WorkQueue.retry``)."""
         return self.state in FINAL_STATES
+
+    @property
+    def deferred_attempt_count(self) -> int:
+        """The number of the ``stopped_attempt_count`` attempts that a worker gave back because the work found no
+        capacity: ``metadata[DEFERRED_ATTEMPTS]``, or 0 without the key. The other give-backs are those of a worker
+        that stopped. Raise ``ValueError`` for a value that is no int from 0 to ``stopped_attempt_count``."""
+        count = self.metadata.get(DEFERRED_ATTEMPTS, 0)
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= self.stopped_attempt_count:
+            raise ValueError(f"work item {self.queue}/{self.id} has an invalid {DEFERRED_ATTEMPTS} {count!r}")
+        return count
 
 
 def is_finite_time(value: object) -> bool:
@@ -346,9 +361,11 @@ class WorkQueue(ABC):
         *,
         retryable: bool,
         now: float | None = None,
+        attempt: int | None = None,
     ) -> WorkItem:
         """End the held attempt with ``error``: the item becomes ``queued`` when ``retryable`` and it has attempts
-        left, else ``failed``, ended at ``now``. ``WorkLeaseLostError`` when ``worker_id`` does not hold it."""
+        left, else ``failed``, ended at ``now``. Raise ``WorkLeaseLostError`` unless ``worker_id`` holds the item
+        and, if specified, ``attempt`` equals its attempt count."""
 
     @abstractmethod
     def give_back(
@@ -360,11 +377,15 @@ class WorkQueue(ABC):
         now: float | None = None,
         available_at: float | None = None,
         error: str = "the worker stopped",
+        deferred: bool = False,
+        attempt: int | None = None,
     ) -> WorkItem:
         """End the held attempt without a result: the item becomes ``queued`` with ``error``, a non-empty text, and one
         more ``stopped_attempt_count``. A worker takes it again from ``available_at``, a finite time, or at once when
         it is None. The attempt does not count toward the attempts that the queue allows. A worker that stops gives
-        an item back with the defaults. ``WorkLeaseLostError`` when ``worker_id`` does not hold it."""
+        an item back with the defaults. With ``deferred``, the work found no capacity, and the same change also adds
+        one to ``metadata[DEFERRED_ATTEMPTS]`` (``WorkItem.deferred_attempt_count``). Raise ``WorkLeaseLostError``
+        unless ``worker_id`` holds the item and, if specified, ``attempt`` equals its attempt count."""
 
     @abstractmethod
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
@@ -563,6 +584,7 @@ class LeaseExtender:
 
 
 __all__ = [
+    "DEFERRED_ATTEMPTS",
     "FINAL_STATES",
     "HELD_STATES",
     "MAX_LOG_LINES",

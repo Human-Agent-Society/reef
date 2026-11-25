@@ -58,7 +58,7 @@ from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts, ProviderCooldowns, refusal_limit
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS
+from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SANDBOX_REQUEST_ERRORS
 from reef.execution.workers import ItemDeferredError, ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
@@ -821,8 +821,10 @@ class EvaluationRolloutWorker(QueueWorker):
     to the queue, as with ``requeue``; a rollout whose trial has ended keeps its result. A failed rollout is retried: a
     trial fails for reasons outside its input, such as a sandbox that did not start. A rollout of a harness tree whose
     task needs what the tree's agent does not give it (``task_agent_tools``) fails for good, and so does a rollout
-    that requires prepared templates when its task's template item did not finish, and one that a provider's limit
-    left with no score (``score``).
+    that requires prepared templates when its task's template item did not finish, one whose sandbox request the
+    sandbox service refused as invalid, and one that a provider's limit left with no score (``score``). A rollout
+    whose sandbox found no capacity goes back to the queue and waits (``ItemDeferredError``), and the worker goes on
+    with other rollouts.
 
     Purpose: the evaluation service starts one (``start``), lets it begin to stop as soon as the process begins to
     stop (``begin_stop``), and stops it (``stop``).
@@ -965,6 +967,9 @@ class EvaluationRolloutWorker(QueueWorker):
         A rollout that requires prepared templates runs only when its task's template item finished, and its trial
         builds no template. Else it fails for good with the template item's error, before its candidate is served.
 
+        A sandbox capacity refusal raises ``ItemDeferredError``. An invalid sandbox request fails the rollout.
+        Both leave the score unset, even if the agent already called the model.
+
         When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), or refused a trailing
         no-tools call on a trial that failed with an error (``RolloutCalls.all_last_refusal``), the rollout fails for
         good with no score (``ModelCallRefusal.reason``). When a rollout makes tool-bearing calls, auxiliary calls
@@ -1049,9 +1054,14 @@ class EvaluationRolloutWorker(QueueWorker):
             )
             # A trial that the sandbox service refused for want of capacity waits in the queue for capacity and runs
             # again, and the attempt does not count. That holds also after the agent called the model: a separate
-            # verifier that found no sandbox (it waits for one first) gave no score of the candidate.
-            if trial_exception_type(result.trial_uri) in SANDBOX_CAPACITY_ERRORS:
+            # verifier that found no sandbox gave no score of the candidate. A sandbox request that the service
+            # refused as invalid fails the same way again, so the rollout fails for good, with the service's reason
+            # and no score.
+            exception_type = trial_exception_type(result.trial_uri)
+            if exception_type in SANDBOX_CAPACITY_ERRORS:
                 raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
+            if exception_type in SANDBOX_REQUEST_ERRORS:
+                raise ItemFailedError(f"the sandbox service refused the sandbox: {result.error}")
             last_refusal = calls.last_refusal
             if last_refusal is None and result.error:
                 # A required tool-less agent step (such as a native sub-agent with ``tools: []``) still fails the
