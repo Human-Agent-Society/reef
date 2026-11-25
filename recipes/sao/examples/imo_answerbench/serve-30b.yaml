@@ -96,12 +96,17 @@ training:
     # Samples above ~35k tokens need the actor optimizer off the GPU (the
     # August paper-scale configuration). The offloaded optimizer cannot be
     # checkpointed before its first step, and SAO's critic-only warmup saves
-    # the actor at step 0, so optimizer state is not saved.
+    # the actor at step 0, so optimizer state is not saved. The cost: each
+    # job's new driver rebuilds the fp32 master weights of the actor and the
+    # critic from the saved bf16 weights and starts Adam again. One 1e-6 step
+    # does not change a bf16 weight larger than about 5e-4, so while each job
+    # is one step, those actor weights do not move.
     optimizer: "adam"
     optimizer-cpu-offload: true
     optimizer-offload-fraction: "1.0"
     use-precision-aware-optimizer: true
     no-save-optim: true
+    reef-accept-optimizer-restart: true
     reef-checkpoint-min-free-space-fraction: "0.03"
     lr: "1e-6"
     lr-decay-style: "constant"

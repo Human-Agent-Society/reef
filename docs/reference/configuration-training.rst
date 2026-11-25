@@ -112,7 +112,7 @@ Train without an inference engine
 
 Training in this mode works as follows:
 
-- Each job trains its data on Slime's workers, which stay on their GPUs between jobs.
+- Each job runs in a Slime driver of its own. The driver starts Slime's workers on the latest checkpoint and releases the workers when the job ends.
 - Each job saves one checkpoint: the Megatron checkpoint and its HF export. Reef publishes every checkpoint as a snapshot. See `Set the checkpoint cadence <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 - A restart continues from the last saved checkpoint, as with an engine.
 

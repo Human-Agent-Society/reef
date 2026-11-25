@@ -21,6 +21,10 @@ from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
 )
 from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
+from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    MEGATRON_TRACKER,
+    latest_checkpoint_has_optimizer_state,
+)
 from reef.train.slime_backend.reef_adapters.worker_hooks import configure_critic_objective
 
 logger = logging.getLogger(__name__)
@@ -238,9 +242,17 @@ def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
         return
     critic_args.save = critic_save
     critic_init = critic_args.critic_init
-    if (Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt").is_file():
+    if (Path(critic_save).expanduser() / MEGATRON_TRACKER).is_file():
         load, reason = critic_save, "resumes from its own checkpoint root"
-    elif critic_init and (Path(critic_init).expanduser() / "latest_checkpointed_iteration.txt").is_file():
+        # As for the actor (apply_unsaved_optimizer_resume), the checkpoint's record decides.
+        is_optimizer_state_loaded = latest_checkpoint_has_optimizer_state(Path(critic_save).expanduser()) is True
+        if not is_optimizer_state_loaded:
+            logger.warning(
+                "the critic's latest checkpoint in %s holds no optimizer state, or its record does not say: the "
+                "critic rebuilds its fp32 master weights from the bf16 weights and starts Adam again",
+                critic_save,
+            )
+    elif critic_init and (Path(critic_init).expanduser() / MEGATRON_TRACKER).is_file():
         # A value model trained on earlier rollouts: its weights and optimizer
         # come from --critic-init once, and every later start resumes from
         # what this run has saved since. The learning-rate schedule is this
@@ -249,6 +261,7 @@ def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
         # iteration count differs.
         critic_args.override_opt_param_scheduler = True
         load, reason = critic_init, "starts from the checkpoint in --critic-init"
+        is_optimizer_state_loaded = True
     else:
         if critic_init:
             raise ValueError(
@@ -261,7 +274,7 @@ def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
         )
         return
     critic_args.load = load
-    critic_args.no_load_optim = False
+    critic_args.no_load_optim = not is_optimizer_state_loaded
     critic_args.no_load_rng = False
     critic_args.finetune = False
     critic_args.ckpt_step = None

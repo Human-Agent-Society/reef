@@ -92,12 +92,13 @@ class RecordingBatchProcessor(TrainingBatchProcessor):
 
 
 def checkpoint_storage(
-    root: Path, *, critic_root: Path | None = None, critic_save_interval: int = 1
+    root: Path, *, critic_root: Path | None = None, critic_save_interval: int = 1, saves_optimizer: bool = True
 ) -> CheckpointStorage:
     """Checkpoint storage over ``root/hf/{rollout_id}`` and ``root/megatron`` that every test checkpoint fits.
 
     Each asset measures one byte and the filesystem reports a terabyte free,
     so admission never blocks and retention never deletes a checkpoint.
+    ``saves_optimizer`` is false for a run with ``--no-save-optim``.
     """
     source = root / "source-hf"
     source.mkdir(parents=True, exist_ok=True)
@@ -110,6 +111,7 @@ def checkpoint_storage(
         measure=lambda path: 1,
         disk_usage=lambda path: SimpleNamespace(total=1 << 40, free=1 << 40),
         critic_save_interval=critic_save_interval,
+        saves_optimizer=saves_optimizer,
     )
 
 

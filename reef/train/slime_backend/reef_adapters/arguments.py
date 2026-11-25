@@ -46,7 +46,9 @@ class SlimeArguments(Namespace):
     custom_megatron_init_path: str | None
     custom_critic_args_hook_path: str | None = None
     no_save_optim: bool = False
-    # Refused by validate_slime_args: the component never releases its workers between jobs.
+    # --reef-accept-optimizer-restart: the deployment accepts that --no-save-optim restarts the optimizer at every job.
+    is_optimizer_restart_accepted: bool = False
+    # Refused by validate_slime_args: the workers keep running through a job.
     release_train: bool
     custom_model_provider_path: str | None
     custom_rollout_data_keys: tuple[str, ...] | list[str] | None = ()

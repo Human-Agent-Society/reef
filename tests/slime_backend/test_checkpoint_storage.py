@@ -45,6 +45,7 @@ def _storage(
     lora: bool = False,
     critic: bool = False,
     critic_save_interval: int = 1,
+    saves_optimizer: bool = True,
 ) -> CheckpointStorage:
     root = tmp_path / "checkpoints"
     source_hf, source_megatron = tmp_path / "source-hf", tmp_path / "source-megatron"
@@ -62,6 +63,7 @@ def _storage(
         lora=lora,
         critic_root=root / "megatron-critic" if critic else None,
         critic_save_interval=critic_save_interval,
+        saves_optimizer=saves_optimizer,
     )
 
 
@@ -117,6 +119,25 @@ def test_complete_requires_the_critic_asset_only_on_its_save_commits(tmp_path: P
         storage.complete("job-1", 1, reward=1.0)
 
     assert storage.required_assets(1) == (*storage.pair_paths(1), critic_root / "iter_0000001")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("saves_optimizer", [True, False])
+def test_a_record_says_whether_its_checkpoint_holds_the_optimizer_state(tmp_path: Path, saves_optimizer: bool) -> None:
+    storage = _storage(tmp_path, saves_optimizer=saves_optimizer)
+    assert checkpoint_storage.latest_checkpoint_has_optimizer_state(storage.megatron_root) is None
+    _complete(storage, 0)
+    assert checkpoint_storage.latest_checkpoint_has_optimizer_state(storage.megatron_root) is saves_optimizer
+
+    # A record written before records kept the field stays valid and cannot say.
+    record = durable_io.read_json(storage._record_path(0)) or {}
+    record.pop("has_optimizer_state")
+    durable_io.write_json(storage._record_path(0), record)
+    assert not storage.validate_capacity()["blocked"]
+    assert checkpoint_storage.latest_checkpoint_has_optimizer_state(storage.megatron_root) is None
+
+    durable_io.write_json(storage._record_path(0), {**record, "has_optimizer_state": "yes"})
+    assert "invalid checkpoint catalog record" in " ".join(storage.validate_capacity()["reasons"])
 
 
 @pytest.mark.unit
@@ -510,6 +531,21 @@ def test_preflight_checks_free_space_and_pins_actor_and_critic_paths(
     assert args.save_hf == storage.hf_template
     # A critic without --critic-save keeps its weights beside the policy's, so a restart resumes them.
     assert args.critic_save == str(storage.critic_root) == f"{args.save}-critic"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("no_save_optim", [False, True])
+def test_the_storage_of_a_run_records_whether_it_saves_the_optimizer_state(
+    tmp_path: Path, monkeypatch, no_save_optim: bool
+) -> None:
+    monkeypatch.setattr(
+        preflight, "CheckpointStorage", partial(CheckpointStorage, disk_usage=lambda path: Usage(1 << 30, 0, 1 << 30))
+    )
+    _write_bytes(tmp_path / "source-hf", 10)
+    args = slime_args(tmp_path, hf_checkpoint=str(tmp_path / "source-hf"), no_save_optim=no_save_optim)
+    storage = prepare_checkpoint_storage(args, RetentionSettings())
+    _complete(storage, 0)
+    assert checkpoint_storage.latest_checkpoint_has_optimizer_state(storage.megatron_root) is (not no_save_optim)
 
 
 @pytest.mark.unit

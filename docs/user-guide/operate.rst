@@ -337,6 +337,9 @@ For Slime:
 
 - A checkpoint is the Megatron checkpoint and its HF export (with LoRA, the PEFT adapter). Each run of ``save_interval`` steps trains as one Slime rollout (one ``rollout_id``, Slime's unit of training).
 - ``save-interval`` in ``training.options`` does not change this cadence. Megatron requires it together with ``save``, so keep both set.
+- The Megatron checkpoint holds the optimizer state: the fp32 master weights and the Adam moments. Without LoRA, a checkpoint then takes about 8 times the size of the HF export, and a critic checkpoint as much again.
+- Reef records whether each checkpoint holds the optimizer state. A job loads the optimizer state from its own latest checkpoint only when that record says so, and continues Adam. Otherwise the job logs a warning and starts Adam again. The component refuses ``--no-load-optim``.
+- ``--no-save-optim`` saves the weights only, about 2 times the HF export. Then every job rebuilds the fp32 master weights from the bf16 weights and starts Adam again, so an update smaller than bf16 precision is lost. The component refuses ``--no-save-optim`` unless ``--reef-accept-optimizer-restart`` is also set. To save the optimizer state again later, remove ``--no-save-optim`` and ``--reef-accept-optimizer-restart`` together, and raise the storage limits.
 - ``--critic-save-interval`` (default 1) in ``training.options`` sets how many saved rollouts pass between two critic checkpoints.
 - These ``training.options`` bound the checkpoints on disk:
 

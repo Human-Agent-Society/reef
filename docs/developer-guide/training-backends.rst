@@ -336,7 +336,8 @@ A driver records each saved checkpoint in the job's directory, where the compone
 - After each rollout, the component saves the paired Hugging Face and Megatron checkpoints. A checkpoint's step is the job's optimizer steps up to it. The snapshot is the Hugging Face export, or with LoRA the PEFT adapter.
 - The job's ``objective`` parameter selects the loss family, and ``learning_rate_schedule`` the learning-rate schedule. The actor workers switch to them when they receive the job's data.
 - The job's last checkpoint records the objective's state after the job's data. An earlier checkpoint records the state of the job's start, because the objective computes its state for the whole data. When the objective skips the job's data, the job saves no checkpoint, so the next job continues the start's weights and objective state. The Tinker component does the same.
-- The optimizer state carries from one job to the next in the Megatron checkpoint.
+- The Megatron checkpoint holds the optimizer state, so the next job continues Adam. Reef's checkpoint storage (``CheckpointStorage``) records whether each saved checkpoint holds it. A driver that resumes the latest actor or critic checkpoint in its own save root loads the optimizer state only when that record says so. When the record does not say, the driver loads no optimizer state. ``--critic-init`` always loads its optimizer state.
+- ``validate_slime_args`` refuses ``--no-save-optim`` unless ``--reef-accept-optimizer-restart`` is set, and ``finalize_reef_slime_args`` refuses ``--no-load-optim``. Without the optimizer state, every job rebuilds the fp32 master weights from the bf16 weights and starts Adam again.
 
 **Starts.** Every driver loads Slime's latest checkpoint, so a job starts from the component's latest checkpoint. Because the jobs continue one save root, a Slime deployment trains one scenario.
 

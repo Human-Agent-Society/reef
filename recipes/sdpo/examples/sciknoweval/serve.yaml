@@ -66,9 +66,10 @@ training:
   config:
     checkpoint_dir: ${SDPO_RUN_DIR}/checkpoints
     checkpoint_retention:
-      # A step saves the weights twice (Megatron, the HF export), about 30 GB
-      # for Qwen3-8B; the cap keeps the last few, not the run's whole history.
-      max_storage: 200GB
+      # A step saves the HF export and the Megatron checkpoint with its
+      # optimizer state (fp32 master weights and Adam moments), about 130 GB
+      # for Qwen3-8B; the cap keeps the newest one and room for the next.
+      max_storage: 300GB
       max_storage_fraction: 0.80
       min_free_space_fraction: 0.10
       policy: latest
@@ -86,7 +87,6 @@ training:
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "1"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    no-save-optim: true
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"
     global-batch-size: "${training.config.global_batch_size}"
@@ -141,6 +141,9 @@ training:
     sdpo-top-k: "100"
     sdpo-top-k-source: student
     sdpo-top-k-distribution: tail
+    # Each job's new driver seeds the EMA teacher from the weights that the job
+    # starts from, so the teacher moves only within a job: a job of one step
+    # trains against a teacher with the student's weights.
     sdpo-teacher-update-rate: "0.05"
     sdpo-importance-sampling-level: token
     sdpo-importance-sampling-cap: "2.0"

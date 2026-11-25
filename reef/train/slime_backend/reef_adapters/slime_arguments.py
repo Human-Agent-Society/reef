@@ -26,6 +26,16 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="Training worker executor: auto (currently ray), ray, or a Slime-compatible Executor as package.module:ClassName.",
     )
     parser.add_argument(
+        "--reef-accept-optimizer-restart",
+        dest="is_optimizer_restart_accepted",
+        action="store_true",
+        default=False,
+        help=(
+            "Accept that --no-save-optim restarts the optimizer at every job: each job's workers rebuild the fp32 "
+            "master weights from the saved bf16 weights and start Adam again. Valid only with --no-save-optim."
+        ),
+    )
+    parser.add_argument(
         "--megatron-to-hf-mode",
         choices=["raw", "bridge"],
         default="raw",
@@ -111,6 +121,12 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
         # The component saves a Megatron checkpoint in --save after every rollout. Megatron also
         # requires --save-interval with --save, but the component does not read it.
         raise ValueError("the Slime training component requires --save for Megatron recovery checkpoints")
+    if "--no-load-optim" in arguments:
+        # Slime sets no_load_optim itself on a first start, so only the written flag tells the user's choice apart.
+        raise ValueError(
+            "--no-load-optim restarts the optimizer at every job: each job's driver loads the latest checkpoint, "
+            "and its optimizer state when the checkpoint holds one; remove --no-load-optim"
+        )
     if explicitly_enabled_critic:
         args.use_critic = True
         # The critic shares the actor's GPUs, so whichever is idle is

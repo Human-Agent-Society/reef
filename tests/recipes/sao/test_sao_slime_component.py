@@ -8,6 +8,7 @@ They transitively import ``ray`` and ``torch`` and touch no GPU.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -597,18 +598,36 @@ def test_prepare_critic_args_without_lora_unwraps_only_the_reef_provider(provide
 
 
 @pytest.mark.unit
-def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path) -> None:
-    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
+@pytest.mark.parametrize(
+    ("record", "no_load_optim"),
+    [
+        ({"has_optimizer_state": True}, False),
+        # A load of an optimizer state that the checkpoint lacks would fail.
+        ({"has_optimizer_state": False}, True),
+        # A record without the field (an older one) cannot say.
+        ({}, True),
+    ],
+)
+def test_prepare_critic_args_restores_from_the_critic_root_when_present(
+    tmp_path, caplog, record, no_load_optim
+) -> None:
+    from reef.storage.durable_files import write_json
+    from reef.train.slime_backend.reef_adapters import train_groups
+    from reef.train.slime_backend.reef_adapters.training_job.storage import checkpoint_record_path
 
     critic_root = tmp_path / "megatron-critic"
     critic_root.mkdir()
     (critic_root / "latest_checkpointed_iteration.txt").write_text("7\n", encoding="utf-8")
+    write_json(checkpoint_record_path(tmp_path, 7), {"rollout_id": 7, **record})
 
-    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_root)))
+    with caplog.at_level(logging.WARNING, logger=train_groups.__name__):
+        critic_args = train_groups.prepare_critic_args(critic_prep_args(critic_save=str(critic_root)))
 
     assert critic_args.save == str(critic_root)
     assert critic_args.load == str(critic_root)
-    assert critic_args.no_load_optim is False
+    assert critic_args.no_load_optim is no_load_optim
+    # The restart is never silent.
+    assert [entry.levelno for entry in caplog.records] == ([logging.WARNING] if no_load_optim else [])
     assert critic_args.no_load_rng is False
     assert critic_args.finetune is False
 

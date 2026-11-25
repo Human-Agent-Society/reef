@@ -21,9 +21,9 @@ engines load its weights from files.
 |                          | jobs and starts their drivers                 |
 +--------------------------+-----------------------------------------------+
 | Slime driver (one per    | Slime's training workers; it continues the    |
-| job, while it trains)    | latest checkpoint, with its optimizer state,  |
-|                          | and saves the job's own. Without a serving    |
-|                          | session, it also reserves the job's GPUs      |
+| job, while it trains)    | latest checkpoint and saves the job's own.    |
+|                          | Without a serving session, it also reserves   |
+|                          | the job's GPUs                                |
 +--------------------------+-----------------------------------------------+
 | Slime serving session    | the rollout engines of task jobs and dataset  |
 | (from the first such job | jobs, their router and the training GPUs,     |
