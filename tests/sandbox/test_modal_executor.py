@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-import reef.execution.sandbox.providers.modal.executor as modal_sandbox
+import reef.execution.sandbox.modal.executor as modal_sandbox
 import reef.execution.sandbox.remote as remote
 from reef.execution.sandbox.config import build_executor, remote_executor
 from reef.execution.sandbox.modal import ModalExecutor, ModalSession

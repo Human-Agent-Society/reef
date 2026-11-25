@@ -211,19 +211,17 @@ def test_an_e2b_trial_gets_reefs_class_on_harbors_template_with_the_tasks_limits
 
 
 @pytest.mark.unit
-def test_the_earlier_e2b_path_is_the_trial_module_that_saved_configs_name() -> None:
+def test_saved_e2b_trial_path_and_executor_imports() -> None:
     from harbor.utils.import_path import import_class
 
     from reef.execution.sandbox import e2b
-    from reef.execution.sandbox.providers.e2b import executor, trial
+    from reef.execution.sandbox.e2b import executor, trial
     from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT
 
-    # Saved trial configs keep the earlier path, and Harbor resolves it to the trial module's class.
     assert HARBOR_E2B_ENVIRONMENT == "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
     assert import_class(HARBOR_E2B_ENVIRONMENT) is trial.KillOnTimeoutE2BEnvironment
-    # The earlier path is the trial module itself, so a hook that a caller sets on it, such as ``build_image`` in the
-    # Compose tests below, is the one that trials call. It still gives the executor.
-    assert e2b is trial and e2b.E2BExecutor is executor.E2BExecutor
+    assert (e2b.E2BExecutor, e2b.SANDBOX_MAX_TIMEOUT_S) == (executor.E2BExecutor, 3600)
+    assert callable(e2b.build_image) and callable(e2b.prepare_guest)
 
 
 @pytest.mark.unit
@@ -349,7 +347,7 @@ def test_reefs_e2b_verifier_sandbox_waits_for_capacity_within_its_start_time_lim
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, refusals: int, pauses: list[int], created: bool
 ) -> None:
     e2b = pytest.importorskip("e2b")
-    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.e2b import trial as reef_e2b
 
     environment = harbor_e2b_environments(tmp_path)["reef"]
     environment.session_id = session
@@ -414,8 +412,8 @@ def test_a_modal_trial_gets_reefs_class_on_harbors_modal_environment(tmp_path: P
     from harbor.environments.modal import ModalEnvironment
     from harbor.utils.import_path import import_class
 
+    from reef.execution.sandbox.modal import trial
     from reef.execution.sandbox.modal_trial import ModalTrialEnvironment
-    from reef.execution.sandbox.providers.modal import trial
     from reef.execution.sandbox.task_environment import HARBOR_MODAL_ENVIRONMENT
 
     environment = harbor_modal_environment(tmp_path)
@@ -834,7 +832,7 @@ def test_the_template_of_a_separate_verifier_environment_is_built_before_the_tri
 @pytest.mark.unit
 def test_a_task_template_that_exists_is_not_built_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("e2b")
-    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.e2b import trial as reef_e2b
 
     monkeypatch.delenv("REEF_E2B_DOCKERFILE_BUILD", raising=False)
     trial = harbor_e2b_environments(tmp_path)["reef"]

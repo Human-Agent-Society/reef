@@ -77,7 +77,7 @@ class DockerfileTemplateBuilder(TaskTemplateBuilder):
 
     async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
         # The e2b extra is optional, and only an evaluation on e2b needs it.
-        from reef.execution.sandbox.providers.e2b.trial import build_task_template
+        from reef.execution.sandbox.e2b import build_task_template
 
         await build_task_template(task_directory)
 

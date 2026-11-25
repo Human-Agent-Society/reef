@@ -11,8 +11,8 @@ asks for the hour again before it ends (:class:`SandboxKeeper`).
 A service can keep a sandbox's ports private and return a traffic access token for them. An :class:`E2BSession`
 then sends that token with each request to the sandbox's relays (:meth:`E2BSession.tunnel_headers`).
 
-This module loads without the optional E2B SDK; opening a sandbox requires it (``reef-infra[e2b]``). The earlier
-module ``reef.execution.sandbox.e2b`` gives the same names.
+This module loads without the optional E2B SDK; opening a sandbox requires it (``reef-infra[e2b]``). The package
+``reef.execution.sandbox.e2b`` exports its names.
 """
 
 from __future__ import annotations
@@ -46,8 +46,7 @@ from reef.execution.sandbox.remote import (
     remote_root,
 )
 
-# The category of the earlier module, which log filters name.
-logger = logging.getLogger("reef.execution.sandbox.e2b")
+logger = logging.getLogger(__package__)
 
 #: The longest life E2B grants a sandbox at creation; asking for more is refused outright, so a run that needs
 #: more keeps its own sandbox alive instead (:class:`SandboxKeeper`).

@@ -20,8 +20,8 @@ A sandbox carries its deployment as ``owner``; a Reef that stopped mid run never
 process starts its first sandbox it stops the ones its deployment left (:meth:`RemoteExecutor.reap_once`), and
 never another deployment's.
 
-A provider's executor module (:mod:`reef.execution.sandbox.providers.e2b.executor`,
-:mod:`reef.execution.sandbox.providers.modal.executor`) implements the sandbox's start, its file and command
+A provider's executor module (:mod:`reef.execution.sandbox.e2b.executor`,
+:mod:`reef.execution.sandbox.modal.executor`) implements the sandbox's start, its file and command
 primitives, and the launch of one process. :mod:`reef.execution.sandbox.config` selects a provider for an
 executor, and :mod:`reef.execution.sandbox.task_environment` names the Harbor task environments.
 """

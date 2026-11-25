@@ -2,7 +2,7 @@
 
 import sys
 
-from reef.execution.sandbox.providers.agentenv import compose
+from reef.execution.sandbox.agentenv import compose
 
 COMPOSE_FILE = compose.COMPOSE_FILE
 COMPOSE_MODES = compose.COMPOSE_MODES

@@ -394,15 +394,13 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
 
 
 def test_executor_config_and_the_e2b_module_do_not_require_the_e2b_package() -> None:
-    # The executor config imports the E2B executor for every deployment, and reef.execution.sandbox.e2b, the earlier
-    # path of the E2B trial module, defines a subclass of Harbor's E2B environment. A base installation has no e2b
-    # package. The modules still import, a local executor is built and the E2B settings are read; only the E2B
-    # startup check names the missing extra.
+    # The executor config imports the E2B executor for every deployment, and its package, reef.execution.sandbox.e2b,
+    # gives a subclass of Harbor's E2B environment. A base installation has no e2b package. The modules still import,
+    # a local executor is built and the E2B settings are read; only the E2B startup check names the missing extra.
     _assert_isolated_import(
         "import sys\n"
         "sys.modules['e2b'] = None\n"
         "from reef.execution.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor\n"
-        "assert 'reef.execution.sandbox.providers.e2b.trial' not in sys.modules\n"
         "from reef.execution.sandbox.e2b import E2BExecutor, KillOnTimeoutE2BEnvironment\n"
         "from reef.execution.sandbox.process import LocalExecutor, SandboxUnavailableError\n"
         "assert REMOTE_EXECUTORS['e2b'] is E2BExecutor and KillOnTimeoutE2BEnvironment.type() == 'e2b'\n"
@@ -419,20 +417,19 @@ def test_executor_config_and_the_e2b_module_do_not_require_the_e2b_package() -> 
 
 
 def test_executor_config_and_the_modal_executor_do_not_require_the_modal_package() -> None:
-    # Only Harbor's factory loads Reef's Modal trial environment, which imports Modal's SDK. The executor config, the
-    # provider packages and the earlier Modal module import without any provider SDK; only the Modal startup check
-    # names the missing extra.
+    # Only Harbor's factory loads Reef's Modal trial environment, which imports Modal's SDK. The executor config and
+    # the provider packages import without any provider SDK; only the Modal startup check names the missing extra.
     _assert_isolated_import(
         "import sys\n"
         "sys.modules.update(dict.fromkeys(('modal', 'e2b')))\n"
-        "import reef.execution.sandbox.providers.agentenv\n"
-        "import reef.execution.sandbox.providers.e2b\n"
-        "import reef.execution.sandbox.providers.modal\n"
+        "import reef.execution.sandbox.agentenv\n"
+        "import reef.execution.sandbox.e2b\n"
+        "import reef.execution.sandbox.modal\n"
         "from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor\n"
         "from reef.execution.sandbox.modal import NODE_IMAGE, ModalExecutor, ModalSession\n"
         "from reef.execution.sandbox.process import SandboxUnavailableError\n"
         "assert REMOTE_EXECUTORS['modal'] is ModalExecutor and ModalSession and NODE_IMAGE\n"
-        "loaded = {'reef.execution.sandbox.providers.modal.trial', 'reef.execution.sandbox.modal_trial'}\n"
+        "loaded = {'reef.execution.sandbox.modal.trial', 'reef.execution.sandbox.modal_trial'}\n"
         "assert not loaded & set(sys.modules), loaded & set(sys.modules)\n"
         "executor = remote_executor('modal', {'modal_app': 'custom'}, {})\n"
         "assert isinstance(executor, ModalExecutor) and executor.app_name == 'custom'\n"
@@ -446,19 +443,18 @@ def test_executor_config_and_the_modal_executor_do_not_require_the_modal_package
 
 
 def test_a_name_set_on_the_earlier_agentenv_build_path_is_the_one_that_builds_read() -> None:
-    # Callers set names on the earlier module path, such as the poll interval of a build wait. That path is the build
-    # module itself, also when a process imports it first. Neither earlier AgentENV path needs the E2B SDK or loads
-    # Reef's E2B trial module.
+    # Callers set names on the earlier module path, such as the poll interval of a build wait, also when a process
+    # imports that path first. Neither earlier AgentENV path needs the E2B SDK or loads Reef's E2B trial module.
     _assert_isolated_import(
         "import sys\n"
         "sys.modules['e2b'] = None\n"
         "import reef.execution.sandbox.agentenv_build as earlier\n"
         "from reef.execution.sandbox.agentenv_compose import ComposeSandbox\n"
-        "from reef.execution.sandbox.providers.agentenv import build, compose\n"
+        "from reef.execution.sandbox.agentenv import build, compose\n"
         "earlier.BUILD_POLL_INTERVAL_S = 0.5\n"
-        "assert earlier is build and build.poll_interval() <= 0.75\n"
+        "assert build.poll_interval() <= 0.75\n"
         "assert ComposeSandbox is compose.ComposeSandbox\n"
-        "assert 'reef.execution.sandbox.providers.e2b.trial' not in sys.modules\n"
+        "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
 
 

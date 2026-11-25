@@ -2,7 +2,7 @@
 
 import sys
 
-from reef.execution.sandbox.providers.agentenv import build
+from reef.execution.sandbox.agentenv import build
 
 ALIAS_CONFLICT_TEXT = build.ALIAS_CONFLICT_TEXT
 BUILD_OUTPUT_TAIL_CHARS = build.BUILD_OUTPUT_TAIL_CHARS

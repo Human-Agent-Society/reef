@@ -4,9 +4,9 @@
 so AgentENV deletes an abandoned sandbox instead of pausing it. It also keeps the file modes of a task's
 ``COPY --chmod``, which E2B's Dockerfile parser ignores (:func:`dockerfile_with_copy_modes`). On AgentENV, whose E2B
 template builds take no files, ``REEF_E2B_DOCKERFILE_BUILD=aenv`` makes it build a task's Dockerfile with
-``aenv build`` (:mod:`reef.execution.sandbox.providers.agentenv.build`). There, ``REEF_E2B_COMPOSE=aenv`` also makes
+``aenv build`` (:mod:`reef.execution.sandbox.agentenv.build`). There, ``REEF_E2B_COMPOSE=aenv`` also makes
 it run the Compose project of a task that has one in one sandbox, so that the agent reaches the task's other services
-(:mod:`reef.execution.sandbox.providers.agentenv.compose`). The shared ``environment_config`` selects this class for
+(:mod:`reef.execution.sandbox.agentenv.compose`). The shared ``environment_config`` selects this class for
 Reef's Harbor rollouts and generator checks through ``import_path``, by the path that saved trial configs keep,
 ``reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment``. A standalone Harbor trial that selects only ``e2b`` uses
 Harbor's own class.
@@ -41,17 +41,14 @@ from harbor.models.trial.paths import TrialPaths
 from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from reef.core.errors import InternalError
-from reef.execution.sandbox.process import SandboxCapacityError, SandboxRequestError
-from reef.execution.sandbox.providers.agentenv.build import (
+from reef.execution.sandbox.agentenv.build import (
     DOCKERFILE_BUILD_VARIABLE,
     AgentEnvTemplates,
     DockerfileBuild,
-    build_image,
     dockerfile_build,
     dockerfile_sets_start_command,
-    ensure_aenv_template,
 )
-from reef.execution.sandbox.providers.agentenv.compose import (
+from reef.execution.sandbox.agentenv.compose import (
     COMPOSE_FILE,
     COMPOSE_VARIABLE,
     AgentEnvComposeOps,
@@ -61,24 +58,11 @@ from reef.execution.sandbox.providers.agentenv.compose import (
     TransientStartError,
     compose_mode,
     compose_project,
-    delete_sandbox,
     main_image,
-    prepare_guest,
 )
-from reef.execution.sandbox.providers.e2b import executor
-from reef.execution.sandbox.providers.e2b.executor import (
-    TRAFFIC_ACCESS_TOKEN_HEADER,
-    E2BExecutor,
-    E2BSession,
-    SandboxKeeper,
-    ensure_template,
-    template_alias,
-)
+from reef.execution.sandbox.process import SandboxCapacityError, SandboxRequestError
 
-# Preserve the settings and logger name used by existing E2B clients.
-SANDBOX_MAX_TIMEOUT_S = executor.SANDBOX_MAX_TIMEOUT_S
-SANDBOX_RENEW_MARGIN_S = executor.SANDBOX_RENEW_MARGIN_S
-logger = logging.getLogger("reef.execution.sandbox.e2b")
+logger = logging.getLogger(__package__)
 
 #: The end of the template alias of a task whose Dockerfile has ``--chmod``. Harbor's class builds that template
 #: without the modes, so Reef's class does not use a template that Harbor's class built.
@@ -187,7 +171,7 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     template is the parent's, with two differences for a task that builds its image from a Dockerfile:
 
     - With ``dockerfile_build`` ``aenv``, ``aenv build`` builds the template on the AgentENV deployment
-      (``reef.execution.sandbox.providers.agentenv.build``), and its alias ends with ``AENV_TEMPLATE_SUFFIX``.
+      (``reef.execution.sandbox.agentenv.build``), and its alias ends with ``AENV_TEMPLATE_SUFFIX``.
     - Else, when the Dockerfile has ``--chmod``, the template is built from ``dockerfile_with_copy_modes`` of it, and
       its alias ends with ``COPY_MODES_TEMPLATE_SUFFIX``.
 
@@ -266,6 +250,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         """
         # Keep this optional SDK import inside sandbox creation.
         from e2b import AsyncSandbox
+
+        from reef.execution.sandbox.e2b import delete_sandbox, prepare_guest
 
         templates = AgentEnvTemplates.from_environ(os.environ)
         image = self.task_env_config.docker_image or main_image(self._template_name)[1]
@@ -428,6 +414,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     )
     @override
     async def _create_template(self) -> None:
+        from reef.execution.sandbox.e2b import build_image, ensure_aenv_template
+
         if not self.builds_templates:
             missing = (
                 f"the template {self._template_name}"
@@ -630,15 +618,9 @@ async def build_task_main_image(task_path: Path) -> str | None:
 __all__ = [
     "AENV_TEMPLATE_SUFFIX",
     "COPY_MODES_TEMPLATE_SUFFIX",
-    "TRAFFIC_ACCESS_TOKEN_HEADER",
-    "E2BExecutor",
-    "E2BSession",
     "KillOnTimeoutE2BEnvironment",
-    "SandboxKeeper",
     "TemplateNotPreparedError",
     "build_task_main_image",
     "build_task_template",
     "dockerfile_with_copy_modes",
-    "ensure_template",
-    "template_alias",
 ]

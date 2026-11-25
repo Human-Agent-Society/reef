@@ -10,7 +10,7 @@ networks. The services then reach one another by name, as under Docker Compose.
 This module holds the parts of that start that need no sandbox: the project that the sandbox runs
 (``compose_project``), the name of the image of ``main`` (``main_image``), and the ``aenv`` commands
 (``ComposeSandbox``, ``prepare_guest``, ``delete_sandbox``). ``KillOnTimeoutE2BEnvironment``
-(``reef.execution.sandbox.providers.e2b.trial``) uses it for a task with a Compose file when ``REEF_E2B_COMPOSE`` is
+(``reef.execution.sandbox.e2b.trial``) uses it for a task with a Compose file when ``REEF_E2B_COMPOSE`` is
 ``aenv``, and then runs the trial's commands in ``main`` with ``AgentEnvComposeOps``.
 
 A deployment selects this with ``REEF_E2B_COMPOSE`` (``compose_mode``), and the default is ``off``. ``aenv build
@@ -49,12 +49,8 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.dind_compose import DinDComposeOps
 
 from reef.core.errors import InternalError
+from reef.execution.sandbox.agentenv.build import BUILD_OUTPUT_TAIL_CHARS, TRANSIENT_STATUSES, AgentEnvTemplates
 from reef.execution.sandbox.process import SandboxCapacityError
-from reef.execution.sandbox.providers.agentenv.build import (
-    BUILD_OUTPUT_TAIL_CHARS,
-    TRANSIENT_STATUSES,
-    AgentEnvTemplates,
-)
 
 # The category of the earlier module, which log filters name.
 logger = logging.getLogger("reef.execution.sandbox.agentenv_compose")

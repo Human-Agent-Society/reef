@@ -275,7 +275,7 @@ limit, and a wait for a free AgentENV builder counts against that limit. A
 trial builds a verifier template only after its agent ends, so a late build
 there loses the agent's work.
 
-``reef.execution.sandbox.providers.e2b.trial.build_task_template(task_path)`` builds the
+``reef.execution.sandbox.e2b.build_task_template(task_path)`` builds the
 templates that a trial of the task would build, with the same aliases,
 resources and build timeouts: the template of the task's environment, and the
 template of each separate verifier environment of the task or of its steps.

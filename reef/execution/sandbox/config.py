@@ -11,9 +11,9 @@ from pathlib import Path
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, resolve_plugin_class
 from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.e2b.executor import E2BExecutor
+from reef.execution.sandbox.modal.executor import ModalExecutor
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
-from reef.execution.sandbox.providers.e2b.executor import E2BExecutor
-from reef.execution.sandbox.providers.modal.executor import ModalExecutor
 from reef.execution.sandbox.remote import RemoteExecutor, deployment_owner
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
