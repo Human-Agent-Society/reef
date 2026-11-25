@@ -5,7 +5,8 @@
 patch to copies of the installed files, or read the installed files when the image build already applied it. They
 skip when Slime is missing.
 
-Slime's ``loss.py`` imports Megatron, so the first test runs only its ``num_tokens`` statement.
+Both modules import packages that Reef's CI does not install (Megatron, wandb), so the tests run only the patched
+statement and function.
 
 Remove these tests with the patch when the Slime pin has a fix.
 """
@@ -16,6 +17,7 @@ import ast
 import importlib.util
 import shutil
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -43,11 +45,14 @@ def patched_slime(tmp_path) -> Path:
     return tmp_path
 
 
-def test_rows_without_a_token_with_loss_add_nothing_to_the_divisor(patched_slime):
-    tree = ast.parse((patched_slime / LOSS).read_text())
-    loss_function = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "loss_function"
+def function_node(path: Path, name: str) -> ast.FunctionDef:
+    return next(
+        node for node in ast.parse(path.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == name
     )
+
+
+def test_rows_without_a_token_with_loss_add_nothing_to_the_divisor(patched_slime):
+    loss_function = function_node(patched_slime / LOSS, "loss_function")
     (statement,) = [
         node
         for node in loss_function.body
@@ -60,15 +65,14 @@ def test_rows_without_a_token_with_loss_add_nothing_to_the_divisor(patched_slime
     assert eval(divisor, {"torch": torch}, {"batch": {"loss_masks": [removed, removed]}}) == 0
 
 
-def test_a_step_without_a_token_with_loss_reports_zero_metrics(patched_slime, monkeypatch):
-    spec = importlib.util.spec_from_file_location("patched_train_metric_utils", patched_slime / METRICS)
-    metrics = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(metrics)
-    monkeypatch.setattr(metrics.dist, "all_reduce", lambda values, group: None)
+def test_a_step_without_a_token_with_loss_reports_zero_metrics(patched_slime):
+    module = ast.Module([function_node(patched_slime / METRICS, "reduce_train_step_metrics")], type_ignores=[])
+    namespace = {"dist": types.SimpleNamespace(all_reduce=lambda values, group: None)}
+    exec(compile(module, str(METRICS), "exec"), namespace)
     # values[0] is the step's tokens with loss; the metrics follow it.
     losses = [{"keys": ["pg_loss", "entropy"], "values": torch.zeros(3)}]
 
-    reduced = metrics.reduce_train_step_metrics(
+    reduced = namespace["reduce_train_step_metrics"](
         losses, calculate_per_token_loss=True, step_global_batch_size=2, cp_size=1, dp_with_cp_group=None
     )
 
