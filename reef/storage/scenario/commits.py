@@ -187,6 +187,8 @@ class CommitRecord:
     algorithm_state: Mapping[str, Any] | None
     high_water_sequence: int
     high_water_offset: int
+    #: The IDs that the step consumed, also those that it skipped on purpose (``PreparedCommit.consumed_ids``). An
+    #: ID in it does not prove that its record changed the model.
     consumed_ids: frozenset[str] = frozenset()
     recorded_at: float = field(default_factory=time.time)
     operation: CommitOperation = "training"

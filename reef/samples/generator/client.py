@@ -192,6 +192,12 @@ class HttpGenerator(Generator):
         tags: Mapping[str, str],
         model: str | None = None,
     ) -> ProposedTask:
+        """Ask the service's designer for one task of ``request``.
+
+        The client reads the local materials that ``request.inputs.assets`` names (``read_asset_files``) and sends
+        their contents. The task of a request with source records keeps their IDs, in order, as its
+        ``source_agent_record_ids``.
+        """
         if any(record.scenario != scenario for record in request.inputs.source_records):
             raise GeneratorError("source records must belong to the proposal's scenario")
         if request.inputs.assets:

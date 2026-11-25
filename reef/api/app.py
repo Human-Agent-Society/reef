@@ -273,6 +273,8 @@ def create_app(
     ``harness_inference_url`` is ``harness.inference_url``: where a client's harness layer sends its model calls.
     ``max_task_archive_bytes`` is ``data.max_task_archive_bytes``: the most bytes of the body of a task archive, when
     the app serves the data routes.
+    ``record_retention`` runs ``Dispatcher.prune_record_archives`` with it when the app starts and every 60 seconds
+    after that; None runs no record retention.
 
     Without routing, the app runs the inference routes in the same process (``reef.api.inference_service``): they read
     ``served_models`` and reach each row's engine through the runtime that inference serves it with, or through

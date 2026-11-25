@@ -11,8 +11,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from reef.execution.sandbox.agentenv_compose import TransientStartError
+from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SandboxCapacityError
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import (
     HARBOR_TASK_ENVIRONMENTS,
@@ -233,6 +236,83 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
     assert harbor_call["timeout"] == 120 + 900 + 300 + 3600 and "lifecycle" not in harbor_call
     # Every argument of Harbor's call, and one more: delete the sandbox at its timeout, never pause it.
     assert calls["reef"][-1] == {**harbor_call, "lifecycle": {"on_timeout": "kill"}}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal", ["busy", "rate", "gateway", "client"])
+def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_sandbox_capacity_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    errors = {
+        "busy": e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available"),
+        "rate": e2b.RateLimitException("429: too many requests"),
+        # A gateway's 504 answer has an HTML body, which the SDK cannot read as JSON.
+        "gateway": json.JSONDecodeError("Expecting value", "<html>504 Gateway Time-out</html>", 0),
+        "client": httpx.ReadTimeout("timed out"),
+    }
+
+    async def create(**options: object) -> object:
+        raise errors[refusal]
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    with pytest.raises(SandboxCapacityError) as raised:
+        asyncio.run(environment._create_sandbox())
+    assert raised.value.__cause__ is errors[refusal]
+    # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it.
+    assert type(raised.value).__name__ in SANDBOX_CAPACITY_ERRORS
+    assert TransientStartError.__name__ in SANDBOX_CAPACITY_ERRORS and issubclass(
+        TransientStartError, SandboxCapacityError
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("session", "refusals", "pauses", "created"),
+    [
+        # A separate verifier waits for capacity, so the agent's work is kept.
+        ("t__verifier__tests", 2, [15, 30], True),
+        # Its wait ends before 80% of its start time limit (96 of 120 s); Harbor's retry starts it once more.
+        ("t__verifier__tests", 99, [15, 30, 15, 30], False),
+        # The agent's environment does not wait: its rollout goes back to the queue (EvaluationRolloutWorker).
+        ("t__env", 99, [], False),
+    ],
+    ids=["verifier-gets-capacity", "verifier-gives-up", "agent-environment"],
+)
+def test_reefs_e2b_verifier_sandbox_waits_for_capacity_within_its_start_time_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, refusals: int, pauses: list[int], created: bool
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    environment.session_id = session
+    clock = {"seconds": 1000.0}
+    environment.started_at = clock["seconds"]
+    slept: list[float] = []
+    calls: list[int] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["seconds"] += seconds
+
+    async def create(**options: object) -> object:
+        calls.append(1)
+        if len(calls) <= refusals:
+            raise e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available")
+        return "sandbox"
+
+    monkeypatch.setattr(reef_e2b, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(reef_e2b, "time", SimpleNamespace(monotonic=lambda: clock["seconds"]))
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    if created:
+        asyncio.run(environment._create_sandbox())
+        assert environment._sandbox == "sandbox"
+    else:
+        with pytest.raises(SandboxCapacityError):
+            asyncio.run(environment._create_sandbox())
+    assert slept == pauses
 
 
 @pytest.mark.unit
@@ -995,3 +1075,24 @@ def test_a_compose_trial_moves_files_through_the_guest_to_and_from_main(
     assert stat.S_IMODE((tmp_path / "back" / "bin" / "run.sh").stat().st_mode) == 0o755
     # Nothing stays in the guest.
     assert list((guest_root / "tmp").iterdir()) == []
+
+
+@pytest.mark.unit
+def test_a_compose_command_as_root_names_root_by_its_uid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent can overwrite /etc/passwd in main. Docker then finds no user named root, but it still runs UID 0."""
+    import shlex
+
+    from harbor.environments.base import ExecResult
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    commands: list[list[str]] = []
+
+    async def host_exec(command: str, timeout_sec: int | None = None) -> ExecResult:
+        commands.append(shlex.split(command))
+        return ExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(environment, "host_exec", host_exec)
+    for user in ("root", "agent", 1000):
+        asyncio.run(environment.exec("true", user=user))
+    users = [command[command.index("-u") + 1] for command in commands]
+    assert users == ["0", "agent", "1000"]

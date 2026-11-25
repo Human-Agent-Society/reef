@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import threading
+import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,9 +23,12 @@ import pytest
 from reef_client.serve import CapturedTurn
 from tests.support.polling import wait_until
 
-from reef.core.errors import ReefError
-from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
+from reef.artifact.artifact import Artifact
+from reef.core.errors import ReefError, UpstreamLimit
+from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel, RolloutScore
 from reef.core.served_models import ServedArtifact
+from reef.core.snapshot import SnapshotRef
+from reef.evaluation import artifact_endpoint
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -32,6 +39,7 @@ from reef.evaluation.rollout_worker import (
     EvaluationRollout,
     EvaluationRolloutWorker,
     LocalCandidateEndpoints,
+    ModelCallRefusal,
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
@@ -48,6 +56,9 @@ from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
+from reef.inference.http import HttpInferenceHandler
+from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError, WorkQueue
 from reef.storage.sql.coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 
@@ -174,6 +185,32 @@ def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing
     assert (failed in caplog.text) == failing
 
 
+class NoCapacityLab(NoSandboxLab):
+    """A lab whose trial ends as Harbor records a sandbox that the service refused for want of capacity."""
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        row = await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        (self.root / key / "result.json").write_text(json.dumps(result))
+        return row
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_sandbox_found_no_capacity_waits_in_the_queue_and_keeps_its_attempts(tmp_path):
+    queue = memory_coordination().work_queue
+    value = rollout()
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=NoCapacityLab(tmp_path / "t"))
+    taken_at = time.time()
+    assert worker.run_once()
+    waiting = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (waiting.state, waiting.error) == ("queued", "waiting for sandbox capacity: the sandbox did not start")
+    assert waiting.available_at >= taken_at + worker.first_deferral_seconds
+    assert waiting.stopped_attempt_count == waiting.attempt_count == 1
+    # The worker starts no other rollout while the service adds capacity.
+    assert not worker.run_once()
+
+
 class AnsweringEndpoints(OpenEndpoints):
     """Endpoints for the failed-score test's model call, with the state and task operations of ``OpenEndpoints``.
 
@@ -259,6 +296,38 @@ def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp
     }
 
 
+class CalledThenNoVerifierCapacityLab(CalledThenFailedLab):
+    """A lab whose agent calls the model, and whose separate verifier then finds no sandbox capacity, as Harbor
+    records it in the trial's ``result.json`` under ``root``."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+        trial = self.root / key
+        trial.mkdir(parents=True)
+        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        (trial / "result.json").write_text(json.dumps(result))
+        error = "the sandbox service has no capacity now: 503"
+        return RolloutRow(rewards={}, error=error, trial_uri=trial.as_uri())
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_verifier_found_no_sandbox_capacity_runs_again_and_gets_no_score(tmp_path):
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = CalledThenNoVerifierCapacityLab(tmp_path / "trials")
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    assert worker.run_once() is True
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    # The agent called the model, but the rollout gets no score of 0: it waits for capacity and runs again.
+    assert (item.state, item.result) == ("queued", None)
+    assert item.error == "waiting for sandbox capacity: the sandbox service has no capacity now: 503"
+    assert item.stopped_attempt_count == item.attempt_count == 1
+
+
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
     return CapturedTurn("", path, status, {"messages": []}, response, None, False, 2.0, at=100.0)
 
@@ -285,6 +354,41 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
+
+
+@pytest.mark.unit
+def test_the_rollouts_of_one_candidate_ask_inference_to_serve_it_one_at_a_time():
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None))
+    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    served = ServedArtifact("artifact-1", "http://engine", "sampler:artifact-1")
+    lease_lost = threading.Event()
+    with ThreadPoolExecutor(2) as pool:
+        waits = [pool.submit(worker.served_candidate, rollout(repeat), lease_lost) for repeat in (0, 1)]
+        wait_until(lambda: len(queue.items(SERVING_QUEUE)) == 2)
+        first = queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND])
+        # The second item waits for the first, so inference has a free slot for other work.
+        assert first is not None and queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
+        queue.finish(SERVING_QUEUE, first.id, "inference", {"served": served.to_json()})
+        second = queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND])
+        assert second is not None
+        queue.finish(SERVING_QUEUE, second.id, "inference", {"served": served.to_json()})
+        assert [wait.result(5) for wait in waits] == [served, served]
+
+
+@pytest.mark.unit
+def test_a_rollout_that_stops_waiting_for_its_candidate_cancels_its_serve_item():
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None))
+    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    lease_lost = threading.Event()
+    with ThreadPoolExecutor(1) as pool:
+        wait = pool.submit(worker.served_candidate, rollout(), lease_lost)
+        wait_until(lambda: len(queue.items(SERVING_QUEUE)) == 1)
+        lease_lost.set()
+        with pytest.raises(WorkLeaseLostError):
+            wait.result(5)
+    (item,) = queue.items(SERVING_QUEUE)
+    assert item.state == "failed" and "stopped waiting" in item.error
+    assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
 
 
 class ServingRefusedWorker(EvaluationRolloutWorker):
@@ -389,6 +493,10 @@ def test_a_captured_call_becomes_an_evaluation_call_and_a_failed_one_keeps_its_e
         turn("/v1/chat/completions", 200, {"choices": [], "training": {"ids": [1]}}), rollout(), 1, 0
     )
     assert trained.response == {"choices": []}
+    # A captured body that is no JSON object is kept as None, with the call's status.
+    for status in (200, 429):
+        kept = evaluation_call(turn("/v1/chat/completions", status, []), rollout(), 1, 0)
+        assert (kept.summary.status, kept.summary.finish_reason, kept.response) == (status, None, None)
 
 
 @pytest.mark.unit
@@ -403,6 +511,344 @@ def test_rollout_calls_number_the_calls_in_order_and_a_refused_call_does_not_sto
         (3, 2, 200),
     ]
     assert "could not keep call 1 of rollout evaluation_rollout:e1:00002:00000" in caplog.text
+
+
+RATE, PAYMENT = UpstreamLimit.RATE, UpstreamLimit.PAYMENT
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "response", "refusal"),
+    [
+        (429, {"error": {"code": "rate_limit", "retry_after_seconds": 30}}, ModelCallRefusal(RATE, 429, 30)),
+        (402, {"error": {"code": "payment_required"}}, ModelCallRefusal(PAYMENT, 402, None)),
+        # A capture of an older endpoint names no code, and its outer 402 still names a payment refusal.
+        (402, {"error": {"message": "inference provider returned 402"}}, ModelCallRefusal(PAYMENT, 402, None)),
+        # A wait that is no number of seconds, and a body that is no object, name no wait.
+        (402, {"error": {"retry_after_seconds": True}}, ModelCallRefusal(PAYMENT, 402, None)),
+        (429, [], ModelCallRefusal(RATE, 429, None)),
+        # A 200 answer is no refusal, whatever its body names; nor is another failure.
+        (200, {"choices": [], "error": {"code": "payment_required"}}, None),
+        (502, {"error": {"message": "the engine stopped"}}, None),
+    ],
+)
+def test_rollout_calls_keep_the_refusal_of_the_last_call_only(status, response, refusal):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    calls.call_captured(turn("/v1/chat/completions", 429, {"error": {"code": "rate_limit"}}))
+    calls.call_captured(turn("/v1/chat/completions", status, response))
+    calls.close()
+    assert calls.last_refusal == refusal
+
+
+ANSWER = (200, {"choices": [{"message": {"role": "assistant", "content": "5"}, "finish_reason": "stop"}]}, {})
+# A gateway's wrapping of the provider's 402: its code is text, and the provider's number is in its message.
+WRAPPED_402 = (
+    402,
+    {"error": {"message": 'Provider - {"error":{"code":402}}', "type": None, "param": None, "code": "402"}},
+    {},
+)
+IN_FLIGHT = (
+    402,
+    {"error": {"code": 402, "metadata": {"limit_source": "openrouter_in_flight_budget"}}},
+    {"Retry-After": "1"},
+)
+RATE_LIMITED_ERROR = re.compile(
+    r"the model provider refused the last model call with HTTP 429 \(rate_limit\)\. Retry after (\d+) s\."
+)
+PAYMENT_ERROR = (
+    "the model provider refused the last model call with HTTP 402 (payment_required). "
+    "Check the provider balance or key limit, or reduce the request size before retrying."
+)
+
+
+@contextmanager
+def scripted_provider(replies: list[tuple[int, dict, dict[str, str]]]) -> Iterator[tuple[str, list[dict]]]:
+    """A model provider on loopback that answers the calls in order with ``replies``, and with the last one after
+    them. Each reply is a status, a JSON body and headers. It yields its URL and the list of each call's JSON body.
+    A test can change ``replies`` in place, as a provider whose account gets credits again."""
+    bodies: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            status, body, headers = replies[min(len(bodies), len(replies)) - 1]
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", bodies
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class ProviderRuntime(InferenceRuntime):
+    """A runtime that answers each call of any artifact from the provider at ``base_url``, through Reef's HTTP
+    handler, as a hosted sampler does. It loads nothing and serves no route."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(base_url=base_url)
+        self.handler = HttpInferenceHandler(base_url, timeout_s=10, error_label="inference provider")
+
+    @property
+    def inference_handler(self) -> InferenceHandler:
+        return self.handler
+
+    @property
+    def serves_any_artifact(self) -> bool:
+        return True
+
+    def activate_checkpoint(self, artifact, *, scenario=None) -> str:
+        return "load-0"
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        return None
+
+
+class CallingLab(TaskLab):
+    """A lab whose agent makes ``calls`` chat calls through its endpoint, one at a time, and keeps the status of each
+    in ``statuses``. It goes on after a refused call. Its trial ends with ``reward``, and with an agent error when its
+    last call was refused and ``fails_after_refusal`` is set. ``runs`` counts its trials. It starts no sandbox."""
+
+    def __init__(self, calls: int, reward: float, *, fails_after_refusal: bool = True) -> None:
+        self.calls = calls
+        self.reward = reward
+        self.fails_after_refusal = fails_after_refusal
+        self.statuses: list[int] = []
+        self.runs = 0
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.runs += 1
+        api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
+        for step in range(self.calls):
+            body = {"model": "m", "messages": [{"role": "user", "content": f"step {step}"}]}
+            request = urllib.request.Request(
+                f"{api_base}/chat/completions",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    self.statuses.append(response.status)
+            except urllib.error.HTTPError as exc:
+                self.statuses.append(exc.code)
+        last = self.statuses[-1]
+        error = f"AgentError: the model call answered {last}" if last != 200 and self.fails_after_refusal else None
+        return RolloutRow(rewards={"reward": self.reward}, error=error, trial_uri=None)
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+def provider_rollouts(
+    tmp_path: Path, provider_url: str, lab: TaskLab, repeats: int = 1
+) -> tuple[WorkQueue, list[EvaluationRollout], ServedWorker, Mock]:
+    """``repeats`` queued rollouts of one task, in queue order, whose candidate the provider at ``provider_url``
+    answers through one runtime; the worker that runs them in ``lab`` through the evaluation's own endpoints and
+    capture proxy; and the mock candidate store that keeps their calls."""
+    task = tmp_path / "tasks" / "add"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text("")
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.candidate.return_value = (
+        ProviderRuntime(provider_url),
+        Artifact(SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact-1"),
+    )
+    artifacts.candidate_task_version.return_value = (task, None)
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    agent = {"name": "x", "kwargs": {"api_base": "{base_url}/v1"}}
+    values = [replace(rollout(repeat), agent=agent) for repeat in range(repeats)]
+    for value in values:
+        queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    return queue, values, ServedWorker(queue, LocalCandidateEndpoints(artifacts), worker_id="w", lab=lab), artifacts
+
+
+def kept_codes(artifacts: Mock) -> list[tuple[int, object]]:
+    """The status and the error code of each call that the rollouts kept, in order."""
+    codes: list[tuple[int, object]] = []
+    for kept in artifacts.add_evaluation_call.call_args_list:
+        call = cast(EvaluationCall, kept.args[3])
+        error = (call.response or {}).get("error")
+        codes.append((call.summary.status, error.get("code") if isinstance(error, Mapping) else None))
+    return codes
+
+
+@pytest.mark.unit
+def test_a_failed_trial_after_a_402_fails_its_rollout_once_and_spares_the_other_rollouts(tmp_path):
+    # The second call gets a gateway's 402; the other rollout's calls, and those of the retry, are answered.
+    lab = CallingLab(2, reward=0.0)
+    with scripted_provider([ANSWER, WRAPPED_402, ANSWER]) as (url, bodies):
+        queue, (refused, other), worker, artifacts = provider_rollouts(tmp_path, url, lab, repeats=2)
+        assert worker.run_once()
+        failed = queue.read(EVALUATIONS_QUEUE, refused.item_id())
+        # The agent got the outer 402; the rollout has no score, keeps no provider text, and does not run again.
+        assert lab.statuses == [200, 402] and len(bodies) == 2
+        assert (failed.state, failed.attempt_count, failed.result) == ("failed", 1, None)
+        assert failed.error == PAYMENT_ERROR
+        assert kept_codes(artifacts) == [(200, None), (402, "payment_required")]
+        # The other rollout of the evaluation still runs, and a retry of the refused one runs it again.
+        assert queue.read(EVALUATIONS_QUEUE, other.item_id()).state == "queued"
+        lab.reward = 1.0
+        assert worker.run_once()
+        queue.retry(EVALUATIONS_QUEUE, refused.item_id())
+        assert worker.run_once()
+    for value, attempts in ((other, 1), (refused, 2)):
+        item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+        assert (item.state, item.attempt_count, RolloutScore.from_json(item.result["score"]).value) == (
+            "finished",
+            attempts,
+            1.0,
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("replies", "reward", "error"),
+    [([ANSWER, WRAPPED_402], 0.0, None), ([ANSWER, WRAPPED_402], 1.0, None), ([WRAPPED_402], 1.0, PAYMENT_ERROR)],
+)
+def test_a_refused_last_call_keeps_a_completed_score_only_after_an_answered_call(tmp_path, replies, reward, error):
+    # Each trial ends without an agent error, and its verifier writes a reward.
+    lab = CallingLab(len(replies), reward=reward, fails_after_refusal=False)
+    with scripted_provider(replies) as (url, bodies):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    # The provider got each call once: no 402 is sent again.
+    assert len(bodies) == len(replies)
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    if error is not None:
+        assert (item.state, item.attempt_count, item.result, item.error) == ("failed", 1, None, error)
+        return
+    assert (item.state, item.error, RolloutScore.from_json(item.result["score"]).value) == ("finished", None, reward)
+
+
+def timed_turn(status: int, started_at: float, duration_s: float) -> CapturedTurn:
+    """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
+    return CapturedTurn(
+        "", "/v1/chat/completions", status, {"messages": []}, None, None, False, duration_s, at=started_at + duration_s
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("turns", "failure"),
+    [
+        # No failed call, and a refusal of a provider's limit is no failure of the service.
+        ([(200, 0, 10), (429, 10, 1), (200, 11, 10)], None),
+        # A short failure in a long run of calls leaves the score: 10 s of 1000 s.
+        ([(200, 0, 500), (502, 500, 10), (200, 510, 490)], None),
+        # A call that waited out the request timeout took much of the time: 300 s of 1000 s.
+        (
+            [(200, 0, 400), (502, 400, 300), (200, 700, 300)],
+            "the inference service failed 1 of 3 model calls, which took 300 s of 1000 s of model calls; "
+            "the rollout has no score",
+        ),
+        # The agent stopped on a failed call, however short it was.
+        (
+            [(200, 0, 990), (503, 990, 1)],
+            "the inference service failed 1 of 2 model calls, the last one among them, which took 1 s of 991 s of "
+            "model calls; the rollout has no score",
+        ),
+    ],
+)
+def test_rollout_calls_name_a_service_failure_that_took_the_last_call_or_much_of_the_time(turns, failure):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    for status, started_at, duration_s in turns:
+        calls.call_captured(timed_turn(status, 1000.0 + started_at, duration_s))
+    calls.close()
+    assert calls.service_failure() == failure
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_inference_service_failed_its_last_call_gets_no_score_and_runs_again(tmp_path):
+    # The trial ends without an agent error, and its verifier writes 0, as a verifier does for work never done.
+    lab = CallingLab(2, reward=0.0, fails_after_refusal=False)
+    broken = (502, {"error": {"message": "the engine stopped"}}, {})
+    with scripted_provider([ANSWER, broken]) as (url, _):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+        item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+        # The attempt failed with no score, and the rollout waits for another attempt.
+        assert lab.statuses == [200, 502]
+        assert (item.state, item.attempt_count, item.result) == ("queued", 1, None)
+        assert "the inference service failed 1 of 2 model calls, the last one among them" in (item.error or "")
+        while worker.run_once():
+            pass
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    # The service stayed down, so the rollout ends with no score once its attempts are used.
+    assert (item.state, item.attempt_count, item.result) == ("failed", 3, None)
+    assert lab.runs == 3
+
+
+@pytest.mark.unit
+def test_a_rate_limited_call_is_sent_again_in_the_same_sandbox_and_the_rollout_scores(tmp_path, monkeypatch):
+    monkeypatch.setattr(artifact_endpoint, "RATE_LIMIT_FIRST_WAIT_SECONDS", 0.01)
+    busy = (429, {"error": {"message": "No deployments available for selected model"}}, {"Retry-After": "0"})
+    # An answer whose body has an error code is still an answer.
+    answer = (200, {**ANSWER[1], "error": {"code": "payment_required"}}, {})
+    lab = CallingLab(1, reward=1.0)
+    with scripted_provider([busy, IN_FLIGHT, answer]) as (url, bodies):
+        queue, (value,), worker, artifacts = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.attempt_count, RolloutScore.from_json(item.result["score"]).value) == ("finished", 1, 1.0)
+    # One sandbox: the provider got the same call three times, and the agent and the call log saw one answer.
+    assert lab.runs == 1 and len(bodies) == 3 and bodies[0] == bodies[1] == bodies[2]
+    assert lab.statuses == [200] and kept_codes(artifacts) == [(200, "payment_required")]
+
+
+@pytest.mark.unit
+def test_a_rate_limit_longer_than_a_call_can_wait_fails_the_rollout_once_and_sends_nothing_early(tmp_path):
+    busy = (429, {"error": {"message": "concurrency limit"}}, {"Retry-After": "600"})
+    lab = CallingLab(2, reward=0.0)
+    with scripted_provider([busy]) as (url, bodies):
+        queue, (first, second), worker, _ = provider_rollouts(tmp_path, url, lab, repeats=2)
+        started = time.monotonic()
+        assert worker.run_once()
+        # The agent got the refusal at once, and its second call reached no provider: the route waits 600 s.
+        assert lab.statuses == [429, 429] and len(bodies) == 1 and time.monotonic() - started < 30
+        failed = queue.read(EVALUATIONS_QUEUE, first.item_id())
+        assert (failed.state, failed.attempt_count, lab.runs) == ("failed", 1, 1)
+        reason = RATE_LIMITED_ERROR.fullmatch(failed.error)
+        assert reason is not None and 590 <= int(reason.group(1)) <= 600
+        # The worker takes the next rollout at once, and it sends nothing to the provider before the wait ends.
+        assert queue.read(EVALUATIONS_QUEUE, second.item_id()).state == "queued"
+        assert worker.run_once()
+    assert queue.read(EVALUATIONS_QUEUE, second.item_id()).state == "failed" and len(bodies) == 1
+    assert queue.read(EVALUATIONS_QUEUE, first.item_id()).state == "failed", "no automatic retry"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("spending_cap", [True, False])
+def test_only_an_openrouter_spending_cap_403_fails_the_rollout_once(tmp_path, spending_cap):
+    metadata = {"metadata": {"limit_source": "openrouter_workspace_budget"}} if spending_cap else {}
+    lab = CallingLab(1, reward=0.0)
+    with scripted_provider([(403, {"error": {"code": 403, "message": "Forbidden", **metadata}}, {})]) as (url, bodies):
+        queue, (value,), worker, artifacts = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert lab.statuses == [403] and len(bodies) == 1
+    if spending_cap:
+        assert (item.state, item.attempt_count) == ("failed", 1)
+        assert item.error == (
+            "the model provider refused the last model call with HTTP 403 (payment_required). "
+            "Check the provider's spending cap, or wait until it resets, before retrying."
+        )
+        assert kept_codes(artifacts) == [(403, "payment_required")]
+        return
+    # Any other 403 fails the attempt as before, and the queue runs the rollout again.
+    assert (item.state, item.attempt_count, kept_codes(artifacts)) == ("queued", 1, [(403, None)])
 
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "judge"}, "steps": [{"source": "user"}]}

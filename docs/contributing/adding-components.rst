@@ -301,8 +301,8 @@ snapshot chain in the `State model <../advanced_topics/state-model.rst#the-snaps
   archived the scenario in any process that shares the store, and never false
   again after that, because a deleted scenario's ID is never used again. A
   delete archives the registration first, so ``discard_all_content`` must
-  find the content of a scenario that has no registration. See `Artifact
-  backends <../reference/python-api-artifacts.rst#artifact-backends>`__.
+  find the content of a scenario that has no registration. See the docstrings
+  of ``reef.artifact.repository``.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
   ``reef/inference/``, and client-pull delivery in a
   ``FileTree`` (``reef/artifact/components.py``). Reef does not change a model

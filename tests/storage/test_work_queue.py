@@ -1,4 +1,5 @@
 import logging
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,8 @@ from tests.support.polling import wait_until
 from reef.core.errors import RuntimeConfigError
 from reef.core.plugins import PluginConfigError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
+from reef.execution import workers
+from reef.execution.workers import ItemDeferredError, ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.storage.coordination.control_lease import ControlLease
 from reef.storage.coordination.served_models import (
     AUTOMATIC_RETRIES,
@@ -179,6 +181,19 @@ def test_an_attempt_that_its_worker_gave_back_does_not_count(open_coordination):
     assert queue.fail("jobs", "a", "w", "transient", retryable=True, now=5).state == "queued"
     queue.take("jobs", "w", ["training_job:tinker"], now=6)
     assert [item.state for item in queue.requeue_expired(now=100)] == ["failed"]
+
+
+@pytest.mark.unit
+def test_an_item_given_back_with_a_time_and_a_reason_waits_until_that_time(open_coordination):
+    queue = open_coordination().queue
+    queue.append(job("a"), now=0)
+    queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    waiting = queue.give_back("jobs", "a", "w", now=1, available_at=60, error="waiting for capacity")
+    assert (waiting.state, waiting.error, waiting.available_at) == ("queued", "waiting for capacity", 60)
+    assert queue.take("jobs", "w", ["training_job:tinker"], now=59) is None
+    assert queue.take("jobs", "w", ["training_job:tinker"], now=60).attempt_count == 2
+    with pytest.raises(ValueError):
+        queue.give_back("jobs", "a", "w", now=61, available_at=math.inf)
 
 
 @pytest.mark.unit
@@ -439,6 +454,32 @@ def test_a_stopped_worker_returns_every_item_in_progress_to_the_queue(tmp_path):
         worker.stop()
         assert worker.item_threads == []
         assert [queue.read("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]
+
+
+@pytest.mark.unit
+def test_a_worker_gives_an_item_without_capacity_back_and_waits_longer_each_time(monkeypatch):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={"jobs": 3})
+    # The test sets the clock that the queue reads too.
+    queue.append(job("a"), now=0)
+    worker = FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity"))
+    worker.max_deferrals = 2
+    clock = {"wall": 1000.0, "monotonic": 50.0}
+    monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
+    monkeypatch.setattr(workers.time, "monotonic", lambda: clock["monotonic"])
+    for delay_seconds in (30, 60):
+        assert worker.run_once()
+        item = queue.read("jobs", "a")
+        assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
+        assert item.available_at == clock["wall"] + delay_seconds
+        # The worker takes no item while it waits, so the service gets no new work.
+        assert not worker.run_once()
+        clock["wall"] += delay_seconds
+        clock["monotonic"] += delay_seconds
+    # The give-backs did not use the item's attempts; after ``max_deferrals`` of them the error counts as a failure.
+    assert worker.run_once()
+    item = queue.read("jobs", "a")
+    assert (item.attempt_count, item.stopped_attempt_count) == (3, 2)
+    assert item.state == "queued" and item.error == "waiting for sandbox capacity (given back 2 times)"
 
 
 @pytest.mark.unit

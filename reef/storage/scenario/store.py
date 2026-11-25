@@ -106,7 +106,8 @@ class ScenarioStore(ABC):
     @property
     @abstractmethod
     def durable(self) -> bool:
-        """Whether committed state survives a process restart."""
+        """Whether committed state survives a process restart. A scenario with a durable store needs a repository
+        backend that is a ``StagedSnapshotRepositoryBackend``."""
 
     @property
     @abstractmethod
@@ -152,6 +153,7 @@ class ScenarioStore(ABC):
         (ignoring only ``recorded_at``) returns the original record, even after
         later commits. Different content or
         a stale expected commit number raises ``ScenarioStoreConflictError``.
+        This check is not a lease: the caller still runs one training writer of a scenario at a time.
 
         An exception can occur after the commit becomes durable. Callers
         inspect history or retry the same commit before repeating training.
@@ -169,7 +171,8 @@ class ScenarioStore(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """Release this session's records and other resources exactly once."""
+        """Release this session's records and other resources exactly once. The caller closes the scenario's
+        trainers first, also when the construction or the recovery of the scenario fails."""
 
 
 class ScenarioStorage(Plugin, ABC):
@@ -227,7 +230,9 @@ class ScenarioStorage(Plugin, ABC):
 
     @abstractmethod
     def archive(self, scenario: str) -> tuple[str, ...]:
-        """Archive a closed scenario's records, commits, tasks and settings; return archive locations."""
+        """Archive a closed scenario's records, commits, tasks and settings; return archive locations. Also remove
+        the scenario from the uses of its owner's data items (``DataStore.delete_scenario``). A repeated call
+        changes nothing more."""
 
     @abstractmethod
     def close(self) -> None:

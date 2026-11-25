@@ -46,7 +46,7 @@ A configuration file selects the recipe with ``recipe.implementation``, puts the
      - optional
      - optional
    * - ``scheduling``
-     - optional (`Step scheduling <python-api-training.rst#training-objective>`__)
+     - optional (`Parameters that Slime and Tinker take <../developer-guide/recipe-training-service.rst#parameters-that-slime-and-tinker-take>`__)
      - optional
    * - ``save_interval``
      - optional
@@ -186,7 +186,7 @@ Rules of the section:
 
 - A stage without a key is the recipe's class with no config. Any other key under ``pipeline`` fails the startup.
 - Each recipe's page lists the keys of its stages. Keys are written as the stage reads them; a hyphen spelling is also accepted.
-- Reef checks each stage when it loads the recipe config, before a scenario starts. It imports a named class, rejects functions and abstract classes, and parses the stage's ``config``. An unknown key or a value out of range fails the startup.
+- Reef checks each stage when it loads the recipe config, before a scenario starts. It imports a named class, and rejects functions and abstract classes. A stage parses its ``config`` when a scenario builds its pipeline: an unknown key or a value out of range fails then, and not at startup.
 - A stage key under ``recipe.config``, such as ``groups_per_step``, is an unknown recipe key and also fails the startup.
 - A stage class needs the class method ``from_config``. The sample-to-job stage receives the record-to-sample stage and reads the values that the record-to-sample stage owns from it. For example, the TTTD step grid is set once, in ``pipeline.record2sample.config``.
 - A scenario can replace keys of ``pipeline.record2sample.config`` for itself with its ``record2sample_config`` setting (`Record-to-sample config <http-api-scenarios.rst#record-to-sample-config>`__).

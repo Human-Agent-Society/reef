@@ -192,6 +192,7 @@ class InferenceStream:
 
     ``chunks`` must end only after capture finalization and transport validation. When
     ``record_response_pending`` is true, a successful stream supplies ``record_response`` before that end.
+    Reef records ``record_response`` in place of the forwarded bytes, and records those bytes when it is None.
     A terminal frame alone is not successful completion. ``close`` releases transport resources.
     """
 
@@ -336,7 +337,10 @@ class InferenceHandler(Plugin, ABC):
         timeout_s: float,
         **config: Any,
     ) -> InferenceHandler:
-        """Construct a configured handler; direct injection needs only inference()."""
+        """Construct a configured handler; direct injection needs only inference().
+
+        Reef passes the options of ``inference.handler-config`` in ``config``.
+        """
         raise ValueError(f"{cls.__name__} does not support deployment configuration")
 
     @abstractmethod
@@ -585,9 +589,8 @@ class InferenceRuntime(ABC):
     def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
         """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
         engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
-        set takes the deployment's value again. The inference worker calls it before each activation and each
-        ``serve_artifact``, and when only the override changed, so a second call with the same values changes
-        nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
+        set takes the deployment's value again. The inference worker calls it before each activation, and when only
+        the override changed, so a second call with the same values changes nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
         the scenario to another engine. The default has no engine field and does nothing; the handler applies
         request fields to each request."""
         return
@@ -613,8 +616,8 @@ class InferenceRuntime(ABC):
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds
-        for it. A value the runtime does not know is no error. The default holds nothing per value: a runtime that
-        loads full weights in place replaced them at the next activation."""
+        for it. The engines may stay allocated. A value the runtime does not know is no error. The default holds
+        nothing per value: a runtime that loads full weights in place replaced them at the next activation."""
         return
 
     def release_unreferenced_artifacts(self, retained: Collection[ServedArtifact]) -> None:
@@ -626,8 +629,9 @@ class InferenceRuntime(ABC):
         its model name, whatever its artifact ID is (as ``ServedModels.is_referenced``). So the call releases only
         what a serving work loaded and did not publish, because the work failed or stopped, and what waits for its
         scheduled stop stays. Only the inference worker that owns the runtime calls it, between two serving works,
-        while none runs. A release that fails raises, and the next call tries it again. The call adds no way to
-        serve an artifact that is not deployed (``serves_any_artifact``).
+        while none runs. A runtime with more than one serving slot (``serving_slots``) gets no call. A release that
+        fails raises, and the next call tries it again. The call adds no way to serve an artifact that is not
+        deployed (``serves_any_artifact``).
         """
         return
 
@@ -707,10 +711,16 @@ class InferenceRuntime(ABC):
         """
         raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
         """Make an engine answer for ``artifact`` of ``scenario``, and return the value that reaches it: the engine's
         URL and the model name that samples that artifact. None when the engine has no address that another process
-        can call. The inference worker applies ``scenario``'s serving config (``apply_serving_config``) first.
+        can call.
+
+        ``serving_config`` is the override that the engine of ``artifact`` starts with, as ``serving_config``
+        accepted it: the inference worker gives the config of the scenario's newest serving request. The call reads
+        no other config, and it does not change the config of what serves the scenario now (``apply_serving_config``).
 
         Return only when the engine is ready. A second call for a served artifact starts nothing. Only the inference
         owner calls it, one call at a time.

@@ -143,8 +143,9 @@ class TrajectoryBuilder:
         self.last = record
 
     def sample(self, reward: float | None = None, feedback: str | Mapping[str, Any] | None = None) -> TrajectorySample:
-        """The ATIF trajectory of the records added, with ``reward`` and ``feedback``. ``ValueError`` when no record
-        was added."""
+        """The ATIF trajectory of the records added, with ``reward`` and ``feedback``. Its ``schema_version`` is
+        ``ATIF-v1.7``, and its agent's ``tool_definitions`` come from the ``tools`` of the last record.
+        ``ValueError`` when no record was added."""
         first, last = self.first, self.last
         if first is None or last is None:
             raise ValueError("an ATIF trajectory requires at least one inference record")
@@ -224,6 +225,11 @@ def has_image_content(payload: Mapping[str, object]) -> bool:
 
 
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """The request messages and the response messages of one provider payload.
+
+    An explicit ``response.training.response_message`` takes precedence over the provider's response. A completed
+    text-only streaming response contributes its aggregated ``response.message``.
+    """
     response = payload.get("response", {})
     response = response if isinstance(response, Mapping) else {"content": response}
     training = response.get("training", {})

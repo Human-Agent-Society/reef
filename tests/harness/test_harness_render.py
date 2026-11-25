@@ -1132,6 +1132,24 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
         load_descriptor(target)
 
 
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ({"stdin": "yes"}, "run task 'stdin' must be a boolean"),
+        ({"stdin": True, "argv": ["-p", "task: {task}"]}, "'stdin' needs an instruction in argv tokens that are"),
+    ],
+)
+def test_an_agent_that_reads_its_task_from_stdin_has_the_task_in_tokens_of_its_own(tmp_path, task, message) -> None:
+    data = descriptor_data("pi")
+    data["run"]["task"] = {**data["run"]["task"], **task}
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(write_descriptor(tmp_path, data))
+
+
+def test_opencode_alone_of_the_bundled_adapters_reads_its_task_from_stdin() -> None:
+    assert [name for name in BUILTIN_ADAPTERS if get_adapter(name).task_on_stdin] == ["opencode"]
+
+
 def test_no_bundled_adapter_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
     """Every bundled adapter's run stays hermetic: no service variable beyond PATH and TMPDIR."""
     for name in BUILTIN_ADAPTERS:

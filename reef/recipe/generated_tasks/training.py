@@ -260,12 +260,23 @@ class SingleUseTraining(TaskTraining):
     def ended_uses(
         self, job_id: str, rewards: Mapping[str, Sequence[float]], items: TaskItems, trainer: str
     ) -> tuple[TaskUse, ...]:
-        """The use of each task that a committed job trained: the tasks of the ended job, of an earlier job that a new
-        training start cancelled, and of a job that started before the stage read this end."""
+        """The use of each task of the ended job, and of an earlier job that a new training start cancelled.
+
+        The candidates are the tasks whose first sample a committed job trained. The job's own tasks are the candidates
+        that ``rewards`` names: the rewards of a finished job name each of its tasks, with no reward for a task whose
+        rollouts all failed. In ``auto``, a job takes tasks after those of the jobs before it, so a candidate before
+        the job's first own task belongs to an earlier job that a new training start cancelled, and one after it to a
+        job that started before the stage read this end. The end ends the uses of its own tasks and of the candidates
+        before them; the use of a later job's task ends with the end of that job. A finished job whose rewards name no
+        candidate, such as a job of imported tasks only, ends no use. The rewards of a failed job name no task, and its
+        end ends the use of every candidate.
+        """
+        trained = {name: stored[0] for name, stored in items.items() if stored[0].train_count(trainer) > 0}
+        first_own = min((sample.sequence for name, sample in trained.items() if name in rewards), default=None)
         return tuple(
             TaskUse(name, job_id, 0, tuple(rewards.get(name) or ()))
-            for name, stored in items.items()
-            if any(sample.train_count(trainer) > 0 for sample in stored)
+            for name, sample in trained.items()
+            if not rewards or name in rewards or (first_own is not None and sample.sequence < first_own)
         )
 
     def reuse_tasks(self, uses: Sequence[TaskUse], items: TaskItems, samples: TrainerSamples) -> NextSamples:

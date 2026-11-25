@@ -5,10 +5,56 @@ This page says which package owns a change, and maps the packages to the seven s
 
 Each package's ``__init__`` docstring states the boundaries that it holds and how to extend it. There are no READMEs under ``reef/``. Read the docstring of the package that you change; this page only helps you find it.
 
+Layers
+------
+
+Reef has four layers. A package imports from its own layer and from the layers below it. It imports from no layer above it. `Package import direction`_ gives the imports of each package.
+
+.. code:: mermaid
+
+   flowchart TD
+       accTitle: The four layers of Reef and the direction of imports
+
+       Methods("<b>Method packages</b><br/><code>recipes/*</code>")
+
+       subgraph Entry["Entry layer: how a request or a command reaches Reef"]
+           direction LR
+           Deploy("<b>deploy</b><br/><code>reef serve</code>")
+           Api("<b>api</b><br/>HTTP process of each service")
+       end
+
+       subgraph ControlLayer["Control layer: the loaded scenarios"]
+           Control("<b>control</b><br/>scenarios · workers · operations")
+       end
+
+       subgraph Domain["Domain layer: one package for each capability"]
+           direction LR
+           Recipe("<b>recipe</b><br/>method contract")
+           Train("<b>train</b><br/>training jobs")
+           Samples("<b>samples</b><br/>records to samples")
+           Evaluation("<b>evaluation</b><br/>candidate evaluation")
+           Harness("<b>harness</b><br/>harness tree and runs")
+           Routing("<b>routing</b><br/>Semantic Router")
+           Inference("<b>inference</b><br/>model requests")
+       end
+
+       subgraph Foundation["Foundation layer: shared mechanisms"]
+           direction LR
+           Observability("<b>observability</b>")
+           Execution("<b>execution</b>")
+           Storage("<b>storage</b>")
+           Artifact("<b>artifact</b>")
+           Tinker("<b>tinker</b>")
+           Core("<b>core</b>")
+       end
+
+       Entry --> ControlLayer --> Domain --> Foundation
+       Methods -. "implement the recipe contract" .-> Domain
+
 Packages
 --------
 
-`Architecture <architecture.rst>`__ gives the four layers of the packages and what each package is for. The table below says which package owns a change.
+The table says which package owns a change.
 
 .. list-table::
    :header-rows: 1
@@ -76,6 +122,11 @@ Packages
      - Python dependency declarations
 
 Nothing under ``reef/`` imports a method package. A weight method keeps its objective and loss family in a ``slime/`` subpackage that only the training service imports. A harness method holds its ``Method``, its prompts, and a scorer when it needs its own.
+
+Two parts look as if they belong to another package. Each stays for a reason.
+
+- **The training pipeline stays in ``train``.** ``TrainingPipeline`` (``reef/train/pipeline.py``) stores the samples that the record-to-sample stage makes, and it selects the samples of the next job. The two halves share the sample store and its state under the trainer's lock, and ``reef`` exports the class. A split of the class changes that interface, so it needs an RFC (`Changes that need an RFC <../../CONTRIBUTING.md#changes-that-need-an-rfc>`__).
+- **The generated-task recipe stays in ``recipe``.** ``reef/recipe/generated_tasks/`` holds the recipe that trains on generated Harbor tasks, and ``TaskGenerator``, the base class of a task generator. A generator, such as SPADE in ``recipes/beta/``, is a plugin of this recipe. The ``recipes/`` tree does not ship in the Reef wheel, so the base class and its recipe must be in ``reef/``.
 
 Services and the shared store
 -----------------------------

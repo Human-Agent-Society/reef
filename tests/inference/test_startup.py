@@ -843,7 +843,7 @@ def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, mo
     selection = routes.current_request("math").payload["selection"]
     control.set_served("math", {})
     if standalone:
-        monkeypatch.setattr(runtime, "serve_artifact", lambda artifact, scenario: served)
+        monkeypatch.setattr(runtime, "serve_artifact", lambda artifact, scenario, serving_config: served)
         worker.queue.append(
             NewWork(
                 SERVING_QUEUE,
@@ -893,6 +893,58 @@ def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, mo
         assert routes.read_scenario("math")["active"] == served
     assert routes.due_stops(time.time()) == ()
     assert runtime.stops == []
+
+
+@pytest.mark.unit
+def test_a_cancelled_serve_item_stops_the_start_of_its_artifact(tmp_path, monkeypatch):
+    # Two slots, so that each item runs on its own thread.
+    runtime = StoppableRuntime(2)
+    runtime.release.set()
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=True), runtime)
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    # A short lease, so that the worker finds the cancellation within the test.
+    coordination = memory_coordination(lease_seconds=0.3)
+    control = Dispatcher(
+        recipe,
+        backends,
+        live=live,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=coordination,
+        components=frozenset({"control"}),
+        local_artifact_dir=tmp_path / "control",
+    )
+    worker = ServingWorker(
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+    )
+    started, stopped = threading.Event(), threading.Event()
+
+    def serve_artifact(artifact, scenario, serving_config):
+        started.set()
+        while not stopping():
+            time.sleep(0.02)
+        stopped.set()
+        raise StartupStoppedError
+
+    try:
+        control.create_scenario("math")
+        assert worker.run_once()
+        worker.item_threads[-1].join(5)
+        monkeypatch.setattr(runtime, "serve_artifact", serve_artifact)
+        selection = coordination.served_models.current_request("math").payload["selection"]
+        payload = {"selection": selection, "component": "weights"}
+        worker.queue.append(NewWork(SERVING_QUEUE, "evaluation-candidate", "math", SERVE_ARTIFACT_KIND, payload))
+        assert worker.run_once()
+        assert started.wait(5)
+        worker.queue.cancel(SERVING_QUEUE, "evaluation-candidate", "the rollout stopped waiting")
+        assert stopped.wait(5)
+        worker.item_threads[-1].join(5)
+        # The cancellation stays the item's end.
+        item = worker.queue.read(SERVING_QUEUE, "evaluation-candidate")
+        assert (item.state, item.error) == ("failed", "the rollout stopped waiting")
+    finally:
+        worker.stop()
+        control.close()
 
 
 @pytest.mark.unit

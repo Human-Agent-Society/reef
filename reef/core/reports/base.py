@@ -69,6 +69,13 @@ class ReportBase:
     Parsing is pure, cheap, and payload-only; deployment-relative checks (does
     the announced value match this scenario's configuration?) belong to the
     record-to-sample stage.
+
+    A subclass is a frozen dataclass. A field without a default is required.
+    A ``float`` field takes any JSON number, and an ``int`` field takes a
+    number with an integral value; neither takes a boolean. A ``str`` or
+    ``bool`` field takes no value of another type. ``null`` passes only for a
+    ``| None`` field. Another annotation, another union included, raises
+    ``TypeError`` at the first parse or ``to_dict`` of the type.
     """
 
     def __post_init__(self) -> None:

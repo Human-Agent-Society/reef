@@ -200,8 +200,12 @@ Sample
 
 One item of job data, a ``Sample`` (``reef.core.job_data``): a
 ``TrajectorySample`` that trains as it is, or a ``TaskSample``, a Harbor task
-that the training component rolls out. ``job_samples`` and ``buffer_size``
-count samples. A sample is not a sampling call to a model.
+that the training component rolls out. The trajectory of a
+``TrajectorySample`` is an `ATIF document
+<https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__,
+and a ``TaskSample`` names a `Harbor task directory
+<https://www.harborframework.com/docs/tasks>`__. ``job_samples`` and
+``buffer_size`` count samples. A sample is not a sampling call to a model.
 
 Staleness
 ---------
@@ -240,7 +244,7 @@ Training objective
 A backend's objective (``SlimeObjective`` or ``TinkerObjective``). It declares
 its loss family and prepares a job's data: advantages, metrics and algorithm
 state. A recipe selects it through the job parameter ``objective``. See
-`Training objective <python-api-training.rst#training-objective>`__.
+`The objective <../developer-guide/recipe-training-service.rst#the-objective>`__.
 
 Loss family
 -----------

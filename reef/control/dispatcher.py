@@ -424,7 +424,8 @@ class Dispatcher(
 
     def prune_record_archives(self, retention: RecordRetention) -> int:
         """Apply deployment-wide retention to the record items of the data store (``DataStore.prune_records``)
-        without racing scenario file moves; return the number of record items that it deleted."""
+        without racing scenario file moves; return the number of record items that it deleted. One call is one
+        sweep, and the dispatcher runs none itself."""
         with self.record_retention_lock:
             return 0 if self.data_store is None else self.data_store.prune_records(retention.max_bytes)
 

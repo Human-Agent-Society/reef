@@ -105,7 +105,7 @@ class Sample2Job(ABC, Plugin):
     #: when no trainer of the scenario accepts uploaded trajectories.
     accepts_trajectories: bool = False
     #: Whether the recipe trains the scenario's imported ``train`` tasks, as it trains uploaded trajectories. Admission refuses an import to the ``train`` split
-    #: (``POST /reef/scenarios/{scenario}/tasks``, ``task-import``) when no trainer of the scenario trains them.
+    #: (``POST /reef/namespaces/{owner}/data/tasks``, ``task-import``) when no trainer of the scenario trains them.
     accepts_imported_tasks: bool = False
 
     def __init__(
@@ -155,6 +155,11 @@ class Sample2Job(ABC, Plugin):
 
         ``record2sample`` is the scenario's record-to-sample stage, built first.
         ``environ`` holds the environment the deployment was read with.
+        A setting that the stage reads is a key of ``config``, not a recipe
+        field, and the stage reads no deployment file. A value that both stages
+        need is a setting of the record-to-sample stage: read it from
+        ``record2sample``. A stage that needs a specific ``Record2Sample`` class
+        checks it with ``isinstance`` and raises ``PluginConfigError`` otherwise.
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 

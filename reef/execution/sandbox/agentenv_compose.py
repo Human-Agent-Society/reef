@@ -50,6 +50,7 @@ from harbor.environments.dind_compose import DinDComposeOps
 
 from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv_build import BUILD_OUTPUT_TAIL_CHARS, TRANSIENT_STATUSES, AgentEnvTemplates
+from reef.execution.sandbox.process import SandboxCapacityError
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +81,8 @@ class ImageNotFoundError(ComposeStartError):
     """``aenv compose up`` found no image under a name of the deployment's own repository."""
 
 
-class TransientStartError(ComposeStartError):
-    """``aenv compose up`` received a status of ``TRANSIENT_STATUSES`` from the AgentENV API."""
+class TransientStartError(ComposeStartError, SandboxCapacityError):
+    """``aenv compose up`` received a status of ``TRANSIENT_STATUSES`` from the AgentENV API: it has no capacity now."""
 
 
 def compose_mode(environ: Mapping[str, str]) -> str:
@@ -294,6 +295,21 @@ class AgentEnvComposeOps(DinDComposeOps):
     def __init__(self, host: ComposeHost) -> None:
         self._env = host
         self.host = host
+
+    @override
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+        *,
+        service: str | None = None,
+    ) -> ExecResult:
+        # Docker finds a user name in the container's /etc/passwd, which the agent can change. Root goes by its UID.
+        user = 0 if user == "root" else user
+        return await super().exec(command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user, service=service)
 
     @override
     async def _compose_exec(self, subcommand: list[str], timeout_sec: int | None = None) -> ExecResult:

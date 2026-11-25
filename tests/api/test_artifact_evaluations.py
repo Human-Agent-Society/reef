@@ -41,6 +41,7 @@ from reef.control.operations.artifact_evaluations import (
     NewArtifacts,
     StoredCalls,
     attempt_trajectories,
+    iter_attempt_trajectories,
     rollout_work,
 )
 from reef.control.operations.data import DataAccess
@@ -120,6 +121,7 @@ class ArtifactRuntime(InferenceRuntime):
         #: The scenario of each served artifact, and each serving config that inference applied.
         self.serve_scenarios: list[str] = []
         self.applied: list[str] = []
+        self.serve_configs: list[dict] = []
         self.serve_error: str | None = None
         self.any_artifact = any_artifact
 
@@ -144,8 +146,9 @@ class ArtifactRuntime(InferenceRuntime):
     def apply_serving_config(self, scenario, override):
         self.applied.append(scenario)
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
+    def serve_artifact(self, artifact: Artifact, *, scenario: str, serving_config) -> ServedArtifact:
         self.served.append(artifact.artifact_id)
+        self.serve_configs.append(dict(serving_config))
         self.serve_scenarios.append(scenario)
         if self.serve_error is not None:
             raise ValueError(self.serve_error)
@@ -464,9 +467,10 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
+            newest = dispatcher.coordination.served_models.current_request("s").payload.get("serving_config", {})
             assert (
-                runtime.serve_scenarios == ["s"] * 10 and runtime.applied.count("s") >= 10
-            ), "inference serves the candidate with the scenario's serving config"
+                runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10
+            ), "inference serves the candidate with the config of the scenario's newest request"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",
@@ -2230,6 +2234,42 @@ def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_with
     assert [record["agent_record_id"] for record in first["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:3"]
     assert [trajectory["extra"]["reef"]["evaluation"]["conversation"] for trajectory in (first, second)] == [0, 1]
     assert first["extra"]["reef"]["reward"] == second["extra"]["reef"]["reward"] == 0.5
+
+
+@pytest.mark.unit
+def test_streaming_releases_finished_conversations_and_preserves_shared_branches() -> None:
+    rollout = EvaluationRollout("s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {}, "docker", {})
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.5},
+    )
+    question = [{"role": "user", "content": "question"}]
+    shared = [*question, {"role": "assistant", "content": "shared reply"}]
+    calls = [
+        chat_call(1, 0, question, "shared reply"),
+        chat_call(1, 1, [*shared, {"role": "user", "content": "left"}], "answer left"),
+        chat_call(1, 2, [*shared, {"role": "user", "content": "right"}], "answer right"),
+        *(chat_call(1, i, [{"role": "user", "content": f"unrelated {i}"}], "answer") for i in range(3, 70)),
+    ]
+    counted = CountedCalls(calls)
+    documents = iter_attempt_trajectories("s", "e1", item, counted)
+    left, right = next(documents), next(documents)
+    assert [s["message"] for s in left["steps"]] == ["question", "shared reply", "left", "answer left"]
+    assert [s["message"] for s in right["steps"]] == ["question", "shared reply", "right", "answer right"]
+    assert [r["agent_record_id"] for r in left["extra"]["reef"]["records"]] == ["e1:2:0:1:1"]
+    assert [r["agent_record_id"] for r in right["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:2"]
+    for ordinal, doc in enumerate(documents, start=2):
+        assert doc["extra"]["reef"]["evaluation"]["conversation"] == ordinal
+        assert doc["extra"]["reef"]["reward"] == 0.5
+    assert counted.most <= 4
 
 
 class TreeCallingLab(TaskLab):

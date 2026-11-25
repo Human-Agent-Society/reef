@@ -92,6 +92,7 @@ from reef.storage.coordination.work_queue import (
     check_page,
     check_prefix_state_counts,
     clock,
+    is_finite_time,
 )
 from reef.storage.sql.records import batches
 from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
@@ -1277,7 +1278,19 @@ class SQLWorkQueue(WorkQueue):
                 ended_at=None if again else moment,
             )
 
-    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def give_back(
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        *,
+        now: float | None = None,
+        available_at: float | None = None,
+        error: str = "the worker stopped",
+    ) -> WorkItem:
+        require_text(error, "error")
+        if available_at is not None and not is_finite_time(available_at):
+            raise ValueError("available_at is a finite time or None")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
@@ -1287,9 +1300,10 @@ class SQLWorkQueue(WorkQueue):
                 item,
                 moment,
                 state="queued",
-                error="the worker stopped",
+                error=error,
                 worker_id=None,
                 lease_expires_at=None,
+                available_at=moment if available_at is None else available_at,
                 stopped_attempt_count=item.stopped_attempt_count + 1,
             )
 

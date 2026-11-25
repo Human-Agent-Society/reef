@@ -135,17 +135,24 @@ class ReefEvalLab(TaskLab):
 COMMAND_FILE = "command.json"
 
 
-def verifier_timed_out(trial_uri: str | None) -> bool:
-    """Whether Harbor's result file for a local trial records that its verifier ran past its timeout."""
+def trial_exception_type(trial_uri: str | None) -> str | None:
+    """The class name of the error that ended a local trial, as Harbor's result file records it; None for a trial
+    that ended without an error, for a trial that is not local, and for a trial with no result file."""
     if not trial_uri or not trial_uri.startswith("file://"):
-        return False
+        return None
     # The URI is percent-encoded (Path.as_uri), so a work dir with a space or a non-ASCII name needs decoding.
     result_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(trial_uri).path)) / "result.json"
-    # A trial whose harbor process was killed has no result file; its rollout stays unscored.
+    # A trial whose harbor process was killed has no result file.
     if not result_path.is_file():
-        return False
+        return None
     exception = json.loads(result_path.read_text(encoding="utf-8"))["exception_info"]
-    return exception is not None and exception["exception_type"] == "VerifierTimeoutError"
+    return None if exception is None else str(exception["exception_type"])
+
+
+def verifier_timed_out(trial_uri: str | None) -> bool:
+    """Whether Harbor's result file for a local trial records that its verifier ran past its timeout. A trial with no
+    result file stays unscored."""
+    return trial_exception_type(trial_uri) == "VerifierTimeoutError"
 
 
 def agent_command_exit(trial_uri: str | None) -> str:
