@@ -576,7 +576,9 @@ class InferenceRuntime(ABC):
         A separate inference service calls it for the URL of each ``served_models`` row, and reaches a URL with no
         handler as a plain proxy. The default gives ``inference_handler`` for ``base_url`` and None for any other
         URL. A runtime that serves artifacts at several URLs, or whose engines need credentials or retries that a
-        plain proxy does not send, gives a handler for each of them.
+        plain proxy does not send, gives a handler for each of them. The inference worker also calls it when it
+        takes over the runtime, before ``open``: it removes each row at a URL with no handler, and offers ``adopt``
+        only the other rows.
         """
         return self.inference_handler if url == self.base_url else None
 
@@ -685,7 +687,11 @@ class InferenceRuntime(ABC):
         runtime existed (an inference worker restart), and return whether the engine still serves it. Then the route
         stays while the new owner serves the scenario again, and the next activation of the same artifact loads
         nothing. The default can tell nothing about the engine: it returns False, so the route goes until the
-        scenario serves again, and the next activation loads."""
+        scenario serves again, and the next activation loads.
+
+        The inference worker calls it after ``open``, and only for a row at a URL that ``handler_for`` gives a
+        handler for. A row at another URL goes before the open, and its requests get ``inference_starting`` until
+        the scenario serves again."""
         return False
 
     def stop_serving(self, served: ServedArtifact) -> None:
