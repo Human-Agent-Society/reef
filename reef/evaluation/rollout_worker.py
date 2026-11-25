@@ -628,8 +628,8 @@ class ModelCallRefusal:
 
     Values: ``limit`` is the ``UpstreamLimit`` of the refusal (``refusal_limit``), ``status`` the answer's HTTP status,
     an int from 400 to 599, and ``retry_after_seconds`` the answer's ``Retry-After``, an int of at least 0, or None.
-    It holds no text of the answer. Purpose: ``RolloutCalls`` makes it for the last captured call, and
-    ``EvaluationRolloutWorker.score`` fails an unscored rollout with its ``reason``.
+    It holds no text of the answer. Purpose: ``RolloutCalls`` makes it for each refused call and keeps the last one,
+    and ``EvaluationRolloutWorker.score`` fails an unscored rollout with its ``reason``.
     """
 
     limit: UpstreamLimit
@@ -645,12 +645,18 @@ class ModelCallRefusal:
         if wait is not None and (isinstance(wait, bool) or not isinstance(wait, int) or wait < 0):
             raise ValueError("retry_after_seconds is a number of seconds of at least 0, or None")
 
-    def reason(self) -> str:
-        """The error of a rollout that this refusal left with no score, made from the fields alone."""
-        text = f"the model provider refused the last model call with HTTP {self.status} ({self.limit.value})."
+    def reason(self, refused_calls: int) -> str:
+        """The error of a rollout that ``refused_calls`` refusals left with no score, this one the last of them, made
+        from the fields and ``refused_calls`` alone."""
+        text = (
+            f"the model provider refused {refused_calls} of the rollout's model calls, the last one with HTTP "
+            f"{self.status} ({self.limit.value})."
+        )
         if self.retry_after_seconds is not None:
             text += f" Retry after {self.retry_after_seconds} s."
-        if self.limit is UpstreamLimit.PAYMENT and self.status == 403:
+        if self.limit is UpstreamLimit.ACCESS:
+            text += " Check the provider key and its permissions before retrying."
+        elif self.limit is UpstreamLimit.PAYMENT and self.status == 403:
             text += " Check the provider's spending cap, or wait until it resets, before retrying."
         elif self.limit is UpstreamLimit.PAYMENT:
             text += " Check the provider balance or key limit, or reduce the request size before retrying."
@@ -662,15 +668,16 @@ class RolloutCalls(CaptureObserver):
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
-    the index of the next call. ``all_answered`` counts calls that answered 200 and ``all_last_refusal`` holds the
-    ``ModelCallRefusal`` of the call captured last, or None. ``tool_calls_seen`` is True once a call carried a
-    non-empty ``tools`` field (``has_tools``); ``tool_answered`` and ``tool_last_refusal`` track those tool-bearing
-    calls alone. ``answered`` and ``last_refusal`` read the tool-bearing counters when ``tool_calls_seen`` is True,
-    else the all-call counters, so auxiliary calls without tools (such as title generation) neither mask a main-loop
-    refusal nor fail a completed main loop. ``service_failures`` is the number of calls that the inference service
-    failed (an HTTP status of 500 or more), ``service_failure_seconds`` their total duration, and ``last_failed``
-    whether the call captured last was one. ``first_started_at`` and ``last_ended_at`` bound the calls in wall-clock
-    seconds; both are None before the first.
+    the index of the next call. ``all_answered`` counts calls that answered 200, ``all_refused`` counts calls that a
+    provider's limit refused (``refusal_limit``), and ``all_last_refusal`` holds the ``ModelCallRefusal`` of the last
+    refused call, or None when ``all_refused`` is 0. A later call does not clear them. ``tool_calls_seen`` is True
+    once a call carried a non-empty ``tools`` field (``has_tools``); ``tool_answered``, ``tool_refused`` and
+    ``tool_last_refusal`` count those tool-bearing calls alone. ``answered`` and ``refusal`` read the tool-bearing
+    counts when ``tool_calls_seen`` is True, else the all-call counts, so auxiliary calls without tools (such as title
+    generation) neither mask a main-loop refusal nor fail a completed main loop. ``service_failures`` is the number of
+    calls that the inference service failed (an HTTP status of 500 or more), ``service_failure_seconds`` their total
+    duration, and ``last_failed`` whether the call captured last was one. ``first_started_at`` and ``last_ended_at``
+    bound the calls in wall-clock seconds; both are None before the first.
 
     Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
     One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
@@ -683,9 +690,11 @@ class RolloutCalls(CaptureObserver):
         self.attempt = attempt
         self.next_index = 0
         self.all_answered = 0
+        self.all_refused = 0
         self.all_last_refusal: ModelCallRefusal | None = None
         self.tool_calls_seen = False
         self.tool_answered = 0
+        self.tool_refused = 0
         self.tool_last_refusal: ModelCallRefusal | None = None
         self.service_failures = 0
         self.service_failure_seconds = 0.0
@@ -700,10 +709,21 @@ class RolloutCalls(CaptureObserver):
         with self.lock:
             return self.tool_answered if self.tool_calls_seen else self.all_answered
 
-    @property
-    def last_refusal(self) -> ModelCallRefusal | None:
+    def refusal(self, trial_failed: bool) -> str | None:
+        """The error of a rollout whose score would judge the model provider rather than the model, or None.
+
+        That is a rollout with a model call that a provider's limit refused, whatever calls came after it. Each
+        captured call is the endpoint's answer after its own tries (``ArtifactEndpoint.answer``), so each counted
+        refusal reached the agent. When the rollout made a tool-bearing call, only refused tool-bearing calls count;
+        when none was refused and ``trial_failed`` is True, any refused call counts."""
         with self.lock:
-            return self.tool_last_refusal if self.tool_calls_seen else self.all_last_refusal
+            if self.tool_calls_seen:
+                refused, last = self.tool_refused, self.tool_last_refusal
+            else:
+                refused, last = self.all_refused, self.all_last_refusal
+            if last is None and trial_failed:
+                refused, last = self.all_refused, self.all_last_refusal
+        return None if last is None else last.reason(refused)
 
     def call_captured(self, turn: CapturedTurn) -> None:
         # The proxy keeps whatever JSON the endpoint answered; only an object can name a refusal.
@@ -719,11 +739,15 @@ class RolloutCalls(CaptureObserver):
             index = self.next_index
             self.next_index += 1
             self.all_answered += turn.status == 200
-            self.all_last_refusal = refusal
+            if refusal is not None:
+                self.all_refused += 1
+                self.all_last_refusal = refusal
             if is_tool_call:
                 self.tool_calls_seen = True
                 self.tool_answered += turn.status == 200
-                self.tool_last_refusal = refusal
+                if refusal is not None:
+                    self.tool_refused += 1
+                    self.tool_last_refusal = refusal
             started = turn.at - turn.duration_s
             self.first_started_at = started if self.first_started_at is None else min(self.first_started_at, started)
             self.last_ended_at = turn.at if self.last_ended_at is None else max(self.last_ended_at, turn.at)
@@ -972,12 +996,11 @@ class EvaluationRolloutWorker(QueueWorker):
         A sandbox capacity refusal raises ``ItemDeferredError``. An invalid sandbox request fails the rollout.
         Both leave the score unset, even if the agent already called the model.
 
-        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), or refused a trailing
-        no-tools call on a trial that failed with an error (``RolloutCalls.all_last_refusal``), the rollout fails for
-        good with no score (``ModelCallRefusal.reason``). When a rollout makes tool-bearing calls, auxiliary calls
-        without tools do not mask a main-loop refusal and do not fail a trial that finished with no error. When the
-        inference service failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score,
-        and the rollout is retried as any other failed attempt."""
+        When a provider's limit refused a model call that reached the agent (``RolloutCalls.refusal``), the rollout
+        fails for good with no score, also when later calls were answered. When a rollout makes tool-bearing calls, a
+        refused auxiliary call without tools fails only a trial that failed with an error. When the inference service
+        failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score, and the rollout is
+        retried as any other failed attempt."""
         if rollout.requires_prepared_templates:
             template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
@@ -1064,15 +1087,13 @@ class EvaluationRolloutWorker(QueueWorker):
                 raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
             if exception_type in SANDBOX_REQUEST_ERRORS:
                 raise ItemFailedError(f"the sandbox service refused the sandbox: {result.error}")
-            last_refusal = calls.last_refusal
-            if last_refusal is None and result.error:
-                # A required tool-less agent step (such as a native sub-agent with ``tools: []``) still fails the
-                # trial with ``result.error``; keep its terminal refusal rather than scoring 0.
-                last_refusal = calls.all_last_refusal
-            if last_refusal is not None:
-                # The agent stopped on a provider refusal, so a score, 0 above all, would judge the provider, and a
-                # new sandbox at once would meet the same refusal.
-                raise ItemFailedError(last_refusal.reason())
+            # A required tool-less agent step (such as a native sub-agent with ``tools: []``) fails the trial with
+            # ``result.error``, so its refusal counts then.
+            refusal = calls.refusal(trial_failed=bool(result.error))
+            if refusal is not None:
+                # The agent met a provider refusal, so a score, 0 above all, would judge the provider, and a new
+                # sandbox at once would meet the same refusal.
+                raise ItemFailedError(refusal)
             service_failure = calls.service_failure()
             if service_failure is not None:
                 # The agent stopped on a failed call or lost much of its time to them, so a score, 0 above all, would

@@ -274,10 +274,10 @@ def test_a_call_that_a_rate_limit_refused_is_sent_again_unchanged_until_it_is_an
         # A payment refusal is not sent again, also when an intermediary added a wait; the wait reaches the agent.
         (refused(402, limit=UpstreamLimit.PAYMENT, retry_after_seconds=5.0), 402, "payment_required", 5),
         (refused(429, limit=UpstreamLimit.PAYMENT), 429, "payment_required", None),
-        # An older handler's 402 that names no limit requires payment; its 403 names none.
+        # An older handler's 402 that names no limit requires payment; its 401 and 403 refuse access.
         (refused(402), 402, "payment_required", None),
-        (refused(403), 403, None, None),
-        (refused(401), 401, None, None),
+        (refused(403), 403, "access_denied", None),
+        (refused(401), 401, "access_denied", None),
         # A 5xx keeps the provider's wait in its body, but no Retry-After header tells the agent to wait.
         (refused(503, retry_after_seconds=7.0), 503, None, 7),
         # A limit on a status that names none is no limit.
@@ -475,9 +475,12 @@ def test_a_call_that_its_route_holds_ends_with_its_rollout_and_sends_nothing(end
         (402, {"error": {"code": 402, "message": "refused"}}, UpstreamLimit.PAYMENT),
         (502, {"error": {"message": "the runtime could not answer from the artifact"}}, None),
         (503, {"error": {"code": "rate_limit"}}, None),
-        # Only a 403 with the code is a spending cap.
+        # Only a 403 with the code is a spending cap. Any other 403, and a 401, refuse access.
         (403, {"error": {"code": "payment_required"}}, UpstreamLimit.PAYMENT),
-        (403, {"error": {"message": "Forbidden"}}, None),
+        (403, {"error": {"code": "access_denied"}}, UpstreamLimit.ACCESS),
+        (403, {"error": {"message": "Forbidden"}}, UpstreamLimit.ACCESS),
+        (401, {"error": {"message": "invalid key"}}, UpstreamLimit.ACCESS),
+        (401, None, UpstreamLimit.ACCESS),
         # A 200 answer is no refusal, whatever error code its body holds.
         (200, {"choices": [], "error": {"code": "payment_required"}}, None),
         (200, {"error": {"code": "rate_limit"}}, None),

@@ -50,8 +50,8 @@ RATE_LIMIT_FIRST_WAIT_SECONDS = 1.0
 RATE_LIMIT_MAX_WAIT_SECONDS = 16.0
 #: How often, in seconds, a wait between two tries checks whether the endpoint closed.
 CLOSE_CHECK_SECONDS = 0.1
-#: The HTTP statuses of a refusal that can name a limit: payment, a spending cap and a rate limit.
-REFUSAL_STATUSES = (402, 403, 429)
+#: The HTTP statuses of a refusal that can name a limit: access, payment, a spending cap and a rate limit.
+REFUSAL_STATUSES = (401, 402, 403, 429)
 #: The error of a call that came after its rollout ended, with no provider refusal before.
 CLOSED_ERROR = "the evaluation endpoint closed: its rollout ended"
 
@@ -82,8 +82,8 @@ def refusal_limit(status: int, body: Mapping[str, Any] | None) -> UpstreamLimit 
     (None for any other body).
 
     Only a status of ``REFUSAL_STATUSES`` names a limit: the ``UpstreamLimit`` whose value is the error's ``code``.
-    Without that code, as an older endpoint answered, a 429 is ``RATE``, a 402 ``PAYMENT`` and a 403 None. Any other
-    answer is None, also a 200 or a 5xx whose body has such an error ``code``.
+    Without that code, as an older endpoint answered, a 429 is ``RATE``, a 402 ``PAYMENT``, and a 401 or a 403
+    ``ACCESS``. Any other answer is None, also a 200 or a 5xx whose body has such an error ``code``.
     """
     if status not in REFUSAL_STATUSES:
         return None
@@ -91,17 +91,21 @@ def refusal_limit(status: int, body: Mapping[str, Any] | None) -> UpstreamLimit 
     code = error.get("code") if isinstance(error, Mapping) else None
     if isinstance(code, str) and code in {limit.value for limit in UpstreamLimit}:
         return UpstreamLimit(code)
-    return {429: UpstreamLimit.RATE, 402: UpstreamLimit.PAYMENT}.get(status)
+    if status == 429:
+        return UpstreamLimit.RATE
+    return UpstreamLimit.PAYMENT if status == 402 else UpstreamLimit.ACCESS
 
 
 def call_limit(refusal: UpstreamStatusError) -> UpstreamLimit | None:
     """The limit of a handler's refusal: the handler's own, else the default of its status and ``Retry-After``
-    (``upstream_limit``), as for an older handler that names none. Only a status of ``REFUSAL_STATUSES`` has one."""
+    (``upstream_limit``), as for an older handler that names none, else ``ACCESS`` for a 401 or a 403. Only a status
+    of ``REFUSAL_STATUSES`` has one."""
     if refusal.status not in REFUSAL_STATUSES:
         return None
     if refusal.limit is not None:
         return refusal.limit
-    return upstream_limit(refusal.status, "", retry_after=refusal.retry_after_seconds)
+    limit = upstream_limit(refusal.status, "", retry_after=refusal.retry_after_seconds)
+    return UpstreamLimit.ACCESS if limit is None else limit
 
 
 class ProviderCooldowns:
