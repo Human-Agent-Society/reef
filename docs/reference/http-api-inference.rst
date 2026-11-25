@@ -16,6 +16,7 @@ Scenario creation and activation select an artifact and do not wait for its engi
 .. code:: json
 
    {"artifact_id": "artifact-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
+    "engine_replicas": null,
     "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
                            "detail": "Quantizing to NVFP4"},
                           {"phase": "start", "started_at": 1794150480.6, "ended_at": null,
@@ -42,6 +43,8 @@ A newer request, such as one for a changed serving config, replaces the current 
 * ``idle``: no engine runs. The next request starts one and waits for it.
 
 ``engine`` is null in every other state, and when the handler cannot tell. While ``engine`` is ``starting``, ``engine_detail`` can give one short line about what the engine does now, such as ``Loading weights · 0:42``. It is null otherwise.
+
+``engine_replicas`` counts the engine replicas behind the route of a ``ready`` artifact, such as the containers of a server that scales, when the handler reports them: ``{"serving": 1, "starting": 2}``. ``serving`` replicas answer now, and ``starting`` ones run but do not answer yet. It is null in every other state, and when the handler cannot tell. An engine can be ``warm`` while more replicas start.
 
 ``startup`` gives the artifact's startup in three fixed phases, the same for every backend:
 

@@ -21,7 +21,7 @@ from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
-from reef.inference.interfaces import EngineClients, InferenceHandler, StartupStep, StartupSteps
+from reef.inference.interfaces import EngineClients, EngineReplicas, InferenceHandler, StartupStep, StartupSteps
 from reef.storage.coordination.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.scenario.commits import CommitRecord
 from reef.storage.sql.coordination import memory_coordination
@@ -225,6 +225,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "error": None,
                     "engine": None,
                     "engine_detail": None,
+                    "engine_replicas": None,
                     # RFC #1283: a startup that waits is in its prepare phase from the request.
                     "startup": {
                         "steps": [
@@ -271,6 +272,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     "error": None,
                     "engine": None,
                     "engine_detail": None,
+                    "engine_replicas": None,
                     "startup": None,
                 }
         finally:
@@ -301,6 +303,7 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                     "error": "The inference engine did not start. Check the service logs.",
                     "engine": None,
                     "engine_detail": None,
+                    "engine_replicas": None,
                     "startup": None,
                 }
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
@@ -412,6 +415,7 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                         "error": None,
                         "engine": None,
                         "engine_detail": None,
+                        "engine_replicas": None,
                         "startup": {"steps": [prepare], "estimate_seconds": None},
                     }
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
@@ -462,6 +466,9 @@ class ColdHandler(HttpInferenceHandler):
     def engine_detail(self, served: ServedArtifact) -> str:
         return "Loading weights · 0:42"
 
+    def engine_replicas(self, served: ServedArtifact) -> EngineReplicas:
+        return EngineReplicas(serving=int(self.state == "warm"), starting=int(self.state == "starting"))
+
     def engine_steps(self, served: ServedArtifact) -> StartupSteps:
         return StartupSteps((StartupStep("start", 100.0, 108.0), StartupStep("load", 108.0, detail="5 of 6")), 60.0)
 
@@ -494,6 +501,11 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                     assert status["engine"] == state
                     # Only a starting engine says what it does now.
                     assert status["engine_detail"] == ("Loading weights · 0:42" if state == "starting" else None)
+                    # The replicas come in every engine state: a warm engine can add replicas.
+                    assert status["engine_replicas"] == {
+                        "serving": int(state == "warm"),
+                        "starting": int(state == "starting"),
+                    }
                     # RFC #1283: and its phases, with their times.
                     load = {"phase": "load", "started_at": 108.0, "ended_at": None, "detail": "5 of 6"}
                     start = {"phase": "start", "started_at": 100.0, "ended_at": 108.0, "detail": None}
