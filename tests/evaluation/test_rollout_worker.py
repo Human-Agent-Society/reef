@@ -625,12 +625,14 @@ ANSWER = (200, {"choices": [{"message": {"role": "assistant", "content": "5"}, "
         (502, {"error": {"message": "the engine stopped"}}, None),
     ],
 )
-def test_rollout_calls_keep_a_refusal_after_later_answers(status, response, refusal):
+def test_rollout_calls_read_each_refusal_and_a_later_answer_clears_only_a_rate_limit(status, response, refusal):
     calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
     calls.call_captured(turn("/v1/chat/completions", status, response))
+    assert calls.last_call_refusal == refusal
     calls.call_captured(turn("/v1/chat/completions", 200, ANSWER[1]))
     calls.close()
-    assert (calls.all_last_refusal, calls.all_refused) == (refusal, int(refusal is not None))
+    kept = None if refusal is None or refusal.limit is RATE else refusal
+    assert (calls.all_refusals.last, calls.last_call_refusal) == (kept, None)
 
 
 # A gateway's wrapping of the provider's 402: its code is text, and the provider's number is in its message.
@@ -892,6 +894,42 @@ def test_a_rate_limit_that_the_endpoint_sent_again_to_an_answer_keeps_the_score(
     assert (item.state, RolloutScore.from_json(item.result["score"]).value) == ("finished", 0.0)
 
 
+#: A 429 that the endpoint tries ``RATE_LIMIT_TRIES`` times, so that the agent gets it.
+BUSY = [(429, {"error": {"message": "busy"}}, {"Retry-After": "0"})] * artifact_endpoint.RATE_LIMIT_TRIES
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("replies", "statuses", "error"),
+    [
+        # The agent sends a rate-limited call again on its own, so a later answer means that it lost no step.
+        ([ANSWER, *BUSY, ANSWER], [200, 429, 200], None),
+        ([ANSWER, *BUSY], [200, 429], RATE_LIMITED_ERROR),
+        # An agent does not send a refusal of payment or access again, so a later answer does not clear it.
+        ([ANSWER, WRAPPED_402, ANSWER], [200, 402, 200], PAYMENT_ERROR),
+        ([ANSWER, (401, {"error": {"message": "invalid key"}}, {}), ANSWER], [200, 401, 200], "access_denied"),
+    ],
+)
+def test_a_later_answer_clears_a_rate_limit_that_reached_the_agent_but_no_other_refusal(
+    tmp_path, monkeypatch, replies, statuses, error
+):
+    monkeypatch.setattr(artifact_endpoint, "RATE_LIMIT_FIRST_WAIT_SECONDS", 0.01)
+    lab = CallingLab(len(statuses), reward=0.0)
+    with scripted_provider(replies) as (url, bodies):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    assert lab.statuses == statuses and len(bodies) == len(replies)
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    if error is None:
+        assert (item.state, RolloutScore.from_json(item.result["score"]).value) == ("finished", 0.0)
+        return
+    assert (item.state, item.attempt_count, item.result) == ("failed", 1, None)
+    if isinstance(error, re.Pattern):
+        assert error.fullmatch(item.error) is not None
+    else:
+        assert error in item.error
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("replies", "tool_calls", "fails_after_refusal", "expected_state", "expected_error"),
@@ -963,8 +1001,8 @@ def timed_turn(
 @pytest.mark.parametrize(
     ("turns", "refused", "expected_answered"),
     [
-        # Each 429 that reached the agent counts, also when later main-loop calls answered: 1 of 4, 4 of 9, 7 of 10.
-        ([(200, True), (429, True), (200, True), (200, True)], (ModelCallRefusal(RATE, 429, None), 1), 3),
+        # The agent sent each 429 again on its own, and a later main-loop call answered: 1 of 4, 4 of 9, 7 of 10.
+        ([(200, True), (429, True), (200, True), (200, True)], None, 3),
         (
             [
                 (429, True),
@@ -977,7 +1015,7 @@ def timed_turn(
                 (200, True),
                 (200, True),
             ],
-            (ModelCallRefusal(RATE, 429, None), 4),
+            None,
             5,
         ),
         (
@@ -993,7 +1031,7 @@ def timed_turn(
                 (429, True),
                 (200, True),
             ],
-            (ModelCallRefusal(RATE, 429, None), 7),
+            None,
             3,
         ),
         # A trailing 200 OK auxiliary call (no tools or empty tools list) does not clear a 402 on the main loop.
@@ -1002,9 +1040,15 @@ def timed_turn(
         ([(200, True), (402, True), (200, [])], (ModelCallRefusal(PAYMENT, 402, None), 1), 1),
         # A refused auxiliary call does not fail a main loop that the provider answered.
         ([(402, False), (200, True), (200, True)], None, 2),
+        # A 429 with no later main-loop answer counts, also after an auxiliary answer.
+        ([(200, True), (429, True)], (ModelCallRefusal(RATE, 429, None), 1), 1),
+        ([(429, True), (200, False)], (ModelCallRefusal(RATE, 429, None), 1), 0),
+        # An answer clears the 429s before it, but no payment refusal.
+        ([(402, True), (429, True), (200, True)], (ModelCallRefusal(PAYMENT, 402, None), 1), 1),
+        ([(429, True), (402, True), (429, True)], (ModelCallRefusal(RATE, 429, None), 3), 0),
     ],
 )
-def test_rollout_calls_count_each_refusal_that_reached_the_agent_and_ignore_auxiliary_calls(
+def test_rollout_calls_count_lasting_refusals_and_unanswered_rate_limits_and_ignore_auxiliary_calls(
     turns, refused, expected_answered
 ):
     calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
@@ -1019,14 +1063,16 @@ def test_rollout_calls_count_each_refusal_that_reached_the_agent_and_ignore_auxi
 @pytest.mark.parametrize(
     ("turns", "refused"),
     [
-        # A failed trial counts each refused auxiliary call, also one that tool-bearing answers followed.
-        ([(402, False), (200, True), (429, False), (200, True)], (ModelCallRefusal(RATE, 429, None), 2)),
-        # A refused tool-bearing call counts alone, as for a trial that did not fail.
-        ([(402, False), (429, True), (200, True)], (ModelCallRefusal(RATE, 429, None), 1)),
+        # A failed trial counts a refused last auxiliary call.
+        ([(200, True), (402, False)], (ModelCallRefusal(PAYMENT, 402, None), 1)),
+        ([(200, True), (429, False)], (ModelCallRefusal(RATE, 429, None), 1)),
+        # It does not count a refused auxiliary call that another call followed.
+        ([(402, False), (200, True), (429, False), (200, True)], None),
+        ([(402, False), (429, True), (200, True)], None),
         ([(200, False), (200, True)], None),
     ],
 )
-def test_a_failed_trial_counts_the_refused_auxiliary_calls_when_no_tool_bearing_call_was_refused(turns, refused):
+def test_a_failed_trial_counts_a_refused_last_call_when_no_tool_bearing_refusal_counts(turns, refused):
     calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
     for index, (status, with_tools) in enumerate(turns):
         calls.call_captured(timed_turn(status, 1000.0 + index, 0.2, with_tools=with_tools))

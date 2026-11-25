@@ -628,8 +628,8 @@ class ModelCallRefusal:
 
     Values: ``limit`` is the ``UpstreamLimit`` of the refusal (``refusal_limit``), ``status`` the answer's HTTP status,
     an int from 400 to 599, and ``retry_after_seconds`` the answer's ``Retry-After``, an int of at least 0, or None.
-    It holds no text of the answer. Purpose: ``RolloutCalls`` makes it for each refused call and keeps the last one,
-    and ``EvaluationRolloutWorker.score`` fails an unscored rollout with its ``reason``.
+    It holds no text of the answer. Purpose: ``RolloutCalls`` makes it for each refused call (``CallRefusals``), and
+    ``EvaluationRolloutWorker.score`` fails an unscored rollout with its ``reason``.
     """
 
     limit: UpstreamLimit
@@ -663,18 +663,50 @@ class ModelCallRefusal:
         return text
 
 
+@dataclass
+class CallRefusals:
+    """The refusals of one kind of a rollout's calls that leave the rollout with no score.
+
+    Values: ``lasting`` counts the refused calls of a ``PAYMENT`` or ``ACCESS`` limit, and ``last_lasting`` is the
+    last of them. An agent does not send such a call again, so they count whatever calls follow. ``rate`` counts the
+    ``RATE`` refusals since the last call that answered 200. An agent sends such a call again on its own, so a later
+    answer clears them. ``last`` is the last refusal that counts, or None when none counts. Purpose: ``RolloutCalls``
+    keeps one for all calls and one for tool-bearing calls, under its lock.
+    """
+
+    lasting: int = 0
+    rate: int = 0
+    last_lasting: ModelCallRefusal | None = None
+    last: ModelCallRefusal | None = None
+
+    def add(self, status: int, refusal: ModelCallRefusal | None) -> None:
+        """Count one call that answered ``status``, with its ``refusal`` or None."""
+        if refusal is None:
+            if status == 200:
+                self.rate, self.last = 0, self.last_lasting
+        elif refusal.limit is UpstreamLimit.RATE:
+            self.rate += 1
+            self.last = refusal
+        else:
+            self.lasting += 1
+            self.last_lasting = self.last = refusal
+
+    def error(self) -> str | None:
+        """The error of a rollout that these refusals leave with no score, or None."""
+        return None if self.last is None else self.last.reason(self.lasting + self.rate)
+
+
 class RolloutCalls(CaptureObserver):
     """Keeps each call of one attempt of an evaluation rollout in the data store, as the call ends.
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
-    the index of the next call. ``all_answered`` counts calls that answered 200, ``all_refused`` counts calls that a
-    provider's limit refused (``refusal_limit``), and ``all_last_refusal`` holds the ``ModelCallRefusal`` of the last
-    refused call, or None when ``all_refused`` is 0. A later call does not clear them. ``tool_calls_seen`` is True
-    once a call carried a non-empty ``tools`` field (``has_tools``); ``tool_answered``, ``tool_refused`` and
-    ``tool_last_refusal`` count those tool-bearing calls alone. ``answered`` and ``refusal`` read the tool-bearing
-    counts when ``tool_calls_seen`` is True, else the all-call counts, so auxiliary calls without tools (such as title
-    generation) neither mask a main-loop refusal nor fail a completed main loop. ``service_failures`` is the number of
+    the index of the next call. ``all_answered`` counts calls that answered 200, and ``all_refusals`` holds the
+    refusals that count (``CallRefusals``, of ``refusal_limit``). ``last_call_refusal`` is the ``ModelCallRefusal`` of
+    the call captured last, or None. ``tool_calls_seen`` is True once a call carried a non-empty ``tools`` field
+    (``has_tools``); ``tool_answered`` and ``tool_refusals`` count those tool-bearing calls alone. ``answered`` and
+    ``refusal`` read the tool-bearing counts when ``tool_calls_seen`` is True, else the all-call counts, so auxiliary
+    calls without tools (such as title generation) neither mask a main-loop refusal nor fail a completed main loop. ``service_failures`` is the number of
     calls that the inference service failed (an HTTP status of 500 or more), ``service_failure_seconds`` their total
     duration, and ``last_failed`` whether the call captured last was one. ``first_started_at`` and ``last_ended_at``
     bound the calls in wall-clock seconds; both are None before the first.
@@ -690,12 +722,11 @@ class RolloutCalls(CaptureObserver):
         self.attempt = attempt
         self.next_index = 0
         self.all_answered = 0
-        self.all_refused = 0
-        self.all_last_refusal: ModelCallRefusal | None = None
+        self.all_refusals = CallRefusals()
+        self.last_call_refusal: ModelCallRefusal | None = None
         self.tool_calls_seen = False
         self.tool_answered = 0
-        self.tool_refused = 0
-        self.tool_last_refusal: ModelCallRefusal | None = None
+        self.tool_refusals = CallRefusals()
         self.service_failures = 0
         self.service_failure_seconds = 0.0
         self.last_failed = False
@@ -712,18 +743,15 @@ class RolloutCalls(CaptureObserver):
     def refusal(self, trial_failed: bool) -> str | None:
         """The error of a rollout whose score would judge the model provider rather than the model, or None.
 
-        That is a rollout with a model call that a provider's limit refused, whatever calls came after it. Each
-        captured call is the endpoint's answer after its own tries (``ArtifactEndpoint.answer``), so each counted
-        refusal reached the agent. When the rollout made a tool-bearing call, only refused tool-bearing calls count;
-        when none was refused and ``trial_failed`` is True, any refused call counts."""
+        Each captured call is the endpoint's answer after its own tries (``ArtifactEndpoint.answer``), so each
+        refusal reached the agent. A payment or access refusal counts whatever calls came after it; a rate limit
+        counts only when no later call answered (``CallRefusals``). When the rollout made a tool-bearing call, only
+        tool-bearing calls count. When none counts and ``trial_failed`` is True, a refusal of the last call counts."""
         with self.lock:
-            if self.tool_calls_seen:
-                refused, last = self.tool_refused, self.tool_last_refusal
-            else:
-                refused, last = self.all_refused, self.all_last_refusal
-            if last is None and trial_failed:
-                refused, last = self.all_refused, self.all_last_refusal
-        return None if last is None else last.reason(refused)
+            error = (self.tool_refusals if self.tool_calls_seen else self.all_refusals).error()
+            if error is None and trial_failed and self.last_call_refusal is not None:
+                error = self.last_call_refusal.reason(1)
+        return error
 
     def call_captured(self, turn: CapturedTurn) -> None:
         # The proxy keeps whatever JSON the endpoint answered; only an object can name a refusal.
@@ -739,15 +767,12 @@ class RolloutCalls(CaptureObserver):
             index = self.next_index
             self.next_index += 1
             self.all_answered += turn.status == 200
-            if refusal is not None:
-                self.all_refused += 1
-                self.all_last_refusal = refusal
+            self.all_refusals.add(turn.status, refusal)
+            self.last_call_refusal = refusal
             if is_tool_call:
                 self.tool_calls_seen = True
                 self.tool_answered += turn.status == 200
-                if refusal is not None:
-                    self.tool_refused += 1
-                    self.tool_last_refusal = refusal
+                self.tool_refusals.add(turn.status, refusal)
             started = turn.at - turn.duration_s
             self.first_started_at = started if self.first_started_at is None else min(self.first_started_at, started)
             self.last_ended_at = turn.at if self.last_ended_at is None else max(self.last_ended_at, turn.at)
@@ -997,8 +1022,9 @@ class EvaluationRolloutWorker(QueueWorker):
         Both leave the score unset, even if the agent already called the model.
 
         When a provider's limit refused a model call that reached the agent (``RolloutCalls.refusal``), the rollout
-        fails for good with no score, also when later calls were answered. When a rollout makes tool-bearing calls, a
-        refused auxiliary call without tools fails only a trial that failed with an error. When the inference service
+        fails for good with no score: for payment or access, also when later calls were answered; for a rate limit,
+        only when no later call was answered. When a rollout makes tool-bearing calls, a refused last call without
+        tools fails only a trial that failed with an error. When the inference service
         failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score, and the rollout is
         retried as any other failed attempt."""
         if rollout.requires_prepared_templates:
@@ -1088,7 +1114,7 @@ class EvaluationRolloutWorker(QueueWorker):
             if exception_type in SANDBOX_REQUEST_ERRORS:
                 raise ItemFailedError(f"the sandbox service refused the sandbox: {result.error}")
             # A required tool-less agent step (such as a native sub-agent with ``tools: []``) fails the trial with
-            # ``result.error``, so its refusal counts then.
+            # ``result.error``, so a refusal of the last call counts then.
             refusal = calls.refusal(trial_failed=bool(result.error))
             if refusal is not None:
                 # The agent met a provider refusal, so a score, 0 above all, would judge the provider, and a new
