@@ -1258,9 +1258,9 @@ def test_the_step_counts_find_a_later_step_without_a_token_with_loss() -> None:
     # Two steps of one micro-batch on this rank: samples 0 and 1 train, and step 1's sample 2 was removed.
     counts = rank_step_counts([3, 0, 0], [[0, 1], [2]], [1, 1])
     assert counts == [2, 1, 3, 1, 1, 0]
-    check_step_counts([2, 1, 3, 1, 1, 4], [2, 1], sample_count=3)
+    assert check_step_counts([2, 1, 3, 1, 1, 4], [2, 1]) == 3
     with pytest.raises(RuntimeError, match="optimizer step 1 of the rollout trains nothing: it has 1 rollouts"):
-        check_step_counts(counts, [2, 1], sample_count=None)
+        check_step_counts(counts, [2, 1])
 
 
 @pytest.mark.unit

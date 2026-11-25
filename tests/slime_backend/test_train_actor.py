@@ -313,6 +313,7 @@ def load_on_rank_zero(monkeypatch, module, reduced_groups, *, other_rank_mask: l
         tensor += torch.tensor(other_rank)
 
     monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     actor = object.__new__(module.ReefMegatronTrainRayActor)
     actor.args = types.SimpleNamespace()
     actor.role = "actor"
@@ -345,9 +346,23 @@ def test_a_step_with_one_live_sample_on_another_rank_trains(monkeypatch) -> None
 
 
 @pytest.mark.unit
-def test_a_step_plan_that_drops_converted_samples_fails_before_it_trains(monkeypatch) -> None:
-    # Slime's build_dp_schedule floors the steps and drops the rollouts after the last full step.
+def test_a_step_plan_that_drops_converted_samples_trains_with_a_warning(monkeypatch, caplog) -> None:
+    # Slime's build_dp_schedule drops the rollouts after the last full step by design, for example when a rollout
+    # function returns a rollout count that is not a multiple of the step. The job must not fail for it.
     module = _load_train_actor(monkeypatch)
 
-    with pytest.raises(RuntimeError, match="trains 2 of its 3 samples, in steps of \\[2\\] rollouts"):
-        load_on_rank_zero(monkeypatch, module, [], other_rank_mask=[1], raw_reward_count=3)
+    with caplog.at_level("WARNING", logger=module.__name__):
+        loaded = load_on_rank_zero(monkeypatch, module, [], other_rank_mask=[1], raw_reward_count=3)
+
+    assert loaded["global_batch_sizes"] == [2]
+    assert "trains 2 of its 3 samples, in steps of [2] rollouts" in caplog.text
+
+
+@pytest.mark.unit
+def test_a_step_plan_that_trains_every_converted_sample_logs_nothing(monkeypatch, caplog) -> None:
+    module = _load_train_actor(monkeypatch)
+
+    with caplog.at_level("WARNING", logger=module.__name__):
+        load_on_rank_zero(monkeypatch, module, [], other_rank_mask=[1])
+
+    assert "step plan" not in caplog.text

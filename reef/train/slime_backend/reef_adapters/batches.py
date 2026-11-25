@@ -74,28 +74,20 @@ def rank_step_counts(
     return counts
 
 
-def check_step_counts(step_counts: Sequence[int], global_batch_sizes: Sequence[int], sample_count: int | None) -> None:
-    """Raise ``RuntimeError`` when Slime's step plan of a rollout leaves out samples or trains a step on no token.
+def check_step_counts(step_counts: Sequence[int], global_batch_sizes: Sequence[int]) -> int:
+    """Raise ``RuntimeError`` when a step of Slime's plan of a rollout trains no token, and return the planned samples.
 
     ``step_counts`` is the sum of ``rank_step_counts`` over the data-parallel ranks, and ``global_batch_sizes``
-    holds the rollouts of each step. ``sample_count`` is the samples that Slime converted for the rollout, or None
-    for Reef's own data, whose steps the training component plans. A removed sample has no token with loss: Slime
-    zeroes its loss mask.
+    holds the rollouts of each step. A removed sample has no token with loss: Slime zeroes its loss mask.
     """
     steps = [step_counts[index : index + 3] for index in range(0, len(step_counts), 3)]
-    planned = sum(samples for samples, _, _ in steps)
-    if sample_count is not None and planned != sample_count:
-        raise RuntimeError(
-            f"Slime's step plan of the rollout trains {planned} of its {sample_count} samples, in steps of "
-            f"{list(global_batch_sizes)} rollouts: Slime drops the rollouts after the last full step, so "
-            "--rollout-batch-size times --n-samples-per-prompt must be a multiple of --global-batch-size"
-        )
     for step, ((samples, without_loss, tokens), rollouts) in enumerate(zip(steps, global_batch_sizes, strict=True)):
         if tokens == 0:
             raise RuntimeError(
                 f"optimizer step {step} of the rollout trains nothing: it has {rollouts} rollouts and "
                 f"{samples} samples, {without_loss} of them removed or fully masked, and 0 tokens with loss"
             )
+    return sum(samples for samples, _, _ in steps)
 
 
 class TrainingBatchProcessor:
