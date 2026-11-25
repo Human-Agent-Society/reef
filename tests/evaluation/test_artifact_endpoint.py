@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import aiohttp
 import pytest
 from tests.support.polling import wait_until
 
@@ -389,6 +390,30 @@ def test_a_streaming_agent_gets_one_stream_after_its_call_was_sent_again(short_w
     assert handler.payloads == [CHAT, CHAT], "the tries ran before the agent got any output"
     assert stream.count('"content": "five"') == 1 and stream.count("[DONE]") == 1
     assert [(turn["status"], turn["response"]) for turn in turns] == [(200, REPLY)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure",
+    [
+        aiohttp.ServerDisconnectedError(),
+        aiohttp.ClientPayloadError("the body ended early"),
+        OSError("the connection was reset"),
+        RuntimeError("the handler failed"),
+    ],
+)
+def test_a_handler_that_fails_without_a_status_gives_a_502_that_the_capture_keeps(failure) -> None:
+    runtime, _ = scripted(failure)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
+        proxy.start()
+        try:
+            status, _ = call(f"http://127.0.0.1:{proxy.port}", "/v1/chat/completions", CHAT)
+            turns = proxy.drain()
+        finally:
+            proxy.stop()
+    # The capture keeps the failure, so the rollout counts it as a failure of the inference service.
+    assert (status, [turn["status"] for turn in turns]) == (502, [502])
 
 
 @pytest.mark.unit

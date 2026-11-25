@@ -190,9 +190,9 @@ class ArtifactEndpoint:
         holds the route. Tries start at most ``RATE_LIMIT_TRIES`` times, within ``RATE_LIMIT_SECONDS`` and the
         runtime's ``inference_timeout_s`` of the call's arrival; a try after a wait gets only the time left, also when
         its admission comes late (``call_handler``). When a wait would pass these limits, the endpoint answers at once
-        (``refused``). It sends no other failure again. The error body of a refusal names the limit as its ``code``
-        (``call_limit``). No try starts once ``closed`` is set: the call then gets its last refusal, or 503 with
-        ``CLOSED_ERROR`` when the provider refused none.
+        (``refused``). It sends no other failure again, and answers a failure without a provider status with 502. The
+        error body of a refusal names the limit as its ``code`` (``call_limit``). No try starts once ``closed`` is
+        set: the call then gets its last refusal, or 503 with ``CLOSED_ERROR`` when the provider refused none.
         """
         if self.log_probs:
             payload = log_prob_request(path, payload)
@@ -232,7 +232,9 @@ class ArtifactEndpoint:
                 return 503, {"error": {"message": str(exc)}}
             except UpstreamStatusError as exc:
                 refusal, limit, refused_at = exc, call_limit(exc), time.monotonic()
-            except (ValueError, TimeoutError, OSError) as exc:
+            except Exception as exc:
+                # Any other failure, such as a connection that the provider closed, is a 502: without an answer, the
+                # capture keeps no call, and the rollout cannot count the failure (``RolloutCalls.service_failure``).
                 return 502, {"error": {"message": f"the runtime could not answer from the artifact: {exc}"}}
             else:
                 if reply is None:
