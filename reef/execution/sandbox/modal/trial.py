@@ -1,7 +1,7 @@
 """Modal sandbox creation errors for Reef trials. Harbor loads this adapter for Modal environments.
 
-Trial configs name its class by the path that saved configs keep,
-``reef.execution.sandbox.modal_trial:ModalTrialEnvironment``. This module imports Modal's SDK (``reef-infra[modal]``).
+Trial configs name its class ``reef.execution.sandbox.modal.trial:ModalTrialEnvironment``. This module imports Modal's
+SDK (``reef-infra[modal]``).
 """
 
 from __future__ import annotations

@@ -429,8 +429,7 @@ def test_executor_config_and_the_modal_executor_do_not_require_the_modal_package
         "from reef.execution.sandbox.modal import NODE_IMAGE, ModalExecutor, ModalSession\n"
         "from reef.execution.sandbox.process import SandboxUnavailableError\n"
         "assert REMOTE_EXECUTORS['modal'] is ModalExecutor and ModalSession and NODE_IMAGE\n"
-        "loaded = {'reef.execution.sandbox.modal.trial', 'reef.execution.sandbox.modal_trial'}\n"
-        "assert not loaded & set(sys.modules), loaded & set(sys.modules)\n"
+        "assert 'reef.execution.sandbox.modal.trial' not in sys.modules\n"
         "executor = remote_executor('modal', {'modal_app': 'custom'}, {})\n"
         "assert isinstance(executor, ModalExecutor) and executor.app_name == 'custom'\n"
         "try:\n"
@@ -442,18 +441,25 @@ def test_executor_config_and_the_modal_executor_do_not_require_the_modal_package
     )
 
 
-def test_a_name_set_on_the_earlier_agentenv_build_path_is_the_one_that_builds_read() -> None:
-    # Callers set names on the earlier module path, such as the poll interval of a build wait, also when a process
-    # imports that path first. Neither earlier AgentENV path needs the E2B SDK or loads Reef's E2B trial module.
+def test_the_earlier_agentenv_module_paths_share_build_and_compose_settings() -> None:
+    # Existing callers import and patch these two modules. Import the old build path first and the old Compose path
+    # after its canonical module to exercise both orders.
     _assert_isolated_import(
         "import sys\n"
         "sys.modules['e2b'] = None\n"
-        "import reef.execution.sandbox.agentenv_build as earlier\n"
-        "from reef.execution.sandbox.agentenv_compose import ComposeSandbox\n"
+        "import reef.execution.sandbox.agentenv_build as earlier_build\n"
         "from reef.execution.sandbox.agentenv import build, compose\n"
-        "earlier.BUILD_POLL_INTERVAL_S = 0.5\n"
-        "assert build.poll_interval() <= 0.75\n"
-        "assert ComposeSandbox is compose.ComposeSandbox\n"
+        "import reef.execution.sandbox.agentenv_compose as earlier_compose\n"
+        "from reef.execution.sandbox.agentenv_build import BUILD_POLL_INTERVAL_S, poll_interval\n"
+        "from reef.execution.sandbox.agentenv_compose import ComposeSandbox, run_aenv\n"
+        "assert poll_interval is build.poll_interval\n"
+        "assert (ComposeSandbox, run_aenv) == (compose.ComposeSandbox, compose.run_aenv)\n"
+        "assert BUILD_POLL_INTERVAL_S == build.BUILD_POLL_INTERVAL_S\n"
+        "earlier_build.BUILD_POLL_INTERVAL_S = 0\n"
+        "assert build.poll_interval() == 0\n"
+        "start = object()\n"
+        "earlier_compose.run_aenv = start\n"
+        "assert compose.run_aenv is start\n"
         "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
 

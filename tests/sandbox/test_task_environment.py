@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from reef.execution.sandbox.agentenv_compose import TransientStartError
+from reef.execution.sandbox.agentenv.compose import TransientStartError
 from reef.execution.sandbox.process import (
     SANDBOX_CAPACITY_ERRORS,
     SANDBOX_REQUEST_ERRORS,
@@ -412,16 +412,15 @@ def test_a_modal_trial_gets_reefs_class_on_harbors_modal_environment(tmp_path: P
     from harbor.environments.modal import ModalEnvironment
     from harbor.utils.import_path import import_class
 
-    from reef.execution.sandbox.modal import trial
-    from reef.execution.sandbox.modal_trial import ModalTrialEnvironment
+    from reef.execution.sandbox.modal.trial import ModalTrialEnvironment
     from reef.execution.sandbox.task_environment import HARBOR_MODAL_ENVIRONMENT
 
     environment = harbor_modal_environment(tmp_path)
     assert type(environment) is ModalTrialEnvironment and isinstance(environment, ModalEnvironment)
     assert environment.type() == ModalEnvironment.type() == "modal"
-    # Saved trial configs keep this path; it names the class of the Modal provider's trial module.
-    assert HARBOR_MODAL_ENVIRONMENT == "reef.execution.sandbox.modal_trial:ModalTrialEnvironment"
-    assert import_class(HARBOR_MODAL_ENVIRONMENT) is ModalTrialEnvironment is trial.ModalTrialEnvironment
+    # A trial config names the class by its module, and Harbor resolves that path.
+    assert HARBOR_MODAL_ENVIRONMENT == "reef.execution.sandbox.modal.trial:ModalTrialEnvironment"
+    assert import_class(HARBOR_MODAL_ENVIRONMENT) is ModalTrialEnvironment
 
 
 def modal_errors() -> dict[str, Exception]:
@@ -692,7 +691,7 @@ def test_a_cancelled_template_build_ends_and_is_not_built_again(
     cancellation as a failed attempt: the build would run again, and its caller would never end."""
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -723,7 +722,7 @@ def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
 ) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example/")
@@ -767,7 +766,7 @@ def test_a_task_template_built_before_the_trials_is_the_template_of_a_trial(
 ) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -796,7 +795,7 @@ def test_the_template_of_a_separate_verifier_environment_is_built_before_the_tri
     from harbor.models.trial.paths import TrialPaths
 
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -961,7 +960,7 @@ def test_on_agentenv_a_trial_that_builds_no_template_starts_only_from_a_ready_te
 ) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild, TemplateState
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, TemplateState
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -1061,8 +1060,8 @@ def compose_stand_ins(monkeypatch: pytest.MonkeyPatch, *, image_exists: bool) ->
     E2B SDK connects to. The first ``aenv compose up`` finds no image of ``main`` unless ``image_exists``."""
     e2b = pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
-    from reef.execution.sandbox.agentenv_compose import ComposeSandbox, ImageNotFoundError
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox, ImageNotFoundError
 
     calls: list[object] = []
     guest = ComposeGuest()
@@ -1099,8 +1098,8 @@ def compose_stand_ins(monkeypatch: pytest.MonkeyPatch, *, image_exists: bool) ->
 def test_on_agentenv_a_task_with_a_compose_file_runs_its_project_and_the_trial_works_in_main(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from reef.execution.sandbox.agentenv_build import DockerfileBuild
-    from reef.execution.sandbox.agentenv_compose import ComposeSandbox, main_image
+    from reef.execution.sandbox.agentenv.build import DockerfileBuild
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox, main_image
 
     environment = compose_environment(tmp_path, monkeypatch)
     calls, guest = compose_stand_ins(monkeypatch, image_exists=False)
@@ -1154,7 +1153,7 @@ def test_a_compose_trial_that_builds_no_template_needs_the_image_of_main(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_compose import ComposeSandbox
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox
 
     environment = compose_environment(tmp_path, monkeypatch, builds_templates=False)
     calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
@@ -1176,7 +1175,7 @@ def test_a_compose_start_that_fails_after_the_sandbox_exists_deletes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_compose import ComposeStartError
+    from reef.execution.sandbox.agentenv.compose import ComposeStartError
 
     environment = compose_environment(tmp_path, monkeypatch)
     calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
@@ -1209,8 +1208,8 @@ def test_a_compose_file_changes_nothing_unless_the_deployment_selects_compose(
 def test_the_image_of_main_is_built_before_the_trials_of_a_compose_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from reef.execution.sandbox.agentenv_build import DockerfileBuild
-    from reef.execution.sandbox.agentenv_compose import main_image
+    from reef.execution.sandbox.agentenv.build import DockerfileBuild
+    from reef.execution.sandbox.agentenv.compose import main_image
     from reef.execution.sandbox.e2b import build_task_main_image, build_task_template
 
     environment = compose_environment(tmp_path, monkeypatch)

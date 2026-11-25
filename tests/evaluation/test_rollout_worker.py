@@ -53,7 +53,7 @@ from reef.evaluation.rollout_worker import (
 )
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
+from reef.execution.sandbox.agentenv.build import AgentEnvBuildError
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.inference.http import HttpInferenceHandler

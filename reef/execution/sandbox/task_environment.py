@@ -49,7 +49,7 @@ MODAL_SANDBOX_DEFAULT_S = 2 * 60 * 60
 #: E2B trial environment stored in Harbor configurations. It deletes the sandbox at its timeout.
 HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
 #: Modal trial environment stored in Harbor configurations. It reports capacity refusals as Reef sandbox errors.
-HARBOR_MODAL_ENVIRONMENT = "reef.execution.sandbox.modal_trial:ModalTrialEnvironment"
+HARBOR_MODAL_ENVIRONMENT = "reef.execution.sandbox.modal.trial:ModalTrialEnvironment"
 
 
 class ReadinessProbe(ABC):

@@ -1,4 +1,4 @@
-"""``reef.execution.sandbox.agentenv_build``: an ``aenv build`` of a task's Dockerfile into an AgentENV template, and
+"""``reef.execution.sandbox.agentenv.build``: an ``aenv build`` of a task's Dockerfile into an AgentENV template, and
 the state of a template alias that decides whether to build, wait or delete first."""
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.execution.sandbox import agentenv_build
-from reef.execution.sandbox.agentenv_build import (
+from reef.execution.sandbox.agentenv import build as agentenv_build
+from reef.execution.sandbox.agentenv.build import (
     AgentEnvBuildError,
     AgentEnvTemplates,
     DockerfileBuild,
