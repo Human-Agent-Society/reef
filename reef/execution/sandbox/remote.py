@@ -499,7 +499,8 @@ class TunnelPump:
     ``tunnel_headers`` and the relay's ``secret`` in :data:`RELAY_SECRET_HEADER`. In ``tunnel_headers``, each name
     is an HTTP token and each value visible ASCII text (:data:`HEADER_VALUE`). No two names are equal ignoring case,
     and no name is :data:`RELAY_SECRET_HEADER`. The constructor raises ``ValueError`` for other headers; its message
-    names a header and never its value.
+    names a header and never its value. ``taken`` holds the IDs of the requests that the pump took: the relay gives
+    a request out again when no reply piece comes in time, and the pump answers each ID once.
     Purpose: :meth:`RemoteSession.forward` makes one for each forwarded port. Each request to the relay (``/ready``,
     ``/next``, ``/reply``) carries ``headers`` and never follows a redirect: a redirect fails the request, so no
     header reaches another address. A request to the local port carries only the headers that the sandbox's process
@@ -530,6 +531,7 @@ class TunnelPump:
         self.url = url
         self.port = port
         self.pollers = pollers
+        self.taken: set[str] = set()
         self.headers = {**(tunnel_headers or {}), RELAY_SECRET_HEADER: secret}
         self.ready = threading.Event()
         self.failure: str | None = None
@@ -597,6 +599,9 @@ class TunnelPump:
             except Exception:
                 await asyncio.sleep(1)
                 continue
+            if request["id"] in self.taken:
+                continue
+            self.taken.add(request["id"])
             await self.serve(tunnel, local, request)
 
     async def serve(self, tunnel: ClientSession, local: ClientSession, request: Mapping[str, Any]) -> None:
