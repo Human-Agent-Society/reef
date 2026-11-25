@@ -733,6 +733,64 @@ def test_a_refused_last_call_keeps_a_completed_score_only_after_an_answered_call
     assert (item.state, item.error, RolloutScore.from_json(item.result["score"]).value) == ("finished", None, reward)
 
 
+def timed_turn(status: int, started_at: float, duration_s: float) -> CapturedTurn:
+    """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
+    return CapturedTurn(
+        "", "/v1/chat/completions", status, {"messages": []}, None, None, False, duration_s, at=started_at + duration_s
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("turns", "failure"),
+    [
+        # No failed call, and a refusal of a provider's limit is no failure of the service.
+        ([(200, 0, 10), (429, 10, 1), (200, 11, 10)], None),
+        # A short failure in a long run of calls leaves the score: 10 s of 1000 s.
+        ([(200, 0, 500), (502, 500, 10), (200, 510, 490)], None),
+        # A call that waited out the request timeout took much of the time: 300 s of 1000 s.
+        (
+            [(200, 0, 400), (502, 400, 300), (200, 700, 300)],
+            "the inference service failed 1 of 3 model calls, which took 300 s of 1000 s of model calls; "
+            "the rollout has no score",
+        ),
+        # The agent stopped on a failed call, however short it was.
+        (
+            [(200, 0, 990), (503, 990, 1)],
+            "the inference service failed 1 of 2 model calls, the last one among them, which took 1 s of 991 s of "
+            "model calls; the rollout has no score",
+        ),
+    ],
+)
+def test_rollout_calls_name_a_service_failure_that_took_the_last_call_or_much_of_the_time(turns, failure):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    for status, started_at, duration_s in turns:
+        calls.call_captured(timed_turn(status, 1000.0 + started_at, duration_s))
+    calls.close()
+    assert calls.service_failure() == failure
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_inference_service_failed_its_last_call_gets_no_score_and_runs_again(tmp_path):
+    # The trial ends without an agent error, and its verifier writes 0, as a verifier does for work never done.
+    lab = CallingLab(2, reward=0.0, fails_after_refusal=False)
+    broken = (502, {"error": {"message": "the engine stopped"}}, {})
+    with scripted_provider([ANSWER, broken]) as (url, _):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+        item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+        # The attempt failed with no score, and the rollout waits for another attempt.
+        assert lab.statuses == [200, 502]
+        assert (item.state, item.attempt_count, item.result) == ("queued", 1, None)
+        assert "the inference service failed 1 of 2 model calls, the last one among them" in (item.error or "")
+        while worker.run_once():
+            pass
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    # The service stayed down, so the rollout ends with no score once its attempts are used.
+    assert (item.state, item.attempt_count, item.result) == ("failed", 3, None)
+    assert lab.runs == 3
+
+
 @pytest.mark.unit
 def test_a_rate_limited_call_is_sent_again_in_the_same_sandbox_and_the_rollout_scores(tmp_path, monkeypatch):
     monkeypatch.setattr(artifact_endpoint, "RATE_LIMIT_FIRST_WAIT_SECONDS", 0.01)

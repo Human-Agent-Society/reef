@@ -107,6 +107,9 @@ MAX_VERIFIER_REWARDS = 64
 MAX_VERIFIER_CALLS = 2000
 #: The most bytes of verifier files that Reef reads for one attempt.
 MAX_VERIFIER_BYTES = 32 * 1024 * 1024
+#: The share of a rollout's model-call time that failed calls of the inference service may take before the rollout
+#: has no score: below it, the agent lost little time to the failures, and its score still judges the model.
+SERVICE_FAILURE_SHARE = 0.05
 
 
 def harbor_agent(harness: Mapping[str, Any] | None) -> Mapping[str, object]:
@@ -660,6 +663,9 @@ class RolloutCalls(CaptureObserver):
     the index of the next call. ``answered`` is the number of those calls that answered 200, from 0 to
     ``next_index``. ``last_refusal`` is the ``ModelCallRefusal`` of the call captured last, when a provider's limit
     refused it; it is None before the first call, and when the last call answered or failed in another way.
+    ``service_failures`` is the number of calls that the inference service failed (an HTTP status of 500 or more),
+    ``service_failure_seconds`` their total duration, and ``last_failed`` whether the call captured last was one.
+    ``first_started_at`` and ``last_ended_at`` bound the calls in wall-clock seconds; both are None before the first.
 
     Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
     One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
@@ -673,6 +679,11 @@ class RolloutCalls(CaptureObserver):
         self.next_index = 0
         self.answered = 0
         self.last_refusal: ModelCallRefusal | None = None
+        self.service_failures = 0
+        self.service_failure_seconds = 0.0
+        self.last_failed = False
+        self.first_started_at: float | None = None
+        self.last_ended_at: float | None = None
         self.lock = threading.Lock()
         self.writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-evaluation-calls")
 
@@ -689,7 +700,32 @@ class RolloutCalls(CaptureObserver):
             self.next_index += 1
             self.answered += turn.status == 200
             self.last_refusal = None if limit is None else ModelCallRefusal(limit, turn.status, wait)
+            started = turn.at - turn.duration_s
+            self.first_started_at = started if self.first_started_at is None else min(self.first_started_at, started)
+            self.last_ended_at = turn.at if self.last_ended_at is None else max(self.last_ended_at, turn.at)
+            self.last_failed = turn.status >= 500
+            if self.last_failed:
+                self.service_failures += 1
+                self.service_failure_seconds += turn.duration_s
             self.writer.submit(self.keep, evaluation_call(turn, self.rollout, self.attempt, index))
+
+    def service_failure(self) -> str | None:
+        """The error of a rollout whose score would judge the inference service rather than the model, or None.
+
+        That is a rollout whose last model call the service failed, or whose failed calls took at least
+        ``SERVICE_FAILURE_SHARE`` of the time from its first call to the end of its last: the agent stopped on the
+        failure, or it waited out much of its time limit for answers that did not come."""
+        with self.lock:
+            if not self.service_failures or self.first_started_at is None or self.last_ended_at is None:
+                return None
+            span = max(self.last_ended_at - self.first_started_at, 0.0)
+            if not self.last_failed and self.service_failure_seconds < SERVICE_FAILURE_SHARE * span:
+                return None
+            last = ", the last one among them" if self.last_failed else ""
+            return (
+                f"the inference service failed {self.service_failures} of {self.next_index} model calls{last}, which "
+                f"took {self.service_failure_seconds:.0f} s of {span:.0f} s of model calls; the rollout has no score"
+            )
 
     def keep(self, call: EvaluationCall) -> None:
         try:
@@ -908,7 +944,9 @@ class EvaluationRolloutWorker(QueueWorker):
         builds no template. Else it fails for good with the template item's error, before its candidate is served.
 
         When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), and the trial failed or no
-        call was answered, the rollout fails for good with no score (``ModelCallRefusal.reason``)."""
+        call was answered, the rollout fails for good with no score (``ModelCallRefusal.reason``). When the inference
+        service failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score, and the
+        rollout is retried as any other failed attempt."""
         if rollout.requires_prepared_templates:
             template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
@@ -993,6 +1031,11 @@ class EvaluationRolloutWorker(QueueWorker):
             if calls.last_refusal is not None and (result.error or not calls.answered):
                 # A score would judge the provider, and a new sandbox at once would meet the same refusal.
                 raise ItemFailedError(calls.last_refusal.reason())
+            service_failure = calls.service_failure()
+            if service_failure is not None:
+                # The agent stopped on a failed call or lost much of its time to them, so a score, 0 above all, would
+                # judge the service. Another attempt can find the service well again.
+                raise ReefError(service_failure)
             if not calls.answered:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
                 # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
