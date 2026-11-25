@@ -527,16 +527,17 @@ class InferenceReplica:
     def engine_state(
         self, scenario: str, model: str
     ) -> tuple[EngineState | None, str | None, StartupSteps | None, EngineReplicas | None]:
-        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), for a starting engine
-        what it does now (``engine_detail``) and its phases (``engine_steps``), and its replicas
-        (``engine_replicas``); None without a route or a handler."""
+        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), for a starting engine or
+        one with starting replicas what it does now (``engine_detail``) and its phases (``engine_steps``), and its
+        replicas (``engine_replicas``); None without a route or a handler."""
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
         except (NotServedError, StaleServedModelsError, LookupError):
             return None, None, None, None
         engine, replicas = handler.engine_state(served), handler.engine_replicas(served)
-        if engine != "starting":
+        # A warm engine that adds replicas also says how the replicas that start go on.
+        if engine != "starting" and (replicas is None or replicas.starting == 0):
             return engine, None, None, replicas
         return engine, handler.engine_detail(served), handler.engine_steps(served), replicas
 

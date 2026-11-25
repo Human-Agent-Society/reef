@@ -459,6 +459,7 @@ class ColdHandler(HttpInferenceHandler):
     """A handler whose engine scales to zero: it reports a state and never calls the engine."""
 
     state: Any = "idle"
+    adding = False
 
     def engine_state(self, served: ServedArtifact) -> Any:
         return self.state
@@ -467,7 +468,7 @@ class ColdHandler(HttpInferenceHandler):
         return "Loading weights · 0:42"
 
     def engine_replicas(self, served: ServedArtifact) -> EngineReplicas:
-        return EngineReplicas(serving=int(self.state == "warm"), starting=int(self.state == "starting"))
+        return EngineReplicas(serving=int(self.state == "warm"), starting=int(self.state == "starting" or self.adding))
 
     def engine_steps(self, served: ServedArtifact) -> StartupSteps:
         return StartupSteps((StartupStep("start", 100.0, 108.0), StartupStep("load", 108.0, detail="5 of 6")), 60.0)
@@ -511,8 +512,18 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                     start = {"phase": "start", "started_at": 100.0, "ended_at": 108.0, "detail": None}
                     expected = {"steps": [start, load], "estimate_seconds": 60.0}
                     assert status["startup"] == (expected if state == "starting" else None)
+                # A warm engine that adds a replica gives the replica's step and phases.
+                ColdHandler.adding = True
+                response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                status = await response.json()
+                assert (status["engine"], status["engine_detail"], status["engine_replicas"]) == (
+                    "warm",
+                    "Loading weights · 0:42",
+                    {"serving": 1, "starting": 1},
+                )
+                assert status["startup"] == expected
         finally:
-            ColdHandler.state = "idle"
+            ColdHandler.state, ColdHandler.adding = "idle", False
             storage.close()
             coordination.close()
 
