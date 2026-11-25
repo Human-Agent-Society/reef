@@ -985,16 +985,18 @@ class EvaluationRolloutWorker(QueueWorker):
                     result.error,
                 ),
             )
+            # A trial that the sandbox service refused for want of capacity waits in the queue for capacity and runs
+            # again, and the attempt does not count. That holds also after the agent called the model: a separate
+            # verifier that found no sandbox (it waits for one first) gave no score of the candidate.
+            if trial_exception_type(result.trial_uri) in SANDBOX_CAPACITY_ERRORS:
+                raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
             if calls.last_refusal is not None and (result.error or not calls.answered):
                 # A score would judge the provider, and a new sandbox at once would meet the same refusal.
                 raise ItemFailedError(calls.last_refusal.reason())
             if not calls.answered:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
-                # trial whose sandbox did not start makes no call either. When the sandbox service had no capacity,
-                # the rollout waits in the queue for it, and the attempt does not count. Otherwise the attempt fails
-                # with the reason, and the rollout is retried as any other failed attempt.
-                if trial_exception_type(result.trial_uri) in SANDBOX_CAPACITY_ERRORS:
-                    raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
+                # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
+                # the rollout is retried as any other failed attempt.
                 raise ReefError(f"the rollout reached no model: {result.error or 'the agent made no model call'}")
             score = runner.rollout_score(result)
             if score.is_failed:
