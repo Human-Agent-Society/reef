@@ -343,16 +343,17 @@ class FlakyLeaseWorkQueue(SQLWorkQueue):
 
 
 class RecordingStopEvent(threading.Event):
-    """A ``threading.Event`` that records each ``wait`` timeout and signals stop after ``max_waits`` calls.
+    """A ``threading.Event`` that records each ``wait`` timeout and sets itself after ``max_waits`` calls.
 
-    Values: ``max_waits`` is a positive integer; ``waits`` records each timeout passed to ``wait`` before returning
-    ``False`` for the first ``max_waits`` calls and ``True`` once ``max_waits`` calls have been recorded.
+    Values: ``max_waits`` is a positive integer; ``waits`` records each ``timeout`` passed to ``wait``. Calling
+    ``wait`` appends ``timeout`` to ``waits``, calls ``set()`` once ``len(waits) > max_waits`` if the event is not yet
+    set, and returns ``is_set()``.
 
     Purpose: deterministic unit tests inspect the exact wait intervals of ``LeaseExtender.run`` without sleeping.
     """
 
     def __init__(self, max_waits: int) -> None:
-        if max_waits < 1:
+        if isinstance(max_waits, bool) or max_waits < 1:
             raise ValueError("max_waits must be at least 1")
         super().__init__()
         self.max_waits = max_waits
@@ -360,7 +361,9 @@ class RecordingStopEvent(threading.Event):
 
     def wait(self, timeout: float | None = None) -> bool:
         self.waits.append(timeout)
-        return len(self.waits) > self.max_waits
+        if not self.is_set() and len(self.waits) > self.max_waits:
+            self.set()
+        return self.is_set()
 
 
 @pytest.mark.unit
@@ -388,6 +391,7 @@ def test_lease_extender_retries_with_bounded_short_wait_and_resets_after_recover
         extender.run()
 
         assert recorder.waits == expected_waits
+        assert recorder.is_set()
         assert queue.call_count == 3
         assert not extender.lease_lost.is_set()
         assert queue.read("jobs", "a").lease_expires_at >= taken.lease_expires_at
