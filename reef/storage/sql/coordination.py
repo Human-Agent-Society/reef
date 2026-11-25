@@ -974,8 +974,9 @@ def item_from_row(row: RowMapping) -> WorkItem:
 class SQLWorkQueue(WorkQueue):
     """Work queues in a coordination database.
 
-    Every change holds the ``WORK_SEQUENCE`` counter row, so the changes of all queues are serialized: two workers
-    that take at once never get the same item. ``take`` selects the oldest item that the worker can take.
+    Every numbered change holds the ``WORK_SEQUENCE`` counter row, so those changes across all queues are serialized:
+    two workers that take at once never get the same item. Lease-only extensions (``extend_lease``) lock only the
+    item row and take no counter. ``take`` selects the oldest item that the worker can take.
     """
 
     def __init__(

@@ -323,25 +323,22 @@ def test_extending_a_lease_refreshes_expiry_without_taking_the_sequence_counter(
 
 
 @pytest.mark.unit
-def test_extending_a_lease_fences_against_concurrent_reassignment(open_coordination, monkeypatch):
+def test_extending_a_lease_rejects_reassigned_ownership_without_mutating_the_item(open_coordination):
     queue = open_coordination(max_attempts={"jobs": 2}).queue
     queue.append(job("a"), now=0)
-    stale = queue.take("jobs", "w1", ["training_job:tinker"], now=0)
+    queue.take("jobs", "w1", ["training_job:tinker"], now=0)
     assert queue.requeue_expired(now=16)[0].state == "queued"
     reassigned = queue.take("jobs", "w2", ["training_job:tinker"], now=17)
 
-    def return_stale_held(connection, queue_name, item_id, worker_id, now, attempt=None):
-        return stale
-
-    monkeypatch.setattr(queue, "held", return_stale_held)
     with pytest.raises(WorkLeaseLostError):
-        queue.extend_lease("jobs", "a", "w1", now=5)
+        queue.extend_lease("jobs", "a", "w1", now=18)
 
     current = queue.read("jobs", "a")
-    assert (current.worker_id, current.attempt_count, current.lease_expires_at) == (
+    assert (current.worker_id, current.attempt_count, current.lease_expires_at, current.changed_sequence) == (
         reassigned.worker_id,
         reassigned.attempt_count,
         reassigned.lease_expires_at,
+        reassigned.changed_sequence,
     )
 
 
