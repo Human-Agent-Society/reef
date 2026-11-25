@@ -282,12 +282,44 @@ def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_
     monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
     with pytest.raises(SandboxCapacityError) as raised:
         asyncio.run(environment._create_sandbox())
-    assert raised.value.__cause__ is errors[refusal] and len(calls) == 2
+    assert raised.value.__cause__ is errors[refusal] and len(calls) == 1
     # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it.
     assert type(raised.value).__name__ in SANDBOX_CAPACITY_ERRORS
     assert TransientStartError.__name__ in SANDBOX_CAPACITY_ERRORS and issubclass(
         TransientStartError, SandboxCapacityError
     )
+
+
+@pytest.mark.unit
+def test_reefs_e2b_create_skips_retry_for_capacity_errors_and_retries_other_transient_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    capacity_environment = harbor_e2b_environments(tmp_path)["reef"]
+    capacity_calls: list[dict[str, object]] = []
+
+    async def refuse_capacity(**options: object) -> object:
+        capacity_calls.append(options)
+        raise e2b.ServiceBusyException("503: Service temporarily unavailable - no nodes available")
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(refuse_capacity))
+    with pytest.raises(SandboxCapacityError):
+        asyncio.run(capacity_environment._create_sandbox())
+    assert len(capacity_calls) == 1
+
+    transient_environment = harbor_e2b_environments(tmp_path / "other")["reef"]
+    transient_calls: list[dict[str, object]] = []
+    created = object()
+
+    async def fail_once(**options: object) -> object:
+        transient_calls.append(options)
+        if len(transient_calls) == 1:
+            raise RuntimeError("transient connection drop")
+        return created
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(fail_once))
+    asyncio.run(transient_environment._create_sandbox())
+    assert transient_environment._sandbox is created and len(transient_calls) == 2
 
 
 @pytest.mark.unit
@@ -336,8 +368,8 @@ def test_reefs_e2b_create_reads_the_status_of_the_services_answer(
     [
         # A separate verifier waits for capacity, so the agent's work is kept.
         ("t__verifier__tests", 2, [15, 30], True),
-        # Its wait ends before 80% of its start time limit (96 of 120 s); Harbor's retry starts it once more.
-        ("t__verifier__tests", 99, [15, 30, 15, 30], False),
+        # Its wait ends before 80% of its start time limit (96 of 120 s), without repeating the wait loop.
+        ("t__verifier__tests", 99, [15, 30], False),
         # The agent's environment does not wait: its rollout goes back to the queue (EvaluationRolloutWorker).
         ("t__env", 99, [], False),
     ],
