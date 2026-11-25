@@ -816,8 +816,9 @@ class EvaluationRolloutWorker(QueueWorker):
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
     address at which a task's container reaches this host. ``call_route`` is this process's route of rollout calls:
-    with one, a tree's agent in a remote sandbox calls its rollout's capture proxy at a signed public URL; with None,
-    a relay in the sandbox bridges its calls (RFC #986). ``on_stop`` is one of ``ON_STOP_CHOICES``: what the worker
+    with one, a tree's agent in a remote sandbox calls its rollout's capture proxy at a signed public URL, and the
+    worker serves the route from ``start`` until ``stop`` has waited for its rollouts; with None, a relay in the sandbox
+    bridges the calls (RFC #986). ``on_stop`` is one of ``ON_STOP_CHOICES``: what the worker
     does with the rollouts that run when it begins to stop (``begin_stop``). With ``requeue``, it cancels each one and
     gives it back to the queue. With ``finish``, it takes no new rollout, and ``stop`` returns when each running one
     has finished, so a process that a scale-down or a deploy stops loses no work in its grace period.
@@ -882,6 +883,8 @@ class EvaluationRolloutWorker(QueueWorker):
         if self.thread is None:
             # A worker that starts again after a stop runs its rollouts to the end again.
             self.rollouts_cancelled.clear()
+        if self.call_route is not None:
+            self.call_route.start()
         super().start()
 
     def begin_stop(self) -> None:
@@ -925,6 +928,9 @@ class EvaluationRolloutWorker(QueueWorker):
         if timer is not None:
             timer.cancel()
             timer.join()
+        # The rollouts have ended, so their agents make no more calls.
+        if self.call_route is not None:
+            self.call_route.stop()
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         score, rewards, error = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)

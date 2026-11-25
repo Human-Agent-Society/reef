@@ -374,8 +374,18 @@ class ServiceSettings:
         public_path=("evaluation", "call_url"),
         help=(
             "The public URL at which an agent in a remote sandbox calls its rollout's model. The deployment's "
-            "ingress sends this URL's paths to /reef/rollout-calls of its evaluation processes. Unset or empty, "
+            "ingress sends this URL's paths to /reef/rollout-calls on evaluation.call_port of its evaluation "
+            "processes. Unset or empty, "
             "the evaluation bridges each call through a relay in the sandbox."
+        ),
+    )
+    #: The port on which an evaluation process serves the rollout calls, for ``evaluation_call_url``.
+    evaluation_call_port: int = config_option(
+        8901,
+        public_path=("evaluation", "call_port"),
+        help=(
+            "The port on which each evaluation process serves the rollout calls of evaluation.call_url, on every "
+            "interface. It stays open until the process's rollouts have finished, also after the service port closed."
         ),
     )
     #: The address at which the other evaluation processes reach this one, for ``evaluation_call_url``.
@@ -383,7 +393,7 @@ class ServiceSettings:
         None,
         public_path=("evaluation", "call_address"),
         help=(
-            "The address at which the other evaluation processes reach this one, with evaluation.call_url. Unset, "
+            "The address at which the other evaluation processes reach this one's evaluation.call_port. Unset, "
             "it is the address of this host's name, which is the Pod's address on Kubernetes."
         ),
     )

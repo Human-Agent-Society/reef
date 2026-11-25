@@ -14,14 +14,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from aiohttp import web
 from reef_client.serve import CapturedTurn
 
-from reef.api.web import service_application
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.evaluation.call_route import ROLLOUT_CALL_PATH, RolloutCallRoute, register_rollout_call_route
+from reef.evaluation.call_route import ROLLOUT_CALL_PATH, RolloutCallRoute
 from reef.execution.sandbox.task_environment import (
     HARBOR_E2B_ENVIRONMENT,
     HARBOR_MODAL_ENVIRONMENT,
@@ -830,25 +828,12 @@ def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: Stan
 
 
 def test_an_agent_in_a_remote_sandbox_calls_its_rollout_at_the_public_route(reef: StandInReef, tmp_path: Path) -> None:
-    # The evaluation process's route, served on a loop of its own, as the deployment's ingress reaches it.
-    loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
+    # The evaluation process's route, which the deployment's ingress reaches at the route's own URL here.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
-    route = RolloutCallRoute(
-        f"http://127.0.0.1:{port}{ROLLOUT_CALL_PATH}", ["tok"], address="127.0.0.1", server_port=port
-    )
-
-    async def serve() -> web.AppRunner:
-        app = service_application(["tok"])
-        register_rollout_call_route(app, route)
-        server = web.AppRunner(app)
-        await server.setup()
-        await web.TCPSite(server, "127.0.0.1", port).start()
-        return server
-
-    server = asyncio.run_coroutine_threadsafe(serve(), loop).result(10)
+    route = RolloutCallRoute(f"http://127.0.0.1:{port}{ROLLOUT_CALL_PATH}", ["tok"], address="127.0.0.1", port=port)
+    route.start()
     try:
         task_path = written_task(tmp_path / "tasks", "t1")
         lab = StandInLab({"reward": 1.0})
@@ -862,8 +847,7 @@ def test_an_agent_in_a_remote_sandbox_calls_its_rollout_at_the_public_route(reef
         with pytest.raises(TaskRolloutError):
             runner(reef, tmp_path, lab, call_route=route, agent_host="localhost")
     finally:
-        asyncio.run_coroutine_threadsafe(server.cleanup(), loop).result(10)
-        loop.call_soon_threadsafe(loop.stop)
+        route.stop()
 
 
 def test_a_report_that_does_not_reach_reef_is_the_rollouts_error(

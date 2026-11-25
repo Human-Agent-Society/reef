@@ -44,7 +44,7 @@ from reef.control.scenario.live_objects import (
     harness_models,
 )
 from reef.control.workers.served_models import wait_for_control_lease
-from reef.evaluation.call_route import RolloutCallRoute, register_rollout_call_route
+from reef.evaluation.call_route import RolloutCallRoute
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints, TaskTemplateWorker
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import TrialObserver
@@ -566,7 +566,7 @@ def rollout_call_route_for(settings: ServiceSettings) -> RolloutCallRoute | None
         settings.evaluation_call_url,
         normalize_tokens(settings.tokens),
         address=settings.evaluation_call_address,
-        server_port=settings.port,
+        port=settings.evaluation_call_port,
     )
 
 
@@ -859,8 +859,6 @@ def build_app(
         with suppress(Exception):
             dispatcher.close()
         raise
-    if call_route is not None:
-        register_rollout_call_route(app, call_route)
     app.cleanup_ctx.append(EndOnLeaseLoss(dispatcher).run)
     return app
 

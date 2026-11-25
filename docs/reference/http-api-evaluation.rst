@@ -60,7 +60,7 @@ The harness field
 
 Each agent runs in the task's container. On ``docker``, the container reaches the model at ``evaluation.agent_host``. In a remote environment, such as ``e2b`` or ``modal``, the agent reaches the model in one of two ways:
 
-- With ``evaluation.call_url``, the agent calls its rollout's model at a signed URL under that public URL. The URL opens only that rollout's calls, and only while the rollout runs; it holds no Reef token. The trial's network policy allows the URL's host, also for a task without network. The deployment's ingress must send the paths under ``evaluation.call_url`` to ``/reef/rollout-calls`` of its evaluation processes, and each evaluation process must reach the others at ``evaluation.call_address`` and the service port.
+- With ``evaluation.call_url``, the agent calls its rollout's model at a signed URL under that public URL. The URL opens only that rollout's calls, and only while the rollout runs; it holds no Reef token. The trial's network policy allows the URL's host, also for a task without network. Each evaluation process serves ``/reef/rollout-calls`` on ``evaluation.call_port``, until its rollouts have ended, also while it stops. The deployment's ingress must send the paths under ``evaluation.call_url`` to that path and port of its evaluation processes, and each evaluation process must reach the others at ``evaluation.call_address`` and ``evaluation.call_port``.
 - Without it, Reef's sandbox relay bridges each call, also for a task with several compose services.
 
 These rules apply to an item:

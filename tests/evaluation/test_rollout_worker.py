@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -513,7 +514,7 @@ def test_a_tree_agent_in_a_remote_sandbox_calls_its_public_route_and_on_docker_t
         raise RunnerBuiltError
 
     monkeypatch.setattr(rollout_worker, "TaskRolloutRunner", runner)
-    route = RolloutCallRoute("https://calls.example", ["token"], address="10.0.0.1", server_port=8900)
+    route = RolloutCallRoute("https://calls.example", ["token"], address="10.0.0.1", port=8901)
     value = replace(rollout(), agent=None, tree=TreeHarness("codex", "openai-responses", {}), environment=environment)
     worker = EvaluationRolloutWorker(
         memory_coordination().work_queue, OpenEndpoints(tmp_path), worker_id="w", call_route=route
@@ -525,6 +526,29 @@ def test_a_tree_agent_in_a_remote_sandbox_calls_its_public_route_and_on_docker_t
     assert built["call_route"] is (route if routed else None)
     assert built["agent_host"] == (None if routed else worker.agent_host)
     assert cast(Mapping[str, Mapping[str, object]], built["agent"])["kwargs"]["bridge"] is False
+
+
+@pytest.mark.unit
+def test_the_worker_serves_its_rollout_call_route_from_its_start_until_its_rollouts_have_ended(tmp_path):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    route = RolloutCallRoute("https://calls.example", ["token"], address="127.0.0.1", port=port)
+    worker = EvaluationRolloutWorker(
+        memory_coordination().work_queue, OpenEndpoints(tmp_path), worker_id="w", call_route=route, on_stop="finish"
+    )
+    worker.start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as response:
+            assert response.status == 200
+        # A stopping process still answers its rollouts' calls: its service port closes, this one does not.
+        worker.begin_stop()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as response:
+            assert response.status == 200
+    finally:
+        worker.stop()
+    with pytest.raises(urllib.error.URLError):
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5)
 
 
 @pytest.mark.unit
