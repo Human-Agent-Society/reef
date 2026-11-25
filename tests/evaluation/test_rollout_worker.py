@@ -787,7 +787,9 @@ def test_auxiliary_calls_without_tools_do_not_mask_or_trigger_provider_refusal_f
         assert item.error == expected_error
 
 
-def timed_turn(status: int, started_at: float, duration_s: float, *, with_tools: bool | list[object] = False) -> CapturedTurn:
+def timed_turn(
+    status: int, started_at: float, duration_s: float, *, with_tools: bool | list[object] = False
+) -> CapturedTurn:
     """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
     request: dict[str, object] = {"messages": []}
     if isinstance(with_tools, list):
