@@ -1200,9 +1200,26 @@ class SQLWorkQueue(WorkQueue):
 
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
-        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+        # Lease extensions do not advance changed_sequence, so they take no sequence counter lock.
+        with self.database.connection(write=True) as connection:
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.write_item(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
+            result = connection.execute(
+                update(self.table)
+                .where(
+                    *self.key(item.queue, item.id),
+                    self.table.c.state == item.state,
+                    self.table.c.worker_id == worker_id,
+                    self.table.c.attempt_count == item.attempt_count,
+                    self.table.c.lease_expires_at == item.lease_expires_at,
+                )
+                .values(lease_expires_at=moment + self.lease_seconds)
+            )
+            if result.rowcount != 1:
+                raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
+            saved = self.row(connection, item.queue, item.id)
+            if saved is None:
+                raise ReefError(f"work item {item.queue}/{item.id} disappeared")
+            return saved
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
