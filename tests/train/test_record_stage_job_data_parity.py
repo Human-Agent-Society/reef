@@ -528,7 +528,7 @@ def tttd_report(step: int, group: int, rollout: int, score: float) -> AgentRecor
         group=group,
         rollout=rollout,
         groups_per_step=2,
-        rollouts_per_group=2,
+        rollouts_per_group=3,
     )
 
 
@@ -536,7 +536,7 @@ def tttd_steps() -> list[Step]:
     steps: list[Step] = []
     for step, mixed in ((0, True), (1, False)):
         for group in range(2):
-            for rollout in range(2):
+            for rollout in range(3):
                 artifact_id = "v2" if mixed and (group, rollout) == (1, 1) else "v1"
                 steps += [
                     tttd_inference(step, group, rollout, artifact_id),
@@ -684,7 +684,7 @@ def trace_steps(mode_requests: bool) -> list[Step]:
 
 def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
     """Every stream, built fresh: a run keeps its own record store and commits."""
-    grid = {"groups_per_step": 2, "rollouts_per_group": 2}
+    grid = {"groups_per_step": 2, "rollouts_per_group": 3}
     sdpo = stage_configs(
         record2sample={
             "groups_per_step": 1,

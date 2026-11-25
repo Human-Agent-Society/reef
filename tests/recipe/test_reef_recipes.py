@@ -170,8 +170,8 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "from tests.support.records import memory_records\n"
                 "from reef.train.pipeline import PipelineSettings\n"
                 "from tests.support.runtime_stubs import STUB_ROOT, live_objects\n"
-                "grid = {'record2sample': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}},"
-                " 'sample2job': {'config': {'job_samples': 2}}}\n"
+                "grid = {'record2sample': {'config': {'groups_per_step': 1, 'rollouts_per_group': 3}},"
+                " 'sample2job': {'config': {'job_samples': 3}}}\n"
                 "stages = PipelineSettings.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "from tests.support.trainers import recipe_trainer\n"
                 "recipe = TTTDRecipe(pipeline_stages=stages)\n"
@@ -210,14 +210,14 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
     [
         (SAORecipe(pipeline_stages=pipeline_stages(SAORecipe, {})), {}),
         (
-            TTTDRecipe(pipeline_stages=tttd_grid(1, 2)),
+            TTTDRecipe(pipeline_stages=tttd_grid(1, 3)),
             {
                 "algorithm": "tttd",
                 "step": 0,
                 "group": 0,
                 "rollout": 0,
                 "groups_per_step": 1,
-                "rollouts_per_group": 2,
+                "rollouts_per_group": 3,
                 "comparison_set": "tttd-step-0-group-0",
             },
         ),
@@ -422,6 +422,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
 
     first = policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5)
     second = first.with_metadata(source_agent_record_id="i2", reward=1.5)
+    third = first.with_metadata(source_agent_record_id="i3", reward=1.0)
     checked = set()
     for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
         expected_family = resolve_objective(recipe_type.default_parameters()["trajectory"]["objective"]).loss_family
@@ -431,7 +432,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
                 "b",
                 tuple(
                     replace(sample, group_id=str(index))
-                    for index, group in enumerate(((first, second),))
+                    for index, group in enumerate(((first, second, third),))
                     for sample in group
                 ),
             )

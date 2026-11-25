@@ -146,7 +146,8 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
     ("pipeline", "message"),
     [
         ({"record2sample": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
-        ({"record2sample": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
+        ({"record2sample": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least three"),
+        ({"record2sample": {"config": {"rollouts_per_group": 2}}}, "rollouts_per_group must be at least three"),
         ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"sample2job": {"config": {"batch_size": 2}}}, "TTTDJobData: unknown config fields: batch_size"),
     ],
@@ -469,6 +470,28 @@ def test_adaptive_entropic_advantages_match_pinned_reference(rewards, expected) 
 
 
 @pytest.mark.unit
+def test_adaptive_entropic_advantages_refuse_a_group_of_two() -> None:
+    # The KL of two rollouts never reaches log(2), so the winner's advantage approaches 1 / epsilon = 1e12.
+    with pytest.raises(ValueError, match="at least three"):
+        adaptive_entropic_advantages([1.0, 0.0])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("rewards", "expected"),
+    [
+        ([1.0, 0.0, 0.0], [16.257184585763422, -0.8904540844965134, -0.8904540844965134]),
+        ([1.0, 1.0, 0.0, 0.0], [2.0, 2.0, -1.0, -1.0]),
+        ([1.0, 1.0, 1.0, 0.0], [0.5, 0.5, 0.5, -1.0]),
+    ],
+)
+def test_adaptive_entropic_advantages_are_bounded_for_three_rollouts_and_ties(rewards, expected) -> None:
+    advantages, _ = adaptive_entropic_advantages(rewards)
+
+    assert advantages == pytest.approx(expected, rel=1e-9, abs=1e-9)
+
+
+@pytest.mark.unit
 def test_importance_sampling_surrogate_is_unclipped() -> None:
     torch = pytest.importorskip("torch")
     from recipes.tttd.slime.objective import importance_sampling_surrogate
@@ -611,7 +634,7 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
         "b",
         tuple(
             replace(sample, group_id=str(index))
-            for index, group in enumerate(((sample("a", 1.0), sample("b", 1.0)),))
+            for index, group in enumerate(((sample("a", 1.0), sample("b", 1.0), sample("c", 1.0)),))
             for sample in group
         ),
     )
@@ -619,7 +642,7 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
         "b",
         tuple(
             replace(sample, group_id=str(index))
-            for index, group in enumerate(((sample("a", 1.0), sample("b", 0.0)),))
+            for index, group in enumerate(((sample("a", 1.0), sample("b", 0.0), sample("c", 0.0)),))
             for sample in group
         ),
     )

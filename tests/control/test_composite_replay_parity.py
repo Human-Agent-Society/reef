@@ -153,8 +153,8 @@ def step_stages() -> PipelineSettings:
 
 
 def tttd_stages() -> PipelineSettings:
-    """The TTTD recipe's stages, one group of two rollouts per step."""
-    config = {"groups_per_step": 1, "rollouts_per_group": 2}
+    """The TTTD recipe's stages, one group of three rollouts per step."""
+    config = {"groups_per_step": 1, "rollouts_per_group": 3}
     return component_stages(LaggingTTTDSamples, TTTDJobData, record2sample_config=config)
 
 
@@ -408,7 +408,7 @@ def tttd_report(record_id: str, reference: str, rollout: int, score: float) -> A
         "group": 0,
         "rollout": rollout,
         "groups_per_step": 1,
-        "rollouts_per_group": 2,
+        "rollouts_per_group": 3,
     }
     return AgentRecord.create(
         scenario="agent",
@@ -438,6 +438,8 @@ def tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
                 tttd_report("r0", "i0", 0, 1.0),
                 tttd_inference("i1"),
                 tttd_report("r1", "i1", 1, 0.0),
+                tttd_inference("i2"),
+                tttd_report("r2", "i2", 2, 0.0),
             ),
         )
         first = step(scenario, HARNESS)
@@ -451,6 +453,8 @@ def tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
                 tttd_report("s0", "j0", 0, 1.0),
                 tttd_inference("j1"),
                 tttd_report("s1", "j1", 1, 0.0),
+                tttd_inference("j2"),
+                tttd_report("s2", "j2", 2, 0.0),
             ),
         )
         resampled = step(scenario, HARNESS)

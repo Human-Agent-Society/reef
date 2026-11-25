@@ -24,11 +24,11 @@ pipeline:
   record2sample:
     config:
       groups_per_step: 2
-      rollouts_per_group: 2
+      rollouts_per_group: 3
   sample2job:
     config:
       # One job is the whole grid, groups_per_step x rollouts_per_group samples: the same value as batch-size.
-      job_samples: 4
+      job_samples: 6
 training:
   backend: tinker
   ready-timeout: 1800
@@ -45,7 +45,7 @@ training:
     learning-rate: 0.00004
     kl-coef: 0.1
     # One optimizer step over the whole grid: groups_per_step x rollouts_per_group samples.
-    batch-size: "4"
+    batch-size: "6"
 storage:
   artifact-repository: ${TTTD_STATE_DIR}/artifacts.git
   artifact-work-dir: ${TTTD_STATE_DIR}/artifact-work

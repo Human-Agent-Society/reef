@@ -155,7 +155,7 @@ the record-to-sample stage. ``TTTDJobData`` reads the grid from ``TTTDSamples``.
        comparison groups in one step; at least one.
 
    ``pipeline.record2sample.config.rollouts_per_group`` : 64
-       siblings per group; at least two, since a group of one has no relative reward.
+       siblings per group; at least three. With two, the ``log(2)`` KL target of the advantages has no solution, and the better rollout gets an advantage near ``1e12``.
 
    ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
        train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.

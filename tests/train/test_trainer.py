@@ -268,11 +268,11 @@ def test_cookbook_processors_wait_for_references_before_rejecting_a_report_of_se
             "group": 0,
             "rollout": 0,
             "groups_per_step": 1,
-            "rollouts_per_group": 2,
+            "rollouts_per_group": 3,
             "comparison_set": "tttd-step-0-group-0",
         }
         context = PipelineContext("math", TTTDGroupedRolloutReport)
-        tttd_samples = TTTDSamples(context, TTTDSettings(groups_per_step=1, rollouts_per_group=2))
+        tttd_samples = TTTDSamples(context, TTTDSettings(groups_per_step=1, rollouts_per_group=3))
         processor = TrainingPipeline(
             context,
             record2sample=tttd_samples,

@@ -22,9 +22,14 @@ def adaptive_entropic_advantages(rewards: list[float]) -> tuple[tuple[float, ...
     ``KL(softmax(beta * rewards) || uniform) == log(2)`` using the same
     expansion bound, 60 bisection iterations, stable reward shift, and
     leave-one-out normalizer.
+
+    A group of two is refused. Its KL is below ``log(2)`` for every finite beta, so the search drives beta up
+    until the loser's weight underflows, and the winner's advantage approaches ``1 / epsilon``.
     """
     if not rewards:
         raise ValueError("an adaptive-entropic group cannot be empty")
+    if len(rewards) == 2:
+        raise ValueError("an adaptive-entropic group of two has unbounded advantages; use at least three rollouts")
 
     delta = math.log(2)
     beta_max = 1e6
