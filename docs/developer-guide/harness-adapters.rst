@@ -572,8 +572,8 @@ adapter without ``layer`` does not run on a person's machine.
 Bundled adapters
 ----------------
 
-At startup, Reef installs the pinned binary for the runs unless
-``evolution.binary`` names one. Another package adds an adapter through the
+At the first job of a scenario, Reef installs the pinned binary for the runs
+unless ``evolution.binary`` names one. Another package adds an adapter through the
 ``reef.harness_adapters`` entry point, as the Meta-Harness Terminal-Bench
 campaign adds ``terminus`` (`its README
 <../../recipes/meta_harness/examples/terminal_bench/README.md#the-terminus-adapter>`__).

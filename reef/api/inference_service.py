@@ -18,6 +18,8 @@ Routes:
 - ``/reef/scenarios/{s}/artifacts/{a}/v1/...``: a recorded call to the row named ``a``;
   ``/reef/scenarios/{s}/artifacts/{a}/evaluation/v1/...``: the same call, unrecorded.
 - ``GET /reef/scenarios/{s}/inference/status?model=active``: the current artifact's startup state.
+- ``GET /reef/scenarios/{s}/inference/target?model=active``: an exact binding for one non-streaming artifact chat call.
+  Both binding headers opt in to strict validation and disable replica retries; other calls keep the existing rules.
 
 Rules:
 
@@ -50,6 +52,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -76,6 +79,7 @@ from reef.core.trajectory_index import SHADOW_PURPOSE
 from reef.core.values import JsonValue
 from reef.inference.interfaces import (
     EngineClients,
+    EngineReplicas,
     EngineState,
     InferenceArtifact,
     InferenceHandler,
@@ -97,6 +101,9 @@ BUCKET_COUNT = 100
 RECORD_HEADER = "x-reef-agent-record-id"
 #: The header that carries the ID of the artifact that answered.
 ARTIFACT_HEADER = "x-reef-artifact-id"
+#: Optional strict-call headers: the selected binding and the caller's attempt identifier.
+BINDING_HEADER = "x-reef-binding-id"
+ATTEMPT_HEADER = "x-reef-attempt-id"
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
 
@@ -517,7 +524,9 @@ class InferenceReplica:
             state = "pending"
         else:
             state = "starting"
-        engine, detail, steps = self.engine_state(scenario, model) if state == "ready" else (None, None, None)
+        engine, detail, steps, replicas = (
+            self.engine_state(scenario, model) if state == "ready" else (None, None, None, None)
+        )
         if state in ("pending", "starting"):
             steps = reported_steps(item.progress, artifact_id, item.created_at, None)
         return {
@@ -526,21 +535,26 @@ class InferenceReplica:
             "error": startup_error(item.error) if state == "failed" else None,
             "engine": engine,
             "engine_detail": detail,
+            "engine_replicas": None if replicas is None else replicas.to_json(),
             "startup": None if steps is None else steps.to_json(),
         }
 
-    def engine_state(self, scenario: str, model: str) -> tuple[EngineState | None, str | None, StartupSteps | None]:
-        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), and for a starting engine
-        what it does now (``engine_detail``) and its phases (``engine_steps``); None without a route or a handler."""
+    def engine_state(
+        self, scenario: str, model: str
+    ) -> tuple[EngineState | None, str | None, StartupSteps | None, EngineReplicas | None]:
+        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), for a starting engine or
+        one with starting replicas what it does now (``engine_detail``) and its phases (``engine_steps``), and its
+        replicas (``engine_replicas``); None without a route or a handler."""
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
         except (NotServedError, StaleServedModelsError, LookupError):
-            return None, None, None
-        engine = handler.engine_state(served)
-        if engine != "starting":
-            return engine, None, None
-        return engine, handler.engine_detail(served), handler.engine_steps(served)
+            return None, None, None, None
+        engine, replicas = handler.engine_state(served), handler.engine_replicas(served)
+        # A warm engine that adds replicas also says how the replicas that start go on.
+        if engine != "starting" and (replicas is None or replicas.starting == 0):
+            return engine, None, None, replicas
+        return engine, handler.engine_detail(served), handler.engine_steps(served), replicas
 
     async def resolve(
         self,
@@ -652,6 +666,27 @@ class InferenceReplica:
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
 
+    def bound_target(self, scenario: str, name: str) -> tuple[ServedArtifact, Mapping[str, JsonValue], str]:
+        """Read one exact serving row and its settings without the stale-read fallback.
+
+        Return the row, settings and their scenario-scoped SHA-256 binding ID. Refuse missing or changing state.
+        The ID identifies configuration, not a lease, credential, reservation or idempotency key.
+        """
+        table = self.cache.table
+        try:
+            sequence = table.changed_sequence()
+            served = table.read_scenario(scenario).get(name)
+            config = table.read_serving_config(scenario)
+            if sequence != table.changed_sequence():
+                raise web.HTTPServiceUnavailable(text="The serving state changed during target resolution.")
+        except (SQLAlchemyError, ReefError, OSError) as exc:
+            raise web.HTTPServiceUnavailable(text="The serving state could not be read.") from exc
+        if served is None:
+            raise web.HTTPNotFound(text="The requested model has no serving route.")
+        value = [1, scenario, name, served.to_json(), config]
+        binding_id = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return served, config, binding_id
+
     async def answer(
         self,
         request: web.Request,
@@ -661,6 +696,7 @@ class InferenceReplica:
         name: str | None = None,
         record: bool,
         rollout: bool = False,
+        single_attempt: bool = False,
     ) -> web.StreamResponse:
         """Answer one model request; see the module rules. ``scenario`` overrides the scenario header (a route
         names it), ``name`` the row; ``record`` keeps a record; ``rollout`` marks a call of Reef's own rollouts, which
@@ -676,14 +712,36 @@ class InferenceReplica:
             raise web.HTTPBadRequest(
                 text="metadata.routing purpose 'shadow' and primary_request_id are set only by Reef's shadow calls"
             )
-        served, traffic = await self.resolve(
-            parsed.scenario,
-            payload,
-            name=name,
-            refresh=False,
-            use_split=not rollout,
-            session_key=request.headers.get(SESSION_KEY_HEADER),
-        )
+        binding_id = request.headers.get(BINDING_HEADER)
+        attempt_id = request.headers.get(ATTEMPT_HEADER)
+        strict = single_attempt
+        if not strict and (binding_id is not None or attempt_id is not None):
+            raise web.HTTPBadRequest(text="Use the chat completions attempt route with binding headers.")
+        strict_config: Mapping[str, JsonValue] = {}
+        if strict:
+            if (
+                name is None
+                or path != "/v1/chat/completions"
+                or payload.get("stream", False) is not False
+                or binding_id is None
+                or re.fullmatch(r"[0-9a-f]{64}", binding_id) is None
+                or attempt_id is None
+                or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", attempt_id) is None
+            ):
+                raise web.HTTPBadRequest(text="Use both binding headers on a non-streaming artifact chat call.")
+            served, strict_config, current_binding = await asyncio.to_thread(self.bound_target, parsed.scenario, name)
+            if binding_id != current_binding:
+                raise web.HTTPConflict(text="The serving binding changed. Resolve the target again.")
+            traffic = None
+        else:
+            served, traffic = await self.resolve(
+                parsed.scenario,
+                payload,
+                name=name,
+                refresh=False,
+                use_split=not rollout,
+                session_key=request.headers.get(SESSION_KEY_HEADER),
+            )
         streaming = payload.get("stream") is True
         if streaming and rollout:
             raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
@@ -694,14 +752,21 @@ class InferenceReplica:
         body_names_artifact = kept_row is None and model != ACTIVE and model == served.artifact_id
         kept_artifact = served.artifact_id if body_names_artifact else None
         # Each attempt builds its body and handler from its row: a row read again can name another engine.
-        for attempt in range(2):
-            sent = self.request_payload(parsed.scenario, served, payload)
+        attempts = 1 if strict else 2
+        for attempt in range(attempts):
+            if strict:
+                try:
+                    sent = self.handler(served).request_payload(payload, serving_config=strict_config)
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from exc
+            else:
+                sent = self.request_payload(parsed.scenario, served, payload)
             try:
                 if streaming:
                     return await self.relay_stream(request, path, parsed, sent, served, record=record, traffic=traffic)
                 response = await self.forward(served, path, sent)
             except RuntimeLoadMismatchError as exc:
-                if attempt == 1:
+                if attempt == attempts - 1:
                     raise web.HTTPServiceUnavailable(text=str(exc), headers={"Retry-After": "1"}) from exc
                 served = await self.row_for_retry(
                     parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact
@@ -709,10 +774,12 @@ class InferenceReplica:
                 continue
             if not inference_aborted(response):
                 break
-            if attempt == 1:
+            if attempt == attempts - 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served = await self.row_for_retry(parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact)
         reply_headers = {ARTIFACT_HEADER: served.artifact_id}
+        if binding_id is not None and attempt_id is not None:
+            reply_headers.update({BINDING_HEADER: binding_id, ATTEMPT_HEADER: attempt_id})
         if record:
             try:
                 reply_headers[RECORD_HEADER] = await asyncio.to_thread(
@@ -893,6 +960,23 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
         )
         return web.json_response(status, headers={"Cache-Control": "no-store"})
 
+    async def target(request: web.Request) -> web.Response:
+        name = request.query.get("model", ACTIVE)
+        if not name or len(name) > 256:
+            raise web.HTTPBadRequest(text="model must contain 1 to 256 characters.")
+        served, _, binding_id = await asyncio.to_thread(replica.bound_target, request.match_info["scenario"], name)
+        return web.json_response(
+            {
+                "contract_version": 1,
+                "model": name,
+                "artifact_id": served.artifact_id,
+                "binding_id": binding_id,
+                "protocol": "openai_chat_completions",
+                "streaming": False,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def scenario_inference(request: web.Request) -> web.StreamResponse:
         """A call to ``/v1/*`` with the scenario in the path, answered and recorded as the same call to ``/v1/*``.
 
@@ -917,6 +1001,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
             scenario=request.match_info["scenario"],
             name=request.match_info["artifact_id"],
             record=True,
+            single_attempt="attempt" in request.match_info,
         )
 
     async def artifact_evaluation(request: web.Request) -> web.StreamResponse:
@@ -928,14 +1013,24 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
             name=request.match_info["artifact_id"],
             record=False,
             rollout=True,
+            single_attempt="attempt" in request.match_info,
         )
 
     for path in INFERENCE_PATHS:
         app.router.add_post(path, recorded(path))
     app.router.add_get("/reef/scenarios/{scenario}/inference/status", startup_status)
+    app.router.add_get("/reef/scenarios/{scenario}/inference/target", target)
     app.router.add_post("/reef/scenarios/{scenario}/v1/{route:.+}", scenario_inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
+    # Register before the broad routes. Older replicas reject these suffixes before executing a model.
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:chat/completions}/{attempt:attempt}", artifact
+    )
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:chat/completions}/{attempt:attempt}",
+        artifact_evaluation,
+    )
     app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", artifact)
     app.router.add_post(
         "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:.+}", artifact_evaluation
@@ -968,6 +1063,8 @@ def build_inference_app(
 
 __all__ = [
     "ARTIFACT_HEADER",
+    "ATTEMPT_HEADER",
+    "BINDING_HEADER",
     "INFERENCE_PATHS",
     "RECORD_HEADER",
     "SESSION_KEY_HEADER",

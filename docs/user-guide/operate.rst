@@ -228,7 +228,7 @@ The record of such a call names the ``artifact_id`` that answered. Choose which 
    * - Reef's adapter serving
      - One.
    * - Reef's full-weight serving
-     - One checkpoint on each inference component. A deployment has one component by default; ``inference.remote.slot-urls`` names further components (`The inference section <../reference/configuration-inference.rst#the-inference-section>`__).
+     - One checkpoint on each inference component. A deployment has one component by default; ``inference.remote.slot-urls`` names further components (`Remote inference components <../reference/configuration-inference.rst#remote-inference-components>`__).
 
 **Several checkpoints on several components.** Each full-weight checkpoint of the mapping has its own component:
 
@@ -351,13 +351,13 @@ A failed job ends like a finished one. Reef consumed the records of its data whe
 Track experiments with W&B
 --------------------------
 
-Tracking is optional and off by default. ``observability.wandb`` in `Configuration <../reference/configuration-observability.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before you start the stack. There is no key field, and Reef refuses Slime's ``--wandb-key`` flag, so a credential never enters a command line or a run config.
+Tracking is optional and off by default. The keys of ``observability.wandb`` are in the `Settings reference <../reference/configuration-settings.rst#observability>`__, and `Experiment tracking <../reference/configuration-observability.rst#experiment-tracking>`__ gives an example. Export ``WANDB_API_KEY`` before you start the stack. There is no key field, and Reef refuses Slime's ``--wandb-key`` flag, so a credential never enters a command line or a run config.
 
-W&B shows one group and one run per scenario, and a new run after each train-from. An activation does not end a run.
+W&B shows one group and one run per scenario, and a new run after each train-from. An activation does not end a run. A train-from finishes the current run, records each component's training-start artifact ID in ``reef/train_from_artifact_ids``, and starts ``train/step`` at zero in the next run.
 
 - **Training results.** Each result lands on the run's ``train/step`` axis with the monotonic ``reef/commit_number``, which joins it to the commit history. The commit metrics record ``experiment/run_id``, and the run's ``reef/training_job_id`` leads back to the job.
-- **Several trainers.** Each step's metrics carry the component name as a prefix, on the same ``train/step`` axis, with the name in ``reef/component``. The run summary names the last trainer that committed and its job.
-- **Operations.** Every 10 seconds the run receives ``operations/*`` against ``operations/time_seconds``: unread records, processor queues, waiting ages, training execution durations, request counts and latency, admission waits, record acceptance and rejection, and version-mismatch rejections. A pure inference scenario uploads them too. They need neither status polling nor a training commit. Read the `metric definitions <../reference/configuration-observability.rst#operational-metrics>`__ first: reserved job data may be executing, and manual-mode data may wait on purpose.
+- **Several trainers.** Each step's metrics carry the component name as a prefix, on the same ``train/step`` axis, with the name in ``reef/component``. The run summary names the last trainer that committed and its job. Each trainer's optimizer step rows land under ``<component>/step/*`` on their own counter. The run config names each component's backend under ``reef.components`` and ``backend.<component>``; ``reef.backend`` is null.
+- **Operations.** Every 10 seconds the run receives ``operations/*`` against ``operations/time_seconds``: unread records, record evictions, processor queues, waiting ages, training execution durations, routed request counts, latency and retries, and record acceptance and rejection. A pure inference scenario uploads them too. They need neither status polling nor a training commit. Read the `metric definitions <../reference/configuration-observability.rst#operational-metrics>`__ first: reserved job data may be executing, and manual-mode data may wait on purpose.
 
 Reef sends each event from a background thread after its commit, in commit order. A slow tracker therefore delays neither serving nor training. A tracking failure is logged and never fails a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
@@ -456,7 +456,7 @@ A scenario does not open, and the error says why, when:
 - an imported task now has other files;
 - a task has the name of another sample of the scenario.
 
-A harness evolution recipe evaluates on the imported eval tasks with ``evolution.evaluation.imported_tasks: true``. Each task runs in its own container (`Task directories <evolve-your-harness.rst#task-directories>`__). Each step reads the eval split again, so a task that you import later joins the next step. See `Harness evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__.
+A harness evolution recipe evaluates on the imported eval tasks with ``evolution.evaluation.imported_tasks: true``. Each task runs in its own container (`Task directories <evolve-your-harness.rst#task-directories>`__). Each step reads the eval split again, so a task that you import later joins the next step. See `Settings reference <../reference/configuration-settings.rst#harness-evolution>`__.
 
 Limit the scenarios a service holds
 -----------------------------------

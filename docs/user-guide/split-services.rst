@@ -211,6 +211,8 @@ Evaluation
 
 The inference service serves what ``served_models`` names: the active artifact of each scenario and the artifacts served beside it. A candidate under evaluation is not one of them. Before each trial, the evaluation service asks inference to start the candidate and waits until its engine is ready. It then sends the rollout's model calls to that engine. The request publishes no route, so no client reaches the candidate, and no call becomes a record of the scenario. An evaluation therefore needs a running inference service.
 
+**Stop the evaluation service.** ``evaluation.on-stop`` and ``evaluation.finish-timeout-s`` set what a stopping process does with its rollouts (`Settings reference <../reference/configuration-settings.rst#evaluation>`__). A rollout that the process gives back to the queue uses no attempt of ``storage.work-max-attempts``. A process that is killed gives back nothing: each of its rollouts goes back to the queue when its lease expires, and that attempt counts. Set ``evaluation.finish-timeout-s`` below the delay after which your supervisor kills the process.
+
 Control restarts
 ----------------
 

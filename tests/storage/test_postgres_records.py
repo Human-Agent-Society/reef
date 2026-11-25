@@ -160,6 +160,21 @@ def test_config_interpolation_and_credentials(monkeypatch, tmp_path):
     assert "secret" not in str(error.value)
 
 
+def test_a_postgres_url_ends_connections_to_a_server_that_stopped_answering():
+    url = postgres_url("postgresql://user:secret@db.example/reef?connect_timeout=3&sslmode=require")
+    assert url.drivername == "postgresql+psycopg"
+    # A value that the URL sets stays; the others get their defaults.
+    assert url.query == {
+        "connect_timeout": "3",
+        "sslmode": "require",
+        "keepalives": "1",
+        "keepalives_idle": "30",
+        "keepalives_interval": "10",
+        "keepalives_count": "3",
+        "tcp_user_timeout": "60000",
+    }
+
+
 @pytest.mark.parametrize("backend", ["sqlite", "postgres", "sqlite-plugin", "postgres-plugin"])
 def test_deployment_selects_record_backend(backend, request, tmp_path):
     values: dict = {}

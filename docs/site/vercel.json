@@ -419,6 +419,36 @@
       "source": "/docs/contributing/architecture/",
       "destination": "/docs/contributing/codebase-structure/",
       "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-files",
+      "destination": "/docs/reference/configuration",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-files/",
+      "destination": "/docs/reference/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-service",
+      "destination": "/docs/reference/configuration-settings",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-service/",
+      "destination": "/docs/reference/configuration-settings/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-execution",
+      "destination": "/docs/reference/configuration-settings",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-execution/",
+      "destination": "/docs/reference/configuration-settings/",
+      "permanent": true
     }
   ]
 }

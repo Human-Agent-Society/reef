@@ -8,6 +8,8 @@ credentials from ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``, or from the prof
 Without ``modal_image``, the image is Node 22 with bubblewrap, Python 3 and the harness's pinned npm package; Modal
 builds it on first use and caches it. A ``modal_image`` must hold the program's binary, ``bwrap``, ``python3`` and
 coreutils' ``timeout``. Modal grants a sandbox at most a day, and a session cannot extend it.
+
+This module loads without Modal's SDK. The package ``reef.execution.sandbox.modal`` exports its names.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from reef.execution.sandbox.remote import (
     remote_root,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__package__)
 
 #: The longest life Modal grants a sandbox.
 SANDBOX_MAX_TIMEOUT_S = 86400

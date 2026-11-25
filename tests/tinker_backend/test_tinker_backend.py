@@ -564,7 +564,7 @@ def test_a_base_root_of_the_model_rank_and_service_is_admitted_and_samples_the_b
     first = inference.activate_checkpoint(base)
     assert inference.served_model_name("s") == MODEL
     assert inference.artifact_model(base) == PolicyModel(MODEL, None)
-    assert inference.serve_artifact(base, scenario="s").model_name == MODEL
+    assert inference.serve_artifact(base, scenario="s", serving_config={}).model_name == MODEL
     (checkpoint,) = train(component, batch(), objective.name).checkpoints
     trained = inference.activate_checkpoint(Artifact.local(Path(checkpoint.artifact_path)))
     assert trained != first and inference.served_model_name("s") == "tinker://update-1/sampler"

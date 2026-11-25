@@ -20,6 +20,7 @@ import json
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -260,6 +261,73 @@ class InferenceArtifact:
 #: yet, ``idle`` runs no engine, and a request starts one.
 EngineState = Literal["warm", "starting", "idle"]
 
+
+#: The state of one replica behind a route: ``serving`` answers now, ``starting`` runs but does not answer yet.
+EngineReplicaState = Literal["serving", "starting"]
+
+
+@dataclass(frozen=True)
+class EngineReplica:
+    """One replica behind a route, such as one container of a server that scales.
+
+    Values: ``id`` is the replica's non-empty name, such as its container ID. ``state`` is an ``EngineReplicaState``.
+    ``started_at`` is when the replica started, in epoch seconds, or None. ``startup`` is its own ``start`` and
+    ``load`` phases while it starts (``StartupSteps``), or None."""
+
+    id: str
+    state: EngineReplicaState
+    started_at: float | None = None
+    startup: StartupSteps | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("an engine replica has a non-empty id")
+        if self.state not in ("serving", "starting"):
+            raise ValueError("an engine replica is serving or starting")
+        started = self.started_at
+        if started is not None and (isinstance(started, bool) or not isinstance(started, (int, float)) or started < 0):
+            raise ValueError("an engine replica's start time is epoch seconds of at least 0, or None")
+        if self.startup is not None and not isinstance(self.startup, StartupSteps):
+            raise ValueError("an engine replica's startup is StartupSteps, or None")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "state": self.state,
+            "started_at": self.started_at,
+            "startup": None if self.startup is None else self.startup.to_json(),
+        }
+
+
+@dataclass(frozen=True)
+class EngineReplicas:
+    """The engine replicas behind a route, such as the containers of a server that scales: ``serving`` answer now,
+    and ``starting`` run but do not answer yet. Both are integers of at least 0. ``replicas`` names each one
+    (``EngineReplica``), as many as the two counts and in any order, or is empty when the handler gives only the
+    counts. ``InferenceHandler.engine_replicas`` gives them, and the inference status shows them (``to_json``)."""
+
+    serving: int
+    starting: int
+    replicas: tuple[EngineReplica, ...] = ()
+
+    def __post_init__(self) -> None:
+        for value in (self.serving, self.starting):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("engine replicas are integers of at least 0")
+        if not all(isinstance(replica, EngineReplica) for replica in self.replicas):
+            raise ValueError("engine replicas name each replica with an EngineReplica")
+        states = [replica.state for replica in self.replicas]
+        if states and (states.count("serving"), states.count("starting")) != (self.serving, self.starting):
+            raise ValueError("the named engine replicas must match the serving and starting counts")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "serving": self.serving,
+            "starting": self.starting,
+            "replicas": [replica.to_json() for replica in self.replicas],
+        }
+
+
 #: The phases of an artifact's startup, in their order (RFC #1283): ``prepare`` (the serving work waits, deploys the
 #: engine, and converts or quantizes the weights), ``start`` (a machine and the weights) and ``load`` (GPU memory,
 #: kernels, CUDA graphs and warm-up). ``reef.inference.startup`` reports them.
@@ -325,6 +393,13 @@ class StartupSteps:
         return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
 
 
+#: The session key of the model call that runs in this context, or None. All calls of one conversation have the same
+#: key, and calls of other conversations have other keys. A handler can send the calls of one key to the same engine
+#: replica, so that each turn reuses the prefix cache of the turns before it. An evaluation's ``ArtifactEndpoint`` sets
+#: it to its rollout. A service can set it from the ``x-reef-session-key`` header of a request.
+REQUEST_SESSION_KEY: ContextVar[str | None] = ContextVar("REQUEST_SESSION_KEY", default=None)
+
+
 class InferenceHandler(Plugin, ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
@@ -385,16 +460,23 @@ class InferenceHandler(Plugin, ABC):
         """
         return None
 
+    def engine_replicas(self, served: ServedArtifact) -> EngineReplicas | None:
+        """The engine replicas that answer at ``served`` (``EngineReplicas``), or None when the handler cannot tell,
+        the default. It must not start an engine. It may block: the inference service calls it in a thread, for the
+        status of a ready artifact, in every ``engine_state``."""
+        return None
+
     def engine_detail(self, served: ServedArtifact) -> str | None:
         """What the starting engine at ``served`` does now, as one short line for a person, such as "Loading weights
         · 0:42"; None when the handler cannot tell, the default. Reef asks it only while ``engine_state`` is
-        ``starting``, under the same rules."""
+        ``starting``, or while ``engine_replicas`` has replicas that start, under the same rules."""
         return None
 
     def engine_steps(self, served: ServedArtifact) -> StartupSteps | None:
         """The ``start`` and ``load`` phases of the starting engine at ``served`` (RFC #1283), when a ready artifact's
-        engine starts again from zero; None when the handler cannot tell, the default. Reef asks it only while
-        ``engine_state`` is ``starting``, under the same rules."""
+        engine starts again from zero, or of a replica that starts beside one that answers; None when the handler
+        cannot tell, the default. Reef asks it only while ``engine_state`` is ``starting``, or while
+        ``engine_replicas`` has replicas that start, under the same rules."""
         return None
 
     async def inference_stream(
@@ -589,9 +671,8 @@ class InferenceRuntime(ABC):
     def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
         """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
         engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
-        set takes the deployment's value again. The inference worker calls it before each activation and each
-        ``serve_artifact``, and when only the override changed, so a second call with the same values changes
-        nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
+        set takes the deployment's value again. The inference worker calls it before each activation, and when only
+        the override changed, so a second call with the same values changes nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
         the scenario to another engine. The default has no engine field and does nothing; the handler applies
         request fields to each request."""
         return
@@ -712,10 +793,16 @@ class InferenceRuntime(ABC):
         """
         raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
         """Make an engine answer for ``artifact`` of ``scenario``, and return the value that reaches it: the engine's
         URL and the model name that samples that artifact. None when the engine has no address that another process
-        can call. The inference worker applies ``scenario``'s serving config (``apply_serving_config``) first.
+        can call.
+
+        ``serving_config`` is the override that the engine of ``artifact`` starts with, as ``serving_config``
+        accepted it: the inference worker gives the config of the scenario's newest serving request. The call reads
+        no other config, and it does not change the config of what serves the scenario now (``apply_serving_config``).
 
         Return only when the engine is ready. A second call for a served artifact starts nothing. Only the inference
         owner calls it, one call at a time.

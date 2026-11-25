@@ -71,8 +71,23 @@ def enable_wal(connection: Connection, database: str, *, timeout_seconds: float,
         time.sleep(retry_seconds)
 
 
+#: The libpq parameters that end a connection to a server that stopped answering, as when the server restarts. Without
+#: them, a call waits for its answer forever and holds what its thread holds. A connect waits up to 10 s. A connection
+#: that waits for an answer sends a keepalive after 30 s idle, and fails after 3 probes 10 s apart. Data that the server
+#: does not acknowledge in 60 s fails the connection. A URL that sets a parameter keeps its value.
+DEAD_SERVER_PARAMETERS = {
+    "connect_timeout": "10",
+    "keepalives": "1",
+    "keepalives_idle": "30",
+    "keepalives_interval": "10",
+    "keepalives_count": "3",
+    "tcp_user_timeout": "60000",
+}
+
+
 def postgres_url(database_url: str) -> URL:
-    """Validate a PostgreSQL URL and select psycopg 3 without exposing credentials."""
+    """Validate a PostgreSQL URL and select psycopg 3 without exposing credentials. The URL gets each
+    ``DEAD_SERVER_PARAMETERS`` value that it does not set."""
     try:
         url = make_url(database_url)
         if url.drivername not in {"postgres", "postgresql", "postgresql+psycopg"}:
@@ -82,7 +97,8 @@ def postgres_url(database_url: str) -> URL:
             raise ValueError
     except (TypeError, ValueError, AttributeError, ArgumentError):
         raise ValueError("record_database_url must be a PostgreSQL URL using psycopg 3") from None
-    return url.set(drivername="postgresql+psycopg")
+    defaults = {name: value for name, value in DEAD_SERVER_PARAMETERS.items() if name not in url.query}
+    return url.set(drivername="postgresql+psycopg").update_query_dict(defaults)
 
 
 def validate_postgres_schema(schema: str) -> None:
