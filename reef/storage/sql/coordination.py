@@ -23,7 +23,7 @@ import time
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -1201,26 +1201,15 @@ class SQLWorkQueue(WorkQueue):
 
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
-        # Lease extensions do not advance changed_sequence, so they take no sequence counter lock.
+        lease_expires_at = moment + self.lease_seconds
+        # A lease extension numbers no change, so it takes no counter. ``held`` locks the item's row (PostgreSQL) or
+        # the database (SQLite), so no other write changes the item between the check and the update.
         with self.database.connection(write=True) as connection:
             item = self.held(connection, queue, item_id, worker_id, moment)
-            result = connection.execute(
-                update(self.table)
-                .where(
-                    *self.key(item.queue, item.id),
-                    self.table.c.state == item.state,
-                    self.table.c.worker_id == worker_id,
-                    self.table.c.attempt_count == item.attempt_count,
-                    self.table.c.lease_expires_at == item.lease_expires_at,
-                )
-                .values(lease_expires_at=moment + self.lease_seconds)
+            connection.execute(
+                update(self.table).where(*self.key(item.queue, item.id)).values(lease_expires_at=lease_expires_at)
             )
-            if result.rowcount != 1:
-                raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
-            saved = self.row(connection, item.queue, item.id)
-            if saved is None:
-                raise ReefError(f"work item {item.queue}/{item.id} disappeared")
-            return saved
+            return replace(item, lease_expires_at=lease_expires_at)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)

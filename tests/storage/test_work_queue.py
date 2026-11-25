@@ -319,6 +319,7 @@ def test_extending_a_lease_refreshes_expiry_without_taking_the_sequence_counter(
 
     assert extended.lease_expires_at == 15
     assert extended.changed_sequence == taken.changed_sequence
+    assert queue.read("jobs", "a") == extended
     assert queue.read_changes("jobs", taken.changed_sequence) == ()
 
 
