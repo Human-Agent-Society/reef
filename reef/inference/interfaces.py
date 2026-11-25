@@ -260,6 +260,25 @@ class InferenceArtifact:
 #: yet, ``idle`` runs no engine, and a request starts one.
 EngineState = Literal["warm", "starting", "idle"]
 
+
+@dataclass(frozen=True)
+class EngineReplicas:
+    """The engine replicas behind a route, such as the containers of a server that scales: ``serving`` answer now,
+    and ``starting`` run but do not answer yet. Both are integers of at least 0. ``InferenceHandler.engine_replicas``
+    gives them, and the inference status shows them (``to_json``)."""
+
+    serving: int
+    starting: int
+
+    def __post_init__(self) -> None:
+        for value in (self.serving, self.starting):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("engine replicas are integers of at least 0")
+
+    def to_json(self) -> dict[str, Any]:
+        return {"serving": self.serving, "starting": self.starting}
+
+
 #: The phases of an artifact's startup, in their order (RFC #1283): ``prepare`` (the serving work waits, deploys the
 #: engine, and converts or quantizes the weights), ``start`` (a machine and the weights) and ``load`` (GPU memory,
 #: kernels, CUDA graphs and warm-up). ``reef.inference.startup`` reports them.
@@ -383,6 +402,12 @@ class InferenceHandler(Plugin, ABC):
         It must not start an engine. It may block: the inference service calls it in a thread, for the status of a
         ready artifact. The default is None.
         """
+        return None
+
+    def engine_replicas(self, served: ServedArtifact) -> EngineReplicas | None:
+        """The engine replicas that answer at ``served`` (``EngineReplicas``), or None when the handler cannot tell,
+        the default. It must not start an engine. It may block: the inference service calls it in a thread, for the
+        status of a ready artifact, in every ``engine_state``."""
         return None
 
     def engine_detail(self, served: ServedArtifact) -> str | None:
