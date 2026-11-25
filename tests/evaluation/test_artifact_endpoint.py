@@ -22,7 +22,7 @@ from reef.core.snapshot import SnapshotRef
 from reef.evaluation import artifact_endpoint
 from reef.evaluation.artifact_endpoint import CLOSED_ERROR, ArtifactEndpoint, ProviderCooldowns, refusal_limit
 from reef.harness.capture import CaptureProxy
-from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import REQUEST_SESSION_KEY, InferenceArtifact, InferenceHandler, InferenceRuntime
 
 
 class RefusingHandler(InferenceHandler):
@@ -86,12 +86,14 @@ class EngineHandler(InferenceHandler):
 
     def __init__(self) -> None:
         self.bodies: list[dict[str, Any]] = []
+        self.session_keys: list[str | None] = []
 
     def request_payload(self, payload: Mapping[str, Any], *, serving_config: Mapping[str, Any]) -> dict[str, Any]:
         return {**payload, "temperature": 0.2}
 
     async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.bodies.append(payload)
+        self.session_keys.append(REQUEST_SESSION_KEY.get())
         return {"artifact_id": artifact.artifact_id}
 
 
@@ -122,6 +124,25 @@ def test_a_call_reaches_an_engine_that_another_process_started_with_the_engines_
         chat = {"model": "from-the-agent", "messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (200, {"artifact_id": "artifact:r7"})
     assert runtime.engine.bodies == [{**chat, "model": "engine-model", "temperature": 0.2}]
+
+
+@pytest.mark.unit
+def test_each_call_of_an_endpoint_has_its_session_key_and_no_other_call_sees_it() -> None:
+    artifact = Artifact(
+        SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
+    )
+    runtime = StartedElsewhereRuntime()
+    served = ServedArtifact("artifact:r7", "https://engine.invalid", "engine-model")
+    chat = {"model": "from-the-agent", "messages": [{"role": "user", "content": "ok"}]}
+    # Two rollouts send the same first messages, as the tasks of one benchmark can.
+    with (
+        ArtifactEndpoint(runtime, artifact, served, session_key="rollout-0") as first,
+        ArtifactEndpoint(runtime, artifact, served, session_key="rollout-1") as second,
+    ):
+        for url in (first.url, second.url, first.url):
+            assert call(url, "/v1/chat/completions", chat)[0] == 200
+    assert runtime.engine.session_keys == ["rollout-0", "rollout-1", "rollout-0"]
+    assert REQUEST_SESSION_KEY.get() is None
 
 
 @pytest.mark.unit
