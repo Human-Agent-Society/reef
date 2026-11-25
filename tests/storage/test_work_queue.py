@@ -27,6 +27,8 @@ from reef.storage.coordination.served_models import (
 )
 from reef.storage.coordination.work_queue import (
     DEFERRED_ATTEMPTS,
+    LEASE_RETRY_MAX_SECONDS,
+    LeaseExtender,
     NewWork,
     WorkConflictError,
     WorkItem,
@@ -303,6 +305,136 @@ def test_an_expired_lease_returns_the_item_and_a_late_worker_loses_it(open_coord
     assert again.worker_id == "w2" and again.attempt_count == 2
     # The last attempt expires too: no attempts are left, so the item fails.
     assert [item.state for item in queue.requeue_expired(now=100)] == ["failed"]
+
+
+class FlakyLeaseWorkQueue(SQLWorkQueue):
+    """A work queue whose ``extend_lease`` raises scripted errors before delegating to ``SQLWorkQueue``.
+
+    Values: ``outcomes`` is a list of optional exceptions popped from the front on each ``extend_lease`` call;
+    ``None`` or an exhausted list delegates to ``SQLWorkQueue.extend_lease``. ``call_count`` counts every
+    ``extend_lease`` call and ``success_count`` counts completed delegations, both guarded by ``lock``.
+
+    Purpose: unit tests of ``LeaseExtender`` inject transient errors and lease-loss errors cleanly.
+    """
+
+    def __init__(
+        self,
+        database: SQLiteCoordinationDatabase,
+        *,
+        lease_seconds: float,
+        outcomes: list[Exception | None],
+    ) -> None:
+        super().__init__(database, lease_seconds=lease_seconds)
+        self.outcomes: list[Exception | None] = list(outcomes)
+        self.call_count = 0
+        self.success_count = 0
+        self.lock = threading.Lock()
+
+    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        with self.lock:
+            self.call_count += 1
+            outcome = self.outcomes.pop(0) if self.outcomes else None
+        if outcome is not None:
+            raise outcome
+        extended = super().extend_lease(queue, item_id, worker_id, now=now)
+        with self.lock:
+            self.success_count += 1
+        return extended
+
+
+class RecordingStopEvent(threading.Event):
+    """A ``threading.Event`` that records each ``wait`` timeout and signals stop after ``max_waits`` calls.
+
+    Values: ``max_waits`` is a positive integer; ``waits`` records each timeout passed to ``wait`` before returning
+    ``False`` for the first ``max_waits`` calls and ``True`` once ``max_waits`` calls have been recorded.
+
+    Purpose: deterministic unit tests inspect the exact wait intervals of ``LeaseExtender.run`` without sleeping.
+    """
+
+    def __init__(self, max_waits: int) -> None:
+        if max_waits < 1:
+            raise ValueError("max_waits must be at least 1")
+        super().__init__()
+        self.max_waits = max_waits
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return len(self.waits) > self.max_waits
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("lease_seconds", "expected_waits"),
+    [
+        (60.0, [20.0, LEASE_RETRY_MAX_SECONDS, LEASE_RETRY_MAX_SECONDS, 20.0]),
+        (6.0, [2.0, 0.6, 0.6, 2.0]),
+    ],
+)
+def test_lease_extender_retries_with_bounded_short_wait_and_resets_after_recovery(
+    lease_seconds: float, expected_waits: list[float]
+):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(
+            database,
+            lease_seconds=lease_seconds,
+            outcomes=[RuntimeError("pool timeout"), RuntimeError("db restart"), None],
+        )
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        extender = LeaseExtender(queue, taken, "w1")
+        recorder = RecordingStopEvent(max_waits=3)
+        extender.done = recorder
+        extender.run()
+
+        assert recorder.waits == expected_waits
+        assert queue.call_count == 3
+        assert not extender.lease_lost.is_set()
+        assert queue.read("jobs", "a").lease_expires_at >= taken.lease_expires_at
+
+
+@pytest.mark.unit
+def test_lease_extender_recovers_before_lease_expiry_on_transient_error():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(database, lease_seconds=1.5, outcomes=[RuntimeError("transient"), None])
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        with LeaseExtender(queue, taken, "w1") as extender:
+            wait_until(lambda: queue.success_count >= 1, timeout_seconds=5)
+            refreshed = queue.read("jobs", "a")
+            assert not extender.lease_lost.is_set()
+            assert queue.call_count >= 2
+            assert refreshed.lease_expires_at > taken.lease_expires_at
+            assert queue.requeue_expired() == ()
+
+
+@pytest.mark.unit
+def test_lease_extender_exits_immediately_on_lease_lost_without_retrying():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(database, lease_seconds=0.06, outcomes=[WorkLeaseLostError("lost")])
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        with LeaseExtender(queue, taken, "w1") as extender:
+            assert extender.lease_lost.wait(2.0)
+            extender.thread.join(timeout=2.0)
+            assert not extender.thread.is_alive()
+            assert queue.call_count == 1
+
+
+@pytest.mark.unit
+def test_lease_extender_stop_wakes_promptly_during_wait():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(database, lease_seconds=60.0, outcomes=[])
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        extender = LeaseExtender(queue, taken, "w1")
+        extender.thread.start()
+        started = time.monotonic()
+        extender.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert not extender.thread.is_alive()
+        assert not extender.lease_lost.is_set()
 
 
 @pytest.mark.unit
