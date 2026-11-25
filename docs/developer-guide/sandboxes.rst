@@ -220,9 +220,8 @@ and ``e2b`` gets none, so Harbor's default of one day applies.
 - E2B's Dockerfile parser drops ``COPY --chmod``. The class adds a ``chmod``
   after each such copy, so the files keep their modes.
 - AgentENV's E2B template builds refuse every ``COPY`` step. With
-  ``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class builds the Dockerfile with
-  ``aenv build`` (``reef.execution.sandbox.agentenv_build``), which has
-  Docker's semantics, multi-stage builds included.
+  ``REEF_E2B_DOCKERFILE_BUILD=aenv``, Reef runs ``aenv build``, which supports
+  multi-stage Dockerfiles.
 
 With ``aenv``, the class uses a ready template and waits for a build that
 another trial runs. It deletes and rebuilds a failed template, and a template
@@ -241,9 +240,8 @@ A task can name more services next to ``main`` in
 challenge. By default, an ``e2b`` trial starts only the task's image, and the
 agent reaches no other service. With ``REEF_E2B_COMPOSE=aenv``, which needs
 ``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class runs the project in one sandbox
-with ``aenv compose up`` (``reef.execution.sandbox.agentenv_compose``). The
-agent's commands and files go to ``main``, and the services reach one another
-by name, as under Docker Compose.
+with ``aenv compose up``. The agent's commands and files go to ``main``, and
+the services reach one another by name, as under Docker Compose.
 
 Before you set ``REEF_E2B_COMPOSE=aenv``, check the tools that manage the
 repository of the AgentENV deployment. ``aenv build --image`` and
@@ -277,7 +275,7 @@ limit, and a wait for a free AgentENV builder counts against that limit. A
 trial builds a verifier template only after its agent ends, so a late build
 there loses the agent's work.
 
-``reef.execution.sandbox.e2b.build_task_template(task_path)`` builds the
+``reef.execution.sandbox.providers.e2b.trial.build_task_template(task_path)`` builds the
 templates that a trial of the task would build, with the same aliases,
 resources and build timeouts: the template of the task's environment, and the
 template of each separate verifier environment of the task or of its steps.

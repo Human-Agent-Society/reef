@@ -211,6 +211,22 @@ def test_an_e2b_trial_gets_reefs_class_on_harbors_template_with_the_tasks_limits
 
 
 @pytest.mark.unit
+def test_the_earlier_e2b_path_is_the_trial_module_that_saved_configs_name() -> None:
+    from harbor.utils.import_path import import_class
+
+    from reef.execution.sandbox import e2b
+    from reef.execution.sandbox.providers.e2b import executor, trial
+    from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT
+
+    # Saved trial configs keep the earlier path, and Harbor resolves it to the trial module's class.
+    assert HARBOR_E2B_ENVIRONMENT == "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+    assert import_class(HARBOR_E2B_ENVIRONMENT) is trial.KillOnTimeoutE2BEnvironment
+    # The earlier path is the trial module itself, so a hook that a caller sets on it, such as ``build_image`` in the
+    # Compose tests below, is the one that trials call. It still gives the executor.
+    assert e2b is trial and e2b.E2BExecutor is executor.E2BExecutor
+
+
+@pytest.mark.unit
 def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -396,12 +412,18 @@ def harbor_modal_environment(tmp_path: Path) -> object:
 def test_a_modal_trial_gets_reefs_class_on_harbors_modal_environment(tmp_path: Path) -> None:
     pytest.importorskip("modal")
     from harbor.environments.modal import ModalEnvironment
+    from harbor.utils.import_path import import_class
 
     from reef.execution.sandbox.modal_trial import ModalTrialEnvironment
+    from reef.execution.sandbox.providers.modal import trial
+    from reef.execution.sandbox.task_environment import HARBOR_MODAL_ENVIRONMENT
 
     environment = harbor_modal_environment(tmp_path)
     assert type(environment) is ModalTrialEnvironment and isinstance(environment, ModalEnvironment)
     assert environment.type() == ModalEnvironment.type() == "modal"
+    # Saved trial configs keep this path; it names the class of the Modal provider's trial module.
+    assert HARBOR_MODAL_ENVIRONMENT == "reef.execution.sandbox.modal_trial:ModalTrialEnvironment"
+    assert import_class(HARBOR_MODAL_ENVIRONMENT) is ModalTrialEnvironment is trial.ModalTrialEnvironment
 
 
 def modal_errors() -> dict[str, Exception]:

@@ -94,7 +94,7 @@ def test_reconnecting_does_not_extend_the_command_deadline(tmp_path, monkeypatch
     rpc = pytest.importorskip("connectrpc.errors")
     from connectrpc.code import Code
 
-    import reef.execution.sandbox.e2b as executor
+    import reef.execution.sandbox.providers.e2b.executor as executor
 
     monkeypatch.setattr(executor, "time", SimpleNamespace(monotonic=Mock(side_effect=[0.0, 61.0])))
     sandbox = Mock()
