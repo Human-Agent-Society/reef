@@ -185,8 +185,9 @@ Select a Harbor environment by name: ``docker``, ``e2b`` or ``modal``
 (``HARBOR_TASK_ENVIRONMENTS``); ``checked_task_environment`` refuses any
 other name. Use ``e2b`` for a self-hosted service that implements E2B's API,
 such as AgentENV. Configure its endpoints in the rollout process, as
-described under ``rollout.environment`` in the `configuration reference
-<../reference/configuration.rst>`__.
+`Rollout job parameters
+<../reference/configuration-generated-tasks.rst#rollout-job-parameters>`__
+describes.
 
 ``task_environment_probes(environment)`` returns a readiness probe for each
 thing a host needs to run tasks in the type: the Docker daemon; the E2B key,
@@ -299,6 +300,20 @@ function for each task before an evaluation.
   build timeout, the item waits again, for at most six hours in each attempt.
 - ``evaluation.require_prepared_templates`` keeps template builds out of
   trials.
+
+A deployment's builder subclasses ``TaskTemplateBuilder``
+(``reef.evaluation.task_templates``), whose docstring gives the contract. With
+``evaluation.pin-task-files``, startup refuses a builder that does not override
+``build_for_version``.
+
+Keep the files of a trial
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The evaluation worker removes the directory of each trial when the attempt
+ends. To keep more of a trial, such as the logs of the agent and the verifier,
+name a ``TrialObserver`` (``reef.evaluation.trials``) in
+``evaluation.trial-observer``. The worker gives it each trial before it removes
+the directory. The docstring of ``TrialObserver`` gives the contract.
 
 Who applies the config
 ~~~~~~~~~~~~~~~~~~~~~~

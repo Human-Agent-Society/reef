@@ -97,7 +97,7 @@ HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 
 - The change selects later job data. Job data that is already reserved or running completes in its original mode.
 - After a switch back to ``auto``, automatic jobs train the samples that no job trained, including those collected in ``manual``.
-- Accepted requests wait for ``manual``, including requests not yet read when the mode changes to ``auto``.
+- A queued request trains in both modes, so a request that is not yet read when the mode changes still trains.
 - A processor that does not support the requested mode returns 501 without changing its state.
 
 A Reef process runs at most one scenario that trains full weights, so preparation, remote execution, and commit never interleave. It may run any number of scenarios that produce no updates or that update text artifacts in process. Record acceptance never waits for artifact evolution.
