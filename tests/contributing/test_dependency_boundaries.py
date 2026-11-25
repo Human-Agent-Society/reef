@@ -441,25 +441,15 @@ def test_executor_config_and_the_modal_executor_do_not_require_the_modal_package
     )
 
 
-def test_the_earlier_agentenv_module_paths_share_build_and_compose_settings() -> None:
-    # Existing callers import and patch these two modules. Import the old build path first and the old Compose path
-    # after its canonical module to exercise both orders.
+def test_the_agentenv_build_and_compose_helpers_load_without_the_e2b_package() -> None:
+    # Reef's E2B trials use these helpers on AgentENV, but the helpers need neither the E2B SDK nor the trial module.
     _assert_isolated_import(
         "import sys\n"
         "sys.modules['e2b'] = None\n"
-        "import reef.execution.sandbox.agentenv_build as earlier_build\n"
-        "from reef.execution.sandbox.agentenv import build, compose\n"
-        "import reef.execution.sandbox.agentenv_compose as earlier_compose\n"
-        "from reef.execution.sandbox.agentenv_build import BUILD_POLL_INTERVAL_S, poll_interval\n"
-        "from reef.execution.sandbox.agentenv_compose import ComposeSandbox, run_aenv\n"
-        "assert poll_interval is build.poll_interval\n"
-        "assert (ComposeSandbox, run_aenv) == (compose.ComposeSandbox, compose.run_aenv)\n"
-        "assert BUILD_POLL_INTERVAL_S == build.BUILD_POLL_INTERVAL_S\n"
-        "earlier_build.BUILD_POLL_INTERVAL_S = 0\n"
-        "assert build.poll_interval() == 0\n"
-        "start = object()\n"
-        "earlier_compose.run_aenv = start\n"
-        "assert compose.run_aenv is start\n"
+        "from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, dockerfile_build\n"
+        "from reef.execution.sandbox.agentenv.compose import ComposeSandbox, TransientStartError, compose_mode\n"
+        "assert (dockerfile_build({}), compose_mode({})) == ('e2b', 'off')\n"
+        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError\n"
         "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
 

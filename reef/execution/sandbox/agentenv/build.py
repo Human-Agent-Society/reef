@@ -43,8 +43,7 @@ import tomli_w
 
 from reef.core.errors import InternalError
 
-# The category of the earlier module, which log filters name.
-logger = logging.getLogger("reef.execution.sandbox.agentenv_build")
+logger = logging.getLogger(__name__)
 
 #: The variable that selects how Reef's Harbor E2B class builds a task's Dockerfile: ``e2b`` (E2B's template API, the
 #: default) or ``aenv`` (``aenv build`` on an AgentENV deployment).

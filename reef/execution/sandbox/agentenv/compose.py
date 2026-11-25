@@ -52,8 +52,7 @@ from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv.build import BUILD_OUTPUT_TAIL_CHARS, TRANSIENT_STATUSES, AgentEnvTemplates
 from reef.execution.sandbox.process import SandboxCapacityError
 
-# The category of the earlier module, which log filters name.
-logger = logging.getLogger("reef.execution.sandbox.agentenv_compose")
+logger = logging.getLogger(__name__)
 
 #: The variable that selects how Reef's Harbor E2B class runs a task with a Compose file: ``off`` (only the task's own
 #: image, as Harbor's class does; the default) or ``aenv`` (the project, with ``aenv compose up``).

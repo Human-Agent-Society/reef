@@ -16,7 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.execution.sandbox.agentenv import build as agentenv_build
+from reef.execution.sandbox.agentenv import build as build_module
 from reef.execution.sandbox.agentenv.build import (
     AgentEnvBuildError,
     AgentEnvTemplates,
@@ -115,8 +115,8 @@ def fake_aenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_AENV_LOG", str(tmp_path / "aenv"))
-    monkeypatch.setattr(agentenv_build, "BUILD_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(agentenv_build, "ORPHAN_WAITING_S", 0.1)
+    monkeypatch.setattr(build_module, "BUILD_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(build_module, "ORPHAN_WAITING_S", 0.1)
     yield tmp_path / "aenv"
 
 
@@ -315,7 +315,7 @@ def test_a_refused_build_deletes_the_waiting_template_that_it_made_and_builds_ag
     monkeypatch.setenv("FAKE_AENV_CREATED", "t1")
     monkeypatch.setenv("FAKE_AENV_ERROR", "Error: HTTP 429: node concurrent build limit reached; retry later")
     # The second build must not wait until the template counts as an orphan.
-    monkeypatch.setattr(agentenv_build, "ORPHAN_WAITING_S", 3600.0)
+    monkeypatch.setattr(build_module, "ORPHAN_WAITING_S", 3600.0)
     fake = FakeAgentEnv([None, ("t1", "waiting")])
     ensured(fake, task_build(tmp_path))
     assert fake.deleted == ["t1"]
