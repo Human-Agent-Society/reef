@@ -77,45 +77,14 @@ HTTP 201 returns ``{scenario, component, artifact_id}`` after durable storage; a
 
 **Layout.** Imports require the backend/configuration's snapshot layout; components without one reject imports.
 
-+-----------------------------+------------------------------------------------+------------------+
-| Component                   | The directory holds                            | Other files      |
-+=============================+================================================+==================+
-| Full weights (Slime)        | ``config.json`` and ``*.safetensors`` or       | allowed          |
-|                             | ``*.bin`` at the root                          |                  |
-+-----------------------------+------------------------------------------------+------------------+
-| LoRA adapter (Slime)        | ``adapter/adapter_config.json`` and            | allowed          |
-|                             | ``adapter/adapter_model.safetensors`` or       |                  |
-|                             | ``.bin``; ``r`` is at most the configured      |                  |
-|                             | rank, and ``target_modules`` is a list within  |                  |
-|                             | the configured modules                         |                  |
-+-----------------------------+------------------------------------------------+------------------+
-| Tinker                      | ``tinker-checkpoint.json`` of the configured   | allowed          |
-|                             | model, rank and service; its ``state_path``    |                  |
-|                             | resolves on that service as a LoRA of that     |                  |
-|                             | model and rank                                 |                  |
-+-----------------------------+------------------------------------------------+------------------+
-| Harness                     | a source tree whose files are UTF-8 text and   | refused: a path  |
-|                             | pass validation for the adapter, the files a   | off the harness  |
-|                             | harness artifact stores                        | layout fails     |
-|                             |                                                | validation       |
-+-----------------------------+------------------------------------------------+------------------+
+- Slime full weights: root ``config.json`` and safetensors/bin weights.
+- Slime LoRA: ``adapter/adapter_config.json`` plus adapter safetensors/bin;
+  rank and target modules must fit configuration.
+- Tinker: ``tinker-checkpoint.json`` resolving to the configured model, rank and service.
+- Harness: UTF-8 source files passing the adapter's layout validation.
 
-**Base roots.** Slime/Tinker accept ``base.json`` alone, for example ``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``. Inputs must match the creation row's ``source``; mismatched model/rank/service returns 400 naming differences. These artifacts serve/train the base without adapters and are created for new scenarios (`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
+**Base roots.** Slime/Tinker accept ``base.json`` alone, for example ``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``. Inputs must match the creation row's ``source``; mismatched model/rank/service returns 400 naming differences. These artifacts serve/train the base without adapters and are created for new scenarios (`Artifacts <../user-guide/operate.rst#read-the-artifacts>`__).
 
-+--------+--------------------------------------------------------------------+
-| Status | Cause                                                              |
-+========+====================================================================+
-| 201    | the artifact is imported                                           |
-+--------+--------------------------------------------------------------------+
-| 400    | a malformed body or URI; a URI of an unknown scheme or of nothing  |
-|        | to read; an unknown ``component``, or ``component`` is missing in  |
-|        | a scenario with several components; the component takes no         |
-|        | import (Reef reads nothing for these three); the directory does    |
-|        | not have the component's layout, or its admission check refuses it |
-+--------+--------------------------------------------------------------------+
-| 404    | unknown scenario; Reef reads nothing then                          |
-+--------+--------------------------------------------------------------------+
-| 409    | a training result waits for its commit; send the request again     |
-+--------+--------------------------------------------------------------------+
-| 503    | the source failed, for example S3 refused the read                 |
-+--------+--------------------------------------------------------------------+
+Invalid bodies, layouts or sources return 400; unknown scenarios return 404.
+Pending training commits return 409; source-service failures return 503.
+Unknown/unsupported components fail before reading the source.

@@ -1,19 +1,14 @@
 Harness adapters
 ================
 
-An adapter connects a harness source tree to an agent's configuration,
-headless command and session format. The same adapter supports evaluation,
-Harbor tasks and, optionally, installation on a user's machine.
-
-Start with ``adapter.yaml``. Add Python rendering code only for behavior
-that the descriptor cannot express.
+An adapter maps a source tree to an agent's configuration, headless command
+and session format. Add Python rendering only where descriptors are insufficient.
 
 The adapter file
 ----------------
 
-Use an existing descriptor as a starting point, such as
-`pi's adapter <../../reef/harness/adapters/pi/adapter.yaml>`__.
-Its core fields look like this excerpt:
+Start from an existing descriptor, such as `pi's <../../reef/harness/adapters/pi/adapter.yaml>`__.
+This excerpt declares installation, parts and execution:
 
 .. code:: yaml
 
@@ -43,49 +38,21 @@ Its core fields look like this excerpt:
      primary:
        path: plugin/settings.json
 
-Also declare model bindings, config checks and any client installation commands.
-``primary`` is the required config target. ``load_descriptor`` rejects unknown keys.
-The `descriptor contract <../../reef/harness/adapters/descriptor.py>`__ defines
-all fields, including self-isolation requirements.
-
-How Reef runs an agent
-----------------------
-
-Evaluation renders a fresh root, relocates agent state, runs in an empty
-workspace, reads the session and removes the root.
-Harbor tasks install the pinned agent inside the task environment, render
-its tree and run the verifier.
-Client installations use ``run.layer`` without reading the user's configuration.
-
-Harbor tasks require declared skills and MCP support for those capabilities.
-Missing capabilities permanently fail the rollout.
-Reef stages packages before execution; do not require registry access during runs.
-A reader with ``to_atif`` supplies ``/logs/agent/trajectory.json`` to verifiers.
-
-Task MCP servers
-~~~~~~~~~~~~~~~~
-
-Declare supported transports in ``run.task.mcp`` with a config ``target``
-and server-mapping ``key``. Templates accept ``{command}``, ``{args}``,
-``{argv}`` and ``{url}``; other values remain literal.
-Task servers merge after config checks.
-
-Unsupported transports, missing declarations and HTTP headers fail evaluation
-admission. See `MCP descriptor types <../../reef/harness/adapters/descriptor.py>`__
-for the complete mapping.
+Also provide model bindings and config checks; ``primary`` is required.
+Unknown keys fail loading. Pin installation versions and stage packages before execution;
+Harbor runs must not depend on registry access.
+See the `descriptor contract <../../reef/harness/adapters/descriptor.py>`__.
 
 Tree parts
 ----------
 
-A part kind fixes its source path, format and merge behavior.
-The descriptor selects the rendered path:
+Descriptors choose rendered paths; part kinds fix source layouts and merge rules:
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 45 30
 
    * - Kind
-     - Source path
+     - Source
      - Merge
    * - ``rules``
      - ``rules.md``
@@ -93,191 +60,80 @@ The descriptor selects the rendered path:
    * - ``skill``
      - ``skills/{name}/SKILL.md``
      - By line
-   * - ``command``
-     - ``commands/{name}.md``
-     - By line
-   * - ``memory``
-     - ``memory/{name}.md``
+   * - ``command``, ``memory``
+     - ``commands/{name}.md``, ``memory/{name}.md``
      - By line
    * - ``extension``
-     - ``extensions/{name}`` plus rendered suffix
+     - ``extensions/{name}`` plus suffix
      - By file
-   * - ``native_*``
-     - ``native/`` subdirectories
-     - By file
-   * - ``program``
-     - ``program/{name}.py``; ``main`` is the entry point
+   * - ``native_*``, ``program``
+     - ``native/`` subdirectories, ``program/{name}.py``
      - By file
    * - ``config``
      - ``config/<target>.json``
      - Not synced
 
-Names start with a letter or digit; later characters can also be ``._-``.
-Use ``{renders: PATH, format: FORMAT}`` to override a part's format.
-``holds`` describes the part to methods through ``material/host.json``.
-``review: true`` requires manual activation regardless of ``review_kinds``.
-Native loops and Python programs require this review.
-Unknown review kinds fail configuration.
-
-Validation rejects empty files, credentials and unsupported paths.
-Config files must be JSON objects for declared targets.
-Code extensions cannot write raw stdout/stderr without the required UI guard.
-Native modules must compile and satisfy their declared contract.
-
-Render paths
-~~~~~~~~~~~~
-
-Use the descriptor's ``evolve`` mapping for destinations and
-`parts.py <../../reef/harness/adapters/parts.py>`__ for source layouts.
+Names begin with a letter/digit; later characters can also be ``._-``.
 Only declare parts that affect every supported execution mode.
-For example, Codex supports skills and skill-based commands, but no rules or extensions.
-
-Config targets and a person's machine
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``config/<target>.json`` merges into the named target.
-Checks limit writable settings; model-binding keys remain reserved.
-Client installation requires ``run.layer``, which pi, OpenCode, Claude and Codex provide.
-
-Config checks
--------------
-
-Checks validate merged config before adapter steps. Errors identify keys,
-never their values:
-
-.. code:: yaml
-
-   checks:
-     - key: includeCoAuthoredBy
-       match: IsDefault()
-     - key: [model, fallbackModel]
-       match: IsAbsent()
-       reason: Reef's binding selects the model
-
-``key`` accepts a dot path, path list or ``.`` for the whole file.
-``*`` matches entries and ``**`` matches any depth.
-Use ``AnyOf(IsAbsent(), X)`` for optional values constrained by ``X``.
-
-See `matchers.py <../../reef/harness/adapters/matchers.py>`__ for typed matchers
-and ``AllOf``, ``AnyOf`` and ``Not`` composition.
+``review: true`` always requires manual activation; native loops and Python programs require it.
+Validation rejects unsupported paths, empty files, credentials and invalid declared code contracts.
+See `part contracts <../../reef/harness/adapters/parts.py>`__.
 
 Rendering
 ---------
 
-``render_tree(tree, descriptor, overlays)`` returns root-relative file paths
-and contents without writing to disk:
+``render_tree(tree, descriptor, overlays)`` returns relative paths and contents:
 
-1. Merge target defaults, tree config and overlays, in that order.
-2. Place other files at their declared render paths.
+1. Merge target defaults, tree config and overlays.
+2. Place files at declared render paths.
 3. Apply checks and adapter steps.
 
-Output config uses its suffix's format: JSON, TOML, YAML or ``.env``.
-Unknown paths/targets, collisions, failed checks and tree-supplied binding
-keys raise render errors.
+Output suffixes select JSON, TOML, YAML or env formatting.
+Unknown targets, collisions, failed checks and binding-key overrides raise render errors.
+Custom ``AdapterRenderer`` methods must be stateless; raise ``RenderError`` for refusal.
+Prefer declarative checks over Python transformations.
 
-Model binding checks
-~~~~~~~~~~~~~~~~~~~~
+Client installation requires ``run.layer``. It registers the rendered plugin
+without merging user configuration. Layer rendering starts config targets empty
+and skips evaluation checks. Credentials use ``{token}`` through environment variables only.
+Every declared part must work in evaluation and installed modes.
 
-Bindings supply endpoint, model and credentials.
-Trees cannot set those keys. Add checks for alternate routes such as
-fallback models, extra providers and proxies.
-These checks inspect configuration; they cannot control a tool that constructs
-its own model request.
-Use the `model-route tests <../../tests/harness/test_harness_model_route.py>`__.
+Config checks
+-------------
+
+Checks constrain merged settings before rendering steps:
+
+.. code:: yaml
+
+   checks:
+     - key: [model, fallbackModel]
+       match: IsAbsent()
+       reason: Reef's binding selects the model
+
+Model-binding keys stay reserved. Check alternate providers, fallback models and proxies too.
+Errors identify keys, never values.
+Use ``AnyOf(IsAbsent(), X)`` for optional constrained values.
+See `matchers <../../reef/harness/adapters/matchers.py>`__ for available checks.
 
 Token limits
 ~~~~~~~~~~~~
 
-Binding templates can use:
-
-- ``{context_window}``: ``REEF_CONTEXT_WINDOW``, endpoint model metadata,
-  or 128000 tokens, in that order.
-- ``{max_output_tokens}``: ``REEF_MAX_OUTPUT_TOKENS`` or 32000 tokens.
-
-Pi and OpenCode write both limits.
-Codex writes context only when supplied by environment or model metadata;
-it writes no reply limit. Other adapters write neither.
-
-Harness-item ``env`` can set these values for artifact evaluations.
-Values must be positive integers. Correct context limits let agents compact
-before reaching the endpoint limit.
-
-Adapter steps
-~~~~~~~~~~~~~
-
-Subclass ``AdapterRenderer`` with static, stateless methods:
-
-- ``process_config`` adjusts one merged config.
-- ``process_skill`` and ``process_command`` process one file's text.
-- ``check_model_route`` validates routes that config checks cannot express.
-- ``finalize_render`` handles unavoidable cross-file work, such as manifests.
-- ``layer_files`` adapts client installation output.
-
-Defaults preserve input. Raise ``RenderError`` to reject it.
-Prefer config checks for value constraints and narrow steps for transformations.
-Do not pass state between renders or steps.
-
-A person's machine
-------------------
-
-``reef-client harness`` installs the rendered plugin with ``register``;
-``disconnect`` runs ``unregister``. Sync applies new selections.
-User configuration remains separate.
-
-Layer rendering starts targets empty and skips evaluation checks.
-Use ``layer_files`` for installation metadata.
-Pass ``{token}`` only through environment variables, never command arguments.
-Every declared part must work in both evaluation and installed plugins.
-
-Bundled adapters
-----------------
-
-The `bundled descriptors <../../reef/harness/adapters>`__ define pinned versions,
-commands and model dialects. ``evolution.binary`` overrides the installed binary.
-The Python adapter runs ``program/main.py`` with uv and PEP 723 dependencies;
-its descriptor defines the model binding and session format.
+``{context_window}`` uses ``REEF_CONTEXT_WINDOW``, endpoint metadata, then 128000.
+``{max_output_tokens}`` uses ``REEF_MAX_OUTPUT_TOKENS``, then 32000.
+Values must be positive integers.
+Pi and OpenCode write both. Codex writes only explicitly supplied context;
+other adapters write neither. Artifact-evaluation ``env`` can override these variables.
 
 Connect a new agent
 -------------------
 
-1. Write the descriptor's paths, installation, model templates and run settings.
-2. Add a ``TrajectoryReader`` if the session format is new.
-   Implement ``to_atif`` for task verifiers; reuse Harbor converters when available.
-3. Register in ``BUILTIN_ADAPTERS`` or the ``reef.harness_adapters`` entry-point group.
-   External entries return an ``AdapterDescriptor`` directly or through a zero-argument callable.
-4. Add rendering steps only where declarations are insufficient.
+1. Define installation, paths, model templates and run settings.
+2. Add a ``TrajectoryReader`` for new session formats; ``to_atif`` supplies verifier trajectories.
+3. Register in ``BUILTIN_ADAPTERS`` or ``reef.harness_adapters`` entry points.
+4. Test descriptors, golden renders, model routes and captured sessions.
 
-Test descriptor loading, rendered files, model routes and captured sessions.
-Run a real task and confirm each supported part reaches the model in
-evaluation and client modes. Test ``reef-client harness connect`` when supported.
-External readers use ``package.module:ClassName`` in ``sessions.format``.
-
-Native runner
--------------
-
-``reef-native`` reads rules, skills and model bindings from ``native/``.
-Start from `the native seed <../../tutorials/evolve-your-harness/seeds/native>`__.
-Tools, hooks, graphs, delegated agents and custom loops extend execution.
-Graphs and loops allow 1–32 steps; custom loops always require review.
-
-Tree code runs with user privileges. Tool capabilities apply under Linux
-sandbox execution; Seatbelt retains the outer profile.
-See the `runner contracts <../../reef/harness/runners/native>`__ for each extension.
-
-Trajectory
-~~~~~~~~~~
-
-``native-jsonl`` records ``{type, seq, time, data}`` events, including turn
-termination reasons. Large tool outputs are saved under ``.reef/tool-output/``.
-
-Run and serve modes
-~~~~~~~~~~~~~~~~~~~
-
-``reef-native -p`` runs one turn.
-``reef-native serve`` follows active harness artifacts between steps;
-failed loads retain the current tree.
-``--follow pinned`` requires explicit ``reef-native mount <artifact_id>``.
-Model calls carry scenario and artifact identity.
-
-``REEF_NATIVE_ENFORCE=bwrap`` confines tool calls only.
-``--self-tools`` adds inspection and trial tools.
+Harbor skills/MCP require matching ``run.task`` declarations; missing capabilities fail the rollout.
+Unsupported MCP transports and HTTP headers fail evaluation admission.
+Run a real task and confirm every part reaches the model in each supported mode.
+Test client connection when ``run.layer`` is supplied.
+See the `bundled adapters <../../reef/harness/adapters>`__ for complete examples.

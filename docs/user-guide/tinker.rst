@@ -7,8 +7,8 @@ Reef keeps records, feedback and artifacts. No local GPU stack is required.
 Install and run
 ---------------
 
-You need Python 3.12+, Git LFS and a Tinker account with model access.
-In an activated environment, run from the checkout:
+Use Python 3.12+, Git LFS and a Tinker account with model access.
+From the checkout in an activated environment:
 
 .. code:: bash
 
@@ -24,118 +24,56 @@ After ``/healthz`` is ready, run in another terminal with the same environment:
 
    python tutorials/tinker/smoke.py
 
-This paid smoke run generates four responses and trains one step with synthetic
-rewards. Run it once per fresh state directory. It checks integration, not
-learning quality. See the `example <../../tutorials/tinker/README.md>`__ for setup.
+This paid check generates four responses and trains one step with synthetic rewards.
+Run it once per fresh state directory. It checks integration, not learning quality.
+See the `example <../../tutorials/tinker/README.md>`__ for the complete setup.
 
-For another deployment, set ``training.backend: tinker`` and a supported
-``inference.model-path``. Keep ``training.options.state-dir`` persistent and
-exclusive to one runtime. Reef downloads tokenizer resources, not model weights.
-
-``api-key-env``, ``project-id`` and ``base-url`` select credentials, project and
-service. A checkpoint belongs to its originating service; Reef rejects a
-checkpoint from another service. Spindle has no checkpoint archive API, so its
-LoRA checkpoints cannot use Reef's inference engines. Its base-model sampler
-starts a sampler pool on first use.
-
-Default ``inference.serving: trainer`` supports one training scenario per
-deployment. Engine serving supports several adapters on one base model.
-See `Training settings <../reference/configuration-settings.rst#training>`__.
+For another deployment, set ``training.backend: tinker`` and a supported model.
+Keep ``training.options.state-dir`` persistent and exclusive to one runtime.
+Default trainer serving supports one training scenario; engine serving supports
+several adapters on one base model.
 
 What the backend supports
 -------------------------
 
-Inference requests
-~~~~~~~~~~~~~~~~~~
-
-Use ``/v1/chat/completions`` with text ``system``, ``user`` and ``assistant``
-messages. Assistant prefill is supported; tools, multimodal messages and
-Anthropic routes are rejected.
-
-Supported options are ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
-``top_p``, ``top_k``, ``seed``, ``stop`` and ``chat_template_kwargs.enable_thinking``.
-Only one output is allowed. Unknown options fail explicitly.
+Use ``/v1/chat/completions`` with text messages. Tools, multimodal messages,
+Anthropic routes, multiple outputs and unknown options are rejected.
+Streaming buffers the full reply, then emits its reasoning and answer as SSE;
+it provides no token-by-token latency.
 
 Without a token limit, generation uses the remaining context window, or 1024
-tokens if the service states no window. A full prompt returns 400
-``context_length_exceeded``. Reasoning appears in ``reasoning_content`` for
-responses. Streaming buffers the complete reply, then emits OpenAI SSE with
-its reasoning and answer. It provides no token-by-token latency.
+tokens when the service states no window. A full prompt returns 400
+``context_length_exceeded``. Match training and serving chat templates;
+unrenderable or over-context samples do not train.
 
-Match ``training.options.chat_template_kwargs`` to serving. Unrenderable or
-over-context samples do not train; ``unrenderable_samples`` counts them.
+Supported objectives are ``importance_sampling``, ``sft`` and
+`TTTD <recipes/tttd.rst>`__. Set ``kl-coef: 0`` for the first two.
+SAO and OpenClaw-RL are unsupported. See `training settings
+<../reference/configuration-settings.rst#training>`__ for batch size, learning rate
+and service selection.
 
-Losses
-~~~~~~
-
-.. list-table::
-   :header-rows: 1
-
-   * - Objective
-     - Requirements
-   * - ``importance_sampling``
-     - Advantages and rollout log probabilities; ``kl-coef: 0``.
-   * - ``sft``
-     - Target tokens; no advantages or rollout log probabilities. Set ``kl-coef: 0``.
-   * - `TTTD <recipes/tttd.rst>`__
-     - Its recipe supplies the objective, including frozen-base KL configured by ``kl-coef``.
-
-SAO and OpenClaw-RL are not implemented. Unknown loss families fail before
-training. See `objective extensions
-<../developer-guide/recipe-training-service.rst#job-parameters>`__ for custom losses.
-
-Job settings
-~~~~~~~~~~~~
-
-Under ``training.options``, set:
-
-- ``batch-size``: samples per optimizer step, default 1.
-- ``lora-rank`` and ``seed``: adapter initialization.
-- ``learning-rate``: Adam rate, unless the recipe selects a schedule.
-
-Adam otherwise uses SDK defaults: beta1 0.9, beta2 0.95, epsilon 1e-12,
-no weight decay or gradient clipping.
-
-``pipeline.sample2job.config.job_samples`` controls job submission. Complete record
-sets and trajectory rendering can produce more optimizer samples.
-A job's ``scheduling`` controls epochs, shuffle and its final partial batch;
-see `Job parameters <../developer-guide/recipe-training-service.rst#job-parameters>`__.
-
-``training.timeout-s`` bounds SDK futures and transport; ``inference.timeout-s``
-bounds sampling. A timeout does not cancel an accepted remote update.
-
-Task jobs
-~~~~~~~~~
-
-The `generated-task recipe
-<../reference/configuration-generated-tasks.rst#generated-tasks>`__ submits Harbor tasks.
-``rollout`` selects the agent and sandbox; ``rollout.rollouts_per_task`` sets
-attempts per task. Rollouts use the job's start weights and Tinker's sampler.
-Resumed jobs reuse saved rollouts.
+``training.timeout-s`` bounds SDK calls; ``inference.timeout-s`` bounds sampling.
+A timeout does not cancel an accepted remote update.
 
 Jobs, checkpoints, and recovery
 -------------------------------
 
-A new scenario serves the base model. The first job creates its adapter from
-``seed``. With ``seed: null``, Reef saves and reuses one untrained adapter
-under ``<state-dir>/base/``.
-
-Jobs restore weights and optimizer state. They save training state and sampler
-weights at job end, or also at ``recipe.config.job_parameters.save_interval``
+New scenarios serve the base model. Jobs restore weights and optimizer state,
+save at job end, and optionally save every ``recipe.config.job_parameters.save_interval``
 optimizer steps. The next job uses the last checkpoint regardless of activation.
 
-Artifacts contain ``tinker-checkpoint.json``, not weights. Keep their remote
-checkpoints and originating account, project and service available. Local
-retention never deletes remote checkpoints.
+Artifacts contain remote checkpoint references, not weights. Keep the originating
+account, project, service and checkpoints available. Local retention does not delete
+remote checkpoints. Cross-service checkpoints are rejected.
 
-A restart resumes from the last save. An uncertain API result can consume
-credits or leave an unreferenced checkpoint; retry uses a fresh session.
-See `Train-from and recovery <operate.rst#train-from-an-artifact>`__ for changing starts.
+Restart resumes from the last save. Uncertain API results can consume credits or
+leave unreferenced checkpoints. See `train-from <operate.rst#train-from-an-artifact>`__
+to change a training start.
 
 Serve on inference engines
 --------------------------
 
-Hosted Tinker adapters can serve on GPU-backed SGLang engines:
+Hosted Tinker adapters can serve on SGLang:
 
 .. code:: yaml
 
@@ -150,15 +88,13 @@ Hosted Tinker adapters can serve on GPU-backed SGLang engines:
        state-dir: /var/lib/reef/tinker
        lora-rank: 32
 
-Engine settings select ``inference.serving: engines``. ``training.colocate`` is
-rejected. Reef downloads selected checkpoints, converts them to PEFT and caches
-them under ``<state-dir>/sampler-weights/``.
+Engine settings select engine serving. ``training.colocate`` is rejected.
+Set adapter slots at least as high as the scenario count; one extra slot allows
+updates beside served adapters. Match the base model, tokenizer and chat template.
+SGLang must support ``lm_head`` adapters.
 
-Set ``max-loaded-adapters`` at least as high as the scenario count. One extra
-slot lets an update load beside the served adapter; otherwise it replaces it.
-Match the base model, tokenizer and chat-template arguments. SGLang must support
-``lm_head`` adapters. Restart reloads served adapters before requests resume.
-
+Reef downloads checkpoints and converts them to PEFT. Spindle LoRA checkpoints
+cannot use this path because Spindle has no checkpoint archive API.
 This topology has stub-engine tests only; no real SGLang run has validated it.
 
 Serve from a remote GPU host
@@ -172,37 +108,23 @@ On a GPU host with Reef and SGLang installed:
    export REEF_REMOTE_INFERENCE_TOKEN=...
    python -m reef.inference.remote --port 8000
 
-Use different tokens. Set the same variables on the Reef host and add this
-to the engine configuration above:
+Use different tokens. Supply the same variables on the Reef host and set
+``inference.remote.url: https://gpu-host.example.com`` in the engine configuration.
+Use HTTPS. Protect the control token like a host login: it can start model code
+and replace weights.
 
-.. code:: yaml
-
-   inference:
-     remote:
-       url: https://gpu-host.example.com
-
-Reef starts no local component. The GPU host downloads the base model and
-receives selected adapters. Protect the control token like a host login;
-it can start model code and replace weights. Use HTTPS.
-
-The component accepts one controlling runtime. Stopping that runtime stops
-its engines. After a component restart, Reef detects it within 30 seconds
-and reloads adapters. See `remote settings
-<../reference/configuration-settings.rst#inference>`__ and the command's ``--help``.
+The component accepts one controlling runtime. Stopping that runtime stops its
+engines. After a component restart, Reef detects it within 30 seconds and reloads
+adapters. See `remote settings <../reference/configuration-settings.rst#inference>`__.
 
 Train all the parameters on Spindle
 -----------------------------------
 
-Use ``spindle_full`` to train a Hugging Face checkpoint on a
-`Spindle <https://github.com/modal-projects/spindle>`__ full-parameter engine.
-Before starting Reef:
-
-- Deploy the engine with the exact base repository and 40-digit commit SHA.
-- Supply the Spindle API key through ``TINKER_API_KEY`` or ``api-key-env``.
-- Supply an ``HF_TOKEN`` that reads the base, plus Modal credentials
-  (``reef-infra[modal]`` and a profile or ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET``).
-- In Spindle's Modal environment, give the ``hf-secret`` secret (default
-  ``huggingface-secret``) an ``HF_TOKEN`` that reads the base and writes ``release-repo``.
+Deploy a `Spindle <https://github.com/modal-projects/spindle>`__ full-parameter
+engine with the exact base repository and 40-digit commit SHA. Install
+``reef-infra[modal]`` and supply Modal credentials, a Spindle API key through
+``TINKER_API_KEY``, and ``HF_TOKEN`` with base-model read access.
+Spindle's ``huggingface-secret`` must also permit writes to the release repository.
 
 .. code:: yaml
 
@@ -218,41 +140,16 @@ Before starting Reef:
        modal-environment: spindle
        learning-rate: 1.0e-6
 
-Each checkpoint exports weights, tokenizer and templates to a new
-``release-repo`` commit. Reef stores references and restores optimizer state
-for later training. Default serving uses Spindle; Reef's engines can load
-the exported revision.
+Each checkpoint exports weights, tokenizer and templates to a new release commit.
+Default serving uses Spindle; Reef's engines can load that revision.
+Imports must match the base or contain a full-parameter manifest from the same
+service. Other weights return 400. Use a separate engine and scenario per base.
 
-Imports must contain the base's files or its full-parameter manifest from the
-same service with a full-weight reference. Other weights return HTTP 400.
-Use another engine and scenario to train another base.
+Budget for GPU startup and export on every job. One live 4B smoke run validated
+integration; it measured no learning quality.
 
-Budget for GPU startup and weight export on every job. Only one live 4B smoke
-run has validated this backend; it measured no learning quality.
-
-Score centering
-~~~~~~~~~~~~~~~
-
-For ``spindle_full`` task jobs, enable score centering to correct policy drift
-from bounded importance weights (`method <https://arxiv.org/abs/2609.20807>`__):
-
-.. code:: yaml
-
-   training:
-     options:
-       score-centering: true
-       score-centering-top-k: 128
-       score-centering-weight-low: 1.0
-       score-centering-weight-high: 1.0
-       score-centering-min-tail-mass: 1.0e-6
-
-The default bounds 1 and 1 give REINFORCE; 0 and 2 give truncated importance
-sampling. The correction is zero under the full importance ratio.
-
-- ``importance_sampling`` task jobs use Spindle's centered ``cispo`` loss.
-  Recorded or uploaded samples lack the required sampler top-k and fail.
-- Sample at temperature 1 without truncation. Other temperatures or explicit
-  ``top_p``/``top_k`` return 400. Harbor's ``terminus-2`` sets none by default.
-- SFT is unchanged. Other policy losses and nonzero ``kl-coef`` are rejected.
-- Spindle must implement ``topk_sample_logprobs`` and centered ``cispo``.
-  Missing support fails the job. Inspect ``score_centering:sum`` in its metrics.
+Optional ``training.options.score-centering: true`` requires importance-sampling
+task jobs and Spindle support for centered ``cispo`` and ``topk_sample_logprobs``.
+Use temperature 1 without ``top_p`` or ``top_k``. Recorded samples and nonzero
+``kl-coef`` are rejected; SFT is unchanged. See `score-centering settings
+<../reference/configuration-settings.rst#training>`__.

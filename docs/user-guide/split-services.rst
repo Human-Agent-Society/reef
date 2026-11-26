@@ -1,11 +1,9 @@
 Run the services in separate processes
 ======================================
 
-Run services separately to scale them independently or keep inference available
-during control restarts. Start from a working single-process deployment.
-
-The seven services coordinate through shared stores and work queues.
-By default, ``reef serve`` runs them in one process.
+Split services to scale them independently or keep inference available during
+control restarts. Start from a working deployment; default ``reef serve`` runs
+all seven services in one process.
 
 .. figure:: ../assets/services-light.svg
    :alt: Control queues work in the shared store. Inference, data, harness, samples, training and evaluation read or write the store.
@@ -13,8 +11,7 @@ By default, ``reef serve`` runs them in one process.
 Start the services
 ------------------
 
-Use the same configuration for every service. Run each command in its own
-process or supervisor:
+Use the same configuration and token. Run each command in its own process:
 
 .. code:: bash
 
@@ -27,138 +24,89 @@ process or supervisor:
    reef serve -c deploy.yaml --service data --reef.port 8906
    reef serve -c deploy.yaml --service harness --reef.port 8907
 
-A ``--service`` process starts no other Reef service.
-Start the external engines and training backends that the configuration requires.
+Each process starts only its named service. Start required external engines
+and training backends separately. Install backend dependencies and credentials
+on the training host.
 
-Every process must reach the same stores:
+All services must share:
 
-- On one host, share SQLite files under ``storage.agent-record-dir``.
-  On several hosts, use ``storage.record-backend: postgres``.
-  Coordination uses schema ``<record schema>_coordination``.
-- Share ``storage.data-store`` and the task and segment stores it uses.
-  The data store follows the record backend by default; see
-  `Data storage <storage.rst#choose-the-data-store>`__.
-- Share ``storage.artifact-backend``. Training needs write access to save checkpoints.
+- Scenario and coordination stores. Share SQLite files on one host; use
+  ``storage.record-backend: postgres`` across hosts.
+- The data store and its task and segment stores.
+- Artifact storage, with checkpoint write access for training.
 
-Give each process separate ``storage.artifact-work-dir`` and
-``storage.artifact-cache-dir`` paths. Shared working copies can corrupt concurrent fetches.
+See `storage setup <storage.rst>`__. Give each process separate
+``storage.artifact-work-dir`` and ``storage.artifact-cache-dir`` paths to avoid
+concurrent working-copy corruption. Training services need no shared training
+directory; keep harness ``evolution.state_dir`` on the training host.
 
 Send each request to its service
 --------------------------------
 
 .. list-table::
    :header-rows: 1
-   :widths: 20 80
 
    * - Service
      - Routes
    * - ``inference``
-     - ``/v1/chat/completions``, ``/v1/responses``, ``/v1/messages``, ``/v1/messages/count_tokens``, the evaluation routes, the routes of each served artifact, and ``GET /reef/scenarios/{scenario}/inference/status``.
+     - ``/v1/`` inference routes, evaluation inference, served-artifact routes and scenario ``inference/status``.
    * - ``data``
-     - The ``/reef/namespaces/{owner}/data...`` routes, artifact file reads and
-       ``GET /reef/scenarios/{scenario}/jobs``. Only data serves these routes.
-       Data and control both answer scenario reads: lists, settings, contracts,
-       records, commits, artifacts, samples, tasks, evaluations and rollouts.
+     - Namespace ``data`` routes, artifact file reads and scenario ``jobs``. Scenario reads also work on control.
    * - ``harness``
-     - ``GET /reef/harness``, ``GET /reef/harness/artifacts``, ``POST /reef/harness/import`` and ``GET /reef/harness/adapters``.
+     - ``/reef/harness``, ``/reef/harness/artifacts``, ``/reef/harness/import`` and ``/reef/harness/adapters``.
    * - ``control``
-     - Other routes: scenario writes, next-job reads, training cancellation,
-       ``/reef/status``, harness snapshot and request pages, and step records.
+     - Other routes, including scenario writes, training cancellation, ``/reef/status`` and harness step pages.
    * - ``samples``, ``training``, ``evaluation``
-     - ``/healthz`` only. They take their work from queues.
+     - ``/healthz`` only; work arrives through queues.
 
-Data and harness services need no control lease. You can run several replicas
-of each behind one address. A one-process ``reef serve`` answers all routes.
+Data and harness services need no control lease and support replicas behind
+one address. Point harness clients at the harness service; set
+``harness.inference_url`` to their reachable inference address.
+
+Data writes wait 30 seconds for control synchronization. ``synced: false`` means
+the write remains pending, not lost. Harness imports return 503 after that wait
+but remain queued; resending the same files waits for the original request.
 
 Inference
 ---------
 
-Poll ``GET /reef/scenarios/{scenario}/inference/status`` after changing served
-artifacts. Inference requests return 503 during startup; unknown or nonserving
-scenarios return 404. See `inference errors
-<../reference/http-api-inference.rst#request>`__.
+Poll scenario ``inference/status`` after changing served artifacts.
+Requests return 503 during startup and 404 for unknown or nonserving scenarios.
+Control retries failed startup after 60 seconds, doubling to one hour maximum.
+Resending ``served`` retries immediately.
 
-Control retries failed startup after 60 seconds, doubling the delay to at
-most one hour. Resending ``served`` retries immediately and resets the delay.
+One worker owns the runtime under a lease. On takeover, it removes routes the
+new runtime cannot serve before opening it. Local addresses usually change;
+requests return 503 until selections reload. Native engines restart and interrupt
+requests. Remote routes survive only when the runtime confirms them.
+Startup status is not a continuous health check.
 
-One worker owns the runtime under a lease; replicas answer requests. On
-takeover, it removes routes outside the new runtime before opening it. Local
-addresses usually change, so requests return 503 until selections reload.
-Remote routes survive only when the runtime confirms them. Native engines
-restart and interrupt requests. Startup status is not a continuous health check.
+Keep all services on the same Reef version. Keep engine addresses private.
+After resetting coordination storage, restart the inference component.
 
-Use the same Reef version throughout. Keep engine addresses private and
-restart the inference component after resetting coordination storage.
-A failed adapter load leaves the engine unavailable; fix the artifact or
-restart the worker. A native control call that hangs requires operator recovery.
-See `request pinning and control deadlines
-<../developer-guide/serving-runtimes.rst#request-pinning>`__.
+Training and evaluation
+-----------------------
 
-Training
---------
+Unavailable training services leave new jobs waiting without consuming samples.
+Tinker/Spindle imports return 503 after 60 seconds without a training response.
+Evaluation needs inference; candidate loads do not change production routes,
+and evaluation calls do not become training records.
 
-Install the selected backend's dependencies and credentials on the training
-service: `Slime <evolve-your-model.rst>`__, `Tinker <tinker.rst>`__ or the
-`harness binary and sandbox <evolve-your-harness.rst>`__.
-
-Training reads starts and writes checkpoints through shared artifact storage.
-Other services need no shared training directory. While training is unavailable,
-new jobs wait for admission without consuming samples or appearing as running.
-Tinker/Spindle imports return 503 after 60 seconds without a training-service response.
-
-For harness recipes, keep ``evolution.state_dir`` on the training host.
-It owns evolution runs and archives history after scenario deletion.
-
-Harness clients
----------------
-
-Point harness clients at the harness service. Set ``harness.inference_url``
-to the address those clients can reach for model calls.
-
-Control merges imported files. After 30 seconds without a response, import
-returns 503 but stays queued. Resending the same files waits for that request.
-
-Data
-----
-
-Data writes wait up to 30 seconds for control to sync the scenario.
-``synced: false`` means the write remains pending synchronization, not lost.
-The next control cycle or scenario load applies it.
-
-Evaluation
-----------
-
-Evaluation requires inference. Candidates load without changing production
-routes, and evaluation calls do not become training records.
-
-Choose graceful shutdown with ``evaluation.on-stop`` and
-``evaluation.finish-timeout-s``. Keep the timeout below the supervisor's kill
-deadline. Graceful requeue consumes no attempt; a forced kill consumes one
-and waits for lease expiry. See `evaluation settings
-<../reference/configuration-settings.rst#evaluation>`__.
+Set ``evaluation.on-stop`` and ``evaluation.finish-timeout-s`` for graceful shutdown.
+Keep the timeout below the supervisor's kill deadline. Graceful requeue consumes
+no attempt; a forced kill consumes one and waits for lease expiry.
 
 Control restarts
 ----------------
 
-While control is down:
+Inference, queued work and data writes continue while control is down.
+Control must return to submit new work and synchronize data.
 
-- Inference keeps serving loaded artifacts and recording requests.
-  Control restarts do not reopen engines.
-- Queued training jobs, sample requests and evaluation rollouts continue.
-  Control must return before it can submit new work.
-- Data accepts writes. Each write waits 30 seconds for control to sync it,
-  then returns ``"synced": false``.
+Run one active control instance and optional standbys on the same store.
+A standby loads no scenarios and answers no requests, including ``/healthz``.
+Use that probe to route traffic to the active instance.
 
-**Standby instances.** Run one active control instance and any number of
-standby instances on the same store:
-
-- The active instance holds the control lease and extends it.
-- A standby waits for the lease. It loads no scenarios and answers no
-  requests, including ``/healthz``. Use that probe to route traffic to the
-  active instance.
-- A normal stop releases the lease; a standby takes over within 10 seconds.
-  After a crash, takeover waits for lease expiry (30 seconds).
-- An instance that loses its lease stops its training work and exits.
-  Its supervisor can restart it as a standby.
-
-For a control upgrade, start the new instance as a standby. Then stop the old instance.
+Normal shutdown releases the lease; takeover occurs within 10 seconds.
+After a crash, takeover waits for lease expiry (30 seconds).
+A process that loses its lease stops its training work and exits.
+For upgrades, start a standby, then stop the active instance.

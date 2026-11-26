@@ -22,30 +22,7 @@ Set ``inference.backend: none`` for supervised fine-tuning on uploaded trajector
 Use the `trajectory upload <http-api-data-upload.rst#create-trajectory-items>`__ or import records with ``POST /reef/records``.
 The trainer uses the GPUs named by ``training.options.actor-*``. Inference routes return 404.
 
-.. code:: yaml
-
-   recipe:
-     implementation: reef.recipe.sft:SFTRecipe
-   inference:
-     model-path: /models/Qwen3-8B   # the weights to train; nothing serves them
-     backend: none
-   training:
-     backend: slime
-     options:
-       actor-num-nodes: 1
-       actor-num-gpus-per-node: 8
-       global-batch-size: 32
-   pipeline:
-     sample2job:
-       config:
-         job-samples: 32
-
-With this backend, ``reef serve`` rejects:
-
-- ``inference.serving`` other than ``none`` or ``inference.num-gpus`` other than 0;
-- ``inference.tensor-parallel-size``, ``inference.options``, ``inference.url`` or ``inference.remote``;
-- ``inference.handler-factory`` or ``inference.handler-config``;
-- ``teacher.model-path``, a ``generator`` section or a composite recipe.
+Use ``inference.model-path`` for the starting weights. Omit inference engine settings, teacher, generator and composite recipes.
 
 Task jobs on Slime
 ------------------
@@ -84,13 +61,8 @@ Use these training and recipe options:
 - Install Harbor and the selected environment on the Ray actor's host. Set ``agent_host`` for sandboxed agents.
   The actor inherits E2B credentials, API and sandbox URLs, domain, and Modal credentials from the training service.
 
-Reef rejects task jobs when:
-
-- The request sets ``learning_rate_schedule`` or ``scheduling``. Set optimizer and learning-rate options in Slime.
-- An option replaces task generation or scoring. This includes ``group-rm``, ``reward-key``, ``custom-generate-function-path``, ``data-source-path`` or a different ``rollout-function-path``.
-- Sampling uses ``partial-rollout``, ``dynamic-sampling-filter-path`` or ``use-rollout-routing-replay``.
-- ``over-sampling-batch-size`` differs from ``rollout-batch-size``, or ``rollout-top-p`` differs from 1.
-- ``n-samples-per-prompt`` is 1 with an ``advantage-estimator`` that centers each reward on its group, such as ``grpo``.
+Set optimizer and learning-rate options in Slime. Use at least two samples per prompt with GRPO.
+Leave task generation and scoring to Reef. Custom data sources and generation functions conflict with Harbor task jobs.
 
 Dataset jobs on Slime
 ---------------------
@@ -103,16 +75,6 @@ Send ``POST /reef/train`` with a Slime prompt dataset:
    {"text": "GRPO on the prompts", "session": "s", "artifact_id": "artifact-1",
     "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
 
-.. container:: config
-
-   ``dataset.path``
-       Absolute path on the Ray cluster to a Slime prompt-data JSONL file.
-
-   ``dataset.epochs`` : 1
-       Passes over the dataset. Each epoch trains ``len(dataset) // rollout-batch-size`` rollouts.
-
-   ``save_interval``
-       Rollouts between checkpoints. The default saves at job end only.
-
-The recipe can set a default ``dataset`` in ``job-parameters``. Configure Slime's input, rollout, reward and postprocessing plugins in ``training.options``.
-Reef sets ``data-source-path`` and rejects ``disable-compute-advantages-and-returns``.
+Use an absolute ``dataset.path`` on the Ray cluster. Each epoch runs ``len(dataset) // rollout-batch-size`` rollout iterations.
+``save_interval`` counts rollout iterations. Omit it to save only at job end.
+Set Slime's dataset and reward plugin options under ``training.options``. Reef sets ``data-source-path`` from the request.

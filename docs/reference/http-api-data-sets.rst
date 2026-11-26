@@ -48,18 +48,6 @@ A trajectory's ``trajectory_sets`` metadata lists distinct nonempty set names,
 such as ``{"trajectory_sets": ["week-12"]}``.
 Generated training trajectories belong to ``samples:<scenario>``.
 
-.. code:: bash
-
-   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/scenarios/my-agent/benchmarks/terminal-bench \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"split": "eval"}'
-
-   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/scenarios/my-agent/trajectory-sets/week-12 \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{}'
-
 Routes start at ``/reef/namespaces/{owner}/scenarios/{scenario}``, followed by
 ``/benchmarks`` or ``/trajectory-sets``:
 

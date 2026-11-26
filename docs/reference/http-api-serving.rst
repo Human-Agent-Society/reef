@@ -17,24 +17,8 @@ A component can serve several artifacts, one active. ``GET /reef/harness`` retur
      -d '{"served": {"<id>": 100}}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
 
-These examples use the artifacts ``a`` and ``b`` of one component, where ``a`` is the active artifact before the request:
-
-+--------------------------+-------------------------------------------------+
-| ``served``               | Result                                          |
-+==========================+=================================================+
-| ``{"b": 100}``           | ``b`` becomes the active artifact, and Reef     |
-|                          | stops every other served artifact               |
-+--------------------------+-------------------------------------------------+
-| ``{"a": 95, "b": 5}``    | a traffic split: ``b`` answers 5% of the        |
-|                          | requests                                        |
-+--------------------------+-------------------------------------------------+
-| ``{"a": 100, "b": 0}``   | Reef loads ``b``, which answers only the        |
-|                          | requests that name it                           |
-+--------------------------+-------------------------------------------------+
-| ``{"a": 100}``           | Reef stops serving ``b``                        |
-+--------------------------+-------------------------------------------------+
-| ``{}``                   | the scenario serves nothing (`Serve nothing`_)  |
-+--------------------------+-------------------------------------------------+
+Use ``{"served": {"a": 95, "b": 5}}`` for a split, or
+``{"served": {"a": 100, "b": 0}}`` to keep ``b`` available only by explicit name.
 
 Body: ``{served: {artifact_id: weight}, component?}``. Weights are integers 0–100 totaling 100. Multiple components require ``component``; omit it for a single component or empty ``served``.
 
@@ -45,30 +29,10 @@ Validation is atomic. `Runtime limits <../user-guide/operate.rst#set-what-a-scen
 - Poll `startup status <http-api-inference.rst#startup-status>`__ with ``?model=<artifact-id>``; accepted mappings can still fail startup.
 - Repeating the mapping retries failures immediately, records no operation, and resets automatic retry delay to 60 seconds.
 
-Each changed artifact records ``activate``, ``serve`` or ``stop_serving`` with the complete component mapping. Selections survive restarts; other components and training starts remain unchanged. No artifact or repository revision is created. Full-weight runtimes reload root files when reactivating root snapshots.
-
-+--------+--------------------------------------------------------------------+
-| Status | Cause                                                              |
-+========+====================================================================+
-| 200    | Reef accepted the mapping; the artifacts load in the background    |
-+--------+--------------------------------------------------------------------+
-| 400    | a malformed body; a ``served`` that is no object, a weight that is |
-|        | not an integer from 0 to 100, or weights that do not sum to 100;   |
-|        | an empty ``served`` with ``component``;                            |
-|        | ``component`` without ``served``; an unknown ``component``, or     |
-|        | ``component`` is missing in a scenario with several components;    |
-|        | an artifact has no durable bytes; the runtime cannot serve the     |
-|        | artifact; the mapping names more weight artifacts than the         |
-|        | runtime keeps loaded at once, or several artifacts of another      |
-|        | component in a scenario whose weights the runtime loads; the       |
-|        | mapping names several artifacts, and the store keeps no durable    |
-|        | commit history                                                     |
-+--------+--------------------------------------------------------------------+
-| 404    | unknown scenario; an artifact that is not one of the component     |
-+--------+--------------------------------------------------------------------+
-| 409    | a training result waits for its commit; send the request again     |
-|        | after the commit                                                   |
-+--------+--------------------------------------------------------------------+
+Changes preserve training starts and survive restarts.
+Malformed mappings, unavailable artifact bytes or runtime capacity violations
+return 400; unknown scenarios/artifacts return 404; pending commits return 409.
+A store without durable commit history cannot serve several artifacts.
 
 See `Activation rule <../user-guide/operate.rst#activation-rule>`__ for automatic selection.
 
@@ -134,13 +98,8 @@ Call ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where ``
 The same prefix with ``/evaluation/v1/{route}`` makes the same call without a record.
 
 
-Additional artifacts:
-
-- Keep other-component bindings from their original serving selection, despite later activations.
-- Stay served through activation or restore; training starts are unchanged.
-- Keep samples non-stale until stopped. Afterward, staleness counts artifacts previously served as active; on-policy stages mark non-active samples stale.
-- Have no concurrency limit for scenarios loading no runtime weights, such as harness scenarios. Other runtime limits still apply.
-
+Additional artifacts retain their original other-component bindings through
+activation/restore. Their samples remain non-stale while served.
 
 Bind one chat attempt
 ~~~~~~~~~~~~~~~~~~~~~
@@ -152,24 +111,9 @@ Read ``GET /reef/scenarios/{scenario}/inference/target?model={name}`` with the s
 ``model`` defaults to ``active``; unknown exact row names return 404 without fallback.
 This reserves nothing, executes no model and does not extend artifact lifetime.
 
-.. list-table:: Target response
-   :header-rows: 1
-   :widths: 25 75
-
-   * - Field
-     - Meaning
-   * - ``contract_version``
-     - ``1`` for this contract.
-   * - ``model``
-     - The selected row name. Use this name in the artifact route.
-   * - ``artifact_id``
-     - The artifact associated with that row.
-   * - ``binding_id``
-     - An opaque SHA-256 identifier of the scenario, row, engine address, engine model name and serving settings.
-   * - ``protocol``
-     - ``openai_chat_completions``.
-   * - ``streaming``
-     - ``false``. This contract does not yet support streams.
+The result contains ``contract_version: 1``, ``model``, ``artifact_id``,
+``binding_id``, ``protocol: openai_chat_completions`` and ``streaming: false``.
+Use the returned model name in the artifact route.
 
 Then send the ordinary provider body to ``/reef/scenarios/{scenario}/artifacts/{model}/v1/chat/completions/attempt`` with both headers:
 
@@ -183,10 +127,10 @@ Before execution: missing rows/unsupported routes return 404, changed bindings 4
 
 Accepted calls keep their row/settings through activation and invoke the handler at most once. Binding refusal returns 503; engine abort returns 409. Neither retries.
 
-Bindings identify configuration. Weight runtimes must pin requests to the selected model or immutable provider revision. Record-only artifacts cannot guarantee provider weights. Callers validate usage and token limits.
-
-``attempt_id`` is unpersisted correlation, not deduplication. Callers own admission, retries and recovery. Timeouts/lost responses mean uncertain execution; do not resend the attempt. Older servers reject attempt paths without execution or fallback to ordinary retries.
-
+Bindings identify configuration; external provider weights are not guaranteed.
+``attempt_id`` is correlation, not deduplication. Callers own retries and recovery.
+After timeout or lost response, execution is uncertain: do not resend the attempt.
+Older servers reject these paths without model execution.
 
 Restore a scenario selection
 ----------------------------
@@ -202,10 +146,3 @@ Reef returns:
 - 409 while a training result waits for its commit.
 
 Artifact validation and runtime capabilities still apply.
-
-Serving settings
-----------------
-
-Runtime-defined `serving config <http-api-scenarios.rst#serving-config>`__ selects model/settings, defaulting to deployment values. Changes apply when inference next serves the scenario; running artifacts keep their engines.
-
-Training artifacts' ``training_starts`` metadata lists their start and its ancestors. Without an override, runtimes inherit serving settings from these starts.

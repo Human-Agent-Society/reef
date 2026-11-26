@@ -6,77 +6,33 @@ Send model requests, track startup, and report feedback using response receipts.
 Startup status
 --------------
 
-Creation and activation return before startup publishes the artifact's route. Poll status with the inference bearer token:
+``GET /reef/scenarios/{scenario}/inference/status`` describes the selected
+artifact, independently of any older route still answering requests.
+``model`` defaults to ``active``; served artifact IDs also work.
+Unknown names return 404; unreadable state returns 503.
 
-.. code:: bash
+- ``state``: ``pending`` (queued), ``starting``, ``ready`` (route published),
+  or ``failed`` with ``error``. Creation and activation return before readiness.
+- ``startup``: ``steps`` and ``estimate_seconds``, or null when unreported.
+  Steps follow ``prepare`` → ``start`` → ``load``. Each has ``phase``,
+  epoch-second ``started_at``/``ended_at``, and optional ``detail``.
+  The current step has no end time.
+- ``engine``: ``warm``, ``starting`` or ``idle``; null outside ready routes
+  or when unreported. An idle engine starts on the next request.
+- ``engine_replicas``: serving/starting counts and optional individual replicas.
+  Each has ``id``, ``state``, ``started_at``, ``startup`` and ``load``.
+  Serving load reports ``running_requests``, ``waiting_requests``,
+  ``output_tokens_per_second`` and epoch-second ``measured_at``; otherwise null.
+  ``engine_detail`` and top-level startup can describe an additional starting replica.
 
-   curl -sS http://127.0.0.1:8900/reef/scenarios/hello-reef/inference/status \
-     -H "Authorization: Bearer $REEF_TOKEN"
+Without a usable route, inference returns 503: ``inference_starting`` with
+``Retry-After: 30``, or ``inference_start_failed``.
+Failed startup retries after 60 seconds, doubling to one hour.
+Resend the complete ``served`` mapping to retry immediately.
 
-.. code:: json
-
-   {"artifact_id": "artifact-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
-    "engine_replicas": null,
-    "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
-                           "detail": "Quantizing to NVFP4"},
-                          {"phase": "start", "started_at": 1794150480.6, "ended_at": null,
-                           "detail": "Waiting for a GPU"}],
-                "estimate_seconds": null}}
-
-**Select an artifact.** ``model`` defaults to ``active``; active aliases and served artifact IDs also work. Unknown names or absent startup work return 404; unreadable state returns 503.
-
-Status describes the selected artifact, even while an older route handles requests. Reads start no work; status is not a health check.
-
-**State.** Startup covers all served artifacts. Published routes stay ``ready`` while other artifacts start or fail.
-
-- ``pending``: waiting for a worker.
-- ``starting``: downloading, converting or loading, including retries.
-- ``ready``: startup succeeded and the route is published.
-- ``failed``: startup ended with an error.
-
-``error`` is null unless ``failed``: then it contains the runtime's ``StartupFailedError`` message or fixed text. Logs provide details.
-
-**Startup progress.** ``startup`` contains ``steps`` and ``estimate_seconds``. Phases run in this order:
-
-1. ``prepare``: wait for serving work, deploy the engine, and convert or quantize weights.
-2. ``start``: allocate a machine or container and transfer weights to it.
-3. ``load``: load weights into GPU memory, run kernels and CUDA graphs, and warm up.
-
-- ``steps``: reported phases, each ``{phase, started_at, ended_at, detail}``, in order. Times use epoch seconds; only the last step can have a null ``ended_at``. ``detail`` is a progress note or null.
-- ``estimate_seconds``: estimated seconds until warm, or null when unavailable.
-
-Pending/starting artifacts report the request's ``prepare`` phase, then the runtime's phases. Ready artifacts report the handler's phases while an engine or replica starts. Otherwise, ``startup`` is null.
-
-**Engine status.** ``engine`` and ``engine_replicas`` describe ready routes; each is null otherwise or when unreported. ``engine`` is:
-
-- ``warm``: answers requests now.
-- ``starting``: runs but cannot answer yet.
-- ``idle``: no engine runs; the next request starts one and waits.
-
-``engine_detail`` describes a starting engine/replica, for example ``Loading weights · 0:42``; null if unavailable or none starts.
-
-``engine_replicas`` has the form ``{"serving": 1, "starting": 2, "replicas": [...]}``:
-
-- ``serving``/``starting`` count ready/not-yet-ready replicas.
-- ``replicas`` lists ``{id, state, started_at, startup, load}``; empty if the handler cannot identify replicas.
-- ``id`` identifies the replica; ``started_at`` is its start time in epoch seconds, or null.
-- ``startup`` reports ``start``/``load`` phases as above; null unless starting and reported.
-- ``load`` is the latest serving-replica measurement: ``{running_requests, waiting_requests, output_tokens_per_second, measured_at}``; null if starting or unavailable. Counts cover running/queued requests; token rate covers the last measurement interval. ``measured_at`` uses epoch seconds.
-
-A warm engine with starting replicas reports one replica's ``engine_detail`` and top-level ``startup``.
-
-**Retries.** Failures return to ``pending`` after 60 seconds, doubling after each failed retry up to one hour. Resend the complete accepted ``served`` mapping to retry immediately.
-
-New startup requests replace current work immediately; replaced work stops within seconds. Scenarios start sequentially, or concurrently with multiple ``serving_slots``.
-
-**Inference during startup.** Without a usable route, requests return 503:
-
-- ``pending`` or ``starting``: ``inference_starting`` with ``Retry-After: 30``.
-- ``failed``: ``inference_start_failed``.
-
-Both use ``{"error": {"type", "message"}}``. Control and data operations remain available.
-
-``POST /reef/scenarios/{scenario}/redeploy`` restarts served engines, replacing pending startup work without changing artifact selection or requiring changed settings. It returns ``{scenario}``, even when serving nothing.
+``POST /reef/scenarios/{scenario}/redeploy`` restarts served engines without
+changing artifact selection, returning ``{scenario}``. It also replaces pending startup.
+Status reads start no work and are not health checks.
 
 Request
 -------
@@ -107,8 +63,6 @@ To receive token IDs from Reef's SGLang or vLLM backend, set ``"return_token_ids
 - Messages returns top-level ``prompt_token_ids`` and ``token_ids``, or carries them in ``message_delta`` when streaming.
 - Records retain the same fields. Without the flag, responses contain no token IDs.
 
-In ATIF records, the reply step's ``metrics`` stores ``prompt_token_ids``, ``completion_token_ids`` and each token's ``logprob`` in ``logprobs``.
-
 The receipt identifies the stored record:
 
 +---------------+-----------------------------------------------------------+
@@ -122,16 +76,11 @@ The receipt identifies the stored record:
 | Anthropic SSE | the same field on ``message_stop``                        |
 +---------------+-----------------------------------------------------------+
 
-Stream receipts follow record storage; incomplete streams have none. After headers, these failures close the connection without a terminal event, causing an SDK transport error:
-
-- an engine or transport error;
-- a missing terminal event;
-- a handler's report that the engine does not serve the selected weights;
-- the inference timeout.
-
-Aborted SGLang/vLLM streams keep their terminal event but remain incomplete: Reef cannot restart after sending frames.
-
-Stored incomplete streams retain provider responses but cannot produce training samples, including through references or replay after restart. Receipt-based reports cannot reference them. See also `routed streams <http-api-routing.rst#routed-external-model-requests>`__.
+Stream receipts follow record storage; incomplete streams have none and never train.
+Engine/transport failures, timeouts and missing terminal events close the connection
+without a terminal event, causing an SDK transport error. Aborted SGLang/vLLM
+streams may keep a terminal event but are still incomplete. Streams cannot restart
+once frames have been sent. See also `routed streams <http-api-routing.rst#routed-external-model-requests>`__.
 
 Served Reef artifacts return ``x-reef-artifact-id``; routed external models do not. Clients find harness updates through `harness routes <http-api-harness.rst#harness-artifacts>`__.
 
@@ -142,42 +91,19 @@ Use ``/reef/scenarios/{scenario}/evaluation/v1/{route}``, or ``.../components/{c
 
 - Routes use the active model, store no record and return no ``training`` block.
 - An unknown scenario or a scenario without a served model returns 404.
-- Composite recipes use these routes; single-component recipes call the runtime directly.
 - Authenticated recipes use an evaluation-only startup token, renewed on restart.
-
-Artifact of a recorded response
--------------------------------
-
-Records hold the provider exchange and ``artifact_id``, matching ``x-reef-artifact-id``, for the `staleness check <../developer-guide/recipe-samples-service.rst#staleness>`__. Serving returns no training tensors: Reef removes handler ``training`` blocks from records and client, rollout and evaluation responses.
 
 Report
 ------
 
 ``POST /reef/report`` stores four fields and drops other top-level keys. Put harness-specific data inside ``metadata`` or ``feedback``.
 
-.. list-table::
-   :header-rows: 1
-
-   * - Field
-     - Type
-     - Required
-     - Notes
-   * - ``score``
-     - number
-     - no
-     - Must be finite; booleans are rejected.
-   * - ``feedback``
-     - string or object
-     - no
-     - Opaque feedback interpreted by the recipe.
-   * - ``references``
-     - list of strings
-     - no
-     - Last inference receipt of each scored trajectory in this scenario. Reef expands each to its trajectory's calls. Reported-feedback processors require at least one.
-   * - ``metadata``
-     - object
-     - no
-     - Recipe metadata. ``task`` (``name``, optional ``path``/``digest``) or ``harbor.task_name`` identifies the Harbor task, copied to the sample's ``task``. ``training.eligible`` is unsupported.
+- ``score``: finite number, excluding booleans.
+- ``feedback``: string or object interpreted by the recipe.
+- ``references``: last inference receipt of each scored trajectory in this scenario.
+  Reef expands each to the trajectory's calls. Reported-feedback recipes require references.
+- ``metadata``: recipe-defined object. ``task`` or ``harbor.task_name`` can identify
+  the Harbor task. ``training.eligible`` is forbidden.
 
 It answers ``{agent_record_id, scenario, request_type}``.
 

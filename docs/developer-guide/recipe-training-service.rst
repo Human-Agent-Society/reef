@@ -7,9 +7,7 @@ Harness evolution uses `methods <write-a-harness-method.rst>`__ instead.
 Job parameters
 --------------
 
-``WeightTrainingRecipe.default_parameters()`` returns parameters for each
-sample kind. Each job contains trajectories or tasks, never both.
-For example:
+``WeightTrainingRecipe.default_parameters()`` maps sample kinds to parameters:
 
 .. code:: python
 
@@ -24,91 +22,33 @@ For example:
                "task": {"objective": "my_pkg.objectives:PolicyObjective"},
            }
 
-Request ``parameters`` override ``recipe.config.job_parameters``, which override
+Request parameters override ``recipe.config.job_parameters``, which override
 recipe defaults. Backend defaults fill omissions.
-Defaults must be deterministic because parameters contribute to job identity.
-An omitted kind requires explicit request parameters.
-The deployment selects the backend.
+Defaults must be deterministic because they contribute to job identity.
+Each job has one sample kind; missing defaults require explicit request parameters.
 
 Parameters that Slime and Tinker take
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 20 50
+- ``objective``: registered name or class reference.
+- ``scheduling``: epochs (default 1), shuffle (false), remainder (``partial``)
+  and optional packing length. Packing never splits a rollout.
+- ``save_interval``: optimizer steps between checkpoints.
+  Slime task and dataset jobs count rollout iterations instead.
+- ``learning_rate_schedule``: named schedule. Reusing it continues its step count;
+  changing it resets the count while retaining optimizer state.
 
-   * - Parameter
-     - Default
-     - Meaning
-   * - ``objective``
-     - Recipe-defined
-     - Objective name or import reference
-   * - ``scheduling.epochs``
-     - 1
-     - Positive number of passes
-   * - ``scheduling.shuffle``
-     - ``false``
-     - Deterministically reorder each pass
-   * - ``scheduling.remainder``
-     - ``partial``
-     - Train, drop or reject a shorter final step: ``partial``, ``drop``, ``error``
-   * - ``scheduling.packing_length``
-     - ``null``
-     - Pack rollouts by token count before batching
-   * - ``save_interval``
-     - Backend-defined
-     - Optimizer steps between checkpoints; Slime task and dataset jobs count rollouts
-   * - ``learning_rate_schedule``
-     - Keep active schedule
-     - Named optimizer-step schedule
-
-Packing never splits a rollout. A rollout above the packing length forms
-its own pack. Batch size, shuffle and remainder then apply to packs.
-
-Reusing a named learning-rate schedule preserves its step count across jobs
-and restarts. A different schedule starts at 0 and retains optimizer state.
-Use a new name to restart the same curve.
-Objective state continues only across jobs with the same objective.
 See `Tinker <../user-guide/tinker.rst>`__ and
-`Slime <../reference/configuration-training.rst>`__ for schedule fields and backend restrictions.
-
-Failure behavior
-~~~~~~~~~~~~~~~~
-
-Training checks each job before submission. Unsupported parameters or
-objectives fail the trainer cycle without consuming samples.
-Multiple epochs require ``supports_multiple_epochs=True``.
-
-An exception after submission fails the job; its samples remain trained.
+`Slime <../reference/configuration-training.rst>`__ for backend constraints.
+Unsupported jobs fail before submission without consuming samples;
+after submission, failure leaves samples consumed.
 
 The objective
 -------------
 
-Subclass ``SlimeObjective`` from ``reef.train.slime_backend.objectives`` or
-``TinkerObjective`` from ``reef.train.tinker_backend.objectives``.
-Each backend has its own loss family and ``TrainingSignal``.
-
-Declare:
-
-- ``name``: nonempty objective name.
-- ``loss_family``: a registered family of the same backend.
-- ``supports_multiple_epochs``: default ``False``.
-  Old-policy log probabilities are computed once, before the first pass.
-- ``rollout_unit``: ``sample`` by default, or ``comparison_set`` to keep
-  comparison rows together.
-
-Implement ``prepare(data, state)``. It receives the whole job's data,
-so group statistics remain independent of optimizer-step partitioning.
-Do not mutate the input or commit state. Return ``TrainingSignal`` with:
-
-- ``action``: ``train`` or ``skip``.
-- ``next_algorithm_state``: state saved with the final checkpoint.
-  A skipped job saves no checkpoint and does not keep this state.
-- ``metrics``: measurements reported with the job.
-- ``advantages``: one value per trajectory, in data order, or ``None``
-  when the loss does not use advantages.
-
-A minimal Slime objective:
+Subclass ``SlimeObjective`` or ``TinkerObjective`` from the backend's ``objectives`` module.
+Declare ``name`` and a registered ``loss_family``.
+Implement ``prepare(data, state)`` without mutating inputs or committing state:
 
 .. code:: python
 
@@ -128,47 +68,26 @@ A minimal Slime objective:
                "train", {"steps": steps}, {"steps": steps, "samples": len(trajectories(data))}
            )
 
-Keep model-dependent work in the loss family.
-Objective modules must import without torch, Ray or Slime at module scope:
-non-training services also resolve objectives to read their loss family.
+``TrainingSignal`` returns ``action`` (train or skip), metrics, next state and
+optional advantages in trajectory order. Only the final checkpoint stores next state;
+skipped jobs save neither checkpoints nor state.
 
-Register an objective
-~~~~~~~~~~~~~~~~~~~~~
+The objective sees the whole job before optimizer partitioning.
+Multiple epochs require ``supports_multiple_epochs=True``; old-policy probabilities
+are computed once. ``rollout_unit="comparison_set"`` keeps comparison rows together.
 
-Register by reference in your package's ``__init__.py``:
+Keep torch, Ray and Slime imports out of objective module scope.
+Register by reference with the backend's ``register_objective(name, reference)``;
+the referenced module also registers its loss family.
+Bad names raise ``ValueError``; import/class errors raise ``PluginConfigError``.
 
-.. code:: python
+Rendering and checkpoints
+-------------------------
 
-   from reef.train.slime_backend.objectives import register_objective
+Training uses the model's chat template and starting weights.
+Match `serving template arguments <../reference/configuration-inference.rst#chat-template-arguments>`__.
+Unrenderable or overlength inputs and multi-segment teacher samples are skipped.
+``unrenderable_samples`` counts exclusions. Task rollouts retain exact engine tokens.
 
-   register_objective("my", "my_pkg.slime:MyObjective")
-
-The referenced module defines the objective and registers its loss family.
-Tinker has equivalent registries; register each backend separately.
-Jobs can also name an unregistered objective by dotted reference.
-Bad names raise ``ValueError``; import or class errors raise ``PluginConfigError``.
-
-Rendering
----------
-
-For trajectory samples, training applies the model's chat template and
-computes needed log probabilities with the job's starting weights.
-They are on-policy only when the sample stage enforces that condition.
-Match the serving engine's
-`chat template arguments <../reference/configuration-inference.rst#chat-template-arguments>`__.
-
-``extra.reef`` can supply ``teacher``, ``teacher_candidates`` and ``max_tokens``.
-Rewritten prompts can split trajectories; read ``training.segment`` metadata
-when counting them. Segments retain their group and reward.
-
-Training skips unrenderable or overlength inputs and multi-segment teacher samples.
-``unrenderable_samples`` counts exclusions.
-Task rollouts retain the engine's exact tokens and log probabilities.
-
-Checkpoints
------------
-
-Training validates each checkpoint before storage.
-Control commits it; the activation rule decides whether it serves.
-See `Admission checks <components.rst#admission-checks>`__ and
-`Activation rule <recipe-control-service.rst#activation-rule>`__.
+Checkpoints pass `component validation <components.rst#admission-checks>`__ before storage.
+Control commits them; activation separately decides whether they serve.

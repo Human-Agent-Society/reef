@@ -10,35 +10,19 @@ or use the dedicated `task-file replacement
 <http-api-data-upload.rst#replace-a-task-s-files>`__ route. Metadata can contain
 custom keys; Reef reads these:
 
-.. list-table::
-   :header-rows: 1
-
-   * - Key
-     - Meaning
-   * - ``kind``
-     - ``trajectory``, ``task``, ``record`` or ``artifact``.
-   * - ``owner``
-     - Namespace owner. Scenario assignments must use the same owner.
-   * - ``scenarios``
-     - Scenario-to-split mapping: ``train`` or ``eval``. Trajectories use ``train``; artifacts use no assignments.
-   * - ``origin``
-     - Originating scenario and artifact. Record ``origin.source`` is ``inference`` (default) or ``evaluation``.
-   * - ``benchmarks`` / ``trajectory_sets``
-     - Named sets containing a task or trajectory.
+- ``kind``: ``trajectory``, ``task``, ``record`` or ``artifact``.
+- ``owner``: namespace owner, shared by assigned scenarios.
+- ``scenarios``: scenario→``train``/``eval``. Trajectories use train; artifacts use neither.
+- ``origin``: originating scenario/artifact.
+- ``benchmarks``/``trajectory_sets``: named memberships.
 
 ``kind``, ``owner``, ``origin`` and ``evaluation_id`` cannot change.
 A scenario's owner defaults to its name. Held sets can assign items without
 changing metadata; see `sets and collections <http-api-data-sets.rst>`__.
 
-Each uploaded trajectory counts toward ``job_samples`` and ``buffer_size`` in
-assignment order. Train tasks need a compatible recipe; SFT task jobs require
-a manual request with job parameters. Removing an assignment preserves training
-counts, so reassigning it does not repeat automatic training. Archiving a
-scenario removes its assignments but leaves items stored.
-
-Create, update and delete responses include ``synced``. Reef waits up to
-30 seconds for control to synchronize affected scenarios. False means pending;
-control or the next scenario load completes synchronization.
+Assignments must match recipe capabilities. Reassignment preserves training counts;
+archiving removes assignments, not items. Responses include ``synced`` after waiting
+up to 30 seconds for control; false means synchronization remains pending.
 Unknown items return 404; deployments without a data store return 503.
 
 Record items
@@ -52,15 +36,10 @@ For a scenario's own record:
 - Metadata: ``{kind: record, scenarios: {<scenario>: train}, origin: {scenario, artifact_id}}``.
   The artifact ID can be null.
 
-Metadata patches cannot remove the originating scenario's assignment.
-To share a record, add another scenario of the same owner to ``scenarios``.
-It reads the item without copying it, using the item ID as its record ID.
-Report reference ``x`` becomes ``<origin scenario>/x``; assign reports together
-with their referenced inferences. The receiving recipe determines eligibility.
-On-policy recipes can reject records served by another runtime load.
-
-Removing an assignment stops new reads. Already-loaded training data can still
-train until restart; copies stored by older Reef versions also remain.
+Share records by adding scenarios of the same owner. References become
+``<origin scenario>/<record ID>``; assign reports with their inferences.
+Receiving recipes determine eligibility. The origin assignment cannot be removed.
+Removing other assignments stops new reads, but loaded data can still train.
 
 To upload record items, use ``POST .../data`` with
 ``{"items": [{"id": "...", "content": {...}, "metadata": {...}}]}``.
@@ -68,33 +47,9 @@ The content fields above are required, ``request_type`` must be ``inference``
 or ``report``, and the ID must match the origin and record ID. Invalid items
 return 400. See `Artifact items`_ for the request format.
 
-Evaluation calls
-----------------
-
-Evaluation calls belong to the scenario's owner but never train.
-They have ``kind: record``, empty ``scenarios``, and ``evaluation_id``.
-``origin`` contains the scenario, evaluated artifact, ``source: evaluation``
-and an ``evaluation`` object with the `call summary
-<http-api-evaluation-calls.rst#model-calls-of-a-rollout>`__.
-
-Their item IDs start with ``<scenario>/`` and end with:
-
-- Agent: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``.
-- Verifier: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>``.
-
-Content is an inference record. Its payload adds ``response`` to the request
-body; absent responses are null. ``created_at`` is the call's start time.
-Calls link only within the same attempt and caller, never to production calls.
-
-Query them with ``kind=record&group_key=evaluation_id&group_value=<id>``.
-Scenario record routes omit them. Adding scenario assignments returns 400.
-
-Verifier ATIF files are trajectory items with IDs
-``<scenario>/<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``.
-Metadata has ``kind: trajectory``, empty ``scenarios``, ``evaluation_id`` and
-``evaluation: {evaluation_id, task_index, repeat, attempt, index, name}``.
-``index`` follows filename order; ``name`` is the filename. These items have
-no ``origin`` and reject scenario assignments with 400.
+Evaluation records and verifier trajectories never train and reject scenario
+assignments. Query ``kind=record&group_key=evaluation_id&group_value=<id>``,
+or use `evaluation call routes <http-api-evaluation-calls.rst>`__.
 
 Artifact items
 --------------
@@ -113,10 +68,8 @@ Artifact items reference files without moving them. Their content is:
    * - ``component``
      - Originating scenario component, or null for uploaded items.
 
-After commits, Reef creates library items with ID ``<scenario>/<artifact_id>``
-and ``origin: {scenario, artifact_id}``. ``origin.artifact_id`` identifies the
-artifact. Legacy ``content_id`` is accepted but never used as identity;
-new writes omit it. Retries matching all other fields preserve legacy content and digests.
+Scenario-created items use ``<scenario>/<artifact_id>`` and
+``origin: {scenario, artifact_id}``. Uploaded items omit ``origin``.
 
 Register external files with ``POST /reef/namespaces/{owner}/data``:
 
@@ -168,21 +121,14 @@ Continue with ``next`` as ``after`` or ``before`` until it is null.
 A full final page can require one more request, returning an empty page.
 
 **Groups:** ``GET .../data/groups/{key}?kind=&scenario=&before=&limit=`` returns
-``{owner, groups, next}``. ``kind`` is required; ``key`` uses 1–64 letters,
-digits or underscores. Each group is
-``{value, item_count, first_sequence, last_sequence, metadata}``.
-``value`` is null for missing/nonstring values; metadata comes from the first item.
+``{owner, groups, next}``. ``kind`` is required; keys use 1–64 letters/digits/underscores.
+Rows contain value, item count, first/last sequence and first-item metadata.
+Missing/nonstring values group under null. Groups sort newest first; ``scenario``
+restricts membership and counts. Read members through ``group_key``/``group_value``.
 
-Groups sort newest first by ``first_sequence``. ``before`` is exclusive;
-``limit`` has the bounds above. ``scenario`` restricts both membership and
-counts. To read a group, use the item-list ``group_key``/``group_value`` filters
-and the same scenario. Start with ``after=0`` to include its first item.
-
-**Sets:** ``GET .../data/sets/{kind}?scenario=&before=&limit=`` lists nonempty
-``benchmark`` or ``trajectory_set`` sets as ``{owner, sets, next}``.
-Each set is ``{name, item_count, first_sequence, last_sequence, metadata}``.
-Ordering, metadata, pagination and scenario filtering follow groups.
-Read members through the item-list ``benchmark`` or ``trajectory_set`` filter.
+**Sets:** ``GET .../data/sets/{kind}`` lists nonempty ``benchmark`` or
+``trajectory_set`` sets as ``{owner, sets, next}``. It uses the same pagination,
+counts and metadata as groups; read members through the corresponding item filter.
 
 **Read:** ``GET .../data/{id}`` returns ``{owner, id, sequence, digest, metadata, content}``.
 Task content is null.
@@ -232,7 +178,6 @@ Missing deleted items return 404; an active item reusing the ID causes 409.
 Archiving a scenario also removes its deleted-item assignments.
 
 Forward pagination does not revisit restored sequences already passed.
-Assigned scenarios still read restored items, including through held sets.
 
 Download an item
 ----------------

@@ -34,9 +34,4 @@ The core loop
 Weight recipes save checkpoints. By default, the next job starts from the newest checkpoint, even if an older one still serves.
 Harness recipes compare file trees on tasks. Agents receive selected changes on their next pull.
 
-Learn more
-----------
-
-- `Send a request and report feedback <quickstart.rst>`__.
-- `Choose which artifacts serve <../developer-guide/recipe-control-service.rst#activation-rule>`__.
-- `Inspect the snapshot chain <../advanced_topics/state-model.rst#the-snapshot-chain>`__.
+Inspect the `snapshot chain <../advanced_topics/state-model.rst>`__ to see what changed after a job.

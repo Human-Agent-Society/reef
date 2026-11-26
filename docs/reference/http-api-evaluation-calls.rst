@@ -6,19 +6,11 @@ Inspect agent calls, verifier calls and ATIF trajectories from an `artifact eval
 Model calls of a rollout
 ------------------------
 
-Agent calls become readable when they end, including failures. `Verifier calls <#calls-that-a-verifier-writes>`__ appear after each attempt.
+Agent calls become readable when they end, including failures. Verifier calls appear after each attempt.
 
-These `record items <http-api-data-items.rst#evaluation-calls>`__ belong to the scenario's owner, never train and survive record retention. Archiving removes evaluation routes; data-store access remains.
+These `record items <http-api-data-items.rst#record-items>`__ belong to the scenario's owner, never train and survive record retention. Archiving removes evaluation routes; data-store access remains.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls`` lists calls without bodies:
-
-.. code:: json
-
-   {"scenario": "my-agent", "evaluation_id": "1d0e...", "task_index": 3, "repeat": 1,
-    "calls": [{"caller": "agent", "label": null, "attempt": 1, "index": 0,
-               "path": "/v1/chat/completions", "status": 200, "started_at": 1762590001.2,
-               "duration_s": 1.84, "prompt_tokens": 2100, "completion_tokens": 340,
-               "finish_reason": "tool_calls", "tool_calls": 1}]}
 
 - ``caller`` query: ``agent`` (default) or ``verifier``; other values return 400.
 - ``label``: verifier label, else null.
@@ -30,18 +22,6 @@ These `record items <http-api-data-items.rst#evaluation-calls>`__ belong to the 
 No kept calls returns an empty list; unknown evaluations return 404.
 
 ``GET .../rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` adds ``request``/``response`` JSON bodies, including errors; non-JSON bodies become null. It accepts the same ``caller`` query. Missing calls return 404.
-
-Calls that a verifier writes
-----------------------------
-
-A verifier can save judge calls under ``/logs/verifier/judge/`` in either optional format:
-
-- ``calls.jsonl``: objects in call order: ``{request, response, status, started_at, duration_s, path, label}``. Bodies are JSON; ``response`` can be null. Defaults: ``status=200``, ``path=/v1/chat/completions``. ``started_at`` uses epoch seconds; ``duration_s`` uses seconds. Optional ``label`` has 1–200 characters. Other keys are ignored.
-- ``trajectory*.json``: ATIF documents, one in each file.
-
-Reef stores these after verification, including failures, without changing scores. Preserve ``judge/`` in ``include_logs``/``exclude_logs``.
-
-Limits: 32 MiB and 2000 calls per attempt. Reef skips invalid/excess calls, invalid/excess ATIF files and symlinks, logging counts.
 
 Trajectories of an evaluation
 -----------------------------

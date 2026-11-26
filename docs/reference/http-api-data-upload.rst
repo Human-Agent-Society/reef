@@ -17,14 +17,6 @@ Create trajectory items
 - The ``metadata`` query parameter supplies JSON metadata for every item.
   Its ``kind`` is ``trajectory``.
 
-.. code:: bash
-
-   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/trajectories" \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/x-ndjson' \
-     --data-binary @trajectories.jsonl
-
-This example stores trajectories without assigning them to a scenario.
 Success returns 201 with
 ``{"owner", "items": [{"id", "sequence", "digest", "metadata"}], "synced"}``.
 The write is atomic: all items are stored, or none.
@@ -73,21 +65,8 @@ Archive example:
 Use references for larger tasks. See `Storage settings
 <configuration-settings.rst#storage>`__.
 
-Task limits apply to both forms:
-
-.. list-table::
-   :header-rows: 1
-
-   * - Limit
-     - Value
-   * - One file
-     - 500 GB
-   * - Direct entries in one directory
-     - 10,000 files and directories
-   * - Files per task
-     - 100,000
-   * - Total task size
-     - No limit
+Both forms allow 500 GB per file, 10,000 direct directory entries and
+100,000 files per task. References have no total task-size limit.
 
 For references, write directories under ``data/<owner>`` using the
 ``storage.task-file-backend`` layout. Name each directory after its task.
@@ -95,14 +74,8 @@ Compute digests with ``reef.storage.data.tasks.TaskDirectoryDigest`` or
 ``files_digest`` for local directories. Digests contain 64 lowercase hexadecimal
 characters. Each complete directory must exist under its supplied name and digest.
 
-Reference body, with optional ``metadata``:
-
-.. code:: json
-
-   {
-     "tasks": [{"name": "sum-391", "digest": "<files digest>"}],
-     "metadata": {"scenarios": {"my-agent": "train"}}
-   }
+Reference body: ``{"tasks": [{"name": "sum-391", "digest": "<digest>"}],
+"metadata": {"scenarios": {"my-agent": "train"}}}``.
 
 Metadata must be a JSON object; its ``kind`` defaults to ``task``.
 Training assignments require a recipe that accepts imported tasks;
@@ -188,11 +161,9 @@ All imported items receive the metadata.
 - **Trajectories:** Reef reads only root-level ``*.jsonl`` and ``*.jsonl.gz``
   files, in name order. Each document's ``session_id`` becomes its item ID.
 
-Trajectory imports first validate every line and reject duplicate IDs.
-Failure in this pass stores nothing. The second pass commits batches of at
-most 1000 items, ending earlier after about ``32 * 1024 * 1024`` line characters.
-Validation or store errors stop this pass; earlier transactions remain stored.
-Imports apply the create checks and do not wait for scenario synchronization.
+Trajectory imports validate all lines and IDs before writing in batches.
+Initial validation errors store nothing; later failures preserve completed batches.
+Create checks apply. Imports do not wait for scenario synchronization.
 
 **Export.** Supply ``uri`` and either:
 

@@ -60,26 +60,11 @@ Each dispatched attempt creates an INFERENCE record in the request's Scenario. R
 Managed routing lifecycle
 -------------------------
 
-With ``reef.routing_manifest``, the controller uses private ``GET /reef/lifecycle``, ``POST /reef/lifecycle`` and ``POST /reef/lifecycle/check``:
+Managed deployments start closed: inference returns 503 until admission opens.
+``/healthz`` checks liveness, not admission. Policy changes do not alter admitted requests.
+Reports can finish during close; stop rejects new mutations permanently for that generation.
 
-- Unix socket only, never ``reef.port``: directory 0700, socket 0600.
-- Per-generation control credentials only; service/evaluation tokens cannot access it, and control credentials cannot access public routes.
-- Operators use ``reef serve``, status and cleanup commands (`Managed routing lifecycle <configuration-routing.rst#managed-routing-lifecycle>`__).
-
-A client of the public routes sees these effects:
-
-- Closed by default: inference returns 503 without calling providers. ``/healthz`` checks liveness, not admission.
-- Admission fixes the manifest and runtime hash before reading the body; policy changes never alter admitted requests.
-- Requests remain active through local EOF or termination, including SSE terminal frames; EOF does not confirm receipt.
-- Reports can finish during ``close``. ``stop`` rejects new mutations and permanently stops that generation.
-
-Controller commands:
-
-- ``GET /reef/lifecycle`` returns ``deployment_id``, ``generation``, ``snapshot_version``, ``router_config_hash`` (empty until the owner publishes a verified runtime), ``control_revision``, ``accepting``, ``stopping``, ``policy_closed``, ``active_requests``, ``pending_selections``, ``pending_writes``, ``drain_pending_writes`` and the diagnostic counts ``forced_requests`` and ``failed_writes``.
-- ``POST /reef/lifecycle`` requires deployment ID, generation, nonnegative ``control_revision`` and ``action``: ``open``, ``close``, ``close_policy``, ``abort_policy``, ``activate`` or ``stop``. Revisions increase monotonically; identical repeats are idempotent. Stale revisions, conflicts or identity mismatches return 409.
-- ``open`` and ``abort_policy`` require ``open_deadline_monotonic``. ``open`` returns 409 until runtime publication and close-drain writes finish. It checks providers and one preview per Scenario; failures or deadline expiry return 503 without changes.
-- ``activate`` publishes ``manifest_path``, ``snapshot_version``, ``expected_snapshot_version`` and a 64-hex ``router_config_hash`` together, and leaves admission closed.
-- ``close`` and ``stop`` accept ``cancel_active: true`` to cancel accepted inference requests after their drain deadline.
-- ``POST /reef/lifecycle/check`` changes nothing: 200 with ``{snapshot_version}``, 409 (``routing candidate rejected``), 503 for provider/deadline failure, or 400 for malformed input.
-
-``reef/api/lifecycle.py`` defines the fields and the drain accounting of each command.
+Operators use ``reef serve``, status and cleanup commands.
+The controller's private Unix-socket API uses separate generation credentials,
+not service tokens. See `Managed routing lifecycle
+<configuration-routing.rst#managed-routing-lifecycle>`__.

@@ -10,13 +10,8 @@ Samples are assigned data items: uploaded or generated trajectories and imported
 ``GET /reef/scenarios/{scenario}/samples`` lists them in assignment order.
 ``after`` defaults to 0; ``limit`` defaults to 1000, also the maximum.
 
-.. code:: json
-
-   {"scenario": "my-agent", "next": null, "samples": [
-     {"sample_id": "trajectory-0001", "sequence": 1, "kind": "trajectory", "split": "train",
-      "component": null, "group": null, "held_set": null, "train_counts": {}},
-     {"sample_id": "my-agent.report-17:0", "sequence": 2, "kind": "trajectory", "split": "train",
-      "component": "", "group": null, "held_set": null, "train_counts": {"": 1}}]}
+The response is ``{scenario, samples, next}``. Rows include ``sample_id``,
+``sequence``, ``kind``, ``split`` and:
 
 - ``component`` identifies the generating trainer: ``""`` for a sole trainer;
   ``null`` for uploads or imports.
@@ -60,42 +55,16 @@ Query fields:
 - ``changed``: boolean, default false. True hides unchanged finished tasks;
   filling a page scans at most 5,000 tasks.
 
-The response includes ``scenario``, ``read_at``, ``retention_seconds`` and:
+The response contains ``enabled``, ``records_waiting``, retained task ``counts``,
+``tasks`` and the next ``before`` cursor. Counts can change between reads.
+``records_waiting`` is null when progress is unavailable.
 
-- ``enabled``: whether a trainer generates samples, independent of worker health.
-- ``records_waiting``: unread records for the furthest-behind trainer,
-  measured from its newest finished task with ``record_sequences``.
-  Null means there is no trainer or retained progress is incomplete.
-- ``counts``: all retained tasks, independent of filters and pagination.
-  Counts and page reads are separate; their snapshots can differ.
-- ``tasks`` and ``next``: the page and next ``before`` cursor, or null.
-- ``hidden``: omitted runs under ``changed=true``; otherwise empty.
-  Each has ``after``, ``count``, ``first_created_at`` and ``last_created_at``.
-  ``after`` identifies the shown task just newer than the run, or null at the page top.
-
-``GET /reef/scenarios/{scenario}/sample-processing/{task_id}`` reads one task.
-Unknown tasks and tasks belonging to another scenario return 404.
-
-Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at``,
-``ended_at`` and ``available_at``. Times are Unix seconds; unavailable fields are null.
-
-- ``started_at``: first attempt's start. ``error`` can describe a previous failed attempt.
-- ``records_read``, ``samples_created``: completed-attempt counts, excluding earlier attempts.
-  Reads include ignored replay records; sample counts exclude duplicate inserts.
-- ``record_sequences``: completed-attempt ``[first, last]`` data sequences, or null when no records were read.
-- ``changed``: new input reached training, possibly a request without new samples.
-- ``background``: work remained after completion; later tasks check it.
-- ``triggers``: oldest-first entries with ``name`` and first-request time ``at``.
-- ``progress``: running-attempt ``{attempt, records_read, samples_created, at}``, otherwise null.
-
-Older tasks have null counts, no ``record_sequences`` and no triggers.
-Triggers are ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``.
-Only the first two supply records; others can create samples without new records.
-Background polling starts after one second and doubles unchanged waits up to 300 seconds.
-
-Set data-query ``group_key`` to ``stored_by_task`` or ``read_by_task`` to find a task's samples.
-Ended tasks expire after ``storage.work_retention_s`` (default seven days).
-This removes history and logs, not samples. Active tasks never expire.
+``GET /reef/scenarios/{scenario}/sample-processing/{task_id}`` returns one task's
+state, attempts, epoch-second times, error, record/sample counts and progress.
+Unknown or foreign tasks return 404. Older tasks can have null counts.
+Set data-query ``group_key`` to ``stored_by_task`` or ``read_by_task`` to find related samples.
+Completed history/logs expire after ``storage.work_retention_s`` (default seven days);
+samples and active tasks remain.
 
 ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs`` reads an attempt's log:
 
@@ -109,7 +78,5 @@ The response contains ``task_id``, ``attempt``, ``attempt_count``, ``running``,
 Each line has ``number``, ``at``, ``level``, ``logger`` and ``message``.
 ``next`` is the next ``after`` cursor, or null at the current end.
 
-Logs include stage background jobs, even after the attempt ends, but exclude
-threads started outside the worker's context.
-Reef writes every two seconds and at attempt completion.
-Each attempt keeps 2,000 lines of at most 4,096 characters, then a truncation notice.
+Logs are bounded to 2,000 lines per attempt and 4,096 characters per line,
+followed by a truncation notice.

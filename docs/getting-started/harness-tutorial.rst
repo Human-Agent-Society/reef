@@ -5,15 +5,6 @@ Use feedback from a pi session to improve its rules. You need a
 `Reef checkout <installation.rst#laptop-no-gpu>`__, Node.js with npm,
 ``jq`` and a model API key with tool-call support.
 
-What runs where
----------------
-
-The client installs versioned harness files beside pi's configuration.
-Reef evaluates proposed changes locally or on a server.
-
-.. figure:: ../assets/harness-tutorial-overview-light.svg
-   :alt: The client syncs pi's rules and skills with the Reef service.
-
 Start Reef
 ----------
 
@@ -36,18 +27,13 @@ Choose a scenario name. Clients that connect to the same scenario share its harn
 
 .. code:: bash
 
-   pip install reef-client
    export SCENARIO=my-agent
    reef-client harness connect $SCENARIO --reef http://127.0.0.1:8901
 
 ``connect`` installs pi if needed and configures its launcher. For authentication,
 set ``REEF_TOKEN`` or enter the token when prompted.
 
-Use the agent
--------------
-
-Open a new terminal and run ``pi``. Give it a task, then exit.
-The launcher sends model calls to Reef and syncs file changes when pi exits.
+Open a new terminal and run ``pi``. Give it a task, then exit. The launcher sends model calls to Reef and syncs your file changes.
 
 Tell Reef how it went
 ---------------------
@@ -100,9 +86,3 @@ Sync merges edits to different lines. Conflicting lines or concurrent code-file 
 
 Resolve the conflict and run ``reef-client harness sync``, or use ``--discard`` to discard local edits.
 Run ``reef-client harness disconnect`` to remove Reef's package.
-
-Next steps
-----------
-
-`Write your own method <../developer-guide/write-a-harness-method.rst>`__
-or `configure harness evaluation <../user-guide/evolve-your-harness.rst>`__.

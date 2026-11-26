@@ -2,14 +2,13 @@ Write a harness method
 ======================
 
 Implement ``Method.run(job)`` to edit an agent's source tree.
-Select ``HarnessEvolutionRecipe`` and ``recipe.config.evolution.method``.
-Reef validates and evaluates the tree; activation decides whether it serves.
+Use ``HarnessEvolutionRecipe`` and select ``recipe.config.evolution.method``.
+Reef validates and evaluates the result; activation decides whether it serves.
 
 An example: add a tool
 ----------------------
 
-This method asks the served model to create a pi extension from failed traces.
-The configured evaluation policy compares the resulting tree with the head:
+This method proposes a pi extension from failed traces:
 
 .. code:: python
 
@@ -35,111 +34,34 @@ The configured evaluation policy compares the resulting tree with the head:
            workspace.write_tree(workspace.tree().apply(TreePatch({name: code.strip() + "\n"})))
            workspace.write_output(f"Proposed {name}.")
 
-Other adapters support different source formats.
-Read ``workspace.host()["parts"]`` before generating files.
-See `Configure a deployment`_ for the scorer and activation settings.
+Read ``workspace.host()["parts"]`` before generating adapter-specific files.
+An unchanged or invalid tree skips the job. Exceptions fail it without
+publishing tree changes or method state.
 
-What Reef does with the job
-----------------------------
+Workspace and services
+----------------------
 
-- An unchanged tree skips the job.
-- An invalid tree skips the job, records validation problems and is not retried.
-- A valid changed tree enters evaluation.
-- An exception fails the job. No tree or method state publishes;
-  model calls remain in the job record.
+- ``workspace.tree()`` and ``write_tree`` read/write the candidate.
+- ``traces()``, ``tasks()`` and ``host()`` read job inputs; trace fields can be ``None``.
+- ``state/`` holds persistent UTF-8 files, at most 16 MiB. Failed jobs save no state.
+- ``scratch/`` holds temporary files; ``write_output(summary, notes)`` records diagnostics.
+- ``services.models.served.chat(messages)`` calls the model under test.
+  ``models[name]`` selects a configured model binding.
+- ``services.check(tree)`` validates; ``evaluate(tree, tasks, repeats=1)`` returns scored runs.
+- ``services.run_agent`` runs the coding agent through Reef's budgeted gateway.
 
-The workspace
--------------
-
-- ``harness/``: candidate files; use ``tree()`` and ``write_tree(tree)``.
-- ``material/``: read-only traces, tasks, request and host capabilities.
-- ``state/``: files retained between successful jobs.
-- ``scratch/``: temporary files removed after the job.
-- ``output/``: summary and notes.
-
-Traces provide optional task, reply, score and feedback values.
-``trajectory()`` returns ATIF for traffic traces, otherwise ``None``.
-Files outside declared tree parts fail validation.
-See the `workspace contract <../../reef/train/harness_backend/workspace.py>`__.
-
-The services
-------------
-
-- ``models.served`` selects the model under test;
-  ``models["name"]`` selects an ``evolution.models`` binding.
-  ``chat(messages)`` returns text; ``complete(body)`` returns the raw response.
-- ``check(tree)`` returns ``ValidationResult`` with ``passed``, ``problems``
-  and ``message()``.
-- ``evaluate(tree, tasks, repeats=1)`` returns scored ``RunRecord`` values.
-  ``score.value`` is 0 for no answer, or ``None`` when execution failed.
-  ``failure`` describes that failure.
-- ``run_agent(prompt, tree=, model=)`` runs the configured coding agent.
-
-Model calls count against ``max_model_calls_per_step``.
-Evaluation requires a scorer and remaining
-``max_runs_per_step`` capacity; reused runs are free.
-Invalid trees raise ``ValueError``. Passing one string as ``tasks`` raises
-``TypeError``. Failed evaluation admission runs no tasks.
-
-Run a coding agent
-~~~~~~~~~~~~~~~~~~
-
-Set ``runs_agent=True`` to require ``evolution.agent``.
-``run_agent`` runs in the workspace through Reef's budgeted gateway and
-returns ``AgentOutcome`` with exit status, timeout and error information.
-Set ``runs_without_agent=True`` only when ``services.agent=None`` is supported.
-
-Constructors receive settings only. Access models, agents and credentials
-through ``job.services`` at run time.
-See the `agent protocol <../../reef/train/harness_backend/agent/protocol.md>`__
-for custom orchestration.
-
-A method made of prompts
-------------------------
-
-``AgentMethod`` runs a coding agent from a prompt directory.
-Provide ``START.md`` with optional ``{step}`` and ``{history}`` placeholders.
-``RESUME.md`` can replace it after earlier state exists;
-``rules.md`` and ``skills/`` define the coding agent's harness.
-Select ``reef.train.harness_backend:AgentMethod`` and set its
-``config.prompts`` directory and optional ``config.model`` binding.
-
-What the method says
---------------------
-
-``workspace.write_output(summary, notes)`` writes ``output/summary.md`` and
-``output/notes.json``. Job pages expose them as ``method_summary`` and
-``method_notes``. These values do not affect selection.
-
-Keep state between jobs
-------------------------
-
-Files in ``state/`` must be UTF-8 text totaling at most 16 MiB.
-Reef commits them with the job and restores them for the next job,
-including after restart. Failed jobs commit no state.
-
-Read the history
-----------------
-
-``workspace.history()`` reads candidates, runs, scores and selection decisions.
-Missing or failed scores are ``None``.
-``workspace.step`` is one plus the number of ended jobs, including failures.
-A retried unsettled job reuses its step. Ignore history entries with a
-step greater than or equal to the current step.
+Model calls and evaluation obey ``max_model_calls_per_step`` and ``max_runs_per_step``.
+Reused runs are free. Failed evaluation admission runs no tasks.
+Constructors receive settings only; access models and credentials through ``job.services``.
+Set ``runs_agent=True`` when an agent is required.
+See the `method contract <../../reef/train/harness_backend/contract.py>`__.
 
 Evaluation
 ----------
 
-``evolution.evaluation`` selects tasks, scorer and publication policy.
-Runs from ``services.evaluate`` are reused only with matching evaluation settings.
-Changing those settings evaluates the head again.
-See `Publication policy
-<../user-guide/evolve-your-harness.rst#evaluation-the-publication-policy>`__.
-
-Score a run
-~~~~~~~~~~~
-
-A ``TaskScorer`` returns a finite score; higher is better:
+Configure tasks, a scorer and publication policy.
+Runs are reused only with matching evaluation settings.
+A ``TaskScorer`` returns finite scores; higher is better:
 
 .. code:: python
 
@@ -152,16 +74,15 @@ A ``TaskScorer`` returns a finite score; higher is better:
            text = final_assistant_text(result.trajectory) or ""
            return 1.0 if text.strip().endswith("2880067194370816120") else 0.0
 
-This scorer matches the Fibonacci task below. Nonfinite scores fail.
-For model judging, implement both ``score`` and ``score_with_models``.
+This scorer matches the Fibonacci task below.
+Model judges implement ``score_with_models`` as well as ``score``.
 Declare GPU requirements and load models lazily in workers.
 
 Collect traffic prompts
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-With ``collect_failures=true``, Reef adds trace prompts to evaluation.
-A configured ``TaskCollector.collect(samples)`` selects which prompts to keep.
-Without a collector, Reef keeps every trace's prompt.
+``collect_failures=true`` adds trace prompts to evaluation.
+Optional ``TaskCollector.collect(samples)`` filters them; otherwise every trace prompt is kept.
 
 Configure a deployment
 ----------------------
@@ -189,37 +110,23 @@ Configure a deployment
      upstream-model: qwen3-8b
 
 Run ``reef serve -c CONFIG`` where ``methods`` is importable.
-The seed must pass adapter validation. Extension changes wait for manual activation.
-See `Harness evolution keys <../reference/configuration-harness.rst>`__ for configuration.
+The seed must pass validation. This configuration holds extension changes for manual activation.
+Invalid configuration raises ``RecipeConfigError`` or ``PluginConfigError``.
 
-Method settings
-~~~~~~~~~~~~~~~
+Optional method state
+---------------------
 
-Implement ``from_config(config)`` with a ``PluginSettings`` dataclass;
-``Settings.parse`` rejects unknown keys.
-Configure ``method.module`` and ``method.config``.
-Named models require bindings under ``evolution.models``.
+``workspace.history()`` reads prior trees, runs and decisions.
+``workspace.step`` counts ended jobs plus one, including failures.
+Ignore entries at or beyond the current step; an unsettled retry reuses its step.
 
-Package a method
-----------------
-
-Keep the method, settings and prompts in ``recipes/<name>/``.
-Add a README and runnable ``examples/``.
-
-Configuration failures
-----------------------
-
-Invalid deployment settings raise ``RecipeConfigError``;
-invalid method settings raise ``PluginConfigError``.
-Training requires a method, a scorer unless policy is ``none``, and any required coding agent.
+For prompt-only methods, use ``AgentMethod`` with a required ``START.md`` and
+optional ``RESUME.md``. See its `agent protocol <../../reef/train/harness_backend/agent/protocol.md>`__.
+Custom settings use ``from_config`` and ``PluginSettings``.
 
 Untrusted input
 ---------------
 
-Wrap trace text with ``untrusted_text`` before inserting it into prompts.
-Trust client tags as identities only when a gateway supplies them.
-Require review for generated executable parts such as extensions, native
-tools and hooks. Native-loop changes always require manual activation.
-
-Keep credentials out of tree files; validation rejects them.
-Model credentials come from render-time bindings or ``api_key_env``.
+Wrap trace text in ``untrusted_text``. Keep credentials out of tree files.
+Require review for generated executable parts; native loops always require review.
+Client tags identify users only when a trusted gateway supplies them.

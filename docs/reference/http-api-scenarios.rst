@@ -21,7 +21,7 @@ Create it before sending inference requests:
 Creation beyond ``reef.max_scenarios`` returns 409.
 Loading beyond ``reef.max_loaded_scenarios`` returns 503 with ``Retry-After``
 when no loaded scenario is idle.
-See `Scenario limits <../user-guide/operate.rst#limit-the-scenarios-a-service-holds>`__.
+See `Scenario limits <configuration-settings.rst#service>`__.
 
 Create a scenario
 -----------------
@@ -50,12 +50,6 @@ Starting artifacts become both active selections and training starts.
 Their rows use ``operation: creation``; ``source`` identifies the item or default configuration.
 Other components use their default starts.
 
-For an owner-specific starting artifact, send:
-
-.. code:: json
-
-   {"name": "hello-reef-2", "owner": "acme", "artifact_id": "hello-reef/<artifact_id>"}
-
 Reef validates items under the `artifact import rules <http-api-artifacts.rst#import-an-artifact>`__.
 Import failures register no scenario: invalid layouts return 400; missing items return 404.
 
@@ -81,17 +75,9 @@ Deleting a scenario
 ``archived`` names the repository ref under ``refs/reef/archived/``.
 Remote repositories return 501 without changes; archiving requires a local repository.
 
-After deletion:
-
-- Reads, inference and repeated deletion return 404.
-- Reusing the name, explicitly or implicitly, returns 409.
-- In-flight work cannot commit or store samples. Training jobs are cancelled and their output discarded.
-- Published snapshots remain reachable through the archived ref.
-
-Background cleanup archives records, commits and recipe directories, and removes
-service instances and caches. Recipe-directory cleanup waits for the training service.
-Resident adapters remain until normal eviction.
-Cleanup failure leaves the scenario deleted; retries run after an hour and after restart.
+Reads and repeated deletion return 404; reusing the name returns 409.
+Running work cannot commit, and training jobs are cancelled.
+Published snapshots remain under the archived ref. Background cleanup retries failures.
 
 Scenario updates
 ----------------
@@ -110,40 +96,15 @@ The response includes the scenario and changed settings.
 Unknown scenarios return 404; invalid or unknown fields return 400.
 Settings survive reloads and restarts.
 
-**Training mode.** ``auto`` (default) schedules jobs when ``job_samples`` samples are available;
-``manual`` trains only requested samples. For example:
+``manual`` starts jobs only from requests; ``auto`` also uses accumulated samples.
+Changes leave reserved/running jobs unchanged. Requests work in both modes.
+Unsupported modes return 501.
 
-.. code:: json
-
-   {"training_mode": "manual"}
-
-The response is ``{"scenario": "agents", "training_mode": "manual"}`` with HTTP 200.
-Reserved or running jobs remain unchanged. Queued requests train in either mode.
-Switching back to ``auto`` makes previously untrained samples eligible,
-including samples collected in manual mode.
-Unsupported modes return 501 without changing state.
-See `Manual training <http-api-training.rst#manual-training>`__.
-
-Weight-training scenarios can share a deployment only when its backend and runtime
-isolate their weights. Otherwise, use separate deployments.
-
-**Activation.** Override the deployment's rule with a built-in rule:
-
-.. code:: json
-
-   {"activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}}
-
-``always`` accepts ``review_kinds``; ``never`` takes no config;
-``evaluated`` requires ``min_mean_score``.
-
-- ``null`` restores the deployment's rule. The response contains the stored override.
-- Custom class references return 400; configure them in the deployment.
-- ``evaluated`` requires ``artifact_evaluation``. Reef validates and stores this pair together;
-  removing required evaluation settings returns 400.
-- Changing the rule activates nothing immediately. It applies to later outputs
-  and, for ``evaluated``, evaluations that finish afterward.
-
-See `Activation configuration <configuration-recipe.rst#the-activation-section>`__.
+``activation`` accepts built-ins: ``always`` with optional ``review_kinds``,
+``never``, or ``evaluated`` with ``min_mean_score``. Null restores deployment settings.
+``evaluated`` requires ``artifact_evaluation``; Reef validates the pair together.
+Custom classes belong in deployment configuration. Changes affect later outputs
+and finishing evaluations, never immediate activation.
 
 Serving config
 --------------
@@ -171,51 +132,17 @@ After deployment changes, unsupported stored fields log warnings and use deploym
 Record-to-sample config
 -----------------------
 
-``record2sample_config`` overrides sample-stage settings by component.
-Keys replace deployment ``pipeline.record2sample.config`` values; the stage class stays unchanged:
-
-.. code:: json
-
-   {"record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}}}
-
-The request replaces the entire stored mapping; ``{}`` restores deployment configuration.
-The response includes the stored mapping.
-
-Reef rebuilds stages and replays records after committed progress.
-Separate samples services reload before their next selection.
-Components without trainers or invalid settings return 400, preserving the loaded scenario and stored configuration.
+``record2sample_config`` maps component names to overrides of
+``pipeline.record2sample.config``; it does not change stage classes.
+The request replaces the whole stored mapping; ``{}`` restores deployment defaults.
+Stages reload and replay records after committed progress.
+Invalid settings or components without trainers return 400 without changes.
 
 Read the settings
 -----------------
 
-``GET /reef/scenarios/{scenario}/settings`` returns the current settings.
-Example response, with default evaluation fields omitted:
-
-.. code:: json
-
-   {
-     "scenario": "agents",
-     "training_mode": "auto",
-     "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
-     "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
-     "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
-     "serving_config": {"weights": {"temperature": 0.6}},
-     "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
-     "served": {"weights": {"artifact:a": 95, "artifact:b": 5}},
-     "record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}},
-     "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
-   }
-
-- ``training_mode`` is the current mode.
-- ``artifact_evaluation`` and ``activation`` are stored settings, or null.
-- ``effective_activation`` resolves the override or deployment rule.
-  Custom deployment rules appear as ``package.module:ClassName``.
-- ``serving_config`` and ``record2sample_config`` are stored mappings, empty when unset.
-- ``effective_serving_config`` resolves each field from the override or deployment.
-- ``served`` maps components to artifacts and traffic weights. Without a split,
-  the active artifact has weight 100; other artifacts have 0.
-  It also receives the weights of split artifacts no longer served.
-- ``job_parameters`` maps sample kinds to recipe parameters.
-  Request parameters merge into them; kinds without defaults are absent.
-
-Unknown scenarios return 404.
+``GET /reef/scenarios/{scenario}/settings`` returns stored ``training_mode``,
+``artifact_evaluation``, ``activation``, ``serving_config`` and ``record2sample_config``.
+``effective_activation`` and ``effective_serving_config`` resolve deployment defaults.
+``served`` maps components to artifact traffic weights; ``job_parameters`` maps
+sample kinds to recipe defaults. Unknown scenarios return 404.

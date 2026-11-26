@@ -1,46 +1,28 @@
 Scenario components
 ===================
 
-Components declare the artifacts a scenario stores and exposes.
-Use the built-in ``weights`` or ``harness`` component unless you need a
-custom ``Recipe.build_components`` declaration.
+Components declare artifacts and their import, validation and client-file contracts.
+Most recipes use built-in ``weights`` or ``harness`` components.
 
 The declaration
 ---------------
 
-``build_components(scenario)`` returns ``ScenarioComponents``: a mapping of
-names to ``ComponentSpec`` values. Build it from configuration alone;
-every service loading the scenario reads it.
+Override ``Recipe.build_components(scenario)`` to return ``ScenarioComponents``.
+Build declarations from configuration alone; every service loads them.
+Each ``ComponentSpec`` can provide:
 
-.. list-table::
-   :header-rows: 1
+- ``validator``: admit artifacts; the default accepts all.
+- ``layout``: import directories; omitted means no imports.
+- ``files``: expose a client file tree; omitted disables file routes.
+- ``kind``: artifact kind; ``model`` and ``model_adapter`` load into inference.
 
-   * - Field
-     - Purpose
-   * - ``validator``
-     - Admit artifacts before storage; default accepts all.
-   * - ``layout``
-     - Check and import directories; default disables imports.
-   * - ``files``
-     - Expose a client file tree; default disables file routes.
-   * - ``kind``
-     - Identify artifacts; ``model`` and ``model_adapter`` load into inference.
-
-At most one component can load weights, and one can expose files.
+At most one component loads weights and one exposes files.
 Invalid declarations raise ``ValueError``.
-
-Built-in recipes
-----------------
-
-``Recipe`` declares none. ``WeightTrainingRecipe`` declares ``weights``.
-``HarnessEvolutionRecipe`` declares ``harness`` with adapter-specific file
-`rendering <harness-adapters.rst#rendering>`__.
-``CompositeRecipe`` combines component recipes.
 
 Declare components
 ------------------
 
-To expose text files:
+This recipe exposes text files:
 
 .. code:: python
 
@@ -52,27 +34,14 @@ To expose text files:
        def build_components(self, scenario: str) -> ScenarioComponents:
            return ScenarioComponents({"prompt": ComponentSpec(files=TextFileTree())})
 
-Add ``ArtifactValidator`` and ``ArtifactLayout`` implementations for validation
-and imports. See the `component contracts <../../reef/artifact/components.py>`__.
-
-Composite snapshots have a directory per component. Each commit replaces
-one component and preserves the others, including their artifact IDs.
-Snapshots with zero or one component are flat.
+Add ``ArtifactValidator`` and ``ArtifactLayout`` for validation and imports.
+See the `component contracts <../../reef/artifact/components.py>`__.
+Composite commits replace one component while preserving the others and their IDs.
 
 Admission checks
 ----------------
 
-An ``ArtifactValidator`` reads one component directory.
-Raise ``ValueError`` or ``ReefError`` to refuse it:
-
-- Invalid checkpoints fail their job; samples still count as trained.
-- Invalid imports, synced trees and starting artifacts return HTTP 400.
-
-Previously stored artifacts are not revalidated during activation, restore,
-serving or train-from. Multi-component snapshots need per-component checks.
-
-What components do not own
---------------------------
-
-Training produces artifacts, control commits and selects them, and inference
-loads weights. Components only declare their artifact contracts.
+Validators read one component directory and raise ``ValueError`` or ``ReefError`` on refusal.
+Invalid checkpoints fail their job; samples remain consumed.
+Invalid imports, synced trees and starting artifacts return HTTP 400.
+Previously stored artifacts are not revalidated during activation, restore, serving or train-from.

@@ -1,56 +1,39 @@
 Write a recipe
 ==============
 
-A recipe selects how records become samples, jobs and artifacts.
+A recipe defines how records become samples, jobs and artifacts.
 Reef handles storage, submission, commits and recovery.
-First check whether an `existing recipe <../user-guide/recipes.rst>`__ fits.
+First check the `existing recipes <../user-guide/recipes.rst>`__.
 
-What a recipe is
-----------------
+Choose an extension
+-------------------
 
-A recipe is a frozen configuration dataclass. Subclass
-``WeightTrainingRecipe`` for weights, or configure ``HarnessEvolutionRecipe``
-with a ``Method`` for harness updates.
-Keep clients and workers out of recipe fields: services can run separately.
-The activation rule decides which artifacts serve.
+- **Weights:** subclass ``WeightTrainingRecipe`` and select sample stages and an objective.
+- **Harness:** use ``HarnessEvolutionRecipe`` with a `Method <write-a-harness-method.rst>`__.
+- **Both:** combine recipes with `CompositeRecipe <../reference/configuration-recipe.rst#composite-recipes>`__.
 
-Which service calls which plug-in
----------------------------------
+Recipes are frozen configuration dataclasses. Keep running clients and workers
+out of their fields: services can run separately.
 
 .. list-table::
    :header-rows: 1
 
    * - Service
-     - Extension contract
-   * - ``control``
-     - `Report validation, job data and activation <recipe-control-service.rst>`__
-   * - ``samples``
-     - `Record selection, samples and staleness <recipe-samples-service.rst>`__
-   * - ``training``
-     - `Objectives and losses <recipe-training-service.rst>`__ or `harness methods <write-a-harness-method.rst>`__
+     - Extension
+   * - Control
+     - `Reports, job data and activation <recipe-control-service.rst>`__
+   * - Samples
+     - `Record selection and sample creation <recipe-samples-service.rst>`__
+   * - Training
+     - `Objectives and losses <recipe-training-service.rst>`__
    * - Every service loading a scenario
      - `Artifact declarations <components.rst>`__
-
-.. code:: text
-
-   report → samples → job → artifact → activation
-
-Plug-ins must handle records removed by
-`retention <../user-guide/storage.rst#record-retention>`__.
-
-Choose the kind of method
--------------------------
-
-Weight methods usually reuse a backend and inference runtime.
-Add a `loss family <loss-families.rst>`__ only when existing losses do not fit.
-Use `CompositeRecipe <../reference/configuration-recipe.rst#composite-recipes>`__
-to combine weight and harness methods.
 
 A minimal weight recipe
 -----------------------
 
-This excerpt binds SDFT's report, stages and objective. Imports and complete
-code are in `the SDFT recipe <../../recipes/sdft/recipe.py>`__:
+This excerpt binds SDFT's report, stages and objective.
+See the `complete implementation <../../recipes/sdft/recipe.py>`__ for imports.
 
 .. code:: python
 
@@ -70,7 +53,7 @@ code are in `the SDFT recipe <../../recipes/sdft/recipe.py>`__:
        def pipeline_spec(cls) -> PipelineSpec:
            return PipelineSpec(record2sample=SDFTSamples, sample2job=DistillJobData)
 
-Register the objective by import reference in the package's ``__init__.py``:
+Register objectives by import reference in the package's ``__init__.py``:
 
 .. code:: python
 
@@ -78,78 +61,21 @@ Register the objective by import reference in the package's ``__init__.py``:
 
    register_objective("sdft", "recipes.sdft.slime:SdftObjective")
 
-Select the recipe and set its required job size:
+Set ``recipe.implementation`` to the recipe's ``package.module:ClassName``.
+Configure stages under ``pipeline.record2sample`` and ``pipeline.sample2job``.
+SDFT requires ``sample2job.config.job_samples``.
+Use the `SDFT deployment <../../recipes/sdft/examples/skill_stream/serve.yaml>`__
+for backend and engine settings.
 
-.. code:: yaml
+Settings and packaging
+-----------------------
 
-   recipe:
-     implementation: recipes.sdft.recipe:SDFTRecipe
-   pipeline:
-     sample2job:
-       config:
-         job_samples: 32
-   training:
-     backend: slime
-     options:
-       global-batch-size: 32
-       loss-type: custom_loss
+Declare configurable fields with ``config_field``, for example
+``clip_ratio: float = config_field(0.2, env="MY_CLIP_RATIO")``.
+Validate ranges in ``__post_init__``. Invalid settings raise ``RecipeConfigError``.
+Use the `shared configuration loader <../../reef/recipe/__init__.py>`__.
 
-Use the `complete deployment
-<../../recipes/sdft/examples/skill_stream/serve.yaml>`__ for engine settings.
-Native training flags must match the `loss family <loss-families.rst#family-to-slime-flags>`__.
-
-A minimal harness method
-------------------------
-
-Implement ``Method.run(job)`` to edit ``job.workspace.harness``.
-An unchanged tree skips the job.
-Select the class through ``recipe.config.evolution.method``.
-See the runnable example in `Write a harness method <write-a-harness-method.rst>`__.
-
-Recipe settings
----------------
-
-Declare fields with ``config_field`` for YAML, CLI and environment parsing:
-
-.. code:: python
-
-   from dataclasses import dataclass
-   from reef.recipe import WeightTrainingRecipe, config_field
-
-
-   @dataclass(frozen=True)
-   class MyMethodRecipe(WeightTrainingRecipe):
-       clip_ratio: float = config_field(0.2, env="MY_CLIP_RATIO")
-
-Validate ranges and cross-field constraints in ``__post_init__``.
-Invalid configuration raises ``RecipeConfigError`` when loaded.
-Use the shared loader; do not add a recipe-specific loader.
-The `configuration contracts <../../reef/recipe/__init__.py>`__ describe
-supported types, nested sections, readers and defaults.
-
-The rest of the deployment config
----------------------------------
-
-Declare external service endpoints in configuration; implement clients in
-your method package. Reef does not manage those services.
-Use the `Settings reference <../reference/configuration-settings.rst>`__
-for inference, training, execution and storage.
-
-Where the feedback comes from
------------------------------
-
-Reports carry your judge's feedback. Use a consistent scale where higher
-scores are better. Methods can instead
-`compute feedback <recipe-samples-service.rst#computed-feedback>`__ or train
-without scores, as SFT does.
-
-Package a method
-----------------
-
-Put repository methods in ``recipes/<name>/``, with a README and runnable
-``examples/``. The wheel excludes these packages.
-Install your method where every service can import ``package.module:ClassName``.
-
-Stages can log finite numeric metrics through their ``experiment_logger``;
-``Record2Sample`` accesses it through ``context``.
-Tracking-disabled loggers do nothing. Each namespace has its own event axis.
+Put methods in ``recipes/<name>/`` with a README and runnable examples.
+The wheel excludes these packages; install them where every service can import them.
+Record-following plug-ins must handle data removed by
+`retention <../user-guide/storage.rst#record-retention>`__.

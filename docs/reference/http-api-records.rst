@@ -64,22 +64,9 @@ Batch imports and resume
 - Identical retries are accepted, including after training or capacity eviction.
 - Oversized requests return 413.
 
-``reef-client`` imports immutable UTF-8 JSONL, one envelope per line, without service/training dependencies. It preserves IDs and references and converts no schemas.
-
-.. code:: bash
-
-   # Authentication is read from REEF_TOKEN when set.
-   reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
-
-The importer:
-
-- **Batch limits:** ``--batch-size`` defaults to 128; ``--max-batch-bytes`` to 524288. One batch plus one look-ahead record is buffered. Each line must fit; byte limits must remain below 1048576.
-- **Progress:** ``records.jsonl.reef-import.json`` or ``--progress PATH`` stores destination, scenario, checksum, acknowledged offset and count—no token or payload. Every run verifies the whole-file checksum. A file lock prevents concurrent progress writers.
-- **Resume:** rerun the command. Changed sources or destinations need separate progress files; IDs still deduplicate.
-- **Retries:** connection failures and HTTP 408/429/500/502/503/504 retry with backoff and unchanged IDs, up to ``--retries`` (default 3). Permanent failures preserve earlier batches without advancing failed-batch progress.
-- **Count:** acknowledged source rows, including existing records; not trained samples.
-
-Requires local JSONL and POSIX file locking (Linux/macOS); no Parquet, Hugging Face conversion or server-side S3 import. Batch limits do not bound processor memory. Keep reports close to referenced inferences.
+Use ``reef-client import records.jsonl --url <url> --scenario <name>`` for
+resumable JSONL uploads. Keep the source immutable and reuse its progress file.
+The client preserves record IDs, so retries do not duplicate training.
 
 Record and commit history
 -------------------------
@@ -102,16 +89,9 @@ Authenticated history reads use ``Cache-Control: no-store`` and can expose reque
 - Rows: ``commit_number``, ``operation``, ``operation_verified``, ``recorded_at``, ``components`` (name→artifact ID), changed ``component`` when present, ``activated``, ``consumed_ids``, ``metrics``. Private locators, algorithm state and recovery data are excluded.
 - Operations remain readable after trace bodies expire.
 
-The operations are:
-
-- ``training``: a training outcome, including steps that create no artifact. ``activated`` reports whether the step selected its new artifact to serve.
-- ``activate``: select an existing artifact for one component.
-- ``restore``: restore the complete active selection from an earlier step.
-- ``train_from``: change one trainer's starting artifact.
-- ``import``: create an artifact from an external source.
-- ``sync``: create a harness artifact and select it for serving and training in one operation. Its ``activated`` value is true.
-- ``serve`` and ``stop_serving``: add or remove an artifact that the scenario serves beside the active one.
-
-``served`` records one operation per changed artifact (`Serving <http-api-serving.rst>`__). Activation, restore and serving create no artifacts; imports and training need not change serving. Restore appends history without rewinding it. Recovery replays serving and training starts independently.
+Operations include ``training``, ``activate``, ``restore``, ``train_from``,
+``import``, ``sync``, ``serve`` and ``stop_serving``. Selection changes create no
+artifacts. Restore appends history rather than rewinding it.
+Serving and training starts recover independently.
 
 A consumed record does not establish that its resulting artifact serves. Consoles must interpret operation history; Reef adds no learning state or evaluation result.

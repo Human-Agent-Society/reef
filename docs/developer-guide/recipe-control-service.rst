@@ -1,15 +1,12 @@
 Control service: reports, jobs and activation
 =============================================
 
-Extend control to validate reports, build training job data or choose which
-artifacts serve. These are separate contracts; implement only what your
-recipe needs.
+Extend control to validate reports, build job data or choose which artifacts serve.
 
 Report type
 -----------
 
-``Recipe.report_type`` selects a frozen ``ReportBase`` dataclass.
-Control validates each ``POST /reef/report`` before storing it:
+``Recipe.report_type`` selects a frozen ``ReportBase`` dataclass:
 
 .. code:: python
 
@@ -30,28 +27,17 @@ Control validates each ``POST /reef/report`` before storing it:
        def report_type(self) -> type[ReportBase]:
            return MyReport
 
-``score`` reads the payload's top-level field. Other fields read
-``metadata.<field>``. Supported types are finite ``float``, ``int``, ``str``,
-``bool`` and ``Mapping[str, str]``, including optional forms.
-Fields without defaults are required. Override ``validate()`` and raise
-``ReportValidationError`` for cross-field checks.
-
-Use ``ScoredRolloutReport`` for a required score, or ``TeacherContextReport``
-for teacher context and an optional score. The default ``report_type=None``
-accepts any well-formed report.
-
-Invalid reports return HTTP 400 without storage; identical retries return
-the original receipt. Follow the `report API's reference rules
-<../reference/http-api-records.rst>`__.
-With multiple components, any report type can admit a report.
-Other trainers release reports that do not match their type.
+``score`` reads the top-level field; other fields read ``metadata.<field>``.
+Supported types are finite float, int, str, bool and ``Mapping[str, str]``, including optional forms.
+Fields without defaults are required.
+For cross-field checks, override ``validate()`` and raise ``ReportValidationError``.
+Invalid reports return 400 without storage.
+See the `report API <../reference/http-api-records.rst>`__ for references and retry behavior.
 
 Sample-to-job stage
 -------------------
 
-Subclass ``reef.train.sample2job.Sample2Job`` to turn stored samples into
-``JobData``. Control calls it when an automatic job is ready or a request
-is queued.
+Subclass ``Sample2Job`` and select it in ``Recipe.pipeline_spec()``:
 
 .. code:: python
 
@@ -68,100 +54,48 @@ is queued.
        def make_job_data(self, samples, data_id):
            return JobData(data_id, samples)
 
-Name the class in ``Recipe.pipeline_spec()``. Configure it through
-``pipeline.sample2job``.
+``make_job_data(samples, data_id)`` receives store-ordered samples and returns
+``JobData`` with the supplied ID. Do not call models or train here.
+Submission consumes every supplied sample, including omitted ones;
+job failure does not return them.
 
-- ``from_config`` receives scenario context, the record stage and environment.
-  Parse settings and pass sizes to the base constructor.
-- ``make_job_data(samples, data_id)`` receives samples in store order.
-  Return ``JobData`` with the supplied ID. Do not call models or train here.
-  The submission consumes every supplied sample, including any your stage omits.
-- ``job_parameters(data)`` returns training parameters. By default, request
-  parameters override recipe defaults for the sample kind.
-- ``status()`` reports stage state; ``close()`` releases its resources.
-
-Declare accepted inputs with ``required_request_types``, ``accepts_trajectories``
-and ``accepts_imported_tasks``. Reuse ``DistillJobData`` for store-order samples
-or ``TraceJobData`` for harness traces.
-See the `stage contract <../../reef/train/sample2job/base.py>`__ for all hooks
-and capability flags.
+``job_parameters(data)`` supplies backend parameters.
+Declare accepted request types, trajectories and tasks through the
+`stage's capability flags <../../reef/train/sample2job/base.py>`__.
+Release resources in ``close``.
 
 Job size
 ~~~~~~~~
 
-Set these fields under ``pipeline.sample2job.config``:
+Set ``pipeline.sample2job.config``:
 
-- ``job_samples``: minimum samples for an automatic job; a positive integer.
-- ``buffer_size``: maximum samples before completing any touched groups.
-  The base default is ``job_samples``; the value cannot be smaller.
+- ``job_samples``: positive minimum for automatic jobs.
+- ``buffer_size``: selection limit before completing touched groups; defaults to ``job_samples`` and cannot be smaller.
 
-Stages without a size default require ``job_samples``.
-Harness and generated-task stages default to 1; generated tasks use a buffer
-of at least 4. Invalid sizes raise ``PluginConfigError``.
-Set ``max_job_samples`` for a fixed-capacity stage.
+Stages without a job-size default require ``job_samples``.
+Harness and generated-task stages default to one sample.
+Generated tasks default the buffer to ``max(4, job_samples)``.
+Invalid sizes raise ``PluginConfigError``.
+Job size is independent of optimizer batches and token packing.
 
-Job size counts samples, independently of optimizer batch size or token packing.
-Whole groups can exceed the configured buffer.
-
-The next job
-~~~~~~~~~~~~
-
-Automatic jobs take untrained, non-stale samples of one accepted kind in
-store order. The kind must have job parameters.
-Selection takes ``buffer_size`` samples and completes touched groups.
-At least ``job_samples`` must remain.
-
-Imported eval tasks never train. Submission consumes all reserved samples,
-even when the job later fails.
-
-Training modes
-~~~~~~~~~~~~~~
-
-``auto`` is the default. ``manual`` runs queued training requests and uses
-the samples they name, regardless of ``job_samples`` or previous training.
-Manual requests bypass staleness checks.
-
-Requested samples must exist, have one accepted kind and fit ``max_job_samples``.
-Empty requests require ``reads_requests=True``.
-Reef processes requests oldest first and exposes ``JobData.request``.
-Both modes collect samples; switching modes preserves reserved job data.
+Automatic jobs select untrained, non-stale samples of one accepted kind.
+Manual requests can retrain samples and bypass staleness.
 See `Manual training <../reference/http-api-training.rst#manual-training>`__.
-
-Uploaded trajectories
-~~~~~~~~~~~~~~~~~~~~~
-
-Set ``accepts_trajectories=True`` to accept uploaded ATIF data items.
-Without an accepting trainer, uploads return HTTP 400.
-They bypass record-set formation.
-
-Control calls ``Record2Sample.uploaded_sample(trajectory)`` when reading an
-upload. Keep this method pure. The default returns the trajectory unchanged.
-A ``ValueError`` skips the upload with a warning and leaves it untrained.
-
-Each upload counts as one sample and is never stale. Each accepting component
-can train it once. Reward-based objectives require finite
-``extra.reef.reward``; SFT does not.
+Uploaded trajectories require ``accepts_trajectories=True`` and bypass record sets.
+Keep ``Record2Sample.uploaded_sample`` pure; ``ValueError`` skips the upload without consuming it.
 
 Activation rule
 ---------------
 
-Training appends artifacts to the snapshot chain. The activation rule decides
-whether they also serve; subsequent training can use an inactive artifact.
+Training publishes artifacts; activation decides whether they serve.
+Subclass ``ActivationRule``:
 
-Subclass ``ActivationRule`` and implement:
-
-- ``from_config(config)``: build the rule from deployment configuration.
-- ``activates(made) -> bool``: decide from ``MadeArtifact.component`` and
-  ``changed_kinds``. Weight artifacts have no changed harness kinds.
-- ``activates_evaluated(artifact_id, evaluation) -> bool``: decide after an
-  artifact evaluation. The default returns ``False``.
+- ``from_config(config)`` constructs the rule.
+- ``activates(made)`` decides from component and changed part kinds.
+- ``activates_evaluated(artifact_id, evaluation)`` decides after evaluation; default false.
 
 Decision methods depend only on their arguments.
-Select ``package.module:ClassName`` in ``activation.module``;
-invalid configuration raises ``RecipeConfigError`` at load.
+Select ``package.module:ClassName`` in deployment ``activation.module``.
 Scenario overrides accept built-in rules only.
-See `activation configuration <../reference/configuration-recipe.rst#the-activation-section>`__
-for the built-in ``always``, ``never`` and ``evaluated`` rules.
-
-Harness `evaluation <write-a-harness-method.rst#evaluation>`__ chooses which
-tree to keep; activation separately decides whether it serves.
+See `activation configuration <../reference/configuration-recipe.rst#the-activation-section>`__.
+Harness evaluation chooses the tree to keep before activation decides whether it serves.
