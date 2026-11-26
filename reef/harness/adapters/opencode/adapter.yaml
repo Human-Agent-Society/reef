@@ -14,8 +14,9 @@
 # the relocated cache. Permissions auto-reject in `opencode run` without
 # --auto, so --auto is part of the canonical invocation. The config defaults
 # pin the benchmarking traps: autoupdate off, sharing off, permissions
-# allowed (runs are isolated roots), and only provider reef, the model
-# binding's, so a model choice the render check misses cannot reach
+# allowed (runs are isolated roots), title generation disabled by default
+# (no extra title-generation model call per run), and only provider reef,
+# the model binding's, so a model choice the render check misses cannot reach
 # opencode's own zen provider. The binding gives the model its limits:
 # without a context limit, opencode never compacts a session and fails at
 # the endpoint's limit. A run's REEF_CONTEXT_WINDOW and
@@ -142,6 +143,11 @@ config:
   agent:
     path: "opencode/opencode.json"
     defaults:
+      # Disable opencode's hidden title agent by default so runs do not make an extra
+      # title-generation call; a tree can re-enable it in config/primary.json.
+      agent:
+        title:
+          disable: true
       autoupdate: false
       share: "disabled"
       enabled_providers: ["reef"]
@@ -149,8 +155,8 @@ config:
         "*": "allow"
     checks:
       - key: "."
-        match: Each(Key(IsIn(["autoupdate", "share", "enabled_providers", "permission", "provider", "model"])))
+        match: Each(Key(IsIn(["agent", "autoupdate", "share", "enabled_providers", "permission", "provider", "model"])))
         reason: the snapshot's config is config/primary.json
       # Keep a benchmark run hermetic and on the binding's provider only.
-      - key: [autoupdate, share, enabled_providers, permission]
+      - key: [agent, autoupdate, share, enabled_providers, permission]
         match: IsDefault()
