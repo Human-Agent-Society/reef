@@ -1,12 +1,14 @@
 Development
 ===========
 
-:For: contributors
-:Before you start: a Reef checkout, ``uv``, Git LFS, and Python 3.12 or newer
-:You will have: a development environment with the checks that run in CI
+Set up a checkout and check your change before review. Use the
+`codebase map <codebase-structure.rst>`__ to find the owning package.
 
 Setup
 -----
+
+Use ``uv`` and Python 3.12 or newer; CI uses 3.12. Install Git LFS for
+artifact and checkpoint tests. Reuse an existing ``.venv``. For a new checkout:
 
 .. code:: bash
 
@@ -16,44 +18,71 @@ Setup
    uv pip install -e ".[dev]" -e ./third_party/reef-client
    pre-commit install
 
-Training-related work also needs the training runtime:
+For Slime work, use the supported environment in
+`docker/README.md <https://github.com/Human-Agent-Society/reef/blob/main/docker/README.md>`__
+and install its dependencies:
 
 .. code:: bash
 
    uv pip install -e ".[slime]"
    uv pip install --no-deps --group runtime
 
-The ``slime`` extra installs the Python-side dependencies of
-``reef/train/slime_backend/``. The ``runtime`` dependency group pins the
-reviewed training-runtime commit. Keep ``--no-deps``: GPU development uses the
-CUDA-compatible dependencies that the container already holds. `Installation
-<../getting-started/installation.rst#gpu-image-for-weight-training>`__
-describes the container.
-
-``reef-client`` is a separate distribution, maintained at
-`Human-Agent-Society/reef-client <https://github.com/Human-Agent-Society/reef-client>`__.
-It implements Reef's wire protocol with the standard library only, does not
-import ``reef``, and does not ship in the ``reef`` wheel. The harness in
-``recipes/basic/`` talks to Reef through it. `Codebase structure
-<codebase-structure.rst>`__ maps the other packages.
-
-Run entry points as modules or scripts:
-
-.. code:: bash
-
-   python -m reef.deploy --help
-   recipes/basic/run.sh
+The ``slime`` extra supplies adapter dependencies; ``runtime`` pins Slime.
+Keep ``--no-deps`` to preserve the container's CUDA-compatible stack.
 
 Checks
 ------
+
+Activate ``.venv`` and start with the smallest test that exercises the change:
+
+.. code:: bash
+
+   .venv/bin/python -m pytest tests/artifact/test_reef_artifacts.py -q
+
+Use the `test directory map
+<https://github.com/Human-Agent-Society/reef/blob/main/tests/AGENTS.md>`__
+to place tests and find their fixtures. Each test must pass alone and in any
+order; keep files in ``tmp_path`` and allocate ports dynamically.
+
+Before requesting review for Python changes, run:
 
 .. code:: bash
 
    pre-commit run --all-files
    .venv/bin/python -m mypy
-   .venv/bin/python -m pytest tests/api -q
+   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+     .venv/bin/python -m pytest tests/ -n 8
 
-Start with the smallest suite that exercises your change; `Testing
-<testing.rst>`__ describes the full suite and the opt-in suites. Keep provider
-request bodies unchanged and preserve scenario isolation. A change to a public
-interface also needs a contract test.
+Full collection needs training dependencies, even when optional GPU checks
+skip. The Git settings isolate Git LFS tests. Use ``-n 0`` to diagnose a
+failure serially. The `CI workflow
+<https://github.com/Human-Agent-Society/reef/blob/main/.github/workflows/ci.yml>`__
+defines the test environment and suite selections. Report checks that could
+not run.
+
+Integration checks
+------------------
+
+Hosted-provider tests under `tests/smoke/
+<https://github.com/Human-Agent-Society/reef/tree/main/tests/smoke>`__
+list their opt-in variables and credential requirements.
+For real inference engines, follow `Integration qualification
+<../developer-guide/serving-runtimes.rst#integration-qualification>`__.
+These checks require their own environments; the CPU suite does not validate
+real engine behavior.
+
+Documentation
+-------------
+
+Use Node.js 22. From the repository root:
+
+.. code:: bash
+
+   cd docs/site
+   npm ci
+   npm run check:docs
+   npm run lint
+   npm run build
+
+The checks validate links and documented contracts. Inspect changed pages
+with ``npm run dev`` after editing their structure or layout.
