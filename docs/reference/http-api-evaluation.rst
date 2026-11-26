@@ -122,7 +122,7 @@ For an evaluation on a collection, the stored ``collection`` is ``{"name", "aver
 
 Use ``score_levels=true`` when reading one evaluation to add ``score_levels`` to its progress and the progress of each benchmark. It counts rollouts with scores of at least one (``full``), between zero and one (``part``), and zero or below (``zero``). ``failed`` counts failed rollouts. ``pending`` counts rollouts that have yet to end. The separate ``cancelled`` progress count covers cancellations and early stops.
 
-``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts`` answers ``{scenario, evaluation_id, rollouts}``, also while the evaluation runs: each rollout in task and repeat order, as ``{task, task_index, repeat, state, attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``.
+``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts`` answers ``{scenario, evaluation_id, rollouts}``, also while the evaluation runs: each rollout in task and repeat order, as ``{task, task_index, repeat, state, attempt_count, stopped_attempt_count, deferred_attempt_count, started_at, ended_at, score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting`` while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also when a retry runs the rollout again. On ``e2b``, it is also ``waiting`` while the task's sandbox templates build.
 - If the sandbox service has no capacity, the rollout returns to ``queued``. Its ``error`` starts with ``waiting for sandbox capacity``.
@@ -132,6 +132,9 @@ Use ``score_levels=true`` when reading one evaluation to add ``score_levels`` to
   On ``e2b``, the verifier first waits for up to 80% of its start time limit.
 - If the service rejects the sandbox request as invalid, the rollout fails without a score. Its ``error`` gives the service's reason.
 - ``attempt_count`` is how many times a worker took the rollout.
+- ``stopped_attempt_count`` is how many of those attempts a worker gave back: it found no sandbox capacity, or the worker stopped.
+  These attempts do not count toward the attempt limit. ``attempt_count`` minus ``stopped_attempt_count`` is the number of attempts that count.
+- ``deferred_attempt_count`` is how many of the given-back attempts found no sandbox capacity.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at`` when it finished or failed, in epoch seconds. Each is null until then.
 - ``score`` is the rollout's score once it finished, else null.
 - ``rewards`` holds every finite reward that the rollout's verifier wrote, by name, for example ``{"reward": 0.9, "rule": 1.0, "judge": 0.8}``. The score is the primary reward among them. It is null for a rollout that has not finished, that failed, whose verifier wrote no reward, or that finished before Reef kept rewards. Reef keeps at most 64. Nothing else reads them.

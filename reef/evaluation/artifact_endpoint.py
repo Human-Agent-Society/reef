@@ -32,7 +32,7 @@ from reef.core.errors import InferenceUnavailableError, ReefError, UpstreamLimit
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import upstream_limit
-from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import REQUEST_SESSION_KEY, InferenceArtifact, InferenceHandler, InferenceRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,8 @@ class ArtifactEndpoint:
     any other handler failure 502 with the reason. A call that a rate limit refused is sent again (``answer``). With
     ``log_probs``, each call asks the engine for log probabilities and token IDs (``log_prob_request``); the engine
     must accept those fields, as Reef's token-native handlers and SGLang's and vLLM's OpenAI servers do.
-    ``cooldowns`` holds the rate-limit waits that this endpoint shares with others, or its own when None. ``closed`` is
+    ``cooldowns`` holds the rate-limit waits that this endpoint shares with others, or its own when None.
+    ``session_key`` is the session key of every call, which the handler reads (``REQUEST_SESSION_KEY``), or None. ``closed`` is
     set from the exit on, so that no call waits or is sent after its rollout ended. Purpose: the artifact
     evaluation service points its rollouts at ``url``. Use it as a context manager: it binds its loopback port and sets
     ``url`` when it is entered, and closes the port when it exits. Raise ``ValueError`` at construction when the
@@ -165,6 +166,7 @@ class ArtifactEndpoint:
         *,
         log_probs: bool = False,
         cooldowns: ProviderCooldowns | None = None,
+        session_key: str | None = None,
     ) -> None:
         if not runtime.serves_any_artifact:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
@@ -173,6 +175,7 @@ class ArtifactEndpoint:
         self.served = served
         self.log_probs = log_probs
         self.cooldowns = ProviderCooldowns() if cooldowns is None else cooldowns
+        self.session_key = session_key
         self.server: ThreadingHTTPServer | None = None
         self.url = ""
         self.closed = threading.Event()
@@ -284,8 +287,13 @@ class ArtifactEndpoint:
             now = time.monotonic()
             if self.closed.is_set() or (bounds is not None and (now > bounds[0] or now >= bounds[1])):
                 return None
-            call = handler.inference(InferenceArtifact.from_artifact(self.artifact), path, payload)
-            return await (call if bounds is None else asyncio.wait_for(call, bounds[1] - now))
+            # The handler reads the key in this task, or in a copy of its context.
+            session = REQUEST_SESSION_KEY.set(self.session_key)
+            try:
+                call = handler.inference(InferenceArtifact.from_artifact(self.artifact), path, payload)
+                return await (call if bounds is None else asyncio.wait_for(call, bounds[1] - now))
+            finally:
+                REQUEST_SESSION_KEY.reset(session)
         finally:
             admission.release()
 

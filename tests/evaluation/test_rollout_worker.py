@@ -79,6 +79,33 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
     )
 
 
+def test_each_rollout_opens_its_candidate_with_its_own_session_key(monkeypatch) -> None:
+    from reef.evaluation import rollout_worker
+
+    opened = []
+
+    class RecordedEndpoint:
+        def __init__(self, *args, session_key: str | None, **kwargs) -> None:
+            opened.append(session_key)
+            self.url = "http://127.0.0.1:1"
+
+        def __enter__(self) -> RecordedEndpoint:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(rollout_worker, "ArtifactEndpoint", RecordedEndpoint)
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.candidate.return_value = (Mock(), Mock())
+    endpoints = LocalCandidateEndpoints(artifacts)
+    for value in (rollout(0), rollout(1), rollout(0)):
+        with endpoints.open(value, None):
+            pass
+    # The repeats of one task are other conversations; an attempt again of one rollout is the same one.
+    assert opened == ["evaluation:e1:2:0", "evaluation:e1:2:1", "evaluation:e1:2:0"]
+
+
 class ServedWorker(EvaluationRolloutWorker):
     """A worker whose candidate needs no start."""
 
@@ -252,11 +279,15 @@ def test_the_error_that_ended_a_trial_decides_whether_its_rollout_waits_fails_or
     queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     reason = "the service's reason"
     lab = SandboxErrorLab(tmp_path / "t", exception_type, reason)
-    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    observer = ReadingObserver()
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab, trial_observer=observer)
     assert worker.run_once()
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert (item.state, item.result, item.error) == (state, None, error.format(reason=reason))
     assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (1, given_back, given_back)
+    # The trial observer learns whether the attempt was given back for want of capacity, so its logs can show it.
+    [(trial, _)] = observer.trials
+    assert trial.deferred == bool(given_back)
 
 
 class AnsweringEndpoints(OpenEndpoints):

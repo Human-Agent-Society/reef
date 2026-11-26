@@ -791,6 +791,51 @@ def test_filtered_rollout_pages_keep_numeric_repeat_order(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
+def test_a_rollout_view_counts_the_attempts_that_waited_for_sandbox_capacity_or_a_stopped_worker(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            harness = {"name": "terminus-2"}
+            request = ArtifactEvaluationRequest(
+                artifact_id, "weights", harness=harness, task_names=("add",), rollouts_per_task=2
+            )
+            for repeat in (0, 1):
+                rollout = EvaluationRollout(
+                    "s", "e", artifact_id, "weights", 0, "add", repeat, PolicyModel("m"), harness, "docker", {}
+                )
+                queue.append(rollout_work(rollout))
+            with dispatcher.locked_scenario("s") as current:
+                current.store.evaluations.create(
+                    evaluation_id="e", owner="test", request=request, created_at=time.time()
+                )
+            # Repeat 0 finds no sandbox capacity twice and then loses its worker; repeat 1 runs once.
+            for deferred in (True, True, False):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                assert item is not None and item.payload["repeat"] == 0
+                error = "waiting for sandbox capacity: no node has 12 vCPUs free" if deferred else "the worker stopped"
+                # The last give-back keeps repeat 0 out of the queue, so the next take gets repeat 1.
+                later = None if deferred else time.time() + 3600
+                queue.give_back(EVALUATIONS_QUEUE, item.id, "w", error=error, deferred=deferred, available_at=later)
+            other = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            assert other is not None and other.payload["repeat"] == 1
+            response = await client.get("/reef/scenarios/s/evaluations/e/rollouts?calls=false", headers=AUTH)
+            assert response.status == 200, await response.text()
+            counts = [
+                (row["repeat"], row["attempt_count"], row["stopped_attempt_count"], row["deferred_attempt_count"])
+                for row in (await response.json())["rollouts"]
+            ]
+            # attempt_count minus stopped_attempt_count is the attempts that count: none for repeat 0.
+            assert counts == [(0, 3, 3, 2), (1, 1, 0, 0)]
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
 def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
