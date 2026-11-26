@@ -1,9 +1,8 @@
 Sandbox environments
 ====================
 
-Use ``ProgramExecutor`` for programs and Harbor environments for task Dockerfiles.
+Use ``ProgramExecutor`` to run programs and Harbor to run task trials.
 Program backends are ``local``, ``sandbox``, ``e2b`` and ``modal``.
-Harbor supports ``docker``, ``e2b`` and ``modal``.
 
 Run a command
 -------------
@@ -57,39 +56,39 @@ Configure evaluation and coding-agent isolation separately.
 Harbor task environments
 ------------------------
 
-``environment_config(environment, task_path, agent)`` supplies Harbor settings.
-Provider checks require packages, credentials and any local daemon.
-Cloud lifetime includes build, agent and verifier time; see
-`provider limits <../../reef/execution/sandbox/task_environment.py>`__.
+Choose a provider and configure the host that runs the trial.
 
-Tasks with Compose services on AgentENV
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. list-table::
+   :header-rows: 1
 
-Set ``REEF_E2B_DOCKERFILE_BUILD=aenv`` and ``REEF_E2B_COMPOSE=aenv``.
-Agent commands target ``main``; services share resources and communicate by name.
-Other services require prebuilt images. Host files and variable substitutions are unsupported.
-``aenv`` and ``aenv-compose-plan`` must share a directory on ``PATH``.
-See the `Compose contract <../../reef/execution/sandbox/agentenv/compose.py>`__.
+   * - Provider
+     - Harbor environment
+     - Trial host setup
+   * - Docker
+     - ``docker``
+     - A running Docker daemon
+   * - E2B
+     - ``e2b``
+     - ``reef-infra[e2b]`` and ``E2B_API_KEY``
+   * - AgentENV
+     - ``e2b``
+     - ``reef-infra[e2b]`` with your deployment's endpoints and API key
+       (`Dockerfile setup <../../reef/execution/sandbox/agentenv/build.py>`__)
+   * - Modal
+     - ``modal``
+     - ``reef-infra[modal]``, ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``
 
-Build templates before the trials
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``reef.execution.sandbox.e2b.build_task_template(task_path)`` prepares task/verifier templates before rollouts.
-Set ``evaluation.require_prepared_templates`` to refuse trial-time builds.
-An AgentENV trial can start from a verified image of the same task version if its template is unavailable.
-
-Custom ``TaskTemplateBuilder.build(scenario, task_name, task_directory)`` returns when ready.
-Raise ``TimeoutError`` for unavailable capacity; other failures end the attempt.
-Owner-aware builders must reject unsupported owners.
-Pinned work requires ``build_for_version(..., task_digest=...)`` using admitted files.
-See `template contracts <../../reef/evaluation/task_templates.py>`__.
+Harbor reads CPU, memory and time limits from the task's ``task.toml``. To build a trial's ``environment`` section,
+pass the Harbor environment value from the table, the task directory and the agent settings to
+`environment_config <../../reef/execution/sandbox/task_environment.py>`__.
+For template preparation, see the `evaluation settings <../reference/configuration-settings.rst#evaluation>`__.
 
 Keep the files of a trial
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A configured ``TrialObserver.observe(trial)`` runs before scoring and cleanup.
-Copy needed files before returning; ``trial.directory`` can be ``None``.
-Observer errors log without changing scores.
+To save agent or verifier logs from an evaluation, configure ``evaluation.trial-observer``.
+If ``trial.directory`` is available, copy the files you need in ``TrialObserver.observe(trial)``
+before returning. The worker removes the directory afterward.
 
 Cancellation and background work
 --------------------------------
