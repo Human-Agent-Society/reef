@@ -15,19 +15,20 @@ Choose an extension
 Recipes are frozen configuration dataclasses. Keep running clients and workers
 out of their fields: services can run separately.
 
-.. list-table::
-   :header-rows: 1
+In record-based training, the samples and control services exchange data through the shared store.
 
-   * - Service
-     - Extension
-   * - Control
-     - `Reports, job data and activation <recipe-control-service.rst>`__
-   * - Samples
-     - `Record selection and sample creation <recipe-samples-service.rst>`__
-   * - Training
-     - `Objectives and losses <recipe-training-service.rst>`__
-   * - Every service loading a scenario
-     - `Artifact declarations <components.rst>`__
+.. code:: mermaid
+
+   flowchart TB
+       accTitle: Recipe stages and their service owners
+       accDescr: The samples service turns records into stored samples with Record2Sample. The control service turns stored samples into JobData with Sample2Job.
+       records["Records"] -->|"Record2Sample<br/>samples service"| samples["Stored samples"]
+       samples -->|"Sample2Job<br/>control service"| job["JobData for training"]
+
+Extend `sample creation <recipe-samples-service.rst>`__,
+`job data, reports and activation <recipe-control-service.rst>`__, or
+`training objectives and losses <recipe-training-service.rst>`__.
+Every service loading a scenario reads its `artifact declarations <components.rst>`__.
 
 A minimal weight recipe
 -----------------------

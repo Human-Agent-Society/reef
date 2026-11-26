@@ -53,7 +53,7 @@ A zero weight keeps an artifact available through its dedicated URL.
 ``{}`` stops serving but keeps training; inference returns 404.
 
 Add ``component`` for a composite scenario. An empty mapping without it stops
-all components. Serving updates never change training starts and survive restarts.
+all components. Serving selections survive restarts.
 
 Poll ``GET /reef/scenarios/{scenario}/inference/status`` before sending requests.
 Add ``?model=<artifact-id>`` to check another served artifact.
@@ -75,9 +75,20 @@ The deployment's ``activation.module`` controls new artifacts:
 - ``never``: require manual activation through ``served``.
 - ``evaluated``: require an evaluation to reach ``min_mean_score``.
 
+This weight job uses the default training start A with ``activation.module: never``:
+
+.. code:: mermaid
+
+   flowchart TB
+       accTitle: Serving and training can use different artifacts
+       accDescr: Artifact A serves requests. A job from the default start A commits checkpoint B, the next default training start. Activating and loading B changes serving without changing the training start.
+       A["Artifact A"] -->|"Train and<br/>commit"| B["Artifact B"]
+       A -->|Serves| R["Agent<br/>requests"]
+       B -->|"Default<br/>start"| J["Next<br/>training job"]
+       B -.->|"Activate<br/>and load"| R
+
 Set ``{"activation": {"module": "never"}}`` in a scenario update to override
 the deployment rule. Set ``activation`` to null to restore that rule.
-An inactive artifact can still become the next training start.
 See `activation configuration
 <../reference/configuration-recipe.rst#the-activation-section>`__.
 
@@ -131,7 +142,6 @@ Set ``recipe.config.job_parameters.save_interval`` for intermediate saves:
 - Slime task and dataset jobs count rollout iterations.
 
 Both save at job end; without an interval, they save only there.
-Training continues from the last checkpoint regardless of activation.
 Slime's native ``save-interval`` does not set Reef's cadence, but Megatron
 requires it when ``save`` is configured.
 

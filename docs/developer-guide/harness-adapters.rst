@@ -118,11 +118,27 @@ See `matchers <../../reef/harness/adapters/matchers.py>`__ for available checks.
 Token limits
 ~~~~~~~~~~~~
 
-``{context_window}`` uses ``REEF_CONTEXT_WINDOW``, endpoint metadata, then 128000.
-``{max_output_tokens}`` uses ``REEF_MAX_OUTPUT_TOKENS``, then 32000.
-Values must be positive integers.
-Pi and OpenCode write both. Codex writes only explicitly supplied context;
-other adapters write neither. Artifact-evaluation ``env`` can override these variables.
+Set ``REEF_CONTEXT_WINDOW`` or ``REEF_MAX_OUTPUT_TOKENS`` to a positive integer in the
+`evaluation harness environment <../reference/http-api-evaluation.rst#the-harness-field>`__.
+Each arrow points to the next fallback.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Adapter
+     - Context window
+     - Max output tokens
+   * - pi, OpenCode
+     - Override → model metadata → 128,000
+     - Override → 32,000
+   * - Codex
+     - Override → model metadata → agent default
+     - Agent default
+   * - Other built-in adapters
+     - Agent default
+     - Agent default
+
+Use ``{context_window}`` and ``{max_output_tokens}`` in adapter templates that set these limits.
 
 Connect a new agent
 -------------------

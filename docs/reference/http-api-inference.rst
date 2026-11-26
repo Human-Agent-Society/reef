@@ -11,8 +11,22 @@ artifact, independently of any older route still answering requests.
 ``model`` defaults to ``active``; served artifact IDs also work.
 Unknown names return 404; unreadable state returns 503.
 
-- ``state``: ``pending`` (queued), ``starting``, ``ready`` (route published),
-  or ``failed`` with ``error``. Creation and activation return before readiness.
+Creation and activation return before readiness. For a new route, ``state`` follows
+this flow. An artifact with a published route stays ``ready`` while another starts.
+
+.. code:: mermaid
+
+   flowchart TB
+       accTitle: Inference startup and retries
+       accDescr: A worker takes pending work and starts the route. The route becomes ready on publication. After final failure, a new startup request returns it to pending.
+       pending["pending"] -->|Worker starts| starting["starting"]
+       starting -->|"Route<br/>published"| ready(["ready"])
+       starting -->|"Final<br/>failure"| failed["failed"]
+       failed -.->|"New<br/>request"| pending
+
+Worker retries remain in ``starting``. For ``failed``, read ``error``.
+The automatic retry delay doubles from 60 seconds to one hour. Resend the complete ``served`` mapping to retry immediately.
+
 - ``startup``: ``steps`` and ``estimate_seconds``, or null when unreported.
   Steps follow ``prepare`` → ``start`` → ``load``. Each has ``phase``,
   epoch-second ``started_at``/``ended_at``, and optional ``detail``.
@@ -27,8 +41,6 @@ Unknown names return 404; unreadable state returns 503.
 
 Without a usable route, inference returns 503: ``inference_starting`` with
 ``Retry-After: 30``, or ``inference_start_failed``.
-Failed startup retries after 60 seconds, doubling to one hour.
-Resend the complete ``served`` mapping to retry immediately.
 
 ``POST /reef/scenarios/{scenario}/redeploy`` restarts served engines without
 changing artifact selection, returning ``{scenario}``. It also replaces pending startup.

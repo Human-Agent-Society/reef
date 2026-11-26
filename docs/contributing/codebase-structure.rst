@@ -6,35 +6,28 @@ Find the package that owns your change, then read its ``__init__.py`` for the co
 Layers
 ------
 
-Packages may import their own layer and lower layers.
+A package can import from its own layer or any layer below it.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 15 35 50
+.. container:: layer-map
 
-   * - Layer
-     - Main packages
-     - Responsibility
-   * - Entry
-     - ``deploy``, ``api``
-     - Start deployments and receive HTTP requests.
-   * - Control
-     - ``control``
-     - Coordinate scenarios, their lifecycle, commits and recovery.
-   * - Domain
-     - ``samples``, ``train``, ``evaluation``, ``inference``, ``harness``, ``recipe``, ``routing``
-     - Select samples, train and evaluate candidates, serve models, run harnesses and route requests.
-   * - Foundation
-     - ``core``, ``storage``, ``artifact``, ``execution``, ``observability``, ``tinker``
-     - Provide shared types, persistence, artifact files and execution.
+   .. container:: flow
 
-These layers describe code dependencies. The `seven services
-<../user-guide/split-services.rst>`__ describe how a deployment runs that code
-and exchanges work through the shared store.
+      Entry
+          ``deploy`` starts processes. ``api`` receives HTTP requests.
 
-Keep HTTP parsing in ``reef/api/routes/``. Control operations live in ``reef/control/operations/`` and work without HTTP.
-Put method-specific code in ``recipes/<name>/``. Use the owning package's tests.
-``tests/contributing/test_dependency_boundaries.py`` checks the import boundaries.
+      Control
+          ``control`` coordinates scenario changes, commits and recovery.
+
+      Domain
+          ``recipe`` defines learning methods. ``samples`` creates samples, ``train`` runs jobs and ``evaluation`` scores candidates.
+          ``inference`` serves models, ``routing`` routes requests and ``harness`` runs agents.
+
+      Foundation
+          ``core`` defines shared types, ``storage`` persists state and ``artifact`` manages versioned files.
+          ``execution`` runs workers, ``observability`` collects telemetry and ``tinker`` connects training and serving to the Tinker SDK.
+
+Keep method-specific code in ``recipes/<name>/``. Use the owning package's tests.
+See the `service diagram <../user-guide/split-services.rst>`__ for the runtime layout.
 
 Extending Reef
 --------------
