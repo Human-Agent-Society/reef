@@ -168,7 +168,7 @@ Headers
 - ``x-reef-artifact-id``: response-only identity of the answering model or harness tree.
 - ``x-reef-rollout: 1``: service-token inference without records or training tensors.
   Streaming returns 400.
-- ``x-reef-record-training: 1``: the record keeps the call's exact sample as ``response.training``; the response does not change.
+- ``x-reef-record-training: 1``: the record keeps the call's exact sample as ``response.training`` (prompt and reply token IDs, sampled log-probs, finish reason and sampling distribution); the response does not change.
   A streaming or record-less call returns 400, as does one whose ``temperature``, ``top_p`` or ``top_k`` neither the request nor the scenario names.
   The engine must be SGLang or vLLM chat on a route that names one weight load, without ``min_p``, penalties or logit bias; otherwise 400.
 
