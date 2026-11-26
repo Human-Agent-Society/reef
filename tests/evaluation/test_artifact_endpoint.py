@@ -732,3 +732,38 @@ def test_a_streaming_call_to_a_handler_without_a_stream_of_its_own_gets_its_answ
     # The endpoint gave the handler's JSON answer as one piece, and the proxy made the agent's stream from it.
     assert '"reasoning_content": "2 and 3"' in stream and '"content": "five"' in stream
     assert stream.count("[DONE]") == 1 and runtime.inference_admission_status["active"] == 0
+
+
+@pytest.mark.unit
+def test_an_endpoint_with_log_probs_streams_and_the_capture_adds_up_the_token_ids_and_log_probs() -> None:
+    def piece(delta: Mapping[str, Any], token: str, token_id: int, **top: Any) -> dict[str, Any]:
+        choice = {
+            "index": 0,
+            "delta": delta,
+            "finish_reason": None,
+            "logprobs": {"content": [{"token": token, "logprob": -0.5}]},
+            "token_ids": [token_id],
+        }
+        return {"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": [choice], **top}
+
+    runtime = Runtime(any_artifact=True)
+    runtime.handler = handler = StreamingHandler(
+        sse(
+            piece({"role": "assistant", "content": "fi"}, "fi", 11, prompt_token_ids=[1, 2]),
+            piece({"content": "ve"}, "ve", 12),
+        )
+    )
+    with ArtifactEndpoint(runtime, ARTIFACT, log_probs=True) as endpoint:
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True, streams=True)
+        proxy.start()
+        try:
+            streamed(proxy)
+            turns = proxy.drain()
+        finally:
+            proxy.stop()
+    assert handler.payloads[0]["stream"] is True and handler.payloads[0]["return_token_ids"] is True
+    response = turns[0]["response"]
+    assert response["prompt_token_ids"] == [1, 2]
+    assert response["choices"][0]["token_ids"] == [11, 12]
+    assert [entry["token"] for entry in response["choices"][0]["logprobs"]["content"]] == ["fi", "ve"]
+    assert response["choices"][0]["message"]["content"] == "five"
