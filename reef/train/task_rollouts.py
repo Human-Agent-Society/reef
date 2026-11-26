@@ -23,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from reef_client.sse import synthesize_sse_events
+
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import inference_aborted
 from reef.core.evaluation import RolloutRequest, RolloutScores
@@ -222,7 +224,10 @@ class RolloutChat(ABC):
 class ChatEndpoint:
     """An HTTP endpoint on loopback that answers every POST with one ``RolloutChat``, for the rollouts of one job.
 
-    A request that is not JSON gets 400. The server runs on its own threads, so an agent that blocks the
+    A call that asks for a stream (``"stream": true``) and is answered gets the answer as a Chat Completions stream
+    that carries every field of it, the ``training`` capture too (``synthesize_sse_events``): the chat answers
+    whole, so this endpoint makes the stream, and the rollout's proxy passes it on unchanged and captures the
+    answer that it adds up to. A request that is not JSON gets 400. The server runs on its own threads, so an agent that blocks the
     rollout's event loop cannot block it. Use it as a context manager: it binds its loopback port and sets
     ``url`` when it is entered, and closes the port when it exits.
     """
@@ -242,7 +247,19 @@ class ChatEndpoint:
                 except json.JSONDecodeError as exc:
                     self.reply(400, {"error": {"message": f"the request is not JSON: {exc}"}})
                     return
-                self.reply(*chat.answer(self.path, payload))
+                status, body = chat.answer(self.path, payload)
+                if status == 200 and isinstance(payload, Mapping) and payload.get("stream") is True:
+                    self.stream(body)
+                else:
+                    self.reply(status, body)
+
+            def stream(self, body: Mapping[str, Any]) -> None:
+                data = "".join(synthesize_sse_events(dict(body), include_usage=True)).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
 
             def reply(self, status: int, body: Mapping[str, Any]) -> None:
                 data = json.dumps(body).encode()

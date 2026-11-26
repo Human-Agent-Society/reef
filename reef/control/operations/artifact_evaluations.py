@@ -64,7 +64,7 @@ from reef.core.evaluation import (
 )
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import TrajectoryBuilder
-from reef.core.trajectory_index import TrajectoryIndex
+from reef.core.trajectory_index import RequestValues, TrajectoryIndex
 from reef.core.values import deep_merge
 from reef.evaluation.activation import EvaluatedActivation
 from reef.evaluation.rollout_worker import (
@@ -537,15 +537,19 @@ def iter_attempt_trajectories(
     record_ids: dict[int, list[str]] = {}
     positions: dict[str, int] = {}
     title_positions: set[int] = set()
+    # Each call resends the messages of the calls before it, so the rollout's calls share their request values.
+    request_values = RequestValues()
     for position, call in enumerate(calls):
         if call.summary.status != 200:
             continue
         record = call_record(scenario, evaluation_id, call)
-        indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record)
+        indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record, request_values)
         record_ids.setdefault(call.summary.attempt, []).append(record.agent_record_id)
         positions[record.agent_record_id] = position
         if is_title_generation_call(call):
             title_positions.add(position)
+    # The calls are linked: the messages need not stay while the conversations are read.
+    request_values.made.clear()
     for attempt in sorted(record_ids):
         ids = record_ids[attempt]
         conversation_of: dict[str, int] = {}

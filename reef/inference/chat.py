@@ -241,8 +241,14 @@ class _OpenAIChunkWriter(_StreamWriter):
         return output
 
 
+#: The fields of a Messages answer that Reef adds when a call asks for them (``anthropic.TOKEN_REQUEST_KEYS``).
+ANTHROPIC_TOKEN_FIELDS = ("logprobs", "token_ids", "prompt_token_ids")
+
+
 class _AnthropicEventWriter(_StreamWriter):
-    """Anthropic Messages events; content blocks open and close as the sampled text changes kind."""
+    """Anthropic Messages events; content blocks open and close as the sampled text changes kind. ``message_delta``
+    carries the answer's token IDs and log probabilities when it has them (``ANTHROPIC_TOKEN_FIELDS``), so the stream
+    holds all that the whole answer does."""
 
     def __init__(self, message_id: str, *, model: str, input_tokens: int) -> None:
         self._message_id = message_id
@@ -315,6 +321,7 @@ class _AnthropicEventWriter(_StreamWriter):
                     "type": "message_delta",
                     "delta": {"stop_reason": response["stop_reason"], "stop_sequence": response["stop_sequence"]},
                     "usage": {"output_tokens": output_tokens},
+                    **{field: response[field] for field in ANTHROPIC_TOKEN_FIELDS if field in response},
                 }
             ),
             _sse_event({"type": "message_stop"}),
