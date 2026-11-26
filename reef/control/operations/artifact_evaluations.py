@@ -36,6 +36,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, cast, overload
 
+from reef_client.serve import has_tools
+
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
@@ -442,6 +444,11 @@ def call_record(scenario: str, evaluation_id: str, call: EvaluationCall) -> Agen
     return AgentRecord(record_id, scenario, RequestType.INFERENCE, payload, summary.started_at)
 
 
+def request_has_tools(call: EvaluationCall) -> bool:
+    """Return True when ``call`` sent a non-empty ``tools`` field in its request body."""
+    return isinstance(call.request, dict) and has_tools(call.request) and bool(call.request["tools"])
+
+
 def attempt_trajectories(
     scenario: str,
     evaluation_id: str,
@@ -457,9 +464,10 @@ def attempt_trajectories(
     Each conversation excludes calls that a retry replaced. Set ``include_records=False`` to omit ``extra.reef.records``.
 
     Only the agent trajectories from a finished rollout's final attempt carry its reward, which is null if scoring failed.
-    Each trajectory's ``extra.reef.evaluation`` identifies the evaluation, task, task index, repeat, attempt, caller,
-    conversation and scoring status. Conversation numbers start at zero within each attempt.
-    Use ``iter_attempt_trajectories`` to read one conversation at a time.
+    When that attempt includes tool-bearing calls, conversations without tool definitions (such as auxiliary title
+    generation) receive ``scored=False`` and no reward. Each trajectory's ``extra.reef.evaluation`` identifies the
+    evaluation, task, task index, repeat, attempt, caller, conversation and scoring status. Conversation numbers start
+    at zero within each attempt. Use ``iter_attempt_trajectories`` to read one conversation at a time.
     """
     return list(
         iter_attempt_trajectories(scenario, evaluation_id, item, calls, caller, include_records=include_records)
@@ -482,6 +490,7 @@ def iter_attempt_trajectories(
     indexes: dict[int, TrajectoryIndex] = {}
     record_ids: dict[int, list[str]] = {}
     positions: dict[str, int] = {}
+    tool_positions: set[int] = set()
     for position, call in enumerate(calls):
         if call.summary.status != 200:
             continue
@@ -489,6 +498,8 @@ def iter_attempt_trajectories(
         indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record)
         record_ids.setdefault(call.summary.attempt, []).append(record.agent_record_id)
         positions[record.agent_record_id] = position
+        if request_has_tools(call):
+            tool_positions.add(position)
     for attempt in sorted(record_ids):
         ids = record_ids[attempt]
         conversation_of: dict[str, int] = {}
@@ -502,6 +513,8 @@ def iter_attempt_trajectories(
             group = conversation_of.get(record_id)
             if group is not None:
                 groups[group].append(positions[record_id])
+        group_has_tools = [any(pos in tool_positions for pos in group_positions) for group_positions in groups]
+        attempt_has_tools = any(group_has_tools)
         ordered = (pos for group_positions in groups for pos in group_positions)
         if isinstance(calls, StoredCalls):
             # Read originals in bounded batches, even when a rollout has hundreds of single-call conversations.
@@ -512,7 +525,8 @@ def iter_attempt_trajectories(
             builder = TrajectoryBuilder(include_records)
             for _ in group_positions:
                 builder.add(call_record(scenario, evaluation_id, next(members)))
-            scored = caller == "agent" and finished and attempt == item.attempt_count
+            is_auxiliary = attempt_has_tools and not group_has_tools[conversation]
+            scored = caller == "agent" and finished and attempt == item.attempt_count and not is_auxiliary
             trajectory = builder.sample(reward=score if scored else None).trajectory
             evaluation = {
                 "evaluation_id": evaluation_id,
