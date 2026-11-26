@@ -55,18 +55,10 @@ if unserved. Others can reach a new active artifact.
 Providers' ``logprobs``/``top_logprobs`` pass through. For SGLang/vLLM, set
 ``logprobs: true`` and/or ``return_token_ids: true``.
 
-.. list-table:: Returned fields
-   :header-rows: 1
-
-   * - API
-     - Log probabilities
-     - Token IDs
-   * - Chat Completions
-     - ``choices[0].logprobs.content``. Streams send entries with text.
-     - ``prompt_token_ids``, ``choices[0].token_ids``. Streams send them last.
-   * - Messages
-     - ``logprobs.content`` (Reef extension).
-     - ``prompt_token_ids``, ``token_ids``. Streams send IDs and log probabilities in ``message_delta``.
+- **Chat Completions** returns ``choices[0].logprobs.content``, ``prompt_token_ids`` and ``choices[0].token_ids``.
+  Streams send log probabilities with text and token IDs in the last chunk.
+- **Messages** returns ``logprobs.content``, ``prompt_token_ids`` and ``token_ids`` as Reef extensions.
+  Streams send them in ``message_delta``.
 
 Sampled tokens follow output order. Records retain these fields. Token IDs require the flag.
 Each ``top_logprobs`` contains only its sampled token. SGLang alternatives appear in
