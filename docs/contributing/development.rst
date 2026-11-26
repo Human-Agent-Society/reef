@@ -7,8 +7,9 @@ Set up a checkout and check your change before review. Use the
 Setup
 -----
 
-Use ``uv`` and Python 3.12 or newer; CI uses 3.12. Install Git LFS for
-artifact and checkpoint tests. Reuse an existing ``.venv``. For a new checkout:
+Use ``uv`` and Python 3.12 or newer. CI uses 3.12.
+Install Git LFS for artifact and checkpoint tests.
+Reuse an existing ``.venv`` or set up a new checkout with these commands.
 
 .. code:: bash
 
@@ -39,10 +40,8 @@ Activate ``.venv`` and start with the smallest test that exercises the change:
 
    .venv/bin/python -m pytest tests/artifact/test_reef_artifacts.py -q
 
-Use the `test directory map
-<https://github.com/Human-Agent-Society/reef/blob/main/tests/AGENTS.md>`__
-to place tests and find their fixtures. Each test must pass alone and in any
-order; keep files in ``tmp_path`` and allocate ports dynamically.
+Keep test files in ``tmp_path`` and allocate ports dynamically. Follow the
+`test directory map <https://github.com/Human-Agent-Society/reef/blob/main/tests/AGENTS.md>`__.
 
 Before requesting review for Python changes, run:
 
@@ -53,12 +52,8 @@ Before requesting review for Python changes, run:
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
      .venv/bin/python -m pytest tests/ -n 8
 
-Full collection needs training dependencies, even when optional GPU checks
-skip. The Git settings isolate Git LFS tests. Use ``-n 0`` to diagnose a
-failure serially. The `CI workflow
-<https://github.com/Human-Agent-Society/reef/blob/main/.github/workflows/ci.yml>`__
-defines the test environment and suite selections. Report checks that could
-not run.
+Full collection requires the training dependencies. Use ``-n 0`` to diagnose a failure serially.
+See the `CI workflow <https://github.com/Human-Agent-Society/reef/blob/main/.github/workflows/ci.yml>`__ for environment details.
 
 Integration checks
 ------------------
@@ -74,7 +69,7 @@ real engine behavior.
 Documentation
 -------------
 
-Use Node.js 22. From the repository root:
+Use Node.js 22. Run these commands from the repository root.
 
 .. code:: bash
 
