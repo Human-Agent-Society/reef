@@ -1884,6 +1884,10 @@ def test_tree_harness_agent_timeout_env_caps_agent_and_sandbox_timeouts(tmp_path
     short_task.mkdir()
     (short_task / "task.toml").write_text("[agent]\ntimeout_sec = 600\n", encoding="utf-8")
 
+    string_short_task = tmp_path / "string-short"
+    string_short_task.mkdir()
+    (string_short_task / "task.toml").write_text('[agent]\ntimeout_sec = "600"\n', encoding="utf-8")
+
     default_tree = TreeHarness("opencode", "openai-chat", {})
     default_agent = default_tree.agent(tmp_path / "default", task_directory=unbounded_task)
     assert "override_timeout_sec" not in default_agent
@@ -1906,6 +1910,10 @@ def test_tree_harness_agent_timeout_env_caps_agent_and_sandbox_timeouts(tmp_path
     short_agent = capped_tree.agent(tmp_path / "capped-short", task_directory=short_task)
     assert short_agent["override_timeout_sec"] == 600.0
     assert cast(Mapping[str, object], short_agent["kwargs"])["timeout_s"] == 600.0
+
+    string_short_agent = capped_tree.agent(tmp_path / "capped-string-short", task_directory=string_short_task)
+    assert string_short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], string_short_agent["kwargs"])["timeout_s"] == 600.0
 
     subsecond_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "0.5"})
     subsecond_agent = subsecond_tree.agent(tmp_path / "subsecond", task_directory=unbounded_task)
@@ -1951,23 +1959,38 @@ class RecordingAgentLab(TaskLab):
         return ""
 
 
-class TimedTaskEndpoints(OpenEndpoints):
-    """``OpenEndpoints`` whose task declares ``[agent].timeout_sec`` in ``task.toml``.
+class TimedTaskEndpoints(CandidateEndpoints):
+    """Test ``CandidateEndpoints`` whose task directory declares ``[agent].timeout_sec`` in ``task.toml``.
 
-    Values hold the inherited ``root``, call and trajectory lists, plus ``task_timeout_sec`` (``float | None``).
-    ``task_directory`` writes ``[agent]\\ntimeout_sec = <value>\\n`` when ``task_timeout_sec`` is not None, or an
-    empty ``task.toml`` otherwise, preserving ``OpenEndpoints``'s directory layout and ``open`` behavior.
+    Values hold ``root`` (``Path``), ``task_timeout_sec`` (``float | None``), and ``calls`` / ``trajectories`` lists
+    (initially empty). ``task_directory`` creates ``root / rollout.task_name``, writes
+    ``[agent]\\ntimeout_sec = <value>\\n`` when ``task_timeout_sec`` is not None (or an empty ``task.toml``
+    otherwise), and returns that directory. ``open`` yields ``CandidateEndpoint("http://127.0.0.1:9", None)`` without
+    starting a server. ``add_call`` and ``add_trajectory`` append to ``calls`` and ``trajectories``.
     """
 
     def __init__(self, root: Path, task_timeout_sec: float | None) -> None:
-        super().__init__(root)
+        self.root = root
         self.task_timeout_sec = task_timeout_sec
+        self.calls: list[EvaluationCall] = []
+        self.trajectories: list[EvaluationTrajectory] = []
 
     def task_directory(self, rollout: EvaluationRollout) -> Path:
-        task = super().task_directory(rollout)
-        if self.task_timeout_sec is not None:
-            (task / "task.toml").write_text(f"[agent]\ntimeout_sec = {self.task_timeout_sec}\n", encoding="utf-8")
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        content = f"[agent]\ntimeout_sec = {self.task_timeout_sec}\n" if self.task_timeout_sec is not None else ""
+        (task / "task.toml").write_text(content, encoding="utf-8")
         return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        self.calls.append(call)
+
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        self.trajectories.append(trajectory)
 
 
 @pytest.mark.unit

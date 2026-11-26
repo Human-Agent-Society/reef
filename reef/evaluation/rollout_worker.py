@@ -31,7 +31,6 @@ import math
 import tempfile
 import threading
 import time
-import tomllib
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Iterator, Mapping
@@ -155,17 +154,17 @@ def agent_timeout_seconds(env: Mapping[str, str]) -> float | None:
 
 
 def task_agent_timeout_seconds(task_directory: Path) -> float | None:
-    """Return the positive finite ``[agent].timeout_sec`` from ``task_directory/task.toml``, or None when absent."""
+    """Return the positive finite ``[agent].timeout_sec`` parsed by Harbor from ``task_directory/task.toml``, or None
+    when the file or timeout is absent."""
     task_file = task_directory / "task.toml"
     if not task_file.is_file():
         return None
-    task = tomllib.loads(task_file.read_text(encoding="utf-8"))
-    agent = task.get("agent")
-    timeout = agent.get("timeout_sec") if isinstance(agent, Mapping) else None
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+    from harbor.models.task.config import TaskConfig
+
+    timeout = TaskConfig.model_validate_toml(task_file.read_text(encoding="utf-8")).agent.timeout_sec
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
         return None
-    value = float(timeout)
-    return value if math.isfinite(value) and value > 0 else None
+    return float(timeout)
 
 
 @dataclass(frozen=True)
