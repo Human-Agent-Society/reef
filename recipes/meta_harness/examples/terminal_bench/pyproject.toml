@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Terminal-Bench campaign for Reef's Meta-Harness recipe"
 requires-python = ">=3.12"
 dependencies = [
-    "reef-client>=0.4.3",
+    "reef-client>=0.4.4",
     # Reef supplies Harbor in this environment. The "harbor" extra of reef-eval pins a version that Reef refuses.
     "reef-eval>=0.1.1",
     "harbor[e2b]",
