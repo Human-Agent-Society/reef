@@ -11,6 +11,7 @@ can repair the next attempt but refuses to blame the caller for a 5xx.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from aiohttp import web
@@ -26,8 +27,10 @@ from reef.core.errors import (
     ReefError,
     ScenarioNotFoundError,
     TrainingStartRefusedError,
+    UpstreamLimit,
     UpstreamStatusError,
 )
+from reef.evaluation.artifact_endpoint import refusal_limit
 from reef.storage.scenario.records import RecordConflictError
 
 
@@ -106,6 +109,58 @@ def test_an_upstream_refusal_keeps_its_retry_after_wait(
     assert translated.status == upstream_status
     # Whole seconds, rounded up, so the caller never tries before the upstream's wait ends.
     assert translated.headers.get("Retry-After") == retry_after
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("upstream_status", "limit", "code"),
+    [
+        (402, UpstreamLimit.PAYMENT, "payment_required"),
+        (402, UpstreamLimit.RATE, "rate_limit"),
+        (429, UpstreamLimit.RATE, "rate_limit"),
+        (429, UpstreamLimit.PAYMENT, "payment_required"),
+        # A spending cap and a policy refusal share this status and differ only by the limit.
+        (403, UpstreamLimit.PAYMENT, "payment_required"),
+    ],
+)
+def test_a_refusal_that_names_a_limit_answers_with_its_code(
+    upstream_status: int, limit: UpstreamLimit, code: str
+) -> None:
+    error = UpstreamStatusError("refused", status=upstream_status, limit=limit)
+
+    translated = translate_error(error)
+
+    assert translated is not None
+    assert translated.status == upstream_status
+    assert translated.content_type == "application/json"
+    body = json.loads(translated.text)
+    assert body == {"error": {"message": "refused", "code": code}}
+    # The producer's body is the one the evaluation endpoint's reader understands.
+    assert refusal_limit(upstream_status, body) is limit
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("upstream_status", [402, 403, 429])
+def test_a_refusal_without_a_limit_keeps_its_plain_message(upstream_status: int) -> None:
+    error = UpstreamStatusError("refused", status=upstream_status)
+
+    translated = translate_error(error)
+
+    assert translated is not None
+    assert translated.status == upstream_status
+    assert translated.content_type == "text/plain"
+    assert translated.text == "refused"
+
+
+@pytest.mark.unit
+def test_a_refusal_carries_both_its_limit_and_its_retry_after_wait() -> None:
+    error = UpstreamStatusError("slow down", status=429, retry_after_seconds=2.2, limit=UpstreamLimit.RATE)
+
+    translated = translate_error(error)
+
+    assert translated is not None
+    assert translated.headers.get("Retry-After") == "3"
+    assert json.loads(translated.text)["error"]["code"] == "rate_limit"
 
 
 @pytest.mark.unit
