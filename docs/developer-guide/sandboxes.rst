@@ -92,10 +92,9 @@ If the template is unavailable, Reef starts the verified image by digest and
 runs its startup and readiness commands. A Compose project uses the verified
 digest for its main service.
 
-For evaluations, the deployment supplies the records for the requested task
-version through ``build_for_version``. Training reads them from the deployment
-file named by ``REEF_AGENTENV_TASK_IMAGES``. It maps each absolute task path to
-its :class:`~reef.execution.sandbox.agentenv.images.PreparedImage` records.
+For evaluations, the deployment supplies the task version’s images through
+``build_for_version``. For training, ``REEF_AGENTENV_TASK_IMAGES`` names a file
+that maps each absolute task directory to its verified images.
 
 Keep the files of a trial
 ~~~~~~~~~~~~~~~~~~~~~~~~~
