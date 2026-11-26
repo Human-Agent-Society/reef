@@ -125,6 +125,50 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     assert trajectory_reward(rollouts.samples[0]) == 1.0
 
 
+class StreamingAgentLab(AgentLab):
+    """``AgentLab`` whose agent asks for a stream, and keeps what it received in ``streams``."""
+
+    def __init__(self, rewards: dict[str, float]) -> None:
+        super().__init__(rewards)
+        self.streams: list[tuple[str, str]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        body = {"model": "m", "messages": [{"role": "user", "content": f"solve {task_path.name}"}], "stream": True}
+        request = urllib.request.Request(
+            f"{agent['kwargs']['api_base']}/chat/completions",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.streams.append((response.headers["Content-Type"], response.read().decode()))
+        return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
+
+
+@pytest.mark.unit
+def test_a_streaming_agent_gets_a_stream_and_its_rollout_trains_the_same_tokens(tmp_path):
+    lab = StreamingAgentLab({"add": 1.0})
+
+    rollouts = run_train_tasks(
+        (harbor_task(tmp_path, "add"),),
+        rollout_settings({"rollout": ROLLOUT}),
+        SamplerChat(Sampler(), "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start", topk_logprobs=0),
+        model=MODEL,
+        work_dir=tmp_path / "work",
+        start="tinker://start",
+        model_adapter="tinker://start/sampler",
+        lab=lab,
+    )
+
+    # The chat endpoint made the stream, and the rollout's proxy passed it on: the agent read a Chat Completions
+    # stream, which carries the private training capture too.
+    content_type, stream = lab.streams[0]
+    assert content_type == "text/event-stream" and '"content": "done"' in stream and stream.endswith("[DONE]\n\n")
+    training = rollouts.samples[0].training
+    assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
+    assert training["artifact_id"] == "tinker://start"
+
+
 class ScaffoldSampler(Sampler):
     """Renders each message one token per character, an assistant message as its two sampled tokens, and ends each
     prompt with the scaffold 99, which the history of the next prompt drops."""

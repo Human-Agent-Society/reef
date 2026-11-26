@@ -260,11 +260,14 @@ class TinkerInferenceHandler(InferenceHandler):
 
 
 def chat_stream(response: dict[str, Any], payload: dict[str, Any]) -> InferenceStream:
-    """Emit a completed response as buffered OpenAI SSE, keeping it as the record."""
+    """Emit a completed response as buffered OpenAI SSE, keeping it as the record. The stream carries every field
+    that a client of the whole response gets: all of it but the private ``training`` block, which the service keeps
+    from clients (``provider_response``)."""
     include_usage = bool((payload.get("stream_options") or {}).get("include_usage"))
+    sent = {field: value for field, value in response.items() if field != "training"}
 
     async def chunks() -> AsyncIterator[bytes]:
-        for event in synthesize_sse_events(response, include_usage=include_usage):
+        for event in synthesize_sse_events(sent, include_usage=include_usage):
             yield event.encode()
 
     return InferenceStream(

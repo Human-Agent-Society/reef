@@ -374,8 +374,8 @@ def test_a_call_that_waits_to_try_again_ends_when_its_endpoint_closes_or_its_tas
 def test_a_streaming_agent_gets_one_stream_after_its_call_was_sent_again(short_waits) -> None:
     runtime, handler = scripted(rate_limited(), REPLY)
     with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
-        # The evaluation's capture proxy sends each call without streaming, and makes the agent's stream from the
-        # answer.
+        # The call streams. The handler has no stream of its own, so the endpoint gives its answer as one piece,
+        # and the proxy makes the agent's stream from it.
         proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
         proxy.start()
         try:
@@ -390,7 +390,7 @@ def test_a_streaming_agent_gets_one_stream_after_its_call_was_sent_again(short_w
             turns = proxy.drain()
         finally:
             proxy.stop()
-    assert handler.payloads == [CHAT, CHAT], "the tries ran before the agent got any output"
+    assert handler.payloads == [{**CHAT, "stream": True}] * 2, "the tries ran before the agent got any output"
     assert stream.count('"content": "five"') == 1 and stream.count("[DONE]") == 1
     assert [(turn["status"], turn["response"]) for turn in turns] == [(200, REPLY)]
 
@@ -689,7 +689,7 @@ def test_a_streaming_proxy_gives_the_agent_the_engines_own_stream_and_captures_e
     runtime = Runtime(any_artifact=True)
     runtime.handler = handler = StreamingHandler(rate_limited(), ENGINE_STREAM)
     with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
-        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True, streams=True)
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
         proxy.start()
         try:
             stream = streamed(proxy)
@@ -723,7 +723,7 @@ def test_a_streaming_call_to_a_handler_without_a_stream_of_its_own_gets_its_answ
         }
     )
     with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
-        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True, streams=True)
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
         proxy.start()
         try:
             stream = streamed(proxy).decode()
@@ -754,7 +754,7 @@ def test_an_endpoint_with_log_probs_streams_and_the_capture_adds_up_the_token_id
         )
     )
     with ArtifactEndpoint(runtime, ARTIFACT, log_probs=True) as endpoint:
-        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True, streams=True)
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
         proxy.start()
         try:
             streamed(proxy)
