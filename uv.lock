@@ -4214,11 +4214,11 @@ wheels = [
 
 [[package]]
 name = "reef-client"
-version = "0.4.0"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a6/d2/ce59017bd5c4bf1e9a50edd1c5bac2a73b17158cf8d0bce6ea26b86a6971/reef_client-0.4.0.tar.gz", hash = "sha256:125db329b305d9766abcd46232107749269e76f1db0ea189d58c8f6ae57d7058", size = 43895, upload-time = "2026-11-05T01:35:56.002Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/0c/80a3a61f4a0404769c71aa653dd759b097afa7a3a2e359a5eb32d8d08fba/reef_client-0.4.1.tar.gz", hash = "sha256:e16867bf2d539d42313e7ac1813138223be4e4a472db8e0b03c6b7aa5bc9d0c1", size = 44569, upload-time = "2026-11-26T07:37:07.562Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3e/f3/269c6e982a5c2507374e4c92135c3b4579ffdfab37dd6341fb3d47d3179e/reef_client-0.4.0-py3-none-any.whl", hash = "sha256:436464269a58b9f07577ce749b5be8837437dca8d57d2d56e28db986d3efb484", size = 36714, upload-time = "2026-11-05T01:35:54.834Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/af/23bca7691d3302d5d07efb2101143fef7635a262bacfcc0cbdedd64b820f/reef_client-0.4.1-py3-none-any.whl", hash = "sha256:134daf15de23ace8a95e7508683a6355c967026f869b4dae75192797e70255f8", size = 36980, upload-time = "2026-11-26T07:37:06.486Z" },
 ]
 
 [[package]]
@@ -4354,7 +4354,7 @@ requires-dist = [
     { name = "ray", extras = ["default"], marker = "extra == 'sglang'" },
     { name = "ray", extras = ["default"], marker = "extra == 'slime'" },
     { name = "ray", extras = ["default"], marker = "extra == 'vllm'" },
-    { name = "reef-client", specifier = ">=0.4.0" },
+    { name = "reef-client", specifier = ">=0.4.1" },
     { name = "reef-eval", specifier = ">=0.1.1" },
     { name = "requests", marker = "extra == 'sglang'" },
     { name = "requests", marker = "extra == 'slime'" },
