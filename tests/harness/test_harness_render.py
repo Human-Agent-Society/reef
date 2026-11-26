@@ -719,6 +719,26 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
     assert "OPENCODE_ENABLE_EXA" not in OPENCODE.env
 
 
+def test_opencode_disables_title_generation_by_default_and_allows_override() -> None:
+    """Headless runs disable opencode's hidden title agent in opencode.json by default so they do not make an extra
+    title-generation model call; a tree can explicitly re-enable it in config/primary.json (which Reef's plugin
+    merges over opencode.json), and a layer leaves the user's config alone."""
+    default_tree = HarnessTree({})
+    assert validate_tree(default_tree, OPENCODE).passed
+    rendered = render({}, OPENCODE)
+    assert json.loads(rendered["opencode/opencode.json"])["agent"] == {"title": {"disable": True}}
+    assert json.loads(rendered["plugin/config.json"]) == {}
+
+    override_files = config({"agent": {"title": {"disable": False}}})
+    assert validate_tree(HarnessTree(override_files), OPENCODE).passed
+    assert json.loads(render(override_files, OPENCODE)["plugin/config.json"]) == {
+        "agent": {"title": {"disable": False}}
+    }
+
+    layer_files = render_tree(default_tree, OPENCODE, layer=True)
+    assert "agent" not in json.loads(layer_files["opencode/opencode.json"])
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
