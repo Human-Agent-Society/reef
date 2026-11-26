@@ -65,7 +65,7 @@ These rules apply to an item:
 - The item has the kind ``harness_plugin``, and ``adapter`` in its metadata. Its adapter must install with npm, uv or git and call the runtime's API dialect.
 - Reef refuses a task that declares MCP servers or skills.
 - The evaluation does not reach the activation rule, and an automatic evaluation cannot use an item.
-- ``"env": {"NAME": "value"}`` gives each command of the agent these variables. A name is a shell variable name, and a value is text without ``${``. ``REEF_CONTEXT_WINDOW`` and ``REEF_MAX_OUTPUT_TOKENS`` also set the model's token limits in the rendered tree, each a positive number of tokens (`Token limits <../developer-guide/harness-adapters.rst#token-limits>`__).
+- ``"env": {"NAME": "value"}`` gives each command of the agent these variables. A name is a shell variable name, and a value is text without ``${``. ``REEF_CONTEXT_WINDOW`` and ``REEF_MAX_OUTPUT_TOKENS`` also set the model's token limits in the rendered tree, each a positive number of tokens (`Token limits <../developer-guide/harness-adapters.rst#token-limits>`__). ``REEF_AGENT_TIMEOUT_SECONDS`` caps the agent's wall-clock time, in positive finite seconds, bounding both the agent timeout and cloud sandbox lifetime.
 - ``"config": {"<target>": {...}}`` merges each JSON object into the tree's ``config/<target>.json``, as if the tree held it. The tree with the config must pass the adapter's validation (`Config checks <../developer-guide/harness-adapters.rst#config-checks>`__), so the config sets no key that Reef's model binding writes. Otherwise Reef returns 400.
 
 Log probabilities of an evaluation
