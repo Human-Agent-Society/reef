@@ -268,6 +268,51 @@ def test_a_sample_longer_than_max_tokens_is_left_out_before_its_group_forms(tmp_
     )
 
 
+class EnvironmentAgentLab(AgentLab):
+    """An ``AgentLab`` that keeps the Harbor environment config of each rollout in ``environments``."""
+
+    def __init__(self, rewards: dict[str, float]) -> None:
+        super().__init__(rewards)
+        self.environments: list[dict[str, object]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.environments.append(overrides["environment"])
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+
+@pytest.mark.unit
+def test_rollouts_on_e2b_start_the_prepared_images_of_the_deployments_file(tmp_path, monkeypatch):
+    task = harbor_task(tmp_path / "tasks", "add")
+    image = {
+        "directory": "environment",
+        "source_image": None,
+        "image": "registry.example/tasks/add@sha256:" + "b" * 64,
+        "template_id": None,
+        "start": None,
+        "ready": None,
+    }
+    images_file = tmp_path / "private" / "task-images.json"
+    images_file.parent.mkdir()
+    # The deployment names the task by the path that the job reads; a redundant part of the path does not count.
+    images_file.write_text(json.dumps({f"{task.task_path.parent}/./add": [image]}))
+    monkeypatch.setenv("REEF_AGENTENV_TASK_IMAGES", str(images_file))
+    settings = replace(rollout_settings({"rollout": ROLLOUT}), environment="e2b")
+    lab = EnvironmentAgentLab({"add": 1.0, "sort": 0.0})
+
+    def run(tasks: tuple[TaskSample, ...]) -> TaskJobRollouts:
+        chat = SamplerChat(Sampler(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0)
+        return run_train_tasks(tasks, settings, chat, model=MODEL, work_dir=tmp_path / "work", start="s", lab=lab)
+
+    assert run((task,)).rewards() == {"add": (1.0, 1.0)}
+    # A prepared task needs no build before its rollouts, and each trial gets its task's image.
+    assert lab.builds == []
+    assert [environment["kwargs"]["prepared_images"] for environment in lab.environments] == [[image]] * 2
+    # A task that the file does not list runs no rollout: the deployment lists each task of the job.
+    with pytest.raises(ValueError, match="list no task at"):
+        run((harbor_task(tmp_path / "tasks", "sort"),))
+    assert len(lab.environments) == 2
+
+
 @pytest.mark.unit
 def test_the_sampler_chat_refuses_a_request_that_tinker_cannot_serve():
     with ChatEndpoint(

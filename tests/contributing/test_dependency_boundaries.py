@@ -448,8 +448,9 @@ def test_the_agentenv_build_and_compose_helpers_load_without_the_e2b_package() -
         "sys.modules['e2b'] = None\n"
         "from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, dockerfile_build\n"
         "from reef.execution.sandbox.agentenv.compose import ComposeSandbox, TransientStartError, compose_mode\n"
-        "assert (dockerfile_build({}), compose_mode({})) == ('e2b', 'off')\n"
-        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError\n"
+        "from reef.execution.sandbox.agentenv.images import ColdSandbox, TaskImages\n"
+        "assert (dockerfile_build({}), compose_mode({}), TaskImages.from_environ({})) == ('e2b', 'off', None)\n"
+        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError and ColdSandbox\n"
         "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
 

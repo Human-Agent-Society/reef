@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from reef.core.plugins import ConfiguredPlugin
+from reef.execution.sandbox.agentenv.images import PreparedImageJson
 
 
 class TaskTemplateBuilder(ConfiguredPlugin, ABC):
@@ -37,6 +38,13 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
     Its default calls ``build_for_owner`` for unpinned work. A builder supports pinned work when it overrides
     ``build_for_version``. The override uses the admitted digest or builds from the supplied pinned directory.
     A subclass that changes a legacy build hook must also declare how to build the admitted version.
+
+    ``build_for_version`` returns None, or the images that the builder verified for this owner and task version, as
+    a JSON list of ``PreparedImage`` objects (``reef.execution.sandbox.agentenv.images``). Each image gets a
+    template ID only for a template that is ready. A trial of the task then starts each listed environment from its
+    template, or from its image when the template is missing or not ready, and builds nothing for it. So a builder
+    returns the images also when it could not make their templates. The list applies only to the trials of the task
+    digest that the call received; a call with None gives no trial an image.
 
     Purpose: the evaluation service's ``TaskTemplateWorker`` calls ``build_for_version`` for each template item.
     """
@@ -66,8 +74,9 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
         task_directory: Path,
         *,
         task_digest: str | None,
-    ) -> None:
+    ) -> list[PreparedImageJson] | None:
         await self.build_for_owner(owner, scenario, task_name, task_directory)
+        return None
 
 
 class DockerfileTemplateBuilder(TaskTemplateBuilder):
@@ -89,9 +98,10 @@ class DockerfileTemplateBuilder(TaskTemplateBuilder):
         task_directory: Path,
         *,
         task_digest: str | None,
-    ) -> None:
+    ) -> list[PreparedImageJson] | None:
         # The directory already points to the admitted version.
         await self.build_for_owner(owner, scenario, task_name, task_directory)
+        return None
 
 
 __all__ = ["DockerfileTemplateBuilder", "TaskTemplateBuilder"]

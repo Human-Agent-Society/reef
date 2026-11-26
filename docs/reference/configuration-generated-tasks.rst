@@ -19,6 +19,7 @@ Under ``recipe.config.job-parameters``, set an ``objective`` and the backend's r
 
 Both configurations use underscore keys. The agent defaults to ``terminus-2``. Its model calls must use text chat without tools.
 Set ``environment`` for the sandbox provider and ``agent_host`` if a sandboxed agent needs to reach the rollout host.
+AgentENV jobs can also use `prepared task images <../developer-guide/sandboxes.rst#start-tasks-from-prepared-images>`__.
 
 The ``generator`` section
 -------------------------

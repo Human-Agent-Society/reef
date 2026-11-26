@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import random
 import threading
 from collections import Counter
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from reef.core.job_data import TrajectorySample
-from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.agentenv.images import TaskImages
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
@@ -388,7 +389,8 @@ class HarborRolloutSession:
     Harbor lab. ``run`` gives the Slime fields of one rollout and appends its result; a failed rollout gives
     ``removed_fields``, and cancelling ``run`` cancels the rollout and waits for its cleanup. At most
     ``harbor.concurrency`` rollouts and environment builds run at a time. ``close`` closes the chat endpoint and lets
-    the threads end when their work ends.
+    the threads end when their work ends. On ``e2b``, the rollouts start the prepared images of the file that
+    ``TASK_IMAGES_VARIABLE`` names, when the deployment sets it (``TaskImages.from_environ``).
     """
 
     def __init__(
@@ -418,6 +420,7 @@ class HarborRolloutSession:
             verifier_timeout_reward=settings.verifier_timeout_reward,
             lab=lab,
             concurrency=settings.concurrency,
+            task_images=TaskImages.from_environ(os.environ) if settings.environment == "e2b" else None,
         )
 
     def close(self) -> None:
@@ -439,9 +442,10 @@ class HarborRolloutSession:
     async def built(self, task_path: Path) -> str:
         """Wait for the one build of the task's remote environment: "", or the error that stopped it.
 
-        Two concurrent rollouts of one task must not build its environment together, which E2B refuses.
+        Two concurrent rollouts of one task must not build its environment together, which E2B refuses. A task with
+        prepared images has nothing to build (``TaskRolloutRunner.builds_environment_first``).
         """
-        if self.runner.environment not in REMOTE_TASK_ENVIRONMENTS:
+        if not self.runner.builds_environment_first(task_path):
             return ""
         if task_path not in self.builds:
             self.builds[task_path] = asyncio.ensure_future(self.on_own_loop(self.build(task_path)))
