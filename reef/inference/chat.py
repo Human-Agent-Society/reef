@@ -198,8 +198,9 @@ class _StreamWriter(ABC):
 class _OpenAIChunkWriter(_StreamWriter):
     """``chat.completion.chunk`` events sharing one id, model and timestamp."""
 
-    def __init__(self, common: Mapping[str, Any]) -> None:
+    def __init__(self, common: Mapping[str, Any], *, include_usage: bool = False) -> None:
         self._common = dict(common)
+        self._include_usage = include_usage
 
     def _chunk(self, delta: Mapping[str, Any], **choice_fields: Any) -> bytes:
         finish_reason = choice_fields.pop("finish_reason", None)
@@ -233,7 +234,11 @@ class _OpenAIChunkWriter(_StreamWriter):
         if "token_ids" in choice:
             closing["token_ids"] = choice["token_ids"]
         prompt = {"prompt_token_ids": response["prompt_token_ids"]} if "prompt_token_ids" in response else {}
-        return [_sse_data({**self._common, **prompt, "choices": [closing]}), b"data: [DONE]\n\n"]
+        output = [_sse_data({**self._common, **prompt, "choices": [closing]})]
+        if self._include_usage:
+            output.append(_sse_data({**self._common, "choices": [], "usage": response["usage"]}))
+        output.append(b"data: [DONE]\n\n")
+        return output
 
 
 class _AnthropicEventWriter(_StreamWriter):
@@ -329,7 +334,7 @@ class ChatStreamRelay:
         self._parser = stream_tool_parser
         self._tools = _StreamedToolCalls()
         self._reasoning = ""
-        self._text = ""
+        self._text_parts: list[str] = []
 
     def piece(self, kind: str, value: str, *, parse_tools: bool = True) -> list[bytes]:
         if not value:
@@ -350,7 +355,7 @@ class ChatStreamRelay:
                 normal_text, calls = parse(value)
         output: list[bytes] = []
         if normal_text:
-            self._text += normal_text
+            self._text_parts.append(normal_text)
             output.extend(self.writer.text(normal_text))
         for fallback_index, call in enumerate(calls):
             index = getattr(call, "tool_index", fallback_index)
@@ -384,16 +389,24 @@ class ChatStreamRelay:
         if isinstance(final_reasoning, str) and final_reasoning.startswith(self._reasoning):
             output.extend(self.piece("thinking", final_reasoning[len(self._reasoning) :], parse_tools=False))
         final_text = message.get("content")
-        if isinstance(final_text, str) and final_text.startswith(self._text):
-            output.extend(self.piece("text", final_text[len(self._text) :], parse_tools=False))
+        streamed_text = "".join(self._text_parts)
+        if isinstance(final_text, str) and final_text.startswith(streamed_text):
+            output.extend(self.piece("text", final_text[len(streamed_text) :], parse_tools=False))
         for index, call in enumerate(tool_calls):
             function = call.get("function") if isinstance(call, Mapping) else None
             if not isinstance(function, Mapping):
                 continue
             arguments = _argument_text(function.get("arguments", ""))
             emitted = self._tools.arguments.get(index, "")
-            missing = arguments[len(emitted) :] if arguments.startswith(emitted) else arguments
-            if not missing and index in self._tools.arguments:
+            if index in self._tools.arguments:
+                if _json_arguments_equal(arguments, emitted):
+                    continue
+                if not arguments.startswith(emitted):
+                    continue
+                missing = arguments[len(emitted) :]
+            else:
+                missing = arguments
+            if not missing:
                 continue
             output.extend(
                 self.writer.tool_call(index, self._tools.ids[index], self._tools.names[index], missing, announced=True)
@@ -403,6 +416,15 @@ class ChatStreamRelay:
 
 def _argument_text(arguments: Any) -> str:
     return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+
+def _json_arguments_equal(left: str, right: str) -> bool:
+    try:
+        return json.dumps(json.loads(left), sort_keys=True, separators=(",", ":")) == json.dumps(
+            json.loads(right), sort_keys=True, separators=(",", ":")
+        )
+    except json.JSONDecodeError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -661,7 +683,11 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": str(call.request.get("model", self._model_path)),
-            }
+            },
+            include_usage=(
+                isinstance(call.request.get("stream_options"), Mapping)
+                and call.request["stream_options"].get("include_usage") is True
+            ),
         )
 
     def _finish_frames(
