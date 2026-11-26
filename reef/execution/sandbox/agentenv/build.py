@@ -18,8 +18,8 @@ A worker that AgentENV loses during a build never ends the build. Its template s
 alias stays bound to it. A live worker ends each build within ``ORPHAN_BUILDING_GRACE_S`` after the build's deadline.
 So a template that is ``building`` for longer is an orphan too.
 
-``KillOnTimeoutE2BEnvironment`` (``reef.execution.sandbox.e2b``) uses this module when ``REEF_E2B_DOCKERFILE_BUILD`` is
-``aenv``. The ``aenv`` CLI and its ``aenv-buildctl`` must be on ``PATH``.
+``KillOnTimeoutE2BEnvironment`` (``reef.execution.sandbox.e2b.trial``) uses this module when
+``REEF_E2B_DOCKERFILE_BUILD`` is ``aenv``. The ``aenv`` CLI and its ``aenv-buildctl`` must be on ``PATH``.
 """
 
 from __future__ import annotations
@@ -220,7 +220,8 @@ class DockerfileBuild:
     With ``image`` true, the build makes no template: it publishes the image ``aenv/<alias>:latest`` in the
     deployment's repository, and ``alias`` is an image name. The resources and ``start_command`` are then not read.
     Purpose: ``ensure_aenv_template`` runs it when the alias names no template. ``KillOnTimeoutE2BEnvironment`` runs
-    an image build for the main service of a task's Compose project (``reef.execution.sandbox.agentenv_compose``).
+    an image build for the main service of a task's Compose project
+    (``reef.execution.sandbox.agentenv.compose``).
     """
 
     context_dir: Path

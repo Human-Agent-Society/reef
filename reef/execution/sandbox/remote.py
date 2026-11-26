@@ -20,8 +20,9 @@ A sandbox carries its deployment as ``owner``; a Reef that stopped mid run never
 process starts its first sandbox it stops the ones its deployment left (:meth:`RemoteExecutor.reap_once`), and
 never another deployment's.
 
-A provider module (:mod:`reef.execution.sandbox.e2b`, :mod:`reef.execution.sandbox.modal`) implements the sandbox's start, its file and
-command primitives, and the launch of one process. :mod:`reef.execution.sandbox.config` selects a provider for an
+A provider's executor module (:mod:`reef.execution.sandbox.e2b.executor`,
+:mod:`reef.execution.sandbox.modal.executor`) implements the sandbox's start, its file and command
+primitives, and the launch of one process. :mod:`reef.execution.sandbox.config` selects a provider for an
 executor, and :mod:`reef.execution.sandbox.task_environment` names the Harbor task environments.
 """
 
@@ -498,7 +499,8 @@ class TunnelPump:
     ``tunnel_headers`` and the relay's ``secret`` in :data:`RELAY_SECRET_HEADER`. In ``tunnel_headers``, each name
     is an HTTP token and each value visible ASCII text (:data:`HEADER_VALUE`). No two names are equal ignoring case,
     and no name is :data:`RELAY_SECRET_HEADER`. The constructor raises ``ValueError`` for other headers; its message
-    names a header and never its value.
+    names a header and never its value. ``taken`` holds the IDs of the requests that the pump took: the relay gives
+    a request out again when no reply piece comes in time, and the pump answers each ID once.
     Purpose: :meth:`RemoteSession.forward` makes one for each forwarded port. Each request to the relay (``/ready``,
     ``/next``, ``/reply``) carries ``headers`` and never follows a redirect: a redirect fails the request, so no
     header reaches another address. A request to the local port carries only the headers that the sandbox's process
@@ -529,6 +531,7 @@ class TunnelPump:
         self.url = url
         self.port = port
         self.pollers = pollers
+        self.taken: set[str] = set()
         self.headers = {**(tunnel_headers or {}), RELAY_SECRET_HEADER: secret}
         self.ready = threading.Event()
         self.failure: str | None = None
@@ -596,6 +599,9 @@ class TunnelPump:
             except Exception:
                 await asyncio.sleep(1)
                 continue
+            if request["id"] in self.taken:
+                continue
+            self.taken.add(request["id"])
             await self.serve(tunnel, local, request)
 
     async def serve(self, tunnel: ClientSession, local: ClientSession, request: Mapping[str, Any]) -> None:

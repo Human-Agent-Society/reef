@@ -77,7 +77,7 @@ Every task must be within these limits on its files. The module ``reef.storage.d
      -H 'Content-Type: application/gzip' \
      --data-binary @tasks.tar.gz
 
-The setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see `The data section <configuration-service.rst#the-data-section>`__). The files of one archive unpack to at most 8 GiB; create larger tasks in the reference form. Harbor's task loader must accept each task directory.
+The setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see `Settings reference <configuration-settings.rst#storage>`__). The files of one archive unpack to at most 8 GiB; create larger tasks in the reference form. Harbor's task loader must accept each task directory.
 
 **Reference form.** First write each task directory into the owner's partition of the task file store, in the layout of the deployment's ``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner ``<owner>`` is ``data/<owner>``, and the directory has the task name as its name. Compute its digest with ``reef.storage.data.tasks.TaskDirectoryDigest``, or with ``files_digest`` for a local directory. Then send the task names and digests as JSON. ``metadata`` is optional, as in the archive form:
 

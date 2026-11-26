@@ -351,8 +351,8 @@ section with the component's URL:
        lora-rank: 32
 
 ``reef serve`` then starts no local component. The GPU host downloads
-``model-path``; the Reef host keeps it as a remote identifier. `The inference
-section <../reference/configuration-inference.rst#the-inference-section>`__ lists the
+``model-path``; the Reef host keeps it as a remote identifier. The `settings
+reference <../reference/configuration-settings.rst#inference>`__ lists the
 ``inference.remote`` settings.
 
 Behavior to rely on:

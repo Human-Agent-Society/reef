@@ -161,6 +161,7 @@ Send an inference call to ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v
 
 The same prefix with ``/evaluation/v1/{route}`` makes the same call without a record.
 
+
 These rules apply to an artifact that serves beside the active one:
 
 - In a scenario with several components, it stays bound to the artifacts of the other components that were active when it started to serve. A later activation does not change that binding.
@@ -168,6 +169,70 @@ These rules apply to an artifact that serves beside the active one:
 - The samples service does not mark a sample stale while the scenario serves the artifact that produced it. After that artifact stops serving, the check counts only the artifacts that the scenario served as active: an on-policy stage marks a sample whose artifact is not the active one.
 
 - A scenario whose components load nothing into a runtime, such as a harness scenario, can serve any of its artifacts together. `Set what a scenario serves`_ gives the limits of every other scenario.
+
+
+Bind one chat attempt
+~~~~~~~~~~~~~~~~~~~~~
+
+Use this optional contract when the caller must select a target before sending a model request.
+It supports non-streaming Chat Completions on the artifact routes, including the unrecorded evaluation route.
+Existing calls without the new headers keep their routing, streaming and retry behavior.
+
+First read ``GET /reef/scenarios/{scenario}/inference/target?model={name}`` with the existing service token.
+``model`` names an exact serving row and defaults to ``active``. An unknown name returns 404, without fallback.
+This read does not execute a model, reserve an engine, or extend an artifact's lifetime.
+
+.. list-table:: Target response
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Field
+     - Meaning
+   * - ``contract_version``
+     - ``1`` for this contract.
+   * - ``model``
+     - The selected row name. Use this name in the artifact route.
+   * - ``artifact_id``
+     - The artifact associated with that row.
+   * - ``binding_id``
+     - An opaque SHA-256 identifier of the scenario, row, engine address, engine model name and serving settings.
+   * - ``protocol``
+     - ``openai_chat_completions``.
+   * - ``streaming``
+     - ``false``. This contract does not yet support streams.
+
+Then send the ordinary provider body to ``/reef/scenarios/{scenario}/artifacts/{model}/v1/chat/completions/attempt`` with both headers:
+
+- ``X-Reef-Binding-Id``: the returned 64-character lowercase hexadecimal identifier.
+- ``X-Reef-Attempt-Id``: a caller-owned identifier of 1 to 128 letters, digits or ``._:-``.
+
+For example, resolve ``model=artifact-1``, then call the ``artifacts/artifact-1`` route with the returned binding.
+The response preserves the provider body, including any reported usage.
+It adds the two request headers and the existing ``X-Reef-Artifact-Id`` header on success.
+Recorded calls also keep their existing record receipt.
+Use ``/artifacts/{model}/evaluation/v1/chat/completions/attempt`` under the same scenario prefix for an unrecorded call.
+
+Reef reads the current row and settings without its stale-read fallback.
+A missing row returns 404. A changed binding returns 409 before execution.
+An unavailable or concurrently changing serving table returns 503 before execution.
+Malformed headers, default routes and streaming requests return 400 before execution.
+Unsupported attempt routes return 404.
+An accepted request keeps its selected row and settings, even if another artifact becomes active.
+An engine binding refusal returns 503; an engine abort returns 409. The replica does not retry either response.
+It invokes the configured inference handler at most once per accepted HTTP request.
+
+The binding describes a serving configuration, not new engine guarantees.
+Weight-bearing runtimes must already pin admitted requests to the selected model name or use an immutable provider revision.
+A record-only artifact identifies its configured model, not immutable weights at an external provider.
+The response does not invent token counts or token limits. Callers must validate their handler's usage and configured limits.
+
+``attempt_id`` correlates a request; Reef does not persist it or deduplicate repeated HTTP requests.
+The caller owns durable admission, retry decisions and result recovery.
+After a timeout or lost response, it must treat execution as uncertain rather than resend the same attempt.
+This addition changes no stored format, service configuration, dependencies or payment behavior.
+It can be rolled out before callers opt in. Older servers reject both new paths without calling a model.
+Thus a mixed deployment can return an unsupported-route error, but cannot silently run a strict call through the old retry loop.
+
 
 Restore a scenario selection
 ----------------------------

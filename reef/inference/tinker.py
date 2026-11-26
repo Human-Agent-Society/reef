@@ -29,6 +29,7 @@ from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.core.values import JsonValue
 from reef.inference.interfaces import (
     InferenceArtifact,
     InferenceHandler,
@@ -164,8 +165,11 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def serves_any_artifact(self) -> bool:
         return True
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
-        """``artifact``'s own sampler on the service: a call that names it samples that artifact's weights."""
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
+        """``artifact``'s own sampler on the service: a call that names it samples that artifact's weights. The
+        service has no engine field, so ``serving_config`` changes nothing."""
         try:
             return ServedArtifact(artifact.artifact_id, self.base_url, self.sampler_path(artifact) or self._model)
         except ValueError:

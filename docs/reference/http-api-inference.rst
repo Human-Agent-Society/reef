@@ -16,6 +16,7 @@ Scenario creation and activation select an artifact and do not wait for its engi
 .. code:: json
 
    {"artifact_id": "artifact-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
+    "engine_replicas": null,
     "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
                            "detail": "Quantizing to NVFP4"},
                           {"phase": "start", "started_at": 1794150480.6, "ended_at": null,
@@ -42,6 +43,8 @@ A newer request, such as one for a changed serving config, replaces the current 
 * ``idle``: no engine runs. The next request starts one and waits for it.
 
 ``engine`` is null in every other state, and when the handler cannot tell. While ``engine`` is ``starting``, ``engine_detail`` can give one short line about what the engine does now, such as ``Loading weights · 0:42``. It is null otherwise.
+
+``engine_replicas`` counts the engine replicas behind the route of a ``ready`` artifact, such as the containers of a server that scales, when the handler reports them: ``{"serving": 1, "starting": 2, "replicas": [...]}``. ``serving`` replicas answer now, and ``starting`` ones run but do not answer yet. ``replicas`` names each replica when the handler can, and is empty otherwise: ``{"id": "ta-01M8...", "state": "starting", "started_at": 1795590000.0, "startup": {...}}``. ``id`` names the replica, such as its container ID. ``started_at`` is when it started, in epoch seconds, or null. ``startup`` gives its own ``start`` and ``load`` phases while it starts, in the form of the status's ``startup``, or null. It is null in every other state, and when the handler cannot tell. An engine can be ``warm`` while more replicas start. Then ``engine_detail`` and the ``start`` and ``load`` phases of ``startup`` describe a replica that starts.
 
 ``startup`` gives the artifact's startup in three fixed phases, the same for every backend:
 

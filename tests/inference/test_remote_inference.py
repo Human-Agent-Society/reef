@@ -1549,7 +1549,7 @@ def test_slot_urls_serve_one_full_weight_checkpoint_on_each_component(component,
             (tmp_path / name / "config.json").write_text("{}")
             artifacts.append(Artifact.local(tmp_path / name))
         version = runtime.activate_checkpoint(artifacts[0])
-        beside = runtime.serve_artifact(artifacts[1], scenario="math")
+        beside = runtime.serve_artifact(artifacts[1], scenario="math", serving_config={})
         routes = [runtime.served_artifact(artifact.artifact_id, "math") for artifact in artifacts]
         assert routes[1] == beside and [route.url for route in routes] == [url, other_url]
         # Each route names the load of its own component, which admits requests under that name only.

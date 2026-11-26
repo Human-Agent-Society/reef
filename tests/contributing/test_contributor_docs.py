@@ -1,4 +1,4 @@
-"""Keep contributor routing and playbook paths tied to the repository."""
+"""Keep contributor guide paths and navigation tied to the repository."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parents[2]
 CONTRIBUTOR_GUIDES = (
     REPO_ROOT / "docs" / "contributing" / "codebase-structure.rst",
-    REPO_ROOT / "docs" / "contributing" / "adding-components.rst",
+    REPO_ROOT / "docs" / "contributing" / "development.rst",
 )
 REPOSITORY_PATH = re.compile(r"``((?:(?:reef|tests|docs|examples|docker)/[^`]*|pyproject\.toml))``")
 
@@ -37,19 +37,7 @@ def test_contributor_guides_are_linked_from_entry_points_and_site_navigation() -
     contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     navigation = (REPO_ROOT / "docs" / "site" / "lib" / "docs.ts").read_text(encoding="utf-8")
 
-    for filename in ("codebase-structure.rst", "adding-components.rst"):
-        slug = Path(filename).stem
+    for guide in CONTRIBUTOR_GUIDES:
+        slug = guide.stem
         assert f"https://reefinfra.ai/docs/contributing/{slug}/" in contributing
-        assert f'"contributing/{filename}"' in navigation
-
-
-def test_component_playbooks_name_the_live_registration_points() -> None:
-    playbooks = CONTRIBUTOR_GUIDES[1].read_text(encoding="utf-8")
-    recipe_registry = (REPO_ROOT / "reef" / "recipe" / "registry.py").read_text(encoding="utf-8")
-    runtime_registry = (REPO_ROOT / "reef" / "inference" / "registry.py").read_text(encoding="utf-8")
-    route_registry = (REPO_ROOT / "reef" / "api" / "routes" / "__init__.py").read_text(encoding="utf-8")
-
-    assert "register_kind" in playbooks and "def register_kind" not in recipe_registry
-    assert "package.module:ClassName" in playbooks
-    assert "RuntimeFactory" in playbooks and "def register_runtime_kind" not in runtime_registry
-    assert "register_routes" in playbooks and "def register_routes" in route_registry
+        assert f'"contributing/{guide.name}"' in navigation

@@ -11,6 +11,7 @@ translate it, so the route answers HTTP 500.
 from __future__ import annotations
 
 import logging
+import math
 
 from aiohttp import web
 
@@ -73,6 +74,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
 _UPSTREAM_CLIENT_ERRORS: dict[int, type[web.HTTPError]] = {
     400: web.HTTPBadRequest,
     401: web.HTTPUnauthorized,
+    402: web.HTTPPaymentRequired,
     403: web.HTTPForbidden,
     404: web.HTTPNotFound,
     408: web.HTTPRequestTimeout,
@@ -98,11 +100,14 @@ def _translate_upstream(exc: UpstreamStatusError) -> web.HTTPError:
 
     A 4xx means the caller's request was rejected, so it is passed through
     with the upstream's own message — agents parse those to repair the next
-    attempt. A 5xx is the upstream's own fault, not the caller's, so it
-    becomes 502 rather than blaming the request.
+    attempt — and with the upstream's ``Retry-After`` wait, in whole seconds
+    rounded up, when it named one. A 5xx is the upstream's own fault, not the
+    caller's, so it becomes 502 rather than blaming the request.
     """
     if 400 <= exc.status < 500:
-        return _UPSTREAM_CLIENT_ERRORS.get(exc.status, web.HTTPBadRequest)(text=str(exc))
+        wait = exc.retry_after_seconds
+        headers = None if wait is None else {"Retry-After": str(math.ceil(wait))}
+        return _UPSTREAM_CLIENT_ERRORS.get(exc.status, web.HTTPBadRequest)(text=str(exc), headers=headers)
     return web.HTTPBadGateway(text=str(exc))
 
 

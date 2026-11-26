@@ -46,7 +46,7 @@ No service calls another. Each one reads and writes the deployment's shared stor
      - Serves the routes that a harness client calls: the active tree, the harness artifacts, the import of a person's files, and the adapters.
      - Harness import requests
 
-`Codebase structure <../contributing/codebase-structure.rst#services-and-the-shared-store>`__ maps each service to its code and its queues.
+`Codebase structure <../contributing/codebase-structure.rst>`__ maps the code to its packages and layers.
 
 Start the services
 ------------------
@@ -212,6 +212,8 @@ Evaluation
 ----------
 
 The inference service serves what ``served_models`` names: the active artifact of each scenario and the artifacts served beside it. A candidate under evaluation is not one of them. Before each trial, the evaluation service asks inference to start the candidate and waits until its engine is ready. It then sends the rollout's model calls to that engine. The request publishes no route, so no client reaches the candidate, and no call becomes a record of the scenario. An evaluation therefore needs a running inference service.
+
+**Stop the evaluation service.** ``evaluation.on-stop`` and ``evaluation.finish-timeout-s`` set what a stopping process does with its rollouts (`Settings reference <../reference/configuration-settings.rst#evaluation>`__). A rollout that the process gives back to the queue uses no attempt of ``storage.work-max-attempts``. A process that is killed gives back nothing: each of its rollouts goes back to the queue when its lease expires, and that attempt counts. Set ``evaluation.finish-timeout-s`` below the delay after which your supervisor kills the process.
 
 Control restarts
 ----------------

@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from reef.core.config import config_metadata, config_option
+
 
 @dataclass(frozen=True, slots=True)
 class TracingSettings:
@@ -39,11 +41,31 @@ class TracingSettings:
     scenario's traffic.
     """
 
-    enabled: bool = False
-    endpoint: str | None = None
-    authorization: str | None = field(default=None, repr=False)
-    headers: Mapping[str, str] | None = None
-    service_name: str = "reef"
+    enabled: bool = config_option(False, help="Turn on record tracing over OTLP/HTTP.")
+    endpoint: str | None = config_option(
+        None,
+        help=(
+            "Complete OTLP/HTTP traces URL. When unset, the exporter reads the standard "
+            "OTEL_EXPORTER_OTLP_ENDPOINT variable."
+        ),
+    )
+    authorization: str | None = field(
+        default=None,
+        repr=False,
+        metadata=config_metadata(
+            "Value of the Authorization header that the tracing backend expects, such as Bearer <token>. "
+            "The startup report masks it.",
+            env="REEF_TRACING_AUTHORIZATION",
+        ),
+    )
+    headers: Mapping[str, str] | None = config_option(
+        None,
+        help=(
+            "Other request headers for the tracing backend, as a mapping of strings. Authorization is refused "
+            "here; use observability.tracing.authorization."
+        ),
+    )
+    service_name: str = config_option("reef", help="The service.name resource attribute of the spans.")
 
     #: Environment fallback for ``authorization``, read by :func:`reef.observability.build_record_observer`.
     AUTHORIZATION_ENVIRONMENT_VARIABLE = "REEF_TRACING_AUTHORIZATION"

@@ -1019,9 +1019,10 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     assert parameters["objective"] == "slime_dataset"
     assert options["advantage-estimator"] == "grpo" and options["disable-grpo-std-normalization"] is True
     assert int(options["n-samples-per-prompt"]) >= 2
-    # One job of buffer_size tasks is one Slime rollout and one optimizer step.
+    # One job of buffer_size tasks is one Slime rollout and one optimizer step; a job of fewer tasks would fill the
+    # rollout with its first tasks again.
     tasks = slime["pipeline"]["sample2job"]["config"]["buffer_size"]
-    assert int(options["rollout-batch-size"]) == tasks
+    assert int(options["rollout-batch-size"]) == tasks == slime["pipeline"]["sample2job"]["config"]["job_samples"]
     assert int(options["global-batch-size"]) == tasks * int(options["n-samples-per-prompt"])
     # The actor, the rollout engines and Reef's serving engine share one node, and the actor's parallel layout fits.
     actor = int(options["actor-num-gpus-per-node"])
@@ -1035,6 +1036,18 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     window = slime["inference"]["options"]["context-length"]
     assert int(options["sglang-context-length"]) == int(options["rollout-max-context-len"]) == window
     assert int(options["rollout-max-response-len"]) == harbor["agent"]["kwargs"]["llm_kwargs"]["max_tokens"]
+
+
+@pytest.mark.unit
+def test_the_slime_example_trains_with_slimes_own_qwen35_loss() -> None:
+    options = yaml.safe_load((EXAMPLES / SLIME_EXAMPLE).read_text())["training"]["options"]
+    # REINFORCE with truncated importance sampling and score centering, each token weighing the same.
+    assert (options["loss-type"], options["pg-loss-type"]) == ("policy_loss", "reinforce")
+    assert options["use-tis"] is True and (float(options["tis-clip-low"]), float(options["tis-clip"])) == (0.0, 2.0)
+    assert options["use-score-centering"] is True and int(options["score-centering-top-k"]) == 128
+    assert options["calculate-per-token-loss"] is True
+    # Slime refuses get-mismatch-metrics with score centering; use-kl-loss with coef 0 only loads a reference model.
+    assert not {"get-mismatch-metrics", "use-kl-loss"} & options.keys()
 
 
 @pytest.mark.unit

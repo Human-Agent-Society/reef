@@ -181,7 +181,7 @@ Whole-stack deployment configuration
 
 A configuration file has no process list. Reef assembles the inference, training and HTTP processes with the same executor factory as the model workers. The orchestrator handles dependencies, readiness, endpoint publication, log tailing, failure detection and reverse-order shutdown. It contains no local process or Ray placement code.
 
-Method services such as a PRM run on their own, and recipes consume their endpoints (for example ``recipe.config.prm-url``). The one auxiliary child that Reef assembles is the generator service of a ``generator`` section, under the ``generator`` executor role.
+Method services such as a PRM run on their own, and recipes consume their endpoints (for example ``pipeline.record2sample.config.prm_url``). The one auxiliary child that Reef assembles is the generator service of a ``generator`` section, under the ``generator`` executor role.
 
 **Selecting an executor.** Each selector accepts a built-in name, a ``package.module:ClassName`` reference, an inline ``backend``/``options`` object, or a named profile under ``executors``. An explicit selection takes precedence. An omitted selector, or YAML ``null``, uses ``auto``:
 
@@ -205,6 +205,13 @@ Method services such as a PRM run on their own, and recipes consume their endpoi
 Selection happens before the factory imports the chosen class, and service startup logs the selected backend and the reason. The selector imports and initializes no Ray, counts no GPUs, and never retries a failed backend with another one. Installing Ray, setting ``RAY_ADDRESS``, or initializing Ray outside a placement group does not change a service to Ray.
 
 Explicit Slime command-line flags override the corresponding role selection, and accept profile names. The reserved Slime launch arguments (``args``, ``pg``, the rank and GPU layout, the role) come from the model configuration; profile options cannot override them.
+
+**Role limits.** Startup refuses a selector that breaks these rules:
+
+- ``execution.rollout`` places the serving engines of the inference component, for every training backend. SGLang and vLLM refuse ``uni`` and ``mp``; ``auto`` and ``ray`` give the engine's own Ray executor.
+- ``execution.training`` and ``execution.rollout`` refuse ``workers`` and ``resources``. Slime's training options set the topology of the training workers, and ``inference.num-gpus`` and ``inference.tensor-parallel-size`` set the GPUs of the engines.
+- ``execution.generator`` accepts only ``workers: 1``.
+- With Slime, ``execution.training`` accepts only ``auto``, ``ray``, or a profile whose ``backend`` is ``ray``. A training backend that runs in process, such as Tinker, refuses ``execution.training``.
 
 **Resources.** ``resources`` holds worker options: for Ray, ``num_gpus``, ``num_cpus``, ``resources`` and scheduling options. Ray owns CUDA visibility, so Reef rejects Ray execution together with ``cuda`` or a ``CUDA_VISIBLE_DEVICES`` override. Local execution uses ``cuda`` and reserves no cluster GPUs. Slime's GPU-layout flags describe model parallelism, not service placement. A standalone SGLang's ``num_gpus`` must cover its complete local TP group; Reef synthesizes no multi-node SGLang arguments.
 

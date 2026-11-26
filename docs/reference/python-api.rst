@@ -109,6 +109,14 @@ A deployment names each of these in its config, as a built-in name or as ``packa
      - ``ScenarioAdmission`` (``reef.control.scenario.admission``)
      - ``reef.scenario-admission``
      - `Limit the scenarios a service holds <../user-guide/operate.rst#limit-the-scenarios-a-service-holds>`__
+   * - Make the sandbox templates of a task
+     - ``TaskTemplateBuilder`` (``reef.evaluation.task_templates``)
+     - ``evaluation.task-template-builder``
+     - `Build templates before the trials <../developer-guide/sandboxes.rst#build-templates-before-the-trials>`__
+   * - Keep more of an evaluation trial
+     - ``TrialObserver``, ``EvaluationTrial`` (``reef.evaluation.trials``)
+     - ``evaluation.trial-observer``
+     - `Keep the files of a trial <../developer-guide/sandboxes.rst#keep-the-files-of-a-trial>`__
 
 An agent connects through an adapter, which is a file and not a class: `Harness adapters <../developer-guide/harness-adapters.rst>`__.
 
@@ -134,3 +142,5 @@ An application can run the complete Reef service in its own process. ``reef.api.
    web.run_app(app, host=settings.host, port=settings.port)
 
 ``inference_handler`` is optional: it gives the app an ``InferenceHandler`` that the application made. Such a handler needs only the inference methods.
+
+The app of ``build_app`` also runs record retention and the data store's maintenance. An application that uses a ``Dispatcher`` without this app runs them itself, at intervals: ``Dispatcher.prune_record_archives`` with a ``RecordRetention`` (``reef.storage.scenario.records``), and ``DataStore.maintain``.

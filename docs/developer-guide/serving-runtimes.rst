@@ -4,7 +4,7 @@ Serving runtimes
 An inference runtime (``reef.inference.interfaces.InferenceRuntime``) admits requests and serves the weights that Reef published. It never trains.
 
 :For: developers who add or change an inference runtime or engine integration
-:Before you start: `Adding components <../contributing/adding-components.rst#add-a-runtime-kind>`__
+:Before you start: `Codebase structure <../contributing/codebase-structure.rst#domain-layer>`__
 :You will have: the production inference contract, the built-in runtimes, request pinning, and the qualification cases
 
 Production inference contract
@@ -51,6 +51,8 @@ Every other member has a default. Override one only for a capability that the ru
 - Adapters: ``served_weight_kind``, ``per_scenario_adapters``, ``shared_by_training_scenarios``.
 
 The docstring of each member in ``reef.inference.interfaces`` gives its default, its result and its errors.
+
+A handler in front of several engine replicas can read ``REQUEST_SESSION_KEY`` (``reef.inference.interfaces``) to send the calls of one conversation to one replica. An evaluation sets it to each rollout, so rollouts whose first messages are the same still go to different replicas.
 
 Automatic weight training waits while the selected artifact has no served route. Manual training does not wait, because a request names its samples.
 
@@ -173,7 +175,7 @@ Two commands run a real integration through the real inference HTTP app and reco
 
 ``--output`` must be an absolute path to a new or empty directory outside the checkout. The command stores the records and ``report.json`` there, and exits with status 0 only when every check passes. The report lists the checked cases and the cases that the run does not cover. The CPU suite runs the same check against toy SGLang and vLLM components that pin each request.
 
-**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own SGLang and vLLM integrations on one GPU, with two synthetic checkpoints. `Run one area <../contributing/testing.rst#run-one-area>`__ gives its command, its profiles and their limits. Only its ``lifecycle`` profile covers control-plane publication and a public deployment of several artifacts. Neither command covers a managed router lifecycle, or validation of the router's deployment image.
+**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own SGLang and vLLM integrations on one GPU, with two synthetic checkpoints. Its module docstring describes the profiles; run ``python -m tests.smoke.native_inference --help`` for options. Only its ``lifecycle`` profile covers control-plane publication and a public deployment of several artifacts. Neither command covers a managed router lifecycle, or validation of the router's deployment image.
 
 Engine supervision
 ------------------
