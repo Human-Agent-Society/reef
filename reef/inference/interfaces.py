@@ -267,17 +267,50 @@ EngineReplicaState = Literal["serving", "starting"]
 
 
 @dataclass(frozen=True)
+class EngineReplicaLoad:
+    """The work of one serving replica, as the replica measured it last.
+
+    Values: ``running_requests`` and ``waiting_requests`` are integers of at least 0: the requests that the engine
+    runs now, and those that wait in its queue. ``output_tokens_per_second`` is a number of at least 0: the output
+    tokens that it generated each second over its last interval. ``measured_at`` is when it measured them, in epoch
+    seconds of at least 0."""
+
+    running_requests: int
+    waiting_requests: int
+    output_tokens_per_second: float
+    measured_at: float
+
+    def __post_init__(self) -> None:
+        for count in (self.running_requests, self.waiting_requests):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("an engine replica's request counts are integers of at least 0")
+        for value in (self.output_tokens_per_second, self.measured_at):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < float("inf"):
+                raise ValueError("an engine replica's token rate and measure time are finite numbers of at least 0")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "running_requests": self.running_requests,
+            "waiting_requests": self.waiting_requests,
+            "output_tokens_per_second": self.output_tokens_per_second,
+            "measured_at": self.measured_at,
+        }
+
+
+@dataclass(frozen=True)
 class EngineReplica:
     """One replica behind a route, such as one container of a server that scales.
 
     Values: ``id`` is the replica's non-empty name, such as its container ID. ``state`` is an ``EngineReplicaState``.
     ``started_at`` is when the replica started, in epoch seconds, or None. ``startup`` is its own ``start`` and
-    ``load`` phases while it starts (``StartupSteps``), or None."""
+    ``load`` phases while it starts (``StartupSteps``), or None. ``load`` is the work of a ``serving`` replica
+    (``EngineReplicaLoad``), or None when the handler cannot tell. A ``starting`` replica has no ``load``."""
 
     id: str
     state: EngineReplicaState
     started_at: float | None = None
     startup: StartupSteps | None = None
+    load: EngineReplicaLoad | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -289,6 +322,8 @@ class EngineReplica:
             raise ValueError("an engine replica's start time is epoch seconds of at least 0, or None")
         if self.startup is not None and not isinstance(self.startup, StartupSteps):
             raise ValueError("an engine replica's startup is StartupSteps, or None")
+        if self.load is not None and (not isinstance(self.load, EngineReplicaLoad) or self.state != "serving"):
+            raise ValueError("an engine replica's load is EngineReplicaLoad of a serving replica, or None")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -296,6 +331,7 @@ class EngineReplica:
             "state": self.state,
             "started_at": self.started_at,
             "startup": None if self.startup is None else self.startup.to_json(),
+            "load": None if self.load is None else self.load.to_json(),
         }
 
 
