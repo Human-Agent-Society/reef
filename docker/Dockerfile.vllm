@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# The vLLM inference component: the serving engines of a deployment with
+# `inference.backend: vllm`, in a container of their own.
+#
+# The Reef image (Dockerfile.reef) pins Slime, Megatron and SGLang to one CUDA
+# stack, and a vLLM release pins other versions of the same packages. This
+# image therefore starts from vLLM's release image and adds only Reef and the
+# Python-side dependencies of its vLLM adapter. It runs
+# `python -m reef.inference.remote --engine vllm`. A Reef deployment names the
+# component in `inference.remote.url`, starts the engines on it, and uploads
+# the weight files of each published snapshot to it.
+#
+#   docker build -f docker/Dockerfile.vllm -t reef-vllm .
+#
+# The base is pinned by digest. Reef's engine control (reef/inference/vllm/engine.py)
+# calls routes that vLLM serves only under VLLM_SERVER_DEV_MODE and does not
+# keep stable between releases, so qualify another release on GPUs before
+# changing VLLM_IMAGE_TAG.
+ARG VLLM_IMAGE_TAG=v0.29.0@sha256:c2914767605584b6d8f45686b82de173ecc99e781897aa3d0a66dacd72c51ae1
+FROM vllm/vllm-openai:${VLLM_IMAGE_TAG}
+
+WORKDIR /workspace/Reef
+COPY . .
+
+# Reef with the `vllm` extra (Ray, requests, psutil). uv keeps each installed
+# version that Reef's dependencies accept and replaces the others. On vLLM
+# 0.29.0 it replaces aiohttp, yarl, boto3, botocore, certifi, PyJWT and
+# websockets, with versions that vLLM's own requirements accept. `pip check`
+# must report the same as on the base image, so the build fails when a Reef
+# dependency moves a package to a version that vLLM's requirements refuse.
+RUN python3 -m pip check | sort > /tmp/pip-check-base.txt; \
+    uv pip install --system --no-cache -e ".[vllm]" && \
+    { python3 -m pip check | sort > /tmp/pip-check.txt; \
+      diff /tmp/pip-check-base.txt /tmp/pip-check.txt; } && \
+    rm /tmp/pip-check-base.txt /tmp/pip-check.txt
+
+# The component, the vLLM service that it starts, and vLLM's server entry
+# point load without a GPU. A missing dependency fails the build here.
+RUN python3 -c "import ray, vllm.entrypoints.cli.main, reef.inference.vllm.service, reef.inference.vllm.control" && \
+    python3 -m reef.inference.remote --help > /dev/null
+
+# Uploaded weight files. Mount a volume here to keep them out of the
+# container's writable layer.
+VOLUME /var/lib/reef/remote
+EXPOSE 8000
+
+# The component reads its two bearer tokens from REEF_REMOTE_CONTROL_TOKEN and
+# REEF_REMOTE_INFERENCE_TOKEN and refuses to start without them.
+ENTRYPOINT ["python3", "-m", "reef.inference.remote", "--engine", "vllm", "--work-dir", "/var/lib/reef/remote"]
+CMD ["--port", "8000"]
