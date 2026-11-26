@@ -23,6 +23,7 @@ Reef reads these options itself:
 
 - Reef fills Slime's architecture flags, such as layer counts and hidden sizes, from the model's Hugging Face config. An explicit flag wins.
 - Slime's engine and placement options (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*``) configure the rollout engines of Slime's own serving session (`Task jobs on Slime`_). They never configure the serving engines, which take ``inference.options``.
+- With ``colocate``, ``offload``, ``offload-train`` or ``advantage-estimator: ppo``, Slime offloads the training workers and keeps no CPU copy of their parameter and gradient buffers. Such workers cannot use expandable segments, because their optimizer step can then write zeros into the weights. Reef refuses ``expandable_segments:True`` in ``PYTORCH_CUDA_ALLOC_CONF`` or ``PYTORCH_ALLOC_CONF``, and ``SLIME_ENABLE_EXPANDABLE_SEGMENTS=1``, for them. Two critic layouts keep expandable segments: ``use-critic`` with ``no-offload-train`` keeps the workers on the GPU, and ``use-critic`` without the options above offloads them with the CPU copy. The training service checks its own environment and ``train-env-vars`` at startup, and each worker checks its environment before it loads the model.
 - With multi-node training, put the checkpoint directory on storage that the host of the training service can read.
 - `Set the checkpoint cadence <../user-guide/operate.rst#set-the-checkpoint-cadence>`__ describes the ``reef-checkpoint-*`` options.
 
