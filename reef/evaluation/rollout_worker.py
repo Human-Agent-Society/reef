@@ -1081,9 +1081,9 @@ class EvaluationRolloutWorker(QueueWorker):
                 # A template that was removed after its preparation fails the trial; the trial does not build it.
                 builds_templates=not rollout.requires_prepared_templates,
                 # The agent gets the engine's own stream, as it would from a provider, so nothing that the engine
-                # answers is lost on the way, such as a reasoning model's reasoning. A call that asks for log
-                # probabilities stays whole: a stream gives its token IDs in pieces.
-                streams_calls=not rollout.log_probs,
+                # answers is lost on the way, such as a reasoning model's reasoning. With log_probs too: the
+                # capture adds up the token IDs and log probabilities that the stream gives in pieces.
+                streams_calls=True,
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
