@@ -198,9 +198,10 @@ jobs also train the replies of the generator's Designer, as delayed samples
 A reply trains only when its served call kept its exact sample
 (``x-reef-record-training``, see `Headers
 <../reference/http-api.rst#headers>`__): SPADE's generator asks for it with
-``train_designer``. See `Generated tasks
-<../reference/configuration-generated-tasks.rst#generated-tasks>`__ for the
-keys.
+``train_designer``. See `Designer replies
+<../reference/configuration-generated-tasks.rst#designer-replies>`__ for the
+rules and the `Settings reference
+<../reference/configuration-settings.rst#recipe>`__ for the keys.
 
 Container work
 --------------
