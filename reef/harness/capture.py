@@ -155,9 +155,11 @@ class CaptureProxy:
     Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
     call with ``tags`` as ``x-reef-tag-<name>`` headers, and keeps the receipts.
 
-    With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
-    record of it, and the captured response holds the whole training block. A streaming agent still gets a
-    stream, which the proxy makes from the complete answer.
+    With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER``: Reef keeps no record of it. Unless ``streams``,
+    each call is also sent without streaming, so the captured response holds the whole training block, and a
+    streaming agent gets a stream that the proxy makes from the complete answer. With ``streams``, a streaming
+    agent's call streams, and the agent gets the upstream's own stream, its bytes unchanged; the proxy captures
+    the answer that the stream adds up to (``SSEAccumulator``), which has no training block.
 
     ``observer``, when set, gets each captured call as it lands (``CaptureObserver``). With ``keeps_bodies`` false,
     the captures that ``drain`` returns have no request body, and no response body when they answered 200
@@ -174,6 +176,7 @@ class CaptureProxy:
         is_unrecorded: bool = False,
         observer: CaptureObserver | None = None,
         keeps_bodies: bool = True,
+        streams: bool = False,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -184,7 +187,10 @@ class CaptureProxy:
         if is_unrecorded:
             fixed[ROLLOUT_HEADER] = "1"
         self.config = ServeConfig(
-            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
+            upstream=upstream,
+            listen_port=0,
+            capture_paths=CAPTURE_PATHS,
+            force_non_stream=is_unrecorded and not streams,
         )
         #: The tag channel: the record keeps which snapshot (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
