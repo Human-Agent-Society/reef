@@ -1,44 +1,35 @@
 Codebase structure
 ==================
 
-Find the package that owns your change, then read its ``__init__.py`` for the contract.
-
 Layers
 ------
 
-A package can import from its own layer or any layer below it.
+Packages can import from their own layer and the layers below.
 
 .. container:: layer-map
 
    .. container:: flow
 
       Entry
-          ``deploy`` starts processes. ``api`` receives HTTP requests.
+          ``deploy`` starts services. ``api`` handles HTTP.
 
       Control
-          ``control`` coordinates scenario changes, commits and recovery.
+          ``control`` manages scenario state, commits and recovery.
 
       Domain
-          ``recipe`` defines learning methods. ``samples`` creates samples, ``train`` runs jobs and ``evaluation`` scores candidates.
-          ``inference`` serves models, ``routing`` routes requests and ``harness`` runs agents.
+          Learning (``recipe``, ``samples``, ``train``, ``evaluation``), model serving (``inference``, ``routing``) and agents (``harness``).
 
       Foundation
-          ``core`` defines shared types, ``storage`` persists state and ``artifact`` manages versioned files.
-          ``execution`` runs workers, ``observability`` collects telemetry and ``tinker`` connects training and serving to the Tinker SDK.
+          Types (``core``), persistence (``storage``), files (``artifact``), workers (``execution``), telemetry (``observability``) and the Tinker SDK (``tinker``).
 
-Keep method-specific code in ``recipes/<name>/``. Use the owning package's tests.
-See the `service diagram <../user-guide/split-services.rst>`__ for the runtime layout.
+For runtime boundaries, see the `seven-service diagram <../user-guide/split-services.rst>`__.
 
 Extending Reef
 --------------
 
-- `Write a recipe <../developer-guide/write-a-recipe.rst>`__ or
-  `a harness method <../developer-guide/write-a-harness-method.rst>`__.
-- Add a `training backend <../developer-guide/training-backends.rst>`__ or
-  `serving runtime <../developer-guide/serving-runtimes.rst>`__.
-- Add a `harness adapter <../developer-guide/harness-adapters.rst>`__ or
-  `task generator <../developer-guide/task-generators.rst>`__.
-- Define a `snapshot component <../developer-guide/components.rst>`__ or
-  `worker executor <../developer-guide/executors.rst>`__.
+Read the package's ``__init__.py`` for its contract. Put method-specific code in ``recipes/<name>/``.
 
-For setup and checks, see `Development <development.rst>`__. For review and RFC policy, read `CONTRIBUTING.md <../../CONTRIBUTING.md>`__.
+- `Recipes <../developer-guide/write-a-recipe.rst>`__ and `harness methods <../developer-guide/write-a-harness-method.rst>`__
+- `Training backends <../developer-guide/training-backends.rst>`__ and `serving runtimes <../developer-guide/serving-runtimes.rst>`__
+- `Harness adapters <../developer-guide/harness-adapters.rst>`__ and `task generators <../developer-guide/task-generators.rst>`__
+- `Snapshot components <../developer-guide/components.rst>`__ and `worker executors <../developer-guide/executors.rst>`__
