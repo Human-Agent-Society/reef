@@ -371,6 +371,35 @@ def test_a_trajectory_holds_once_a_reply_that_the_agent_resends_with_its_reasoni
     Trajectory.model_validate(trajectory)
 
 
+def test_a_responses_call_with_a_string_input_gives_its_output_items_as_agent_steps() -> None:
+    # The Responses API takes one user message as a string ``input``, so the payload has no message list.
+    payload = {
+        "model": "m",
+        "instructions": "Be brief",
+        "input": "List the files",
+        "tools": [{"type": "function", "name": "ls", "parameters": {"type": "object", "properties": {}}}],
+        "response": {
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Run ls"}]},
+                {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "ls", "arguments": "{}"},
+            ]
+        },
+    }
+    record = AgentRecord("r0", "s", RequestType.INFERENCE, payload, 0.0)
+    trajectory = make_trajectory([record]).trajectory
+    steps = trajectory["steps"]
+    assert [(step["source"], step["message"]) for step in steps] == [
+        ("system", "Be brief"),
+        ("user", "List the files"),
+        ("agent", ""),
+        ("agent", ""),
+    ]
+    assert steps[2]["reasoning_content"] == "Run ls"
+    assert steps[3]["tool_calls"] == [{"tool_call_id": "c1", "function_name": "ls", "arguments": {}}]
+    assert [tool["function"]["name"] for tool in trajectory["agent"]["tool_definitions"]] == ["ls"]
+    Trajectory.model_validate(trajectory)
+
+
 IMAGE_URL = "data:image/png;base64,AAAA"
 ANTHROPIC_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
 
