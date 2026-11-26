@@ -44,7 +44,7 @@ Every ``InferenceRuntime`` implements three members:
 Every other member has a default. Override one only for a capability that the runtime has:
 
 - Engines of its own: ``open``, ``shutdown``, ``set_owner_sequence``.
-- Takeover of a retained endpoint: ``adopt``.
+- Takeover of a retained endpoint: ``adopt``, and ``handler_for`` for an endpoint at a URL other than ``base_url``.
 - Several artifacts at the same time: ``serve_artifact``, ``served_artifact_capacity``, ``stop_serving``, ``release_unreferenced_artifacts``, ``handler_for``.
 - Any artifact on request: ``serves_any_artifact``, ``artifact_model``.
 - Snapshots without weights: ``endpoint_model_name``.
@@ -59,7 +59,7 @@ Automatic weight training waits while the selected artifact has no served route.
 When a binding is in doubt, the runtime must fail safely:
 
 - After an ambiguous load, the affected engines stay unavailable until a known binding is restored and checked.
-- On takeover, ``adopt(served)`` returns false when the retained endpoint cannot establish its binding.
+- On takeover, the new owner removes each route at a URL that ``handler_for`` gives no handler for, before ``open``. After ``open``, ``adopt(served)`` gets each other route, and returns false when the retained endpoint cannot establish its binding.
 - Retirement lets admitted requests finish on their pinned weights, or it interrupts them explicitly.
 - A stream that has sent output never retries on another artifact. An incomplete stream can keep a diagnostic record, but it gets no receipt.
 
