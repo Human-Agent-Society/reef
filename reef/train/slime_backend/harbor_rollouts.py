@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from reef.core.job_data import TrajectorySample
-from reef.execution.sandbox.agentenv.images import TaskImages
+from reef.execution.sandbox.task_environment import task_images_from_environ
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
@@ -389,8 +389,8 @@ class HarborRolloutSession:
     Harbor lab. ``run`` gives the Slime fields of one rollout and appends its result; a failed rollout gives
     ``removed_fields``, and cancelling ``run`` cancels the rollout and waits for its cleanup. At most
     ``harbor.concurrency`` rollouts and environment builds run at a time. ``close`` closes the chat endpoint and lets
-    the threads end when their work ends. On ``e2b``, the rollouts start the prepared images of the file that
-    ``TASK_IMAGES_VARIABLE`` names, when the deployment sets it (``TaskImages.from_environ``).
+    the threads end when their work ends. The rollouts start the prepared images that the deployment names for the
+    tasks, when it names them (``task_images_from_environ``).
     """
 
     def __init__(
@@ -420,7 +420,7 @@ class HarborRolloutSession:
             verifier_timeout_reward=settings.verifier_timeout_reward,
             lab=lab,
             concurrency=settings.concurrency,
-            task_images=TaskImages.from_environ(os.environ) if settings.environment == "e2b" else None,
+            task_images=task_images_from_environ(settings.environment, os.environ),
         )
 
     def close(self) -> None:

@@ -6,10 +6,10 @@ so AgentENV deletes an abandoned sandbox instead of pausing it. It also keeps th
 template builds take no files, ``REEF_E2B_DOCKERFILE_BUILD=aenv`` makes it build a task's Dockerfile with
 ``aenv build`` (:mod:`reef.execution.sandbox.agentenv.build`). There, ``REEF_E2B_COMPOSE=aenv`` also makes
 it run the Compose project of a task that has one in one sandbox, so that the agent reaches the task's other services
-(:mod:`reef.execution.sandbox.agentenv.compose`). A trusted caller can also give it the images that a deployment
-verified for the task; it then starts each environment from its image on AgentENV, and builds nothing
-(:mod:`reef.execution.sandbox.agentenv.images`). The shared ``environment_config`` selects this class for
-Reef's Harbor rollouts and generator checks through ``import_path``, by the path that saved trial configs keep,
+(:mod:`reef.execution.sandbox.agentenv.compose`). When a deployment supplies verified images for the task,
+AgentENV can start each environment from its image (:mod:`reef.execution.sandbox.agentenv.images`).
+The shared ``environment_config`` selects this class for Reef's Harbor rollouts and generator checks through
+the ``import_path`` that saved trial configs keep,
 ``reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment``. A standalone Harbor trial that selects only ``e2b`` uses
 Harbor's own class.
 
@@ -63,12 +63,10 @@ from reef.execution.sandbox.agentenv.compose import (
     compose_project,
     main_image,
 )
-from reef.execution.sandbox.agentenv.images import (
-    ColdSandbox,
-    ColdSandboxError,
+from reef.execution.sandbox.agentenv.images import ColdSandbox, ColdSandboxError, is_missing_snapshot
+from reef.execution.sandbox.prepared_images import (
     PreparedImage,
     PreparedImageJson,
-    is_missing_snapshot,
     prepared_images_from_json,
     select_prepared_image,
 )

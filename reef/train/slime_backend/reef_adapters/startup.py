@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.execution.sandbox.agentenv.images import TASK_IMAGES_VARIABLE
+from reef.execution.sandbox.task_environment import TASK_IMAGES_VARIABLE
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, loss_family_reference, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
@@ -184,7 +184,7 @@ def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
 #: The credentials of Harbor's cloud task environments, which Ray's actors do not inherit from this process.
 TASK_ENVIRONMENT_CREDENTIALS = ("E2B_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
 #: The endpoints of a self-hosted service for the ``e2b`` task environment, which Ray's actors do not inherit either,
-#: and the file of the prepared images of the job's tasks on AgentENV (``TASK_IMAGES_VARIABLE``).
+#: and the manifest of the prepared images of the job's tasks (``TASK_IMAGES_VARIABLE``).
 TASK_ENVIRONMENT_ENDPOINTS = ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN", TASK_IMAGES_VARIABLE)
 
 

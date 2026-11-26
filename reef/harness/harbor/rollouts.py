@@ -37,7 +37,7 @@ from reef_client.client import ReefClient, ReefClientError
 from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
-from reef.execution.sandbox.agentenv.images import TaskImages
+from reef.execution.sandbox.prepared_images import TaskImages
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import HarborEnvironmentConfig, environment_config
 from reef.harness.capture import CaptureObserver, CaptureProxy

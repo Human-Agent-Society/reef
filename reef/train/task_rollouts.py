@@ -30,7 +30,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import inference_aborted
 from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
-from reef.execution.sandbox.agentenv.images import TaskImages
+from reef.execution.sandbox.task_environment import task_images_from_environ
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
 from reef.samples.samples import recorded_training
@@ -348,12 +348,12 @@ def run_train_tasks(
     the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
     ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``. ``max_tokens`` is the most tokens a
     sample's targets, every token but the first, may have, or None for no bound: a longer sample is left out before
-    its task's group forms. The result counts the tokens of each rollout that ran (``RolloutTokens``). On ``e2b``,
-    the rollouts start the prepared images of the file that ``TASK_IMAGES_VARIABLE`` names, when the deployment sets
-    it (``TaskImages.from_environ``).
+    its task's group forms. The result counts the tokens of each rollout that ran (``RolloutTokens``). The rollouts
+    start the prepared images that the deployment names for the tasks, when it names them
+    (``task_images_from_environ``).
     """
     assembly = rollout_assembly(settings)
-    task_images = TaskImages.from_environ(os.environ) if settings.environment == "e2b" else None
+    task_images = task_images_from_environ(settings.environment, os.environ)
     with ChatEndpoint(chat) as endpoint:
         runner = TaskRolloutRunner(
             reef_url=endpoint.url,

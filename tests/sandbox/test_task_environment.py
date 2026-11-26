@@ -19,7 +19,8 @@ import pytest
 from tests.support.agentenv import ColdAnswer, FakeAgentEnvApi, serving
 
 from reef.execution.sandbox.agentenv.compose import TransientStartError
-from reef.execution.sandbox.agentenv.images import NETWORK_FIELDS, ColdSandboxError, PreparedImage
+from reef.execution.sandbox.agentenv.images import NETWORK_FIELDS, ColdSandboxError
+from reef.execution.sandbox.prepared_images import PreparedImage
 from reef.execution.sandbox.process import (
     SANDBOX_CAPACITY_ERRORS,
     SANDBOX_REQUEST_ERRORS,

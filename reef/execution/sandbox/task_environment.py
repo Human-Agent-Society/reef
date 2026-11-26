@@ -3,7 +3,8 @@
 A Harbor task environment is the ``-e`` type of ``harbor run``, or the ``environment.type`` of a trial. Harbor starts
 it, builds the task's image in it, runs the agent and the verifier there, and stops it. This module names the
 environment types, checks what the host needs for each, and gives the Harbor environment config of a task's trial in
-each (``environment_config``); it starts nothing.
+each (``environment_config``), with the prepared images that a training process's deployment names for its tasks
+(``task_images_from_environ``); it starts nothing.
 
 An executor is a different thing: a ``ProgramExecutor`` (:mod:`reef.execution.sandbox.process`) launches one program, such as
 a harness's pinned binary, and ``ExecutorEnvironment`` (:mod:`reef.execution.sandbox.environment`) adapts one to Harbor's
@@ -27,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
-from reef.execution.sandbox.agentenv.images import PreparedImage, PreparedImageJson
+from reef.execution.sandbox.prepared_images import PreparedImage, PreparedImageJson, TaskImages
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 #: Every Harbor task environment type Reef passes to Harbor: local Docker, and each cloud type in
@@ -51,6 +52,9 @@ MODAL_SANDBOX_DEFAULT_S = 2 * 60 * 60
 HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
 #: Modal trial environment stored in Harbor configurations. It reports capacity refusals as Reef sandbox errors.
 HARBOR_MODAL_ENVIRONMENT = "reef.execution.sandbox.modal.trial:ModalTrialEnvironment"
+#: The variable of a training process that names the manifest of its tasks' prepared images
+#: (``task_images_from_environ``).
+TASK_IMAGES_VARIABLE = "REEF_AGENTENV_TASK_IMAGES"
 
 
 class ReadinessProbe(ABC):
@@ -425,6 +429,25 @@ def environment_config(
     return config
 
 
+def task_images_from_environ(environment: str, environ: Mapping[str, str]) -> TaskImages | None:
+    """The prepared images of the tasks of a training process whose trials run in the Harbor environment type
+    ``environment``: the manifest that ``TASK_IMAGES_VARIABLE`` names in ``environ`` (``TaskImages.from_manifest``).
+
+    None on any type but ``e2b``, the only type that starts prepared images (``environment_config``), and when the
+    variable is unset or empty. Raise ``OSError`` for a manifest that cannot be read, and ``ValueError``, which names
+    the variable, for a manifest that is not valid.
+    """
+    if environment != "e2b":
+        return None
+    path = environ.get(TASK_IMAGES_VARIABLE, "").strip()
+    if not path:
+        return None
+    try:
+        return TaskImages.from_manifest(Path(path))
+    except ValueError as error:
+        raise ValueError(f"{TASK_IMAGES_VARIABLE}: {error}") from error
+
+
 __all__ = [
     "DOCKER_PROBE_TIMEOUT_S",
     "HARBOR_BUILD_TIMEOUT_S",
@@ -438,6 +461,7 @@ __all__ = [
     "SANDBOX_LIFETIME_MARGIN_S",
     "SANDBOX_LIFETIME_MAX_S",
     "TASK_ENVIRONMENT_PROBES",
+    "TASK_IMAGES_VARIABLE",
     "DockerProbe",
     "DockerTaskEnvironment",
     "E2BTaskEnvironment",
@@ -451,4 +475,5 @@ __all__ = [
     "checked_task_environment",
     "environment_config",
     "task_environment_probes",
+    "task_images_from_environ",
 ]

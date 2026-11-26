@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from reef.core.plugins import ConfiguredPlugin
-from reef.execution.sandbox.agentenv.images import PreparedImageJson
+from reef.execution.sandbox.prepared_images import PreparedImageJson
 
 
 class TaskTemplateBuilder(ConfiguredPlugin, ABC):
