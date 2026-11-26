@@ -42,21 +42,25 @@ Three members are required:
      - Return an established binding's route without loading it.
        Return ``None`` for unknown, unavailable or uncertain bindings.
 
-Optional capabilities include resource ownership (``open``, ``shutdown``,
-``set_owner_sequence``), retained-endpoint adoption (``adopt``), multiple
-artifacts, adapters and arbitrary-artifact serving.
-Read each member's default and constraints in ``InferenceRuntime``.
+Optional members cover resource ownership, adoption and multiple artifacts.
+See `InferenceRuntime <../../reef/inference/interfaces.py>`__ for their contracts.
 
 Handlers can use ``REQUEST_SESSION_KEY`` to keep a conversation on one replica.
 Evaluations assign one key per rollout, including rollouts with identical prompts.
 Automatic weight training waits for the selected artifact's served route;
 manual requests do not.
 
-Keep uncertain bindings unavailable until a checked restore succeeds.
-``adopt`` must return false when it cannot establish a retained binding.
+On takeover, ``handler_for(url)`` must recognize retained endpoints before ``open``.
+Reef removes routes without a handler, then opens the runtime and calls
+``adopt(served)`` for the remaining routes.
+Return false when adoption cannot establish the binding.
+Keep uncertain bindings unavailable until verified recovery.
+
 Retirement must finish pinned requests or interrupt them explicitly.
 Never retry a stream on another artifact after output starts.
-Incomplete streams receive no receipt, though diagnostic records may remain.
+Incomplete streams receive no receipt.
+Evaluation relays ``inference_stream`` bytes unchanged and holds admission until closure.
+A handler without native streaming returns its JSON answer as one piece.
 
 Routes that bind no weights
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -86,28 +90,18 @@ or its selection changes:
   It refuses new checkpoints when all slots still serve artifacts.
   Released slots retain their engines.
 
-Each load has a runtime load ID verified on every engine.
-Fresh runtime incarnations cannot reuse IDs for different weights.
-Loading already served content is a no-op.
+Verify each load ID on every engine; never reuse IDs for different weights.
+Loading served content is a no-op. The artifact format selects full-weight
+or adapter serving; inference reserves GPUs separately from training.
 
-``inference.serving: engines`` uses a local inference component unless
-``inference.remote`` names an external one. The training component's artifact
-format selects adapter or full-weight serving.
-Serving engines reserve GPUs separately from training workers.
+**Recovery.** Lost engines or uncertain bindings trigger replacement and reload.
+Resume only after load-ID verification. Route queries return none until recovery.
+Full-weight runtimes without verified checkpoints stay paused.
+Adapter recovery preserves targets until restoration completes.
 
-**Recovery.** Health checks run every 30 seconds.
-Lost engines or uncertain bindings trigger engine-stack replacement and
-reload. Resume only after the load-ID check succeeds.
-Until then, existing published routes may wait or fail; new route queries
-return none. Recovery retries on later health checks.
-
-A full-weight runtime without a verified checkpoint has nothing to restore
-and stays paused. Adapter recovery retains previous adapter targets until
-the complete restore succeeds. Capacity refusal leaves current adapters unchanged.
-
-**Takeover.** A new serving owner starts fresh engines and interrupts in-flight
-requests. It reactivates completed selections automatically.
-Old load IDs cannot prove that retained weights stayed unchanged.
+**Takeover.** Built-in saved-weight runtimes start fresh engines, interrupt
+in-flight requests and reactivate completed selections.
+Old load IDs cannot prove retained weight identity.
 See `Startup status <../reference/http-api-inference.rst#startup-status>`__.
 
 Request pinning
@@ -127,20 +121,15 @@ There is no setting to disable it.
   until replacement and verified reload. Explicit engine refusal retains the old binding.
 - **Ownership:** newer owners fence older control calls with HTTP 412.
 
-Built-in protection covers SGLang and vLLM with their standard handlers.
-Other engines need a custom runtime that meets the production contract.
-Keep native engine addresses private: generation and updates must pass through
-the component, which exposes only generation routes.
+Built-in protection covers standard SGLang and vLLM handlers.
+Other engines need a qualified custom runtime.
+Keep native engine addresses private; all generation and updates pass through
+the component.
 
-External KV stores cannot be cleared by this mechanism and are rejected.
-Prefix sharing also excludes SGLang prefill/decode disaggregation.
-See `Serving configuration
-<../reference/configuration-inference.rst#serving-of-a-weight-training-deployment>`__
-for option restrictions.
-
-Reef trusts engine acknowledgements; it does not inspect GPU weights or caches.
-Qualify each engine version. The trainer's own rollout engines use separate
-synchronization and do not use production request pinning.
+External KV stores and prefix sharing with SGLang disaggregation are unsupported.
+See `serving restrictions <../reference/configuration-inference.rst>`__.
+Reef trusts engine acknowledgements; it does not inspect weights or caches.
+Training rollout engines use separate synchronization.
 
 Integration qualification
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -149,19 +138,10 @@ Use two small artifacts with distinguishable generated outputs.
 Check actual content, response identity and stored identity together.
 CPU fake-engine tests cannot establish real weight identity.
 
-Test these cases on each integration version:
-
-1. Delay requests and activations across promotion, including before route
-   publication and after owner takeover.
-2. Make a binding unavailable. Requests must fail without selecting another artifact.
-3. Interrupt a stream after its first token. It must receive no receipt or cross-artifact retry.
-4. For load-ID engines, inject mixed or uniformly wrong IDs. Neither may produce a valid route.
-5. For mutable engines, fail one replica during load. Refuse requests until verified recovery.
-6. For adoption, present missing or mismatched bindings and require refusal.
-7. For adapters and prefix caches, verify that both preserve request identity.
-
-Record the version and tested capabilities. Separately measure throughput,
-p95 latency, drain time and unavailability under representative concurrency.
+Test promotion and takeover with delayed requests, unavailable bindings,
+interrupted streams, wrong load IDs and partial loads.
+Check adapter and prefix-cache identity, and refuse mismatched adoption.
+Record integration versions, uncovered cases and performance under concurrency.
 
 **Cutover check.** Provide a context-manager factory yielding
 ``InferenceQualification`` from ``tests.support.inference_qualification``.
@@ -178,10 +158,8 @@ It receives records and ``report.json``. Exit status 0 means every reported
 check passed; the report also lists uncovered cases.
 
 **Native check.** ``python -m tests.smoke.native_inference --help`` describes
-one-GPU SGLang/vLLM checks with synthetic checkpoints.
-Only its ``lifecycle`` profile covers control publication and multi-artifact
-deployment. Neither command qualifies managed-router lifecycle or images.
-These commands are outside normal pytest and CI runs.
+one-GPU checks. Its ``lifecycle`` profile includes control and multiple artifacts.
+Neither command qualifies managed-router lifecycle or images; neither runs in normal CI.
 
 Engine supervision
 ------------------

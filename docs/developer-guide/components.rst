@@ -1,57 +1,46 @@
 Scenario components
 ===================
 
-Components declare the artifacts a scenario holds, imports and exposes to
-clients. Most recipes use the built-in ``weights`` or ``harness`` component.
-Override ``Recipe.build_components`` only when those declarations do not fit.
+Components declare the artifacts a scenario stores and exposes.
+Use the built-in ``weights`` or ``harness`` component unless you need a
+custom ``Recipe.build_components`` declaration.
 
 The declaration
 ---------------
 
-``build_components(scenario)`` returns ``ScenarioComponents`` from
-``reef.artifact.components``. Its ``components`` mapping binds names to
-``ComponentSpec`` values. Build the declaration from configuration alone:
-every service that loads the scenario reads it.
+``build_components(scenario)`` returns ``ScenarioComponents``: a mapping of
+names to ``ComponentSpec`` values. Build it from configuration alone;
+every service loading the scenario reads it.
 
 .. list-table::
    :header-rows: 1
-   :widths: 20 60 20
 
    * - Field
-     - Contract
-     - Default
+     - Purpose
    * - ``validator``
-     - Admit an artifact before Reef stores it.
-     - Accept all
+     - Admit artifacts before storage; default accepts all.
    * - ``layout``
-     - Check and import an artifact directory.
-     - No imports
+     - Check and import directories; default disables imports.
    * - ``files``
-     - Read the file tree a harness client pulls.
-     - No file routes
+     - Expose a client file tree; default disables file routes.
    * - ``kind``
-     - Declare the artifact kind. ``model`` and ``model_adapter`` load into inference.
-     - No kind
+     - Identify artifacts; ``model`` and ``model_adapter`` load into inference.
 
-At most one component can load weights, and at most one can expose ``files``.
+At most one component can load weights, and one can expose files.
 Invalid declarations raise ``ValueError``.
 
 Built-in recipes
 ----------------
 
-- ``Recipe`` declares no components; it records traffic.
-- ``WeightTrainingRecipe`` declares ``weights``, with the runtime's weight
-  kind and the backend's training layout.
-- ``HarnessEvolutionRecipe`` declares ``harness``, with ``HarnessLayout``
-  and ``HarnessFiles``. File reads render the source for the selected adapter.
-- ``CompositeRecipe`` combines the declarations of its component recipes.
-
-See `Rendering <harness-adapters.rst#rendering>`__ for harness file behavior.
+``Recipe`` declares none. ``WeightTrainingRecipe`` declares ``weights``.
+``HarnessEvolutionRecipe`` declares ``harness`` with adapter-specific file
+`rendering <harness-adapters.rst#rendering>`__.
+``CompositeRecipe`` combines component recipes.
 
 Declare components
 ------------------
 
-For a component that exposes text files:
+To expose text files:
 
 .. code:: python
 
@@ -63,37 +52,27 @@ For a component that exposes text files:
        def build_components(self, scenario: str) -> ScenarioComponents:
            return ScenarioComponents({"prompt": ComponentSpec(files=TextFileTree())})
 
-Add an ``ArtifactValidator`` to reject invalid artifacts and an
-``ArtifactLayout`` to accept imports.
+Add ``ArtifactValidator`` and ``ArtifactLayout`` implementations for validation
+and imports. See the `component contracts <../../reef/artifact/components.py>`__.
 
-Use ``CompositeRecipe`` for multiple components. Each recipe has its own
-trainer, and each training commit names the component it publishes.
-Reef carries the other components forward. Each artifact retains its own ID.
-
-Snapshots with zero or one component are flat. Multi-component snapshots
-have one directory per component. See `Recipe configuration
-<../reference/configuration-recipe.rst#recipe-configuration>`__.
+Composite snapshots have a directory per component. Each commit replaces
+one component and preserves the others, including their artifact IDs.
+Snapshots with zero or one component are flat.
 
 Admission checks
 ----------------
 
-An ``ArtifactValidator`` reads one component's local artifact directory.
-Raise ``ValueError`` or ``ReefError`` with the reason for refusal.
+An ``ArtifactValidator`` reads one component directory.
+Raise ``ValueError`` or ``ReefError`` to refuse it:
 
-- Training checks each checkpoint before storing it. Refusal fails the job;
-  its samples still count as trained.
-- Control checks imports, synced trees and scenario starting artifacts.
-  Refusal returns HTTP 400.
+- Invalid checkpoints fail their job; samples still count as trained.
+- Invalid imports, synced trees and starting artifacts return HTTP 400.
 
-Activation, restore, serving and train-from operations do not rerun validation.
-A new validator therefore applies only to subsequently stored artifacts.
-Multi-component snapshots require per-component checks; they cannot have a
-separate snapshot validator.
+Previously stored artifacts are not revalidated during activation, restore,
+serving or train-from. Multi-component snapshots need per-component checks.
 
 What components do not own
 --------------------------
 
-Components declare artifact contracts. Training produces artifacts, control
-commits and selects them, and inference loads weights. See
-`Serving runtimes <serving-runtimes.rst>`__ and the
-`state model <../advanced_topics/state-model.rst>`__.
+Training produces artifacts, control commits and selects them, and inference
+loads weights. Components only declare their artifact contracts.

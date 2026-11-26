@@ -11,21 +11,11 @@ To change rules, skills or tools while keeping the model fixed, use
 Before you start
 ----------------
 
-Build the `GPU training image
+Build and start the `GPU training image
 <../getting-started/installation.rst#gpu-image-for-weight-training>`__.
-A base Reef installation does not include Slime, Ray or the CUDA training stack.
-Mount persistent directories for the model and deployment state:
-
-.. code:: bash
-
-   docker run --gpus all --network host --ipc host --shm-size 32g -it \
-     -v ~/models:/root/models \
-     -v ~/reef-run:/var/lib/reef \
-     -v "$PWD":/workspace/Reef \
-     reef bash
-
-The model at ``inference.model-path`` must be present or downloadable.
-The container's host network lets Reef, Ray and inference reach each other.
+Mount persistent model and checkpoint directories as described in
+`docker/README.md <../../docker/README.md>`__.
+The base installation has no Slime, Ray or CUDA training stack.
 
 Start from a config
 -------------------
@@ -68,18 +58,16 @@ Startup can take several minutes. In another terminal, check readiness:
    curl -f http://127.0.0.1:8900/healthz
    curl -H "Authorization: Bearer reef-local" http://127.0.0.1:8900/reef/status
 
-``/healthz`` checks the HTTP service. ``/reef/status`` reports training errors,
-preload failures and the current jobs. ``reef serve`` stops the managed stack
-when it exits. See `Configuration <../reference/configuration.rst>`__ for
-command-line overrides and log locations.
+``/healthz`` checks HTTP readiness; ``/reef/status`` shows jobs and errors.
+Exiting ``reef serve`` stops the managed stack.
 
 Watch it learn
 --------------
 
 Send inference and feedback as in the `quickstart
 <../getting-started/quickstart.rst>`__. Once enough eligible samples arrive,
-Reef submits a job. Slime trains it and saves checkpoints. Reef evaluates
-candidates and publishes selected artifacts.
+Reef submits a job. Slime trains it, and each saved checkpoint becomes an
+artifact. Activation decides whether it serves, using evaluation when configured.
 
 .. code:: bash
 
@@ -87,10 +75,8 @@ candidates and publishes selected artifacts.
    curl -sS -H "Authorization: Bearer reef-local" \
      "http://127.0.0.1:8900/reef/scenarios/$SCENARIO/artifacts"
 
-A new ``training`` artifact confirms that a job produced a published checkpoint.
-Activation decides whether later requests use it. Check
-`checkpoint cadence <operate.rst#set-the-checkpoint-cadence>`__ when a job
-needs intermediate checkpoints.
+Look for an artifact with ``operation: training``. Configure
+`checkpoint cadence <operate.rst#set-the-checkpoint-cadence>`__ for intermediate saves.
 
 Slime continues from its latest saved checkpoint, including checkpoints that
 Reef did not select. It refuses ``train-from`` on an existing scenario.
@@ -100,40 +86,20 @@ scenario for its lifetime; use another stack and ports for another scenario.
 What to review
 --------------
 
-.. list-table::
-   :header-rows: 1
-   :widths: 45 55
+Keep the example's GPU layout, loss flags and batch sizes until it works.
+Review these changes for your workload:
 
-   * - Setting
-     - Check
-   * - ``inference.model-path``
-     - The local model path or Hugging Face repository ID.
-   * - ``recipe.implementation``
-     - The recipe to run; its settings are under ``recipe.config``.
-   * - ``reef.token``
-     - The token clients send to Reef.
-   * - ``pipeline.sample2job.config.job_samples``
-     - The stored samples required to submit a job.
-   * - ``training.config.global_batch_size``
-     - The optimizer batch size in examples that expose this setting.
-   * - ``training.options``
-     - Slime's GPU layout, optimizer, sequence length and loss flags.
-   * - Checkpoint and ``storage.artifact-*`` paths
-     - Persistent storage with room for checkpoints and exports.
+- Set ``inference.model-path`` and persistent checkpoint/storage paths.
+- Set required ``pipeline.sample2job.config.job_samples``. This counts stored
+  samples; rendering can produce more optimizer samples (`SFT <recipes/sft.rst>`__).
+- Match the recipe to its `Slime loss flags
+  <../developer-guide/loss-families.rst#family-to-slime-flags>`__; mismatches fail startup.
+- Match training and serving chat-template arguments. For disabled thinking,
+  use ``training.options.apply-chat-template-kwargs: '{"enable_thinking": false}'``.
+  Unrenderable samples do not train and increment ``unrenderable_samples``.
 
-A weight recipe requires ``job_samples``. Set it to the example's batch size
-for its usual one-step jobs. Trajectory rendering can produce more optimizer
-samples than stored samples; see `SFT <recipes/sft.rst>`__.
-``pipeline.batch_size`` is not a valid setting.
-
-The recipe and Slime loss flags must agree. Reef checks this at startup.
-Use the recipe's example or the `loss-family mapping
-<../developer-guide/loss-families.rst#family-to-slime-flags>`__.
-
-Match training and serving chat-template arguments. For example, set
-``training.options.apply-chat-template-kwargs`` to
-``'{"enable_thinking": false}'`` when serving disables thinking.
-Samples that cannot render do not train; ``unrenderable_samples`` counts them.
+See `training options <../reference/configuration-training.rst>`__ for batch
+and backend settings. ``pipeline.batch_size`` is invalid.
 
 Choose what serves
 ------------------
@@ -171,25 +137,13 @@ Reef also accepts imported adapters. Their configuration must declare
 What a published adapter contains
 ---------------------------------
 
-The artifact's ``adapter/`` directory contains:
+The artifact's ``adapter/`` directory holds PEFT's ``adapter_config.json``
+and ``adapter_model.safetensors``, plus Reef metadata in ``reef-adapter.json``.
+Transformers and PEFT can load the first two files directly.
 
-- ``adapter_config.json``: the PEFT configuration.
-- ``adapter_model.safetensors``: the adapter tensors.
-- ``reef-adapter.json``: training metadata and checksums.
-
-The first two files load outside Reef with Transformers and PEFT:
-
-.. code:: python
-
-   from peft import PeftModel
-   from transformers import AutoModelForCausalLM
-
-   base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
-   model = PeftModel.from_pretrained(base, "/path/to/snapshot/adapter")
-
-When ``reef-adapter.json`` exists, Reef checks its files, checksums and settings.
-A mismatch refuses the adapter. External adapters can omit this metadata unless
-the deployment requires it. PEFT ignores the extra file.
+When Reef metadata is present, its checksums and settings must match.
+External adapters can omit it unless the deployment requires it.
+See `artifact layouts <../reference/http-api-artifacts.rst#import-an-artifact>`__.
 
 Connect your agent
 ------------------
@@ -208,12 +162,9 @@ With Docker available, run a task manifest through Reef:
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 
-Each task runs with ``terminus-2`` unless ``--agent-json`` selects another agent.
-Reef records its model calls. The verifier result becomes one report with the
-score, inference receipts and task metadata. The recipe decides what trains.
+The default agent is ``terminus-2``. Each verifier result becomes a report
+with its inference receipts; the recipe decides what trains.
+Use ``--help`` for agent, instruction and tagging options.
 
-- ``--instructions FILE`` appends instructions to each task.
-- ``--label name=value`` tags calls and reports to distinguish experimental arms.
-- ``--agent-host host.docker.internal`` lets an agent inside the container reach
-  the capture proxy. The proxy then listens on all interfaces. On Linux,
-  configure Docker's ``host-gateway`` for that name.
+For container-to-host calls, ``--agent-host host.docker.internal`` makes the
+capture proxy listen on all interfaces. Configure Docker's host gateway on Linux.

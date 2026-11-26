@@ -3,40 +3,8 @@ Generated tasks
 
 Use ``reef.recipe.generated_tasks:GeneratedTaskRecipe`` to generate Harbor tasks and train on their rollouts.
 
-This example requires a custom objective. Replace ``my_methods.objectives:MyObjective`` with your implementation:
-
-.. code:: yaml
-
-   generator:
-     tasks-root: /srv/reef/tasks
-   training:
-     backend: tinker
-   recipe:
-     implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
-     config:
-       job-parameters:
-         objective: my_methods.objectives:MyObjective
-         rollout:
-           rollouts_per_task: 4
-           environment: docker
-   pipeline:
-     record2sample:
-       config:
-         rounds: 20
-         jobs-per-round: 2
-         description: shell tasks with hidden state under /var and /etc
-         generator-url: ${endpoints.generator}
-         generator:
-           module: recipes.beta.spade:SpadeTaskGenerator
-           config:
-             generator_url: ${endpoints.generator}
-             skills: [inspection, repair]
-         pool-capacity: 32
-         review-interval: 8
-         review-band-low: 0.25
-
-For all settings, see `Recipe <configuration-settings.rst#recipe>`__ (``GeneratedTaskSamples``),
-`Generator <configuration-settings.rst#generator>`__ and `Evaluation <configuration-settings.rst#evaluation>`__ (``task-import``).
+Start from the `SPADE deployment <../../recipes/beta/spade/examples/tinker/serve.yaml>`__.
+The `settings reference <configuration-settings.rst#recipe>`__ lists the ``GeneratedTaskSamples`` stage options.
 
 Rounds and tasks
 ----------------
@@ -50,28 +18,19 @@ Rounds and tasks
 The training pool
 -----------------
 
-Set ``pool-capacity`` above 0 to reuse generated training tasks:
+With ``pool-capacity`` above zero, generated training tasks return to the queue after each job.
+Previously trained tasks join when you enable the pool. Imported tasks train once.
+Reef checks capacity at round start, so one generation can exceed the limit. Inspect counts under ``training_pool``.
 
-- After a job ends, its tasks return to the end of the queue.
-- Capacity is checked at round start. The pool can exceed it by one generation's training tasks.
-- Imported train tasks still train once.
-- When you enable the pool, previously trained tasks join it.
-- The status shows the pool under ``training_pool``: ``capacity``, ``active``, ``retired``, ``reviews`` and ``last_review_retired``.
+Every ``review-interval`` jobs, including failures, Reef checks each task's last ``review-window`` rewards.
+Tasks with fewer rewards stay active. Reef retires tasks in this order:
 
-Every ``review-interval`` jobs, including failed jobs, Reef reviews each active task's last ``review-window`` rewards.
-Tasks with fewer rewards stay active. The pass rate is the mean reward.
-The first matching condition retires a task:
+#. Mean below ``review-band-low`` (``below_band``).
+#. Mean above ``review-band-high`` (``above_band``).
+#. Population standard deviation below ``review-min-reward-std`` (``no_reward_spread``).
 
-- ``below_band``: the pass rate is below ``review-band-low``.
-- ``above_band``: the pass rate is above ``review-band-high``.
-- ``no_reward_spread``: the population standard deviation of the rewards is below ``review-min-reward-std``.
-
-Equality with a pass-rate bound does not retire a task. Recorded rewards can be one pool cycle old.
-
-Exceptions:
-
-- If a job starts before the stage reads the previous job's failure, the new job also counts as a use without rewards. Its rewards are discarded. This also applies with ``pool-capacity: 0``.
-- When a new training start cancels a job, its tasks return to the pool only when a later job ends.
+Rewards can lag one pool cycle. A job started before Reef reads the previous failure counts as a use without rewards, even with pooling disabled.
+When a new training start cancels a job, its tasks return after a later job ends.
 
 Rollout job parameters
 ----------------------
@@ -105,62 +64,28 @@ Set these keys under ``recipe.config.job-parameters``.
    ``rollout.scaffold_tolerance`` : 8
        Maximum trailing prompt tokens that the next prompt's history can omit, such as a thinking template. The training sample keeps these tokens.
 
-**Cloud sandboxes.**
+For self-hosted E2B, set ``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` on the rollout host.
+Slime forwards these and ``E2B_DOMAIN`` to workers. On AgentENV also install ``aenv`` and ``aenv-buildctl`` and set
+``REEF_E2B_DOCKERFILE_BUILD=aenv`` in each rollout process. Slime does not forward that variable.
+See `sandbox lifetime and cleanup <../developer-guide/sandboxes.rst#harbor-task-environments>`__.
 
-- For a self-hosted E2B service, set ``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` in the process that runs the rollouts. The Slime training component passes these variables and ``E2B_DOMAIN`` to its workers.
-- On AgentENV, also set ``REEF_E2B_DOCKERFILE_BUILD=aenv`` in that process, and put AgentENV's ``aenv`` and ``aenv-buildctl`` on ``PATH``. Reef then builds each task's Dockerfile with ``aenv build``, which uses the same ``E2B_API_URL`` and ``E2B_API_KEY``. The Slime component does not pass ``REEF_E2B_DOCKERFILE_BUILD`` to its workers.
-- Harbor deletes the sandbox when the rollout ends. When the rollout process is killed first, the sandbox stays until its `lifetime <../developer-guide/sandboxes.rst#harbor-task-environments>`__ ends.
-
-**Task job metrics.**
-
-.. list-table::
-   :header-rows: 1
-
-   * - Metric
-     - Meaning
-   * - ``rollout_rewards``
-     - each task's rewards
-   * - ``rollout_samples``
-     - the samples that train
-   * - ``removed_rollouts``
-     - the rollouts that fail in the infrastructure, or whose model calls do not assemble into one sample
-   * - ``rollout_tokens``, ``rollout_response_tokens``, ``rollout_trained_tokens``
-     - Tinker only: the response tokens and the trained tokens of each rollout, and their sums
-   * - ``unrenderable_samples``
-     - Tinker only: samples longer than the model's context window, which do not train and are not in ``rollout_samples`` or the trained tokens
-
-On Tinker, a sample alone in its group does not train, and it is in neither ``rollout_samples`` nor ``removed_rollouts``.
+Read ``rollout_rewards`` for task rewards and ``rollout_samples`` for trainable samples.
+``removed_rollouts`` counts infrastructure and sample assembly failures.
+Tinker reports per-rollout and total tokens in ``rollout_tokens``, ``rollout_response_tokens`` and ``rollout_trained_tokens``.
+Overlong samples count as ``unrenderable_samples``. A singleton group contributes neither a trained sample nor a removed rollout.
 
 The ``generator`` section
 -------------------------
 
-This section starts the generator before the HTTP service and exposes its address as ``${endpoints.generator}``.
-The generator uses Reef's Python interpreter. Select its executor with ``execution.generator`` (`Executors <configuration-settings.rst#executors>`__).
+Reef starts the generator before HTTP and publishes its URL as ``${endpoints.generator}``.
+Select its executor with ``execution.generator``. Install Harbor and the environment below in the generator's Python environment.
+On Tinker, the training host also needs Harbor and its rollout environment.
 
-The generator host needs ``harbor`` and the selected ``generator.environment``.
-For Tinker, the training host also needs Harbor and the selected ``rollout.environment``.
+- ``docker`` (default) requires a Docker daemon.
+- ``e2b`` requires ``reef-infra[e2b]`` and ``E2B_API_KEY``. For multi-container tasks see `Compose on AgentENV <../developer-guide/sandboxes.rst#tasks-with-compose-services-on-agentenv>`__.
+- ``modal`` requires ``reef-infra[modal]``, ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``.
 
-.. list-table::
-   :header-rows: 1
-
-   * - ``generator.environment``
-     - Needs
-   * - ``docker`` (default)
-     - a Docker daemon on the host
-   * - ``e2b``
-     - ``E2B_API_KEY`` exported where ``reef serve`` starts, and ``reef-infra[e2b]`` in the generator's interpreter. The readiness check looks there, so ``generator.harbor`` must come from the same Python environment
-   * - ``modal``
-     - ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve`` starts, and ``reef-infra[modal]`` in the generator's interpreter
-
-With ``e2b``, a check or a rollout starts only the task's image, unless ``REEF_E2B_COMPOSE=aenv`` also starts its Compose services (`Tasks with Compose services on AgentENV <../developer-guide/sandboxes.rst#tasks-with-compose-services-on-agentenv>`__).
-
-The generator reads its connection settings from the deployment config:
-
-- Address: ``reef.host`` and ``reef.port``.
-- Token: ``reef.token``, or the first entry of ``reef.tokens``.
-- Model: ``inference.model-path`` or ``inference.upstream-model``.
-
-To run the generator separately:
+To start the generator separately with the deployment's address, model and token:
 
 .. code:: bash
 

@@ -5,9 +5,8 @@ A loss family implements a weight method's model-dependent computation.
 The objective prepares the job's data; the family computes the loss for
 each optimizer step.
 
-This page covers Slime's ``SlimeAlgorithm`` contract. Tinker uses
-``TinkerLoss`` from ``reef.train.tinker_backend.losses`` and has no worker hooks.
-Read `Training service <recipe-training-service.rst>`__ for objective registration.
+Slime uses ``SlimeAlgorithm``; Tinker uses ``TinkerLoss`` without worker hooks.
+See `Training service <recipe-training-service.rst>`__ for objective registration.
 
 Layout
 ------
@@ -75,17 +74,9 @@ Use ``custom_loss`` to replace the complete loss.
 Set ``uses_pg_loss_primitive=True`` with ``policy_loss`` to replace only
 its per-token policy-gradient primitive.
 
-Optional methods extend specific stages:
-
-- ``parse_specific_options`` and ``apply_driver_options`` handle
-  ``--<family>-*`` flags before Slime parses its arguments.
-- ``configure_backend_args`` derives backend settings.
-- ``shape_sample_row`` and ``build_rollout_data`` define custom wire data.
-- ``prepare_rollout`` runs before workers train the job.
-- ``bind`` creates per-run state; ``train`` controls actor and critic steps.
-  The default runs one actor step.
-- ``rollout_metrics`` reports step measurements.
-- ``policy_gradient_weight`` declares support for `score centering`_.
+Optional hooks add family flags, wire data, rollout preparation, actor/critic
+steps and metrics. Declare ``policy_gradient_weight`` to support `score centering`_.
+See `SlimeAlgorithm <../../reef/train/slime_backend/algorithm.py>`__ for signatures.
 
 Objective hooks
 ---------------
@@ -117,10 +108,8 @@ loss. Keep torch imports out of the spec module.
 Wire declarations
 -----------------
 
-The default row is
-``[source_id, tokens, loss_mask, rollout_log_probs, reward]``.
-Rendering supplies tokens and masks. Recorded rollout probabilities are
-empty for rendered traffic samples; training task rollouts can supply them.
+Default rows contain source ID, tokens, loss mask, rollout probabilities and reward.
+Rendered traffic has no recorded rollout probabilities; task rollouts can supply them.
 
 For extra columns, declare:
 
@@ -131,10 +120,8 @@ For extra columns, declare:
 - ``external_batch_keys``: values forwarded to microbatches.
 - ``rollout_log_skip_keys``: nonscalar values excluded from numeric logging.
 
-Critic families can set ``critic_value_head_zero_init`` and
-``critic_value_mask_key``. Use ``recipes/tttd/slime/`` for default rows,
-``recipes/openclawrl/slime/`` for custom rows, or ``recipes/sao/slime/`` for
-critic orchestration.
+Critic families can set ``critic_value_head_zero_init`` and ``critic_value_mask_key``.
+See `OpenClaw-RL <../../recipes/openclawrl/slime>`__ for custom wire rows.
 
 Per-job families
 ----------------
@@ -164,21 +151,15 @@ The wire row adds ``teacher_tokens`` and ``sample_weight``.
 Teacher tokens contain the teacher prompt followed by student response IDs.
 Sample weight defaults to 1; stages can set ``distill_sample_weight``.
 
-Family-prefixed flags select the teacher and divergence:
-``teacher``, ``teacher-update-rate``, ``teacher-checkpoint``, ``divergence``,
-``top-k``, ``top-k-source``, ``top-k-distribution``,
-``importance-sampling-cap``, ``importance-sampling-level``,
-``skip-response-tokens`` and ``jsd-beta``.
+Family-prefixed flags select teacher weights and divergence.
+``self`` follows student weights at rate 1, freezes at 0, or updates a slower copy.
+``separate`` loads a compatible teacher checkpoint.
+The teacher runs forward-only before training.
 
-- ``self`` uses student weights: update rate 1 follows current weights,
-  0 freezes a copy, and intermediate values update a slower copy.
-- ``separate`` loads a compatible teacher checkpoint beside the actor.
-
-The teacher runs a forward-only pass before training.
-Losses support forward KL, reverse KL and generalized JSD over the full
-vocabulary or selected top-K IDs. Student-selected top-K requires an extra
-forward pass and zero dropout. Top-K distributions can be renormalized or
-include a bucket for the remaining vocabulary.
+Supported losses are forward/reverse KL and generalized JSD over full
+vocabulary or top-K IDs. Student-selected top-K requires zero dropout.
+See `DistillAlgorithm <../../reef/train/slime_backend/distill/algorithm.py>`__
+for flags and distribution modes.
 
 Teacher engine
 --------------
@@ -187,18 +168,13 @@ A separate teacher can run on a frozen SGLang engine.
 It may differ in size and parallel layout, but must use compatible token IDs.
 See `OPD teacher engine <../user-guide/recipes/opd.rst#teacher-engine>`__.
 
-The ``teacher`` section starts ``distill-teacher`` and supplies family-prefixed
-``teacher-url``, ``teacher-model-path`` and ``teacher-timeout`` flags.
-Set those flags directly for an externally managed engine.
+The ``teacher`` section starts the engine; family-prefixed ``teacher-url``,
+``teacher-model-path`` and ``teacher-timeout`` can select an external engine.
+Reef checks tokenizer compatibility and uses the student's chat template.
+Scoring failure rejects the whole batch.
 
-Reef checks tokenizer compatibility at startup and renders teacher inputs
-with the student's chat template. Scoring happens before worker training;
-a failure rejects the whole job's scored batch.
-
-The engine supports sampled reverse KL and teacher-selected top-K forward KL,
-reverse KL and JSD at temperature 1. Full-vocabulary and student-selected
-top-K modes require a checkpoint teacher. Invalid combinations fail validation.
-``perf/distill_teacher_time`` reports scoring seconds.
+Engine teachers support sampled reverse KL and teacher-selected top-K KL/JSD
+at temperature 1. Full-vocabulary and student-selected top-K need checkpoint teachers.
 
 Score centering
 ---------------
@@ -230,17 +206,9 @@ Implement ``policy_gradient_weight(args)`` with a ``PolicyGradientWeight``:
 Returning ``None`` rejects centering. SAO, importance sampling and sampled
 reverse-KL distillation declare support.
 
-For sampler top-K IDs ``H``, Reef adds:
-
-.. code:: text
-
-   A * sum_{v in H} sg[q_v * f(p_v / q_v) - alpha * p_v] * log p_v
-   rho   = max(1 - q(H), eps) / max(1 - p(H), eps)
-   alpha = rho * f(1 / rho)
-
-``sg`` stops gradients. The sampler tail is approximated by ``rho * p``.
-The correction uses the loss's advantages and per-sample mean, and vanishes
-when ``q = p``.
+``sg`` stops gradients. Centering uses the loss's advantages and per-sample
+mean; its correction vanishes when ``q = p``.
+See the paper for the correction formula and tail approximation.
 
 Requirements
 ~~~~~~~~~~~~
@@ -250,12 +218,10 @@ Samples must carry sampler ``topk_indices`` and ``topk_log_probs`` under
 Traffic records contain no such tensors. Spindle task rollouts can record
 them with ``score_centering`` enabled.
 
-Reef rejects missing or short rows, duplicate or negative IDs, nonfinite
-log probabilities, head mass above one and inconsistent sampled-token probabilities.
+Invalid or incomplete probability rows fail validation.
 Teacher probabilities cannot replace sampler probabilities.
-Recorded probabilities are after temperature but before top-k, top-p and
-min-p filtering; enabled filters therefore leave the correction centered
-against the unfiltered distribution.
+Recorded probabilities include temperature but precede top-k/top-p/min-p filtering;
+centering therefore uses the unfiltered distribution.
 
 Slime requires context parallel size 1. Policy-loss families also reject
 ``use-tis``, ``get-mismatch-metrics``, ``use-opsm`` and a custom PG reducer.
@@ -286,8 +252,6 @@ The correction's top-K and teacher top-K can differ.
 Metrics
 ~~~~~~~
 
-Step metrics sum per-sample means:
-``score_centering_term`` (included in loss),
-``score_centering_correction_l1``, sampler and trainer head masses,
-``score_centering_tail_ratio`` and ``score_centering_tail_clipped``.
-The last metric is the fraction of positions whose tail fell below the floor.
+Metrics include the loss correction, its absolute size, head masses and tail ratio.
+``score_centering_tail_clipped`` measures positions below the tail floor.
+Values sum per-sample means.

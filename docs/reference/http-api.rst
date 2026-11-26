@@ -19,56 +19,40 @@ Each page covers one API area. Services below expose its routes in a `split depl
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 15 55
+   :widths: 75 25
 
    * - Page
      - Service
-     - Coverage
    * - `Inference and feedback <http-api-inference.rst>`__
      - inference, control
-     - Inference routes, startup status, receipts, the report body
    * - `Scenario routing <http-api-routing.rst>`__
      - inference
-     - Routed external-model requests and the managed routing lifecycle
    * - `Records and operation history <http-api-records.rst>`__
      - control, data
-     - Record imports, record reads, operation history
    * - `Data items <http-api-data-items.rst>`__
      - data
-     - The item model; record, evaluation and artifact items; read, patch, delete, restore and download
    * - `Create and transfer data items <http-api-data-upload.rst>`__
      - data
-     - Create trajectory and task items, replace a task's files, import and export
    * - `Benchmarks, collections and trajectory sets <http-api-data-sets.rst>`__
      - data
-     - Benchmarks, collections, trajectory sets, and the sets that a scenario holds
    * - `Scenarios and their settings <http-api-scenarios.rst>`__
      - control
-     - Create and delete scenarios; training mode, activation, serving config and the other settings
    * - `What a scenario serves <http-api-serving.rst>`__
      - control
-     - The ``served`` mapping, traffic split, one served artifact, serve nothing, restore
    * - `Artifacts <http-api-artifacts.rst>`__
      - control, data
-     - Artifact list, artifact files, artifact import
    * - `Training requests and jobs <http-api-training.rst>`__
      - control, data
-     - Training requests (``POST /reef/train``), training jobs, train-from
    * - `Samples <http-api-samples.rst>`__
      - control, data
-     - Sample list, next job, sample processing tasks
    * - `Evaluate an artifact <http-api-evaluation.rst>`__
      - control, data
-     - Start, read, cancel, retry and resume an artifact evaluation; automatic evaluation
    * - `Calls and trajectories of an evaluation <http-api-evaluation-calls.rst>`__
      - control, data
-     - Model calls, verifier calls and trajectories of a rollout
    * - `Harness trees and pages <http-api-harness.rst>`__
      - harness, control
-     - Harness tree, catalog, adapters, sync, step and request pages
    * - `Status, status codes and browser access <http-api-status.rst>`__
      - control
-     - ``GET /reef/status``, status codes, browser consoles
 
 Routes
 ------
@@ -78,209 +62,244 @@ Routes grouped by their reference page. Routed deployments expose fewer routes (
 Inference and feedback routes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| Route                                                                            | Response                                          | Documented in                                                    |
-+==================================================================================+===================================================+==================================================================+
-| ``POST /v1/chat/completions``                                                    | OpenAI-format inference                           | `Request <http-api-inference.rst#request>`__                     |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /v1/responses``                                                           | OpenAI Responses-format inference                 | `Request <http-api-inference.rst#request>`__                     |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /v1/messages``                                                            | Anthropic-format inference                        | `Request <http-api-inference.rst#request>`__                     |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /v1/messages/count_tokens``                                               | count request tokens; recorded like any inference | `Request <http-api-inference.rst#request>`__                     |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/v1/{route}``                                   | inference with the scenario in the path           | `Request <http-api-inference.rst#request>`__                     |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | inference by the active model; keeps no record    | `Evaluation routes <http-api-inference.rst#evaluation-routes>`__ |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same, for a candidate of one component        | `Evaluation routes <http-api-inference.rst#evaluation-routes>`__ |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /reef/report``                                                            | submit feedback about one or more trajectories    | `Report <http-api-inference.rst#report>`__                       |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/inference/status``                              | startup state of a served artifact                | `Startup status <http-api-inference.rst#startup-status>`__       |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/redeploy``                                     | deploy the served engines again                   | `Startup status <http-api-inference.rst#startup-status>`__       |
-+----------------------------------------------------------------------------------+---------------------------------------------------+------------------------------------------------------------------+
+`Inference and feedback <http-api-inference.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``POST /v1/chat/completions``
+     - OpenAI-format inference
+   * - ``POST /v1/responses``
+     - OpenAI Responses-format inference
+   * - ``POST /v1/messages``
+     - Anthropic-format inference
+   * - ``POST /v1/messages/count_tokens``
+     - count request tokens; recorded like any inference
+   * - ``POST /reef/scenarios/{scenario}/v1/{route}``
+     - inference with the scenario in the path
+   * - ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``
+     - inference by the active model; keeps no record
+   * - ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}``
+     - the same, for a candidate of one component
+   * - ``POST /reef/report``
+     - submit feedback about one or more trajectories
+   * - ``GET /reef/scenarios/{scenario}/inference/status``
+     - startup state of a served artifact
+   * - ``POST /reef/scenarios/{scenario}/redeploy``
+     - deploy the served engines again
 
 Record routes
 ~~~~~~~~~~~~~
 
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
-| Route                                                  | Response                                   | Documented in                                                                                            |
-+========================================================+============================================+==========================================================================================================+
-| ``POST /reef/records``                                 | import one existing inference or report    | `Import records for cold-start learning <http-api-records.rst#import-records-for-cold-start-learning>`__ |
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
-| ``POST /reef/records/batch``                           | atomically import a batch of records       | `Batch imports and resume <http-api-records.rst#batch-imports-and-resume>`__                             |
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/records``             | retained record metadata                   | `Record and commit history <http-api-records.rst#record-and-commit-history>`__                           |
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/commits``             | compatibility route for operation history  | `Record and commit history <http-api-records.rst#record-and-commit-history>`__                           |
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/operations``          | paginated operation history and selections | `Record and commit history <http-api-records.rst#record-and-commit-history>`__                           |
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/records/{record_id}`` | one retained record and its trace payload  | `Record and commit history <http-api-records.rst#record-and-commit-history>`__                           |
-+--------------------------------------------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------+
+`Records and operation history <http-api-records.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``POST /reef/records``
+     - import one existing inference or report
+   * - ``POST /reef/records/batch``
+     - atomically import a batch of records
+   * - ``GET /reef/scenarios/{scenario}/records``
+     - retained record metadata
+   * - ``GET /reef/scenarios/{scenario}/commits``
+     - compatibility route for operation history
+   * - ``GET /reef/scenarios/{scenario}/operations``
+     - paginated operation history and selections
+   * - ``GET /reef/scenarios/{scenario}/records/{record_id}``
+     - one retained record and its trace payload
 
 Data routes
 ~~~~~~~~~~~
 
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| Route                                                                           | Response                                         | Documented in                                                                                         |
-+=================================================================================+==================================================+=======================================================================================================+
-| ``POST /reef/namespaces/{owner}/data``                                          | create record and artifact items                 | `Record items <http-api-data-items.rst#record-items>`__                                               |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data``                                           | the owner's items, in arrival order              | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data/groups/{key}``                              | the owner's items grouped by a metadata value    | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data/sets/{kind}``                               | the owner's benchmarks or trajectory sets        | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data/{id}``                                      | one item, with its content                       | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/metadata``                                 | patch the metadata of items                      | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/data/{id}``                                   | delete one item; restore it for 30 days          | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/deleted-items``                                  | the owner's deleted items, newest first          | `Restore deleted items <http-api-data-items.rst#restore-deleted-items>`__                             |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/deleted-items/restore``                         | restore deleted items                            | `Restore deleted items <http-api-data-items.rst#restore-deleted-items>`__                             |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/deleted-items/{id}``                          | purge one deleted item for good                  | `Restore deleted items <http-api-data-items.rst#restore-deleted-items>`__                             |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data/{id}/archive``                              | download one item: a task as tar.gz, else JSON   | `Download an item <http-api-data-items.rst#download-an-item>`__                                       |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/tasks``                                        | the tasks the scenario uses, which trained       | `Read, query, update and delete items <http-api-data-items.rst#read-query-update-and-delete-items>`__ |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/trajectories``                             | create trajectory items from JSON Lines          | `Create trajectory items <http-api-data-upload.rst#create-trajectory-items>`__                        |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/tasks``                                    | create task items from a tar.gz, or by reference | `Create task items <http-api-data-upload.rst#create-task-items>`__                                    |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                | replace a task item's files, or by reference     | `Replace a task's files <http-api-data-upload.rst#replace-a-task-s-files>`__                          |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/imports``                                  | import the files at a URI as items               | `Import and export items <http-api-data-upload.rst#import-and-export-items>`__                        |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data/imports/{id}``                              | the status of one import                         | `Import and export items <http-api-data-upload.rst#import-and-export-items>`__                        |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/exports``                                  | export items to a tar.gz at a URI                | `Import and export items <http-api-data-upload.rst#import-and-export-items>`__                        |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/data/exports/{id}``                              | the status of one export                         | `Import and export items <http-api-data-upload.rst#import-and-export-items>`__                        |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/collections``                                    | the owner's collections of benchmarks            | `Benchmarks and collections <http-api-data-sets.rst#benchmarks-and-collections>`__                    |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``PUT /reef/namespaces/{owner}/collections/{name}``                             | create or replace one collection                 | `Benchmarks and collections <http-api-data-sets.rst#benchmarks-and-collections>`__                    |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/collections/{name}``                             | one collection, with its task counts             | `Benchmarks and collections <http-api-data-sets.rst#benchmarks-and-collections>`__                    |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/collections/{name}``                          | delete one collection                            | `Benchmarks and collections <http-api-data-sets.rst#benchmarks-and-collections>`__                    |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``                  | make a scenario hold a collection's benchmarks   | `Benchmarks and collections <http-api-data-sets.rst#benchmarks-and-collections>`__                    |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks``                | the benchmarks that a scenario holds             | `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__            |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{name}``         | make a scenario hold a benchmark in a split      | `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__            |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{name}``      | end a scenario's hold of a benchmark             | `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__            |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``GET /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets``           | the trajectory sets that a scenario holds        | `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__            |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets/{name}``    | make a scenario hold a trajectory set            | `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__            |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets/{name}`` | end a scenario's hold of a trajectory set        | `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__            |
-+---------------------------------------------------------------------------------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------+
+`Data items <http-api-data-items.rst>`__, `uploads and transfers <http-api-data-upload.rst>`__, `sets and collections <http-api-data-sets.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``POST /reef/namespaces/{owner}/data``
+     - create record and artifact items
+   * - ``GET /reef/namespaces/{owner}/data``
+     - the owner's items, in arrival order
+   * - ``GET /reef/namespaces/{owner}/data/groups/{key}``
+     - the owner's items grouped by a metadata value
+   * - ``GET /reef/namespaces/{owner}/data/sets/{kind}``
+     - the owner's benchmarks or trajectory sets
+   * - ``GET /reef/namespaces/{owner}/data/{id}``
+     - one item, with its content
+   * - ``POST /reef/namespaces/{owner}/data/metadata``
+     - patch the metadata of items
+   * - ``DELETE /reef/namespaces/{owner}/data/{id}``
+     - delete one item; restore it for 30 days
+   * - ``GET /reef/namespaces/{owner}/deleted-items``
+     - the owner's deleted items, newest first
+   * - ``POST /reef/namespaces/{owner}/deleted-items/restore``
+     - restore deleted items
+   * - ``DELETE /reef/namespaces/{owner}/deleted-items/{id}``
+     - purge one deleted item for good
+   * - ``GET /reef/namespaces/{owner}/data/{id}/archive``
+     - download one item: a task as tar.gz, else JSON
+   * - ``GET /reef/scenarios/{scenario}/tasks``
+     - the tasks the scenario uses, which trained
+   * - ``POST /reef/namespaces/{owner}/data/trajectories``
+     - create trajectory items from JSON Lines
+   * - ``POST /reef/namespaces/{owner}/data/tasks``
+     - create task items from a tar.gz, or by reference
+   * - ``PUT /reef/namespaces/{owner}/data/tasks/{id}``
+     - replace a task item's files, or by reference
+   * - ``POST /reef/namespaces/{owner}/data/imports``
+     - import the files at a URI as items
+   * - ``GET /reef/namespaces/{owner}/data/imports/{id}``
+     - the status of one import
+   * - ``POST /reef/namespaces/{owner}/data/exports``
+     - export items to a tar.gz at a URI
+   * - ``GET /reef/namespaces/{owner}/data/exports/{id}``
+     - the status of one export
+   * - ``GET /reef/namespaces/{owner}/collections``
+     - the owner's collections of benchmarks
+   * - ``PUT /reef/namespaces/{owner}/collections/{name}``
+     - create or replace one collection
+   * - ``GET /reef/namespaces/{owner}/collections/{name}``
+     - one collection, with its task counts
+   * - ``DELETE /reef/namespaces/{owner}/collections/{name}``
+     - delete one collection
+   * - ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``
+     - make a scenario hold a collection's benchmarks
+   * - ``GET /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks``
+     - the benchmarks that a scenario holds
+   * - ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{name}``
+     - make a scenario hold a benchmark in a split
+   * - ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{name}``
+     - end a scenario's hold of a benchmark
+   * - ``GET /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets``
+     - the trajectory sets that a scenario holds
+   * - ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets/{name}``
+     - make a scenario hold a trajectory set
+   * - ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/trajectory-sets/{name}``
+     - end a scenario's hold of a trajectory set
 
 Scenario routes
 ~~~~~~~~~~~~~~~
 
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
-| Route                                       | Response                                        | Documented in                                                        |
-+=============================================+=================================================+======================================================================+
-| ``GET /reef/scenarios``                     | scenario selections and harness adapter         | `Scenario routes <http-api-scenarios.rst#scenario-routes>`__         |
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
-| ``POST /reef/scenarios``                    | create a scenario explicitly                    | `Create a scenario <http-api-scenarios.rst#create-a-scenario>`__     |
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``  | update a scenario's settings and what it serves | `Scenario updates <http-api-scenarios.rst#scenario-updates>`__       |
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/settings`` | read a scenario's settings                      | `Read the settings <http-api-scenarios.rst#read-the-settings>`__     |
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/contract`` | what this scenario accepts                      | `Scenario routes <http-api-scenarios.rst#scenario-routes>`__         |
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``       | delete a scenario; the sweep archives its state | `Deleting a scenario <http-api-scenarios.rst#deleting-a-scenario>`__ |
-+---------------------------------------------+-------------------------------------------------+----------------------------------------------------------------------+
+`Scenarios and settings <http-api-scenarios.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``GET /reef/scenarios``
+     - scenario selections and harness adapter
+   * - ``POST /reef/scenarios``
+     - create a scenario explicitly
+   * - ``POST /reef/scenarios/{scenario}/update``
+     - update a scenario's settings and what it serves
+   * - ``GET /reef/scenarios/{scenario}/settings``
+     - read a scenario's settings
+   * - ``GET /reef/scenarios/{scenario}/contract``
+     - what this scenario accepts
+   * - ``DELETE /reef/scenarios/{scenario}``
+     - delete a scenario; the sweep archives its state
 
 Serving and artifact routes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-+------------------------------------------------------------------------+--------------------------------------------+--------------------------------------------------------------------------------------+
-| Route                                                                  | Response                                   | Documented in                                                                        |
-+========================================================================+============================================+======================================================================================+
-| ``POST /reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}`` | inference by one served artifact, recorded | `Call one served artifact <http-api-serving.rst#call-one-served-artifact>`__         |
-+------------------------------------------------------------------------+--------------------------------------------+--------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/restore``                            | restore the selection of an earlier commit | `Restore a scenario selection <http-api-serving.rst#restore-a-scenario-selection>`__ |
-+------------------------------------------------------------------------+--------------------------------------------+--------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/artifacts``                           | ``{scenario, artifacts}``, newest first    | `List the artifacts <http-api-artifacts.rst#list-the-artifacts>`__                   |
-+------------------------------------------------------------------------+--------------------------------------------+--------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files``       | an artifact's file list, or one file       | `Files of an artifact <http-api-artifacts.rst#files-of-an-artifact>`__               |
-+------------------------------------------------------------------------+--------------------------------------------+--------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/artifacts``                          | import a directory as a new artifact       | `Import an artifact <http-api-artifacts.rst#import-an-artifact>`__                   |
-+------------------------------------------------------------------------+--------------------------------------------+--------------------------------------------------------------------------------------+
+`Serving <http-api-serving.rst>`__ and `artifacts <http-api-artifacts.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``POST /reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``
+     - inference by one served artifact, recorded
+   * - ``POST /reef/scenarios/{scenario}/restore``
+     - restore the selection of an earlier commit
+   * - ``GET /reef/scenarios/{scenario}/artifacts``
+     - ``{scenario, artifacts}``, newest first
+   * - ``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files``
+     - an artifact's file list, or one file
+   * - ``POST /reef/scenarios/{scenario}/artifacts``
+     - import a directory as a new artifact
 
 Training and sample routes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| Route                                                               | Response                                          | Documented in                                                                          |
-+=====================================================================+===================================================+========================================================================================+
-| ``POST /reef/train``                                                | enqueue one training request                      | `Manual training <http-api-training.rst#manual-training>`__                            |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/train-from``                      | set the artifact that a trainer starts from       | `Train from an artifact <http-api-training.rst#train-from-an-artifact>`__              |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/jobs``                             | the scenario's training jobs in the jobs queue    | `Training jobs <http-api-training.rst#training-jobs>`__                                |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``            | cancel one training job of the scenario           | `Training jobs <http-api-training.rst#training-jobs>`__                                |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel``    | cancel one training request of the scenario       | `Training jobs <http-api-training.rst#training-jobs>`__                                |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/samples``                          | the scenario's training samples, in use order     | `Choose the samples that train <http-api-samples.rst#choose-the-samples-that-train>`__ |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/sample-processing``                | the scenario's sample processing tasks and counts | `Sample processing tasks <http-api-samples.rst#sample-processing-tasks>`__             |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}``      | one sample processing task of the scenario        | `Sample processing tasks <http-api-samples.rst#sample-processing-tasks>`__             |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs`` | the log of one attempt of a task                  | `Sample processing tasks <http-api-samples.rst#sample-processing-tasks>`__             |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/next-job``                         | the samples that the next automatic job trains    | `Choose the samples that train <http-api-samples.rst#choose-the-samples-that-train>`__ |
-+---------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------------------------------------+
+`Training <http-api-training.rst>`__ and `samples <http-api-samples.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``POST /reef/train``
+     - enqueue one training request
+   * - ``POST /reef/scenarios/{scenario}/train-from``
+     - set the artifact that a trainer starts from
+   * - ``GET /reef/scenarios/{scenario}/jobs``
+     - the scenario's training jobs in the jobs queue
+   * - ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``
+     - cancel one training job of the scenario
+   * - ``POST /reef/scenarios/{scenario}/requests/{request_id}/cancel``
+     - cancel one training request of the scenario
+   * - ``GET /reef/scenarios/{scenario}/samples``
+     - the scenario's training samples, in use order
+   * - ``GET /reef/scenarios/{scenario}/sample-processing``
+     - the scenario's sample processing tasks and counts
+   * - ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}``
+     - one sample processing task of the scenario
+   * - ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}/logs``
+     - the log of one attempt of a task
+   * - ``GET /reef/scenarios/{scenario}/next-job``
+     - the samples that the next automatic job trains
 
 Evaluation routes
 ~~~~~~~~~~~~~~~~~
 
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| Route                                                                                                                 | Response                                           | Documented in                                                                                   |
-+=======================================================================================================================+====================================================+=================================================================================================+
-| ``POST /reef/scenarios/{scenario}/evaluations``                                                                       | evaluate one artifact of a snapshot                | `Start an evaluation <http-api-evaluation.rst#start-an-evaluation>`__                           |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluation-capabilities``                                                            | check support for evaluation start IDs             | `Start an evaluation <http-api-evaluation.rst#start-an-evaluation>`__                           |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``                                                | cancel one evaluation                              | `Cancel, retry and resume <http-api-evaluation.rst#cancel-retry-and-resume>`__                  |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``                                                 | run the failed rollouts again                      | `Cancel, retry and resume <http-api-evaluation.rst#cancel-retry-and-resume>`__                  |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume``                                                | run the cancelled and the unstarted rollouts       | `Cancel, retry and resume <http-api-evaluation.rst#cancel-retry-and-resume>`__                  |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations``                                                                        | artifact evaluations, newest first                 | `Read an evaluation <http-api-evaluation.rst#read-an-evaluation>`__                             |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                                                        | one evaluation: its state and result               | `Read an evaluation <http-api-evaluation.rst#read-an-evaluation>`__                             |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``                                               | the rollouts of one evaluation, as they run        | `Read an evaluation <http-api-evaluation.rst#read-an-evaluation>`__                             |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls``                   | the model calls of one rollout, without bodies     | `Model calls of a rollout <http-api-evaluation-calls.rst#model-calls-of-a-rollout>`__           |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls/{attempt}/{index}`` | one model call of a rollout, with its bodies       | `Model calls of a rollout <http-api-evaluation-calls.rst#model-calls-of-a-rollout>`__           |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``            | the ATIF trajectories of each attempt of a rollout | `Trajectories of an evaluation <http-api-evaluation-calls.rst#trajectories-of-an-evaluation>`__ |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``                                           | the trajectories of an evaluation, as NDJSON       | `Trajectories of an evaluation <http-api-evaluation-calls.rst#trajectories-of-an-evaluation>`__ |
-+-----------------------------------------------------------------------------------------------------------------------+----------------------------------------------------+-------------------------------------------------------------------------------------------------+
+`Evaluations <http-api-evaluation.rst>`__ and `evaluation calls <http-api-evaluation-calls.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``POST /reef/scenarios/{scenario}/evaluations``
+     - evaluate one artifact of a snapshot
+   * - ``GET /reef/scenarios/{scenario}/evaluation-capabilities``
+     - check support for evaluation start IDs
+   * - ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``
+     - cancel one evaluation
+   * - ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``
+     - run the failed rollouts again
+   * - ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume``
+     - run the cancelled and the unstarted rollouts
+   * - ``GET /reef/scenarios/{scenario}/evaluations``
+     - artifact evaluations, newest first
+   * - ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``
+     - one evaluation: its state and result
+   * - ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
+     - the rollouts of one evaluation, as they run
+   * - ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls``
+     - the model calls of one rollout, without bodies
+   * - ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/calls/{attempt}/{index}``
+     - one model call of a rollout, with its bodies
+   * - ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories``
+     - the ATIF trajectories of each attempt of a rollout
+   * - ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``
+     - the trajectories of an evaluation, as NDJSON
 
 Harness routes
 ~~~~~~~~~~~~~~
@@ -308,13 +327,18 @@ Harness routes
 Status routes
 ~~~~~~~~~~~~~
 
-+----------------------+-------------------------------------------+-----------------------------------------+
-| Route                | Response                                  | Documented in                           |
-+======================+===========================================+=========================================+
-| ``GET /healthz``     | liveness of the process; needs no token   | `Health <http-api-status.rst#health>`__ |
-+----------------------+-------------------------------------------+-----------------------------------------+
-| ``GET /reef/status`` | training, serving, and storage state      | `Status <http-api-status.rst#status>`__ |
-+----------------------+-------------------------------------------+-----------------------------------------+
+`Status <http-api-status.rst>`__.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 70 30
+
+   * - Route
+     - Result
+   * - ``GET /healthz``
+     - liveness of the process; needs no token
+   * - ``GET /reef/status``
+     - training, serving, and storage state
 
 Headers
 -------

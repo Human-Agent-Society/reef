@@ -3,9 +3,7 @@ HTTP API: harness trees and pages
 
 Pull harness trees, sync local files, and inspect training steps or requests.
 
-For harness artifacts, clients fetch the active tree through ``GET /reef/harness``, install its files, and bind the agent's model to Reef. They run that snapshot and report feedback using its inference receipts. ``reef-client harness`` provides this workflow (`Use a published tree <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
-
-In the split layout, the harness service answers ``GET /reef/harness``, ``POST /reef/harness/import``, ``GET /reef/harness/artifacts`` and ``GET /reef/harness/adapters``. Control answers the other harness routes (`Run the services in separate processes <../user-guide/split-services.rst>`__).
+``reef-client harness`` installs the active tree, binds its model to Reef and reports inference receipts (`Use a published tree <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__). In split deployments, harness serves the four routes below; control serves the remaining routes.
 
 Harness artifacts
 -----------------
@@ -41,31 +39,31 @@ Harness artifacts
 |                                | `Importing a harness`_                                        |
 +--------------------------------+---------------------------------------------------------------+
 
-The manifest and catalog reads take ``x-reef-scenario`` and never create a scenario. An unknown scenario or one without a harness tree answers HTTP 404.
+Manifest and catalog reads require ``x-reef-scenario``. Unknown scenarios or missing harness trees return 404; reads never create scenarios.
 
 ``?form=`` selects the ``files`` mapping, from paths to text. Unsupported values return 400:
 
-- ``rendered`` (the default): the snapshot rendered for the scenario's adapter. These are the paths that the agent reads, with the adapter's enforced config defaults merged in (see `Rendering <../developer-guide/harness-adapters.rst#rendering>`__).
-- ``source``: the source tree that the snapshot stores. These are the tree paths that the adapter's parts take, the ones that a patch names (see `Tree parts <../developer-guide/harness-adapters.rst#tree-parts>`__).
-- ``client``: an install over local configuration at ``root``, bound to ``<service_url>/reef/scenarios/<scenario>``. Both queries are required: ``service_url`` is Reef's client-accessible address; ``root`` is the install directory. An adapter without a ``layer`` returns 400. The binding selects the served model and uses ``REEF_TOKEN_PLACEHOLDER``. Replace that placeholder with the client's token. This form adds:
+- ``rendered`` (default): agent paths with enforced adapter defaults (`Rendering <../developer-guide/harness-adapters.rst#rendering>`__).
+- ``source``: stored tree paths used by patches (`Tree parts <../developer-guide/harness-adapters.rst#tree-parts>`__).
+- ``client``: a layer over local config. Required queries ``service_url`` and ``root`` select Reef's client-accessible address and install directory. The model binds to ``<service_url>/reef/scenarios/<scenario>``. Replace ``REEF_TOKEN_PLACEHOLDER`` with the client's token. Adapters without ``layer`` return 400. Additional fields:
 
-  - ``run``: the command that runs the agent on the files (``binary``, ``args`` and ``env``; ``env`` may hold the placeholder too);
-  - ``register`` and ``unregister``: the agent's own commands that record the install and remove it, each a list of argument lists, empty for most agents;
-  - ``install``: the agent's pinned install spec;
-  - ``synced``: the render templates of the files that the client sends back, with ``{name}`` for one path segment.
+  - ``run``: ``{binary, args, env}``; ``env`` can also contain the token placeholder.
+  - ``register``, ``unregister``: install-registration and removal commands as argument lists, usually empty.
+  - ``install``: pinned installation spec.
+  - ``synced``: upload path templates, with ``{name}`` matching one segment.
 
-In the ``rendered`` and ``source`` forms, a config file may hold ``{root}``: write the directory that holds the render roots there. These two forms carry no endpoint and no credential: the client writes its own model binding where its agent reads it.
+For ``rendered`` and ``source``, replace ``{root}`` with the render-root directory and supply your own model binding; neither includes endpoints or credentials.
 
-A new scenario's starting artifact holds ``evolution.seed``, so a client can pull before any step publishes. A recipe whose seed is empty returns 404 until a step publishes a tree. Use ``?artifact_id=`` to request a specific harness artifact, in any form. An unknown or unrestorable artifact returns 404.
+Initially, the tree is ``evolution.seed``; empty seeds return 404 until publication. ``?artifact_id=`` selects any restorable artifact in any form; unknown or unrestorable IDs return 404.
 
-``requires`` merges requirements from the artifact's training history by name. The newest definition wins; requests without requirements remove nothing. The combined list can exceed the per-request limit of 8. Clients check requirements before running the artifact; Reef runs no checks. See `Requirements of a change <http-api-training.rst#requirements-of-a-change>`__ for fields.
+``requires`` merges history by name, newest definition winning. Empty requests remove nothing; the combined list can exceed 8. Clients check requirements before execution (`Requirement fields <http-api-training.rst#requirements-of-a-change>`__).
 
-Catalog and manifest reads do not wait for an evolve step's method or evaluation runs: they serve the existing artifacts while a candidate is prepared. A manifest's artifact and evaluation metrics always come from the same artifact.
+Reads serve existing artifacts during evolution. Manifest artifacts and evaluation metrics always match.
 
 Importing a harness
 -------------------
 
-``POST /reef/harness/import`` syncs local harness files to the scenario named by ``x-reef-scenario``. The merged tree becomes a new artifact, active for serving and selected as the harness trainer's start.
+``POST /reef/harness/import`` syncs local files to ``x-reef-scenario``. The merged artifact becomes active and the harness trainer's start.
 
 .. code:: bash
 
@@ -75,36 +73,35 @@ Importing a harness
           "base_artifact_id": "artifact-12"}' \
      "$REEF_URL/reef/harness/import"
 
-- ``files`` maps render paths to text. Include all installed harness files, including unchanged files. See ``roots`` and ``files`` from ``GET /reef/harness/adapters``. Reef maps paths back to tree parts and lists unrecognized paths in ``ignored``. Missing base files count as deletions. Model-binding config files are ignored.
+- ``files`` maps every installed harness render path to text, including unchanged files. Adapter ``roots`` and ``files`` define paths. Missing base files mean deletions; unknown paths appear in ``ignored``. Config files belong to model binding and are ignored.
 - ``base_artifact_id`` is required: the artifact the client installed.
-- The head here is the active selection, not the training start: a sync serves its result at once, so it never carries a kept tree that the activation rule left inactive.
-- Reef merges client changes since the base into the active tree. Changes made by only one side are kept. For files both sides changed, the part's ``merge`` policy applies: ``lines`` combines changed lines; ``file`` rejects conflicting versions. Unmergeable files return 409 with their render paths. Empty files count as absent. ``merged`` is true when the active tree advanced beyond the base.
-- The merged tree must pass the adapter's validation, as a method's candidate does; a problem is HTTP 400 naming it. Reef does not evaluate the tree.
-- A sync that changes nothing answers ``changed: false`` and commits nothing. Otherwise the commit's operation is ``sync``, and its metrics carry ``sync`` (with ``base_artifact_id``), ``patch`` and ``patch_parts``. The snapshot serves at once, without the activation rule.
-- A sync while a step holds job data is HTTP 409; send it again when the step ends. So is a sync that another commit overtook.
+- Merge against the active tree, not an inactive training start. One-sided changes survive. Conflicts use the part's ``merge`` policy: ``lines`` combines changes; ``file`` rejects conflicts. Unmergeable paths return 409. Empty files count as absent.
+- ``merged`` is true when the active tree advanced beyond the base. Invalid merged trees return 400; evaluation does not run.
+- No changes returns ``changed: false`` without a commit. Otherwise ``sync`` commits ``sync.base_artifact_id``, ``patch`` and ``patch_parts`` metrics and bypasses activation rules.
+- Held job data or an intervening commit returns 409; retry afterward.
 
 Harness requests
 ----------------
 
 Submit harness changes through ``POST /reef/train`` with ``text``, ``session`` and the currently used ``artifact_id``. Requests work in both ``auto`` and ``manual`` modes and need no inference receipts. See `Manual training <http-api-training.rst#manual-training>`__.
 
-The trainer runs the method's step on the request, then evaluates and publishes under the same policy as automatic evolution. The snapshot catalog shows the commit metrics ``training_request``, ``method_summary`` and ``method_notes``.
+Normal evaluation and publication apply. Catalog metrics include ``training_request``, ``method_summary`` and ``method_notes``.
 
 Inactive artifacts
 ------------------
 
-The deployment's activation rule can leave a new tree inactive. An example is a tree whose patch changes a file of a kind listed in the ``always`` rule's ``review_kinds``, or of a kind that is always reviewed (native's ``native_loop``). The step creates an artifact but does not activate it:
+Activation can hold trees for review, including ``review_kinds`` and always-reviewed kinds such as ``native_loop``:
 
 - Its row carries ``active: false`` and ``activated: false``.
 - The manifest keeps serving the active selection, and ``?artifact_id=`` pulls the inactive tree for a trial run.
 - To make it serve, send ``{"served": {"<artifact_id>": 100}}`` with the row's ``artifact_id`` to ``POST /reef/scenarios/{scenario}/update`` (`Set what a scenario serves <http-api-serving.rst#set-what-a-scenario-serves>`__).
 
-``GET /reef/harness/artifacts`` lists only the harness component's artifacts. A weights update does not create another harness artifact. Each row's ``parent_artifact_id`` identifies the artifact from which it derives, when known. Every listed artifact can be requested through ``?artifact_id=``.
+The catalog excludes weight updates. ``parent_artifact_id`` identifies derivation when known; every listed artifact accepts ``?artifact_id=``.
 
 Version page
 ------------
 
-``GET /reef/harness/artifacts/{step}/page`` returns a self-contained HTML page (``text/html``) for one catalog row. ``step`` is its index in ``GET /reef/harness/artifacts``, oldest first, starting at 0 for creation. Rejected steps have pages even though they create no artifact.
+``GET /reef/harness/artifacts/{step}/page`` returns self-contained ``text/html``. ``step`` indexes the catalog, oldest first, with creation at 0. Rejected steps also have pages.
 
 The page shows:
 
@@ -113,7 +110,7 @@ The page shows:
 - links to the parent step and to later training or sync operations;
 - ``Active selection`` for the selected artifact, and ``Waiting for activation`` for a step whose artifact was never activated (``activated: false``).
 
-The row itself is in a ``<script type="application/json">`` block at the end of the page. A step outside the catalog, or one that is not a number of at most nine digits, returns 404.
+The row is embedded in ``<script type="application/json">``. Unknown steps or values other than numbers of at most nine digits return 404.
 
 .. code:: bash
 
@@ -123,19 +120,19 @@ The row itself is in a ``<script type="application/json">`` block at the end of 
 Request page
 ------------
 
-``GET /reef/harness/requests/{record_id}/page`` answers one self-contained HTML page (``text/html``, ``Cache-Control: no-store``) for a harness request filed through ``POST /reef/train``. ``record_id`` is the ``agent_record_id`` of the request's response, and its ``page_path`` links this page.
+``GET /reef/harness/requests/{record_id}/page`` returns ``text/html`` with ``Cache-Control: no-store``. Use the training response's ``agent_record_id`` and ``page_path``.
 
-- Until a step settles the request, the page reloads every five seconds and shows the request's state and the step's activity (its latest 80 lines).
-- The catalog row whose ``metrics.training_request.id`` is the record ID settles the page. It then shows the result, the next action (``GET /reef/harness`` for an active selection, the update request that serves an inactive one), ``method_summary``, the patch with each file's kind of the harness tree (from the row's ``patch_parts``), and ``method_notes``.
+- Unsettled pages reload every five seconds, showing state and the latest 80 activity lines.
+- The matching ``metrics.training_request.id`` settles the page. It shows result, next action, ``method_summary``, patch file kinds from ``patch_parts``, and ``method_notes``. Active results link to ``GET /reef/harness``; inactive results offer the serving update.
 - An unknown ID, or one that is not a training request, returns 404.
 
 ``GET /reef/harness/requests/{record_id}/progress`` answers the same state as JSON (``Cache-Control: no-store``) for a client that polls:
 
 - ``request_id`` and ``settled``;
 - ``step``: the step the row landed as once it settles, else ``null``;
-- ``state``: ``queued`` (no step has taken the request), ``proposing`` (the method makes the candidate), ``evaluating`` (the candidate's rollouts run), ``running`` (the trainer holds the request and reports no phase), or the settled row's result, ``failed`` included;
+- ``state``: ``queued``, ``proposing``, ``evaluating``, ``running`` (no reported phase), or the settled result, including ``failed``;
 - ``meaning``: the words the page prints beside the state, ``null`` once settled;
-- while a step holds the request: ``started_at``, ``runs_total``, ``step_record`` and ``activity``, the activity lines oldest first, each ``{at, kind, text}`` with ``failed: true`` on a failed line. ``kind`` is ``model`` for a model call, ``evaluate`` for the method's rollouts, or a kind that the method notes itself.
+- During a step: ``started_at``, ``runs_total``, ``step_record`` and oldest-first ``activity`` entries ``{at, kind, text}``, plus ``failed: true`` for failures. Kinds are ``model``, ``evaluate`` or method-defined.
 
 This route reads the headers alone; a ``?key=`` is HTTP 401. An unknown id is HTTP 404.
 
@@ -149,7 +146,7 @@ For browser links, both pages accept ``?scenario=<name>&key=<page key>``. Header
    $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&key=<page key>
 
 - The path holds a page key only when the request presented a service token. An evaluation token gets none, and with authentication off the query names the scenario alone.
-- The key is an HMAC SHA-256 of the scenario, keyed by the token's digest. It opens these two pages of that one scenario and no other route, and the token cannot be read back from it. So a client may print the links where a session's model reads them.
+- Page keys are HMAC SHA-256 values scoped to these two pages of one scenario. They cannot reveal the service token and may be shown to the session's model.
 - A request whose ``x-reef-scenario`` header names another scenario returns 401.
 - Reef never reads the token itself from a query: ``?token=`` returns 401 on every route, and ``?key=`` returns 401 on every route but the two pages.
 
@@ -169,6 +166,4 @@ Reef reads only the step directory that the selected catalog row names, under th
 - It exposes only JSON and JSONL files. An inventory holds at most 1000 filesystem entries, and a file at most 4 MiB. Past these limits it returns 400; it never truncates.
 - A missing file or catalog step returns 404.
 
-The service does not interpret model replies or agent events. ``calls.json`` holds the recorded messages and replies of the method's model calls. The evaluation runs are in the scenario's history, not in the step directory, so this route does not serve them.
-
-Reads copy no record into another store and change no retention. Step files remain separate from the capacity eviction of online record bodies.
+``calls.json`` contains raw method model exchanges. Evaluation runs live in scenario history and are excluded. Reads copy nothing and change no retention; online-record capacity eviction does not remove step files.

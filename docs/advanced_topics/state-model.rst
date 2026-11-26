@@ -13,20 +13,13 @@ its metadata. ``RecordStore`` provides append, replay and audit operations.
 It does not own training, scenario lifecycle or artifact publication.
 ``ItemRecordStore`` exposes one scenario's records from its owner's data items.
 
-Consumption and retention are separate:
-
-- Each trainer records its own consumed IDs. Consumption does not delete records;
-  another trainer can still use them.
-- ``DataStore.prune_records`` removes the oldest record items when the shared
-  retention budget is exceeded. It preserves commit metadata. Retrying an
-  evicted record can store it again.
-- Recovery excludes consumed IDs when replaying retained records. It cannot
-  recover bodies removed by retention.
+Each trainer tracks its own consumed IDs. Consumption does not delete records.
+Retention removes old bodies but preserves commit metadata; retrying an evicted
+record can store it again. Recovery cannot reconstruct deleted bodies.
 
 Persistent SQLite scenario databases use WAL and ``synchronous = FULL``.
-An in-memory store survives only for its session. See the
-`record contract <../../reef/storage/scenario/records.py>`__ and
-`storage settings <../user-guide/storage.rst#record-retention>`__.
+See the `record contract <../../reef/storage/scenario/records.py>`__ and
+`retention settings <../user-guide/storage.rst#record-retention>`__.
 
 The snapshot chain
 ------------------
@@ -40,35 +33,11 @@ A **selection** maps component names to artifacts, such as
 outcome. Selecting an existing artifact creates an operation, not another artifact.
 Rejected and skipped training results also remain in operation history.
 
-Serving and training keep separate selections:
-
-.. list-table::
-   :header-rows: 1
-
-   * - Operation
-     - Serving
-     - Next default training start
-   * - Activate or restore
-     - Selects existing artifacts.
-     - Unchanged.
-   * - Train-from
-     - Unchanged.
-     - Selects an existing artifact, where the backend supports it.
-   * - Training checkpoint
-     - Changes only if the activation rule permits it.
-     - Advances to the checkpoint, except for jobs with an explicit ``train_from``.
-   * - Import
-     - Unchanged.
-     - Unchanged.
-   * - Harness sync
-     - Selects the merged tree.
-     - Advances to that tree.
-
-The ``served`` setting also keeps artifacts available beside the active selection.
-Reef records ``activate``, ``serve`` and ``stop_serving`` operations to reach
-that mapping. Traffic weights live in coordination storage outside commit history.
-Inference uses routes that completed startup; selecting an artifact does not
-make loading synchronous. See `Serving <../reference/http-api-serving.rst>`__.
+Serving and training starts are independent. Activation changes serving;
+train-from changes the next default start. Harness sync changes both.
+Imports change neither. See `artifact operations
+<../user-guide/operate.rst#read-the-artifacts>`__.
+Traffic weights live in coordination storage outside commit history.
 
 The artifact repository has a publication chain separate from the active
 selection. ``SnapshotRef.revision`` and ``parent_revision`` locate stored bytes;
@@ -89,12 +58,9 @@ commits in ``scenario_commit``. The transaction that appends that row is the
 commit point. It also updates sample training counts, so retries do not count
 samples twice.
 
-A ``CommitRecord`` contains the operation, component selection, checkpoint flag,
-trainer state, consumption IDs, metrics and job ID. Training records identify
-the trainer's component when a scenario has several trainers.
-Current records resolve artifacts through immutable bindings; storage revisions
-remain backend details. See the `record definition
-<../../reef/storage/scenario/commits.py>`__ for each operation's fields.
+``CommitRecord`` holds the operation, selection and trainer progress.
+See its `field and operation contracts
+<../../reef/storage/scenario/commits.py>`__.
 
 ``append_commit(expected_commit_number=..., commit=...)`` must:
 
@@ -109,9 +75,8 @@ For a durable store, ``ScenarioCommitter`` commits a training artifact in this o
 #. Install the committed selections and synchronize the repository pointer.
 #. Apply the trainer's prepared state.
 
-An inactive artifact advances the publication chain but leaves serving unchanged.
-An operation without an artifact appends its record without publishing bytes.
-Activation records the complete component selection before inference loads it.
+Inactive artifacts advance publication without changing serving. Operations
+without artifacts publish no bytes. Activation commits before inference loads.
 
 A pointer synchronization failure after the commit does not undo that commit.
 Status reports ``artifact_head_sync`` as ``pending`` or ``conflict``.
@@ -134,10 +99,8 @@ start, stable data identity and parameters. Retrying the same job must reuse
 its result or reconcile its progress. Saved checkpoints support recovery;
 unsaved optimizer work can run again.
 
-``save_interval`` controls intermediate saves. Tinker and Slime sample jobs count
-optimizer steps. Slime task and dataset jobs count rollout iterations instead.
-These backends also save at job end; without an interval, they save only there.
-Activation does not decide the next training start.
+For checkpoint units and intervals, see `checkpoint cadence
+<../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 
 One scenario's prepare-and-commit cycles are serialized. This does not make
 remote training atomic or prevent concurrent jobs on a backend that supports them.

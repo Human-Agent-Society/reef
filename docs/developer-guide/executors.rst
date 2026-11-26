@@ -27,7 +27,6 @@ Built-in executors
        multi-worker Ray placement context select ``ray``.
 
 Custom executors use a class or ``package.module:ExecutorSubclass`` reference.
-Dot-form class references are unsupported. CPU execution imports no GPU runtime.
 
 .. code:: python
 
@@ -75,13 +74,10 @@ Terminal worker failure sets ``failure`` and fails outstanding waits with
 Reef does not rebuild groups or replay requests.
 Method errors, ordinary timeouts and normal shutdown are not terminal failures.
 
-Failure listeners implement ``on_executor_failure(failure)`` and receive one
-notification, including when registered after failure.
-They must not block or call shutdown. Listener exceptions are logged.
-Multiprocessing monitors process sentinels; Ray monitors actor readiness.
-A busy actor's queued probe does not establish failure.
-Borrowed Ray actors need a registered listener for process-local monitoring;
-listeners are not serialized.
+Failure listeners receive one ``on_executor_failure(failure)`` notification.
+They must not block or call shutdown.
+Borrowed Ray actors require a listener for process-local monitoring.
+See the `failure contract <../../reef/execution/executor/failure.py>`__.
 
 Subclass ``Executor`` and implement ``_init_executor``, ``rpc``,
 ``collective_rpc``, ``check_health`` and ``shutdown``.
@@ -93,18 +89,11 @@ Model collectives, tensors and checkpoint reshaping remain backend responsibilit
 Custom service and inference executors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Service executors receive a ``ProcessWorker`` specification, or
-``RayProcessWorker`` for Ray. Preserve its control methods:
-``describe``, ``prepare``, ``start``, ``probe``, ``read_log``,
-``request_stop``, ``tree_alive``, ``status`` and ``shutdown``.
-``describe`` returns host, PIDs and run directory.
-``status`` maps services to ``None`` while running or an exit code afterward;
-a missing service is not alive.
-
-Inference executors expose one control rank with URL, load-ID, engine update,
-pause/resume, recovery and health operations.
-Follow the control methods in ``reef.inference.engine_control``. Executor
-shutdown owns serving teardown; callers must not reach into backend actor groups.
+Service executors receive ``ProcessWorker`` specifications (``RayProcessWorker``
+for Ray). Preserve their lifecycle and status methods.
+Inference executors expose the control methods in
+`engine_control <../../reef/inference/engine_control.py>`__.
+Executor shutdown owns serving teardown; callers cannot access backend actor groups.
 
 Slime worker executors
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -113,9 +102,8 @@ Slime uses ``SlimeRayExecutor`` for placement and shared ``RayExecutor`` RPC.
 ``training.options.reef-executor-backend`` can select a custom worker executor.
 ``uni`` and ``mp`` are refused for Slime GPU workers.
 
-Preserve rank order and worker methods. Launch options carry parsed Slime
-arguments, node/GPU layout, placement group, role, reference/teacher flags
-and actor class. Profile options cannot override these reserved values.
+Preserve rank order, worker methods and reserved launch options.
+Profile options cannot override Slime's topology or worker configuration.
 
 Harness evolution: worker executor selection
 --------------------------------------------
@@ -130,69 +118,44 @@ Configure evaluation workers separately from rollout isolation:
        resources:
          cpus_per_worker: 2
          gpus_per_worker: 1
-   evolution:
-     executor: sandbox
+   recipe:
+     implementation: reef.recipe.harness:HarnessEvolutionRecipe
+     config:
+       evolution:
+         executor: sandbox
 
-Omit GPU resources for endpoint-only scoring.
-``workers`` fixes pool size; it is not a rollout limit.
-Scorers declare requirements through ``execution_requirements()`` and load
-models lazily inside workers. Explicit resources cannot lower declared needs.
+Omit GPUs for endpoint-only scoring. ``workers`` fixes pool size, not rollout count.
+Scorers declare ``execution_requirements()`` and load models inside workers.
+Explicit resources cannot reduce declared needs.
 
-Local GPU allocations require whole GPUs. ``mp`` masks ranks within its group;
-``uni`` preserves caller visibility. Neither reserves GPUs against other programs.
-Select Ray for cluster or fractional-GPU scheduling.
-Installed GPUs and ``RAY_ADDRESS`` alone do not select it.
-Insufficient local GPU capacity fails rather than switching backends.
+Local allocations need whole GPUs. ``mp`` masks ranks; ``uni`` preserves
+caller visibility. Neither reserves GPUs against other programs.
+Use Ray for cluster or fractional-GPU scheduling.
+Insufficient local capacity fails without switching backends.
 
-Each scenario lazily creates and reuses one pool. Workers keep scorer state,
-but each rollout gets a fresh subprocess and temporary directory.
-Multiprocess scorer changes are not merged into the parent.
-Method logic and publication remain in the parent process.
-
-Scorer errors drain submitted work; worker death fails the pool permanently.
-Close direct Python backends in ``finally``. GPU reservations remain until close.
-
-Remote workers return compressed run records without requiring shared storage.
-Failed RPCs can lose their trajectories. Local rollout process groups use
-owner leases, but detached commands escape that cleanup and are unsupported.
+Each scenario reuses its pool and scorer state; each rollout gets a fresh
+subprocess and directory. Worker changes do not update the parent scorer.
+Scorer errors drain work; worker death permanently fails the pool.
+Close direct Python backends in ``finally`` to release reservations.
+Remote RPC failures can lose trajectories; detached commands are unsupported.
 
 Whole-stack deployment configuration
 ------------------------------------
 
-``execution`` selectors accept backend names, import references, inline
-options or profiles from ``executors``. Explicit selections override ``auto``.
-Services with CUDA pins run locally; resource options or Ray placement
-contexts select Ray. Other service controllers default to ``uni``.
-Startup logs the selected backend and reason.
+``execution`` selects backends or profiles from ``executors``.
+Use the `settings reference <../reference/configuration-settings.rst#executors>`__
+for role-specific options and topology restrictions.
 
-Role constraints:
+Ray starts only when selected. Connection failures never fall back locally.
+Nodes need the software, files, models and routable endpoints before launch.
+Reef closes only connections and clusters it owns.
 
-- SGLang and vLLM rollout engines require their Ray executors.
-- Training and rollout selectors cannot set ``workers`` or ``resources``;
-  model configuration controls topology.
-- Generator execution accepts one worker.
-- Slime training accepts ``auto`` or Ray selections.
-  In-process backends such as Tinker reject ``execution.training``.
-- Ray execution cannot combine with explicit CUDA visibility overrides.
-
-Ray starts only when selected. Reef can start a local cluster or connect
-through ``reef.ray_address`` or ``RAY_ADDRESS``.
-Connection failures do not fall back locally. Borrowed connections remain
-open; Reef stops only clusters it owns.
-Nodes must already contain the required software, files and models.
-
-Readiness runs on each execution node. Independent services start concurrently;
-dependents wait for their prerequisites. Remote consumers need routable
-advertised addresses. Endpoint publication does not rewrite arbitrary localhost URLs.
-
-Logs are tailed into ``run_dir/SERVICE.log``; worker metadata goes to
-``SERVICE.worker.json``. Never signal remote PIDs locally.
-Protect resolved configuration files because they can contain credentials.
-
-Startup failure cancels readiness waits and cleans up all launched workers.
-Shutdown stops dependents before dependencies and attempts cleanup after errors.
-Commands must remain foreground processes. Reef does not automatically restart
-services or replay their operations.
+Custom service executors must support readiness, log collection and bounded
+shutdown. On startup failure, clean up every partial launch.
+Stop dependents before dependencies and continue cleanup after errors.
+Commands must remain foreground processes; Reef does not restart them automatically.
+Never signal remote PIDs locally. Protect resolved config files, which can
+contain credentials.
 
 Verification
 ------------

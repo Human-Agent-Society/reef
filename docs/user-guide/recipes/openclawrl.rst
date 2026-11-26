@@ -1,19 +1,17 @@
 OpenClaw-RL: learn from agent conversations
 ===========================================
 
-Use `OpenClaw-RL <https://arxiv.org/abs/2603.10165>`__ to train an agent from
-its conversations. A judge reads the user's next message as feedback on the
-previous reply. Reef updates the weights while the agent stays in service.
-The recipe requires Slime, GPUs, and a separately served judge model.
+Use `OpenClaw-RL <https://arxiv.org/abs/2603.10165>`__ to train from
+conversations. A judge treats the user's next message as feedback on the
+previous reply. The recipe requires Slime, GPUs, and a separately served judge.
 
 Run the example
 ---------------
 
 The `homework example
 <../../../recipes/openclawrl/examples/openclawrl/README.md>`__ runs 72 GSM8K
-sessions with a Hermes agent and a simulated student. It requires Docker
-and seven GPUs: four for training, and one each for serving, the PRM,
-and the student model.
+sessions with Hermes and a simulated student. It needs Docker and seven
+GPUs: four for training, one each for serving, judging, and the student.
 
 .. code:: bash
 
@@ -22,52 +20,41 @@ and the student model.
    hf download Qwen/Qwen3-32B --local-dir ~/models/Qwen3-32B
    bash recipes/openclawrl/examples/openclawrl/run.sh
 
-``run.sh`` builds the simulated student's image, starts the stack, and runs
-the sessions in order. The agent sends no training reports.
+The script starts the stack and runs sessions in order.
+The agent sends no training reports.
 
 How it works
 ------------
 
-Reef groups recorded calls into sessions. When a session's next state
-arrives, a separate process reward model (PRM) judges the previous turn.
-The judge scores acceptance and can propose hindsight hints.
-
 Correlate sessions
 ~~~~~~~~~~~~~~~~~
 
-Send a stable ``x-reef-tag-session`` header on every call in a conversation.
-The value must be unique within the scenario. Reef orders matching turns by
-arrival, so concurrent conversations must not share a tag. The example adds
-this header through a shim for Hermes.
+Send a stable ``x-reef-tag-session`` header, unique within the scenario.
+Reef orders turns by arrival. Concurrent conversations must not share a tag.
 
-Without a tag, Reef matches extending transcripts. Identical histories can
-be ambiguous; compaction and sliding windows can break the chain.
-An unmatched turn never trains. Reef warns about untagged traffic and
-sessions that expire without a match. The ``correlation`` counters appear
-in the ``prm_record_file`` output.
+Without tags, Reef matches extending transcripts. Identical histories,
+compaction, or sliding windows can break matching. Unmatched turns never
+train. Reef warns about untagged traffic and expired unmatched sessions;
+``prm_record_file`` includes ``correlation`` counters.
 
 Judge and train
 ~~~~~~~~~~~~~~~
 
-The objective combines two signals:
+The next turn triggers a process reward model (PRM) judgment of acceptance
+and possible hindsight hints. The objective combines PPO and distillation
+from a hint-conditioned frozen base model. ``training.options`` sets
+``openclawrl-w-rl: 1.0``, ``openclawrl-w-opd: 1.0``, and
+``openclawrl-topk: 4`` by default.
 
-- RL uses a PPO clipped surrogate with the judged reward as its advantage.
-  ``openclawrl-w-rl`` sets the weight; default 1.0.
-- Distillation uses a frozen base model conditioned on an accepted hindsight
-  hint. ``openclawrl-w-opd`` sets its weight; default 1.0.
-  ``openclawrl-topk`` sets the candidate token count; default 4.
-
-Set these flags in ``training.options``. Match training and serving
-`chat template arguments
+Match serving and training `chat template arguments
 <../../reference/configuration-inference.rst#chat-template-arguments>`__.
-A turn that cannot render does not train. The same applies when no hint
-candidate renders. ``unrenderable_samples`` counts these exclusions.
+Unrenderable turns or turns without a renderable hint candidate do not train;
+``unrenderable_samples`` counts them.
 
 Configuration
 -------------
 
-Set the PRM endpoint and tokenizer under ``pipeline.record2sample``.
-Set the number of judged turns per job under ``pipeline.sample2job``.
+Set the PRM address and tokenizer, then the job size:
 
 .. code:: yaml
 
@@ -80,86 +67,51 @@ Set the number of judged turns per job under ``pipeline.sample2job``.
          prm_tokenizer_path: /models/prm
      sample2job:
        config:
-         job_samples: ${training.config.global_batch_size}
-   training:
-     config:
-       global_batch_size: 16
+         job_samples: 16
 
-.. container:: config
+Match required ``job_samples`` to Slime's ``global-batch-size`` for one
+update per job. Under ``pipeline.record2sample.config``:
 
-   ``pipeline.record2sample.config.session_ttl_s`` : 900.0
-       idle time in seconds before a session expires
+.. list-table::
+   :header-rows: 1
 
-   ``pipeline.record2sample.config.max_open_sessions`` : 4096
-       Maximum live sessions. Reef evicts the least recently active sessions.
+   * - Setting
+     - Default
+     - Meaning
+   * - ``prm_url`` / ``prm_tokenizer_path``
+     - empty
+     - Empty URL disables judging and training; a URL requires the tokenizer.
+   * - ``session_ttl_s`` / ``max_open_sessions``
+     - 900 / 4096
+     - Idle expiry in seconds / session limit; oldest activity is evicted first.
+   * - ``prm_m`` / ``prm_temperature``
+     - 3 / 0.6
+     - Votes per turn / sampling temperature.
+   * - ``prm_max_tokens`` / ``prm_max_hint_candidates``
+     - 8192 / 3
+     - Judge token budget / hint candidates per turn.
+   * - ``prm_timeout_s`` / ``prm_concurrency``
+     - 120 / 8
+     - Timeout seconds / turns judged concurrently.
 
-   ``pipeline.record2sample.config.prm_url`` : ""
-       the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
+Invalid values, unknown keys, or stage settings under ``recipe.config``
+stop startup. Optional ``pipeline.sample2job.config.prm_record_file`` writes
+one JSON line per job; its empty default disables recording.
 
-   ``pipeline.record2sample.config.prm_tokenizer_path`` : ""
-       the PRM's tokenizer. Required when ``prm_url`` is set.
-
-   ``pipeline.record2sample.config.prm_m`` : 3
-       judge votes per turn
-
-   ``pipeline.record2sample.config.prm_temperature`` : 0.6
-       judge sampling temperature
-
-   ``pipeline.record2sample.config.prm_max_tokens`` : 8192
-       judge generation budget
-
-   ``pipeline.record2sample.config.prm_timeout_s`` : 120.0
-       per-judge timeout in seconds
-
-   ``pipeline.record2sample.config.prm_concurrency`` : 8
-       turns judged at once
-
-   ``pipeline.record2sample.config.prm_max_hint_candidates`` : 3
-       hint candidates collected per turn
-
-   ``pipeline.sample2job.config.job_samples`` : required
-       Judged turns per job. Match ``training.config.global_batch_size`` for
-       one optimizer step per job.
-
-   ``training.config.global_batch_size``
-       judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
-
-   ``pipeline.sample2job.config.prm_record_file`` : ""
-       judged population, one JSON line per job; empty disables it
-
-Unknown keys and invalid values stop startup. Stage settings such as
-``prm_url`` must be under ``pipeline``, not ``recipe.config``.
-
-The example sets ``prm_timeout_s`` to 3600 for its thinking model.
-It also sets ``prm_record_file`` to save each job's reward split and judge
-counters. Reef does not manage the PRM process. The example's Compose file
-starts the PRM and simulated-student models.
+Reef does not manage the PRM process. The example's Compose file starts it,
+sets a 3600-second timeout, and records judge counters.
 
 Results
 -------
 
-The example records one run over the first 36 sessions. A session passes
-when the first solution is correct, shows its work, and matches the student's
-formatting preferences.
-
-.. image:: ../../assets/openclawrl/learning-curve.png
-   :alt: Accumulated accepts and rolling bold and list rates
-
-The bold and list rates fall during training. The run reaches three passed
-sessions in a row at session 14. This is one run, not a multi-seed estimate.
-
-.. image:: ../../assets/openclawrl/demo.gif
-   :alt: Replays of a rejected formatted answer and a later accepted answer
-
-The replay shows a rejected reply from session 1 and an accepted first reply
-from session 16.
+The `recorded run and replay
+<../../../recipes/openclawrl/examples/openclawrl/README.md>`__ cover 36 sessions.
+A pass requires a correct first answer with the requested reasoning and formatting.
+The run reaches three consecutive passes at session 14.
+This is one run, not a seed-variance estimate.
 
 Related guides
 --------------
 
-- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
-  learn the request, receipt, and report workflow.
-- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
-  set up the GPU stack and inspect published updates.
-- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
-  and query feedback, scenarios, and artifacts.
+- `Train model weights <../evolve-your-model.rst>`__: configure the GPU stack.
+- `Inference and feedback <../../getting-started/quickstart.rst>`__: connect an agent.

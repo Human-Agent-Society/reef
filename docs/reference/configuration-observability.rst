@@ -27,10 +27,8 @@ For credentials and run navigation, see `Track experiments with W&B <../user-gui
 Operational metrics
 ~~~~~~~~~~~~~~~~~~~
 
-With tracking enabled, Reef samples every loaded scenario every 10 seconds, including scenarios without training.
-Metrics appear under ``operations/*`` with Unix time in ``operations/time_seconds``.
-Offline mode saves them locally. Disabled mode collects none.
-The table omits the ``operations/`` prefix.
+Every 10 seconds Reef samples each loaded scenario under ``operations/*``, with Unix time in ``operations/time_seconds``.
+Offline mode saves samples locally. The table omits the ``operations/`` prefix.
 
 .. list-table:: Operational metrics
    :header-rows: 1
@@ -67,30 +65,22 @@ The table omits the ``operations/`` prefix.
    * - ``training/execution/*``
      - The trainer's job submissions and polls.
 
-``ingest/write``, ``serve/request`` and ``training/execution`` each expose:
-
-- Counts: ``started_total``, ``completed_total``, ``failed_total`` and ``active``.
-- ``elapsed_seconds``: age of the oldest active call.
-- ``duration_seconds_total``: total duration of ended calls.
-- ``last_duration_seconds``: duration of the last ended call, absent before the first completion.
-
+For ``ingest/write``, ``serve/request`` and ``training/execution``, use ``active`` and ``elapsed_seconds`` to find outstanding calls and the age of the oldest.
+``started_total``, ``completed_total`` and ``failed_total`` count calls.
 Mean latency over an interval is ``Δduration_seconds_total / (Δcompleted_total + Δfailed_total)``.
+``last_duration_seconds`` appears when the first call ends.
 
-- A completed execution call is not necessarily a commit: a poll that finds no new checkpoint commits nothing.
-- Measurements reset when their owner is rebuilt. ``training/started_at_seconds`` marks a trainer reset, including recovery. ``started_at_seconds`` marks a scenario reset for request and ingestion measurements.
-- A request that fails before Reef resolves its scenario is not measured.
-- Other numeric status fields of the processor appear under ``processor/``.
-- When ingestion or a commit holds the trainer lock, that sample has no ``records/unread_count``, ``records/oldest_unread_age_seconds``, ``training/reserved_job_data``, ``training/auto_enabled`` or ``processor/*``.
+A completed poll need not produce a commit. Measurements reset on trainer or scenario rebuilds
+(``training/started_at_seconds`` or ``started_at_seconds``).
+Requests that fail before scenario resolution produce no measurements.
+While ingestion or a commit holds the trainer lock, unread-record, reservation, automatic-training and processor gauges are absent.
 
 Commit correlation
 ~~~~~~~~~~~~~~~~~~
 
-Commit metrics identify the run with ``experiment/provider``, ``experiment/project``, ``experiment/group`` and ``experiment/run_id``.
-They include ``experiment/entity`` when set. The run's ``reef/training_job_id`` identifies the job.
-
-The jobs API exposes the W&B run URL in ``experiment.url``.
-For offline runs, Reef constructs ``https://wandb.ai/<entity>/<project>/runs/<run_id>``; it works after ``wandb sync``.
-Without an entity, the offline URL is ``null``.
+Use ``experiment.url`` in the jobs API to open the W&B run. An offline URL works after ``wandb sync``
+and requires an entity. Commit metrics identify the provider, project, group, run ID and optional entity under ``experiment/*``.
+The run's ``reef/training_job_id`` identifies the job.
 
 Record tracing
 --------------

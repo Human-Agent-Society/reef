@@ -1,17 +1,15 @@
 Training service: job parameters and objectives
 ===============================================
 
-A weight method supplies job parameters and an objective. The training
-service runs the objective once per job, then trains its loss on the
-prepared data. See `harness methods <write-a-harness-method.rst>`__ for
-harness evolution.
+A weight objective prepares each job's data before loss computation.
+Harness evolution uses `methods <write-a-harness-method.rst>`__ instead.
 
 Job parameters
 --------------
 
 ``WeightTrainingRecipe.default_parameters()`` returns parameters for each
 sample kind. Each job contains trajectories or tasks, never both.
-Backend code defines the accepted keys and values:
+For example:
 
 .. code:: python
 
@@ -26,20 +24,11 @@ Backend code defines the accepted keys and values:
                "task": {"objective": "my_pkg.objectives:PolicyObjective"},
            }
 
-Later sources override earlier ones:
-
-1. Recipe defaults for the sample kind.
-2. Deployment ``recipe.config.job_parameters``.
-3. Training request ``parameters``.
-
-Backend defaults fill omitted values. Return deterministic defaults:
-parameters contribute to job identity and must survive retries and restarts.
-``objective`` accepts a registered name or ``package.module:Objective``;
-``sft`` is built in. One component can run different objectives across jobs.
-
-Override ``configured_parameters`` to apply deployment settings to selected
-sample kinds. An omitted kind requires explicit request parameters.
-Parameters do not select the backend; the deployment selects it.
+Request ``parameters`` override ``recipe.config.job_parameters``, which override
+recipe defaults. Backend defaults fill omissions.
+Defaults must be deterministic because parameters contribute to job identity.
+An omitted kind requires explicit request parameters.
+The deployment selects the backend.
 
 Parameters that Slime and Tinker take
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -76,16 +65,12 @@ Parameters that Slime and Tinker take
 Packing never splits a rollout. A rollout above the packing length forms
 its own pack. Batch size, shuffle and remainder then apply to packs.
 
-A learning-rate schedule declares ``name``, ``peak_learning_rate``,
-``warmup_steps``, ``decay_style``, ``decay_steps``, ``min_learning_rate`` and
-``initial_learning_rate``. Reusing the active schedule continues its step
-count across jobs and restarts. A different schedule starts at step 0;
-use a new name to restart the same curve. Optimizer state is retained.
-
+Reusing a named learning-rate schedule preserves its step count across jobs
+and restarts. A different schedule starts at 0 and retains optimizer state.
+Use a new name to restart the same curve.
 Objective state continues only across jobs with the same objective.
 See `Tinker <../user-guide/tinker.rst>`__ and
-`Slime task jobs <../reference/configuration-training.rst#task-jobs-on-slime>`__
-for backend-specific parameters.
+`Slime <../reference/configuration-training.rst>`__ for schedule fields and backend restrictions.
 
 Failure behavior
 ~~~~~~~~~~~~~~~~
@@ -95,9 +80,6 @@ objectives fail the trainer cycle without consuming samples.
 Multiple epochs require ``supports_multiple_epochs=True``.
 
 An exception after submission fails the job; its samples remain trained.
-For backends that support train-from, submit the root snapshot to
-``POST /reef/scenarios/{scenario}/train-from`` to restart from base weights
-without training state.
 
 The objective
 -------------
@@ -161,15 +143,10 @@ Register by reference in your package's ``__init__.py``:
 
    register_objective("my", "my_pkg.slime:MyObjective")
 
-The reference loads on first resolution. Its module must define the objective
-and register its loss family with ``register_loss_family``.
-Tinker uses the equivalent registries in ``reef.train.tinker_backend``.
-A package supporting both backends registers each separately.
-Jobs can also use an unregistered objective's dotted reference.
-
-Malformed references, name conflicts and unknown names raise ``ValueError``.
-References that fail to import or identify no objective class raise
-``PluginConfigError``. Tests can register objective and loss-family instances.
+The referenced module defines the objective and registers its loss family.
+Tinker has equivalent registries; register each backend separately.
+Jobs can also name an unregistered objective by dotted reference.
+Bad names raise ``ValueError``; import or class errors raise ``PluginConfigError``.
 
 Rendering
 ---------
@@ -180,21 +157,13 @@ They are on-policy only when the sample stage enforces that condition.
 Match the serving engine's
 `chat template arguments <../reference/configuration-inference.rst#chat-template-arguments>`__.
 
-Sample metadata can provide:
+``extra.reef`` can supply ``teacher``, ``teacher_candidates`` and ``max_tokens``.
+Rewritten prompts can split trajectories; read ``training.segment`` metadata
+when counting them. Segments retain their group and reward.
 
-- ``extra.reef.teacher``: a teacher request followed by student reply tokens.
-- ``extra.reef.teacher_candidates``: alternative teacher requests.
-- ``extra.reef.max_tokens``: maximum trainable sample length.
-
-A prompt that rewrites earlier turns can split a trajectory into segments.
-Each keeps its group and reward, with
-``extra.reef.training.segment = {"index": i, "count": n}``.
-Read that metadata when counting trajectories.
-
-Training skips unrenderable or overlength samples, overlength teacher
-sequences, and teacher samples with multiple segments.
-``unrenderable_samples`` counts these exclusions.
-Task rollouts retain the training engine's exact tokens and log probabilities.
+Training skips unrenderable or overlength inputs and multi-segment teacher samples.
+``unrenderable_samples`` counts exclusions.
+Task rollouts retain the engine's exact tokens and log probabilities.
 
 Checkpoints
 -----------

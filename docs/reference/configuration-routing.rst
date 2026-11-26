@@ -1,12 +1,8 @@
 Scenario routing between students and teachers
 ==============================================
 
-Use Semantic Router (SR) to route a scenario's requests between external models.
-For a complete deployment, follow the `Semantic Router tutorial <../../tutorials/semantic-router/README.md>`__.
-For client behavior, see `Routed external-model requests <http-api-routing.rst#routed-external-model-requests>`__.
-
-Set ``reef.routing-manifest`` to a manifest file.
-Each scenario has a default target and rules that select another target. Clients can also pin a target explicitly.
+Point ``reef.routing-manifest`` to a manifest that selects a default model and routing rules for each scenario.
+Clients can also `pin a target <http-api-routing.rst#routed-external-model-requests>`__.
 
 .. code:: yaml
 
@@ -31,87 +27,26 @@ Each scenario has a default target and rules that select another target. Clients
            keywords: [reef_teacher_required]
            target: code-teacher
 
-Choose ``managed`` to let Reef run SR, or ``external`` to run SR yourself.
-Both require ``recipe.implementation: recipe`` and ``reef.tokens``.
-
-See `Settings reference <configuration-settings.rst#service>`__ for deployment keys.
-If a provider aborts a non-streaming request, Reef retries the same target using ``inference.retry-*`` settings.
-``inference.retry-timeout-s`` defaults to ``inference.timeout-s``.
+Both lifecycles require ``recipe.implementation: recipe`` and ``reef.tokens``.
+Reef retries aborted non-streaming requests against the same target using ``inference.retry-*``.
+The retry deadline defaults to ``inference.timeout-s``.
 
 Manifest keys
 -------------
 
-The manifest accepts only these keys, with underscores. An unknown key is an error.
+Use schema version 2. All keys use underscores. Reef rejects unknown keys.
 
-.. container:: config
-
-   ``schema_version``
-       Required. Must be 2.
-
-   ``automatic_model``
-       Required. The ``model`` value of a request for which SR selects the target. It must differ from every target ID.
-
-   ``targets.<id>.provider_model``
-       Required. The model ID that the provider serves.
-
-   ``targets.<id>.url``
-       Required. The provider's HTTP endpoint, without credentials, query or fragment.
-
-   ``targets.<id>.revision``
-       Required. The immutable revision of the external deployment.
-
-   ``targets.<id>.role``
-       A label, for example ``student``.
-
-   ``targets.<id>.enabled`` : true
-       With false, no request goes to the target. Each default target and rule target must be enabled.
-
-   ``targets.<id>.api_key_env``
-       The environment variable that holds the provider credential.
-
-   ``scenarios.<name>.targets``
-       Required. The IDs of the Scenario's targets.
-
-   ``scenarios.<name>.default_target``
-       Required. The target of a request that matches no rule.
-
-   ``scenarios.<name>.rules``
-       A list. The first matching rule is used.
-
-   ``rules[].name``
-       Required.
-
-   ``rules[].target``
-       Required. The target of a matching request.
-
-   ``rules[].keywords``
-       A list of keywords. A rule has exactly one of ``keywords`` and ``domains``.
-
-   ``rules[].domains``
-       A list of classifier labels. In one Scenario, a label can occur in only one rule, ignoring case.
-
-   ``rules[].match`` : any
-       ``any`` matches a request with one of the keywords, ``all`` a request with all of them.
-
-   ``rules[].case_sensitive`` : false
-       With true, keywords match only in the same letter case.
-
-   ``deployment``
-       Required, also when empty (``deployment: {}``).
-
-   ``deployment.semantic_router_image``
-       The SR image, as ``repository@sha256:<hex>`` or a local image ID ``sha256:<hex>``. See `Semantic Router image`_.
-
-   ``deployment.domain_classifier.model_directory``
-       The absolute path, without symlinks, of the local classifier. Domain rules need ``domain_classifier`` with its three keys.
-
-   ``deployment.domain_classifier.threshold``
-       A number from 0 to 1.
-
-   ``deployment.domain_classifier.files``
-       The ``sha256:`` digest of each of ``config.json``, ``tokenizer.json``, ``model.safetensors`` and ``category_mapping.json``, and of no other file.
-
-Target IDs and ``automatic_model`` must not start with ``reef-entrypoint/``, in any letter case.
+- ``automatic_model`` names the request model that enables automatic routing. It must differ from every target ID.
+  Neither it nor a target ID can start with ``reef-entrypoint/``, ignoring case.
+- Each target requires ``provider_model``, an immutable ``revision`` and an HTTP ``url`` without credentials, query or fragment.
+  Optional fields are ``role``, ``api_key_env`` and ``enabled`` (default true).
+- Each scenario declares ``targets`` and a ``default_target``. The first matching rule wins. Default and rule targets must be enabled.
+- Each rule requires ``name``, ``target`` and exactly one of ``keywords`` or ``domains``.
+  Keyword rules use ``match: any`` or ``all`` and default to ``case_sensitive: false``.
+  Domain labels must be unique across rules within a scenario, ignoring case.
+- Include ``deployment``, even if empty. Its optional ``semantic_router_image`` accepts a repository digest or a local SHA-256 image ID.
+- Domain rules require ``deployment.domain_classifier`` with an absolute, symlink-free ``model_directory`` and a ``threshold`` from 0 to 1.
+  Its ``files`` mapping requires exactly the SHA-256 digests of ``config.json``, ``tokenizer.json``, ``model.safetensors`` and ``category_mapping.json``, each prefixed with ``sha256:``.
 
 Managed routing lifecycle
 -------------------------
@@ -133,63 +68,38 @@ Start the model services yourself. ``reef serve`` starts SR and Reef; ``--servic
      upstream-url: http://127.0.0.1:8101
      upstream-model: code-student
 
-- Set ``reef.host: 127.0.0.1`` and ``reef.routing-deployment.deployment-id``.
-- State is stored under ``${XDG_STATE_HOME:-~/.local/state}/reef/routing/<deployment-id>/``. A lock permits one deployment per user, host and ID.
-- ``python -m reef.deploy.routing.cli validate --config <file>`` checks a configuration without Docker.
+Bind Reef to loopback. Each deployment ID must be unique per user and host.
+Validate the config with ``python -m reef.deploy.routing.cli validate --config <file>``.
 
-**Policy updates.** Edit the manifest and send ``SIGHUP`` to ``reef serve``.
-This updates Reef and SR without restarting them. Follow the `update procedure <../../tutorials/semantic-router/README.md#change-the-routing-policy>`__.
+To apply rule or target edits, send ``SIGHUP`` to ``reef serve``. New requests receive 503 while admitted requests drain on the old endpoints.
+Keep those endpoints available. Referenced targets must remain enabled, and credential variables must exist at startup.
+Changes to ``automatic_model``, scenario names, classifier, image or deployment settings require a restart.
 
-- An update cannot remove or disable a target that a default or a rule names.
-- A change to ``automatic_model``, the Scenario names, the domain classifier, the image or ``reef.routing-deployment`` needs a restart.
-- ``api_key_env`` can name only a variable that was set when ``reef serve`` started.
-- New requests get 503 during the update. Admitted requests finish on the old endpoints; keep them available.
-- Reef keeps the old policy if provider checks fail, SR rejects the change, or request selection exceeds ``drain-timeout-seconds``.
-- If the final check fails after SR runs the new policy, admission stays closed. After ``ready-timeout-seconds``, ``reef serve`` stops.
-- If ``reef serve`` stops during an update, the next start uses the last committed manifest. Send ``SIGHUP`` again to apply the edited file.
+If provider checks, SR updates or draining fail, Reef keeps the old policy.
+If the final check fails after SR changes policies, admission stays closed until Reef stops at ``ready-timeout-seconds``.
+After an interrupted update, restart from the last committed policy and send ``SIGHUP`` again.
+For state paths, events and recovery, follow the `operator procedure <../../tutorials/semantic-router/README.md#change-the-routing-policy>`__.
 
-``generations/<generation>/lifecycle-events.jsonl`` in that directory records the results, for example ``policy_committed``, ``policy_rolled_back`` and ``policy_rejected``.
-
-**Shutdown and recovery.** Ctrl-C or SIGTERM drains requests and record writes, then removes SR.
-``restart-policy: bounded`` recreates a failed SR container without replaying requests.
-Reef failures, unfinished record writes or exhausted recovery attempts stop the deployment.
-See `Stop, inspect and clean up <../../tutorials/semantic-router/README.md#stop-inspect-and-clean-up>`__.
+Ctrl-C and SIGTERM drain requests and record writes before removing SR.
+Bounded restarts recreate failed SR containers without replaying requests. A Reef failure, unfinished writes or exhausted retries stop the deployment.
 
 Semantic Router image
 ---------------------
 
-- If the manifest names no image, startup builds it from the SR commit of this Reef release, or reuses an earlier build. The Reef HTTP port opens only after the image is ready.
-- If the manifest names an image, Reef builds none.
-- The image's ``org.opencontainers.image.revision`` label must match the pinned commit, or Reef starts no container.
-- Updates and recovery keep the image of the start.
+Without a pinned image, Reef builds or reuses one from this release's SR commit before opening HTTP.
+With an explicit image, Reef verifies its ``org.opencontainers.image.revision`` label against that commit.
+Policy updates and recovery reuse the startup image.
 
-Records include the image in ``snapshot_version``.
-Without a named image, another host or build can produce a different version. In this case, ``validate`` prints ``"snapshot_version": null``.
+The image contributes to each record's ``snapshot_version``. Without a pinned image, ``validate`` returns a null version and different builds can produce different versions.
 See the `build requirements <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__.
 
 External router lifecycle
 -------------------------
 
-Set ``lifecycle: external`` when another system, such as Kubernetes, manages SR.
-Run each Reef service separately. Each inference replica needs an SR instance on its own loopback.
-Other services ignore the manifest and can share the config.
-This lifecycle requires ``--service``.
-
-.. code:: yaml
-
-   reef:
-     host: 0.0.0.0
-     tokens: ["change-me"]
-     routing-manifest: /etc/reef/manifest.yaml
-     routing-deployment:
-       lifecycle: external
-   recipe:
-     implementation: recipe
-   inference:
-     upstream-url: http://127.0.0.1:8101
-     upstream-model: code-student
-
-This lifecycle needs no ``deployment-id``, and ``reef.host`` can have any value.
+Set ``reef.routing-deployment.lifecycle: external`` and run each service with ``--service``.
+Supply ``deployment.semantic_router_image`` built from this release's SR commit.
+Each inference replica needs SR on its own loopback. Other services can share the config.
+The host can bind any address. A deployment ID is optional.
 
 To start a replica:
 
@@ -206,13 +116,10 @@ To start a replica:
    The file has mode 0600. Run SR as the user that wrote it.
 4. Run ``reef serve -c /etc/reef/reef.yaml --service inference``.
 
-Use ``GET /readyz`` for readiness (`HTTP API: status <http-api-status.rst>`__).
-It returns 200 when SR is active and ready, all enabled targets list their models, and each scenario passes a preview.
-Otherwise, it returns 503.
+``GET /readyz`` returns 200 when SR is ready, enabled targets list their models and each scenario passes a preview. Otherwise it returns 503.
 
-Differences from ``managed``:
+You own SR startup, recovery and image verification. Replace replicas to change policy.
+During replacement, ``snapshot_version`` identifies the policy that served a request.
+On SIGTERM a replica drains for up to 60 seconds, cancels remaining requests, then waits for record finalization.
 
-- **Policy updates.** Replace replicas to load a new manifest; ``SIGHUP`` is unsupported. During replacement, records identify their policy through ``snapshot_version``.
-- **Stopping.** On SIGTERM the replica stops accepting connections, waits up to 60 seconds for requests, cancels the rest, and waits ``finalization-timeout-seconds`` for their records.
-- **SR management.** You build, start, restart and stop SR. Reef does not check the image's revision label. ``render`` and the replica require ``deployment.semantic_router_image``. Use an image built from this release's SR commit.
-- **Settings.** Only ``sr-management-port``, ``selection-timeout-seconds``, ``preview-max-concurrency`` and ``finalization-timeout-seconds`` apply.
+Only ``sr-management-port``, ``selection-timeout-seconds``, ``preview-max-concurrency`` and ``finalization-timeout-seconds`` apply in external mode.

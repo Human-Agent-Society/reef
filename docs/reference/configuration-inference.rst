@@ -7,52 +7,23 @@ See the `Settings reference <configuration-settings.rst#inference>`__ for key ty
 Serving of a weight-training deployment
 ---------------------------------------
 
-With ``inference.serving: engines``, Reef starts SGLang or vLLM to serve
-published weights. The ``inference`` section controls these engines.
-See `Serving runtimes <../developer-guide/serving-runtimes.rst>`__ for loading,
-request pinning and supervision.
+Set ``inference.serving: engines`` to serve published weights with SGLang or vLLM.
+If ``serving`` is unset, specifying an engine setting selects this mode. Other modes reject engine settings.
 
-- **Engine settings:** ``backend``, ``num-gpus``, ``tensor-parallel-size``, ``options``,
-  ``remote``, ``handler-factory``, ``handler-config``, ``max-loaded-adapters``
-  and ``prefix-sharing`` under ``inference`` select ``engines`` when ``serving``
-  is unset. Other serving modes reject them.
-- **Prefix cache:** SGLang can retain cache entries for adapter snapshots only
-  if the cache keys include the adapter. Otherwise Reef disables the cache.
-- **External KV stores:** Reef rejects SGLang's ``hicache_storage_backend``
-  and ``enable_lmcache``. It also rejects vLLM's ``kv_transfer_config``,
-  ``kv_offloading_size`` and ``kv_offloading_backend``.
-  These restrictions apply with or without prefix sharing.
-  Reef checks only these option names. Do not configure another KV store through plugins or environment variables.
-- **SGLang:** use native option names without a ``sglang-`` prefix.
-  Router options retain ``router-*`` names; ``router-port`` sets its HTTP port.
-  Standalone engines have no router. Reef selects a router metrics port from
-  4000 upward, so choose an HTTP port outside that range.
-  A configured port conflict stops startup.
-- **vLLM:** use native engine-argument names.
-  Reef controls ``model``, ``host``, ``port`` and ``tensor_parallel_size``;
-  it rejects ``enable_sleep_mode``.
-  ``generation_config`` defaults to ``vllm`` to avoid model-specific generation
-  defaults that training does not see.
-  There is no router, so ``inference.num-gpus`` must equal ``inference.tensor-parallel-size``.
+- **SGLang.** Use native option names without ``sglang-``. Router options retain ``router-*``. Keep ``router-port`` clear of the metrics port chosen from 4000 upward. Standalone engines have no router.
+- **vLLM.** GPU count must equal the tensor parallel size. Reef sets ``model``, ``host``, ``port`` and ``tensor_parallel_size``, rejects ``enable_sleep_mode``, and defaults ``generation_config`` to ``vllm``.
+- **Caches.** SGLang adapter snapshots require adapter-specific cache keys for prefix caching.
+  External KV stores are unsupported. Reef rejects ``hicache_storage_backend``, ``enable_lmcache``, ``kv_transfer_config``, ``kv_offloading_size`` and ``kv_offloading_backend``. This restriction also applies to plugins and environment settings.
 
 Remote inference components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Set ``inference.remote`` to run engines on another host.
-Any training backend can use a remote component.
-Follow `Serve from a remote GPU host
-<../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ for setup.
+Use ``inference.remote`` with any training backend. Each component serves one full-weight checkpoint.
+Add ``inference.remote.slot-urls`` for additional checkpoints. Slots exclude adapters and trainer rollout engines.
 
-Each component serves one full-weight checkpoint.
-Add ``inference.remote.slot-urls`` to serve more checkpoints
-(`Set what a scenario serves <../user-guide/operate.rst#set-what-a-scenario-serves>`__):
-
-- Start each component with the same ``--engine`` and both tokens.
-  Reef uses the same model and options on each component.
-  ``inference.num-gpus`` counts GPUs per component.
-- Allocate separate hosts or visible GPUs, or join one Ray cluster with ``--ray-address``.
-  Different URLs alone do not isolate GPUs.
-- ``slot-urls`` does not support adapter snapshots or trainer rollout engines.
+Use the same engine and tokens on each component. ``inference.num-gpus`` counts GPUs per component.
+Allocate separate hosts or visible GPUs, or provide a shared ``--ray-address``.
+Follow the `remote GPU setup <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__.
 
 Native backend options
 ----------------------
@@ -82,10 +53,7 @@ without the leading ``--``. The backend defines their types, defaults and valida
 Request handler options
 -----------------------
 
-Each engine uses its Reef request handler.
-Set its options in ``inference.handler-config`` with underscores as shown below.
-Unknown options fail startup. Built-in deployments reject a
-``handler-factory`` other than the engine's own handler.
+Put these keys under ``inference.handler-config``. Use underscores. Unknown keys or a different engine's handler fail startup.
 
 .. container:: config
 

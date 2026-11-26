@@ -4,35 +4,9 @@ Choose where a deployment stores its data
 Use local stores for a single-host deployment. Use shared storage when services
 run on several hosts. Keep every required store persistent before running training.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 22 38 40
-
-   * - Store
-     - Setting
-     - Default
-   * - Scenario state
-     - ``storage.record-backend``
-     - SQLite under ``storage.agent-record-dir``.
-   * - Work queues and service coordination
-     - ``storage.coordination-backend``
-     - Follows a built-in record backend.
-   * - Artifacts
-     - ``storage.artifact-backend``
-     - Git LFS at ``storage.artifact-repository``.
-   * - Harbor task files
-     - ``storage.task-file-backend``
-     - Local files under ``storage.task-file-dir``.
-   * - Data items
-     - ``storage.data-store``
-     - Follows the record backend.
-   * - Large item content
-     - ``storage.segment-backend``
-     - Off; content stays in the data store.
-
-Changing a backend does not migrate data. Use a new deployment directory or
-schema, or keep the previous store readable. Plugins use a dotted class reference
-or a mapping with ``module`` and ``config``.
+Changing a backend does not migrate data. Keep previous stores readable or
+use a new deployment directory/schema. See `storage settings
+<../reference/configuration-settings.rst#storage>`__ for backend and plugin syntax.
 
 Choose the storage backend
 --------------------------
@@ -61,27 +35,13 @@ Coordination tables use ``<record schema>_coordination``. A custom record backen
 must explicitly select ``coordination-backend: sqlite`` or ``postgres``.
 All services must reach those tables. See `Split services <split-services.rst>`__.
 
-Scenario settings survive restarts. Read them with
-``GET /reef/scenarios/{scenario}/settings`` and update them through the scenario API.
-An unsupported stored training mode falls back to the recipe default with a warning.
-
 Choose the artifact backend
 ---------------------------
 
-The default ``git_lfs`` backend needs Git and Git LFS. It stores snapshots in
-``storage.artifact-repository``. A custom backend reads its own configuration:
-
-.. code:: yaml
-
-   storage:
-     artifact-backend:
-       module: my_package.artifacts:ObjectStoreArtifactBackend
-       config:
-         bucket: reef-snapshots
-
-Do not also set ``storage.artifact-repository`` for a custom backend.
-Reef refuses that combination. Plugins implement
-``ConfigurableRepositoryBackendFactory``; see ``reef.artifact.repository``.
+The default ``git_lfs`` backend stores snapshots at
+``storage.artifact-repository`` and requires Git LFS. A custom
+``storage.artifact-backend`` must provide its own configuration; do not also
+set a nondefault ``artifact-repository``.
 
 To publish Git LFS snapshots to a private Hugging Face repository:
 
@@ -101,40 +61,21 @@ uses ``refs/reef/``. An existing repository cannot switch layouts.
 Reef reads its local clone and pushes each published snapshot.
 ``hf://org/reef-artifacts@<revision>`` identifies a Git revision, not a Reef artifact ID.
 
-**Discarded content.** Local repositories remove unreferenced LFS objects during
-the hourly work sweep, or immediately during scenario cleanup.
-Snapshots, pending snapshots and archived scenarios retain their objects.
-Discarded cache entries remain until the next sweep.
+Local repositories remove unreferenced LFS content hourly or during scenario
+cleanup. Published, pending and archived snapshots retain their content.
+Remote servers retain uploads until their own cleanup; stop all writers first.
+Scenario-ref archival is supported only for local repositories.
 
-Remote Git servers retain uploaded objects. Stop every writer before using the
-server's cleanup tools. On the Hub, the relevant operations are
-``HfApi.list_lfs_files`` and ``HfApi.permanently_delete_lfs_files``.
-Archiving a deleted scenario's ref is supported only for local repositories.
-
-A shared local repository needs filesystem locks that coordinate every host.
-Reef uses ``flock`` on ``reef-objects.lock`` and does not detect unsafe mounts.
-Do not use a mount whose locks are local to one host.
+Shared local repositories require filesystem locks that coordinate every host.
+Reef uses ``flock`` and cannot detect unsafe mounts.
 
 Choose the task file store
 --------------------------
 
-Harbor task files can be text or binary. The default store uses
-``storage.task-file-dir`` (default ``.reef/task-files``).
-Archived scenario files move under its ``archived/`` directory.
-
-For a remote store, configure a ``TaskFileStore`` plugin:
-
-.. code:: yaml
-
-   storage:
-     task-file-backend:
-       module: my_package.tasks:ObjectStoreTaskFileStore
-       config:
-         bucket: reef-tasks
-     task-file-dir: .reef/task-files
-
-A remote plugin can use ``task-file-dir`` as its local cache.
-The extension contract is in ``reef.storage.data.tasks.TaskFileStore``.
+Harbor task files default to ``storage.task-file-dir`` (``.reef/task-files``).
+Archived files move under ``archived/``. For remote storage, select a
+``storage.task-file-backend`` plugin; it can use ``task-file-dir`` as a cache.
+See the `TaskFileStore contract <../../reef/storage/data/tasks.py>`__.
 
 Choose the data store
 ---------------------
@@ -179,27 +120,12 @@ See `Status <../reference/http-api-status.rst#status>`__.
 Keep large content in segment files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Set ``storage.segment-backend`` to move large record and trajectory content
-out of the SQL database. The database retains references to segment files.
+Set ``storage.segment-backend: local`` to move large content out of SQL into
+``<agent-record-dir>/segments``. Multi-host deployments need a shared
+`SegmentStore plugin <../../reef/storage/data/segments.py>`__.
 
-- Trajectory writes of at least 1 MiB go directly to a segment.
-- Every five minutes, the data service moves or combines content when an owner
-  has at least 64 MiB waiting.
-- Segments unused for 24 hours are deleted.
-
-``local`` uses ``<agent-record-dir>/segments`` on one host.
-For several hosts, configure a shared ``SegmentStore`` plugin:
-
-.. code:: yaml
-
-   storage:
-     segment-backend:
-       module: my_package.segments:ObjectStoreSegmentStore
-       config:
-         bucket: reef-data
-
-Keep this backend configured after enabling it. Without it, reads of migrated
-content fail. See ``reef.storage.data.segments.SegmentStore`` for the plugin contract.
+Keep that backend configured: disabling it makes migrated content unreadable.
+Unused segments are deleted after 24 hours.
 
 Back up a deployment
 --------------------

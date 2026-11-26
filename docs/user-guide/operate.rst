@@ -33,61 +33,26 @@ Read the artifacts
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-The list shows immutable outputs, newest first. Treat ``artifact_id`` as an
-opaque string.
+Artifacts appear newest first. IDs are opaque; ``active``, ``activated`` and
+``served`` describe their serving history. Skipped and rejected jobs appear
+only in ``GET /reef/scenarios/{scenario}/operations``.
 
-.. list-table::
-   :header-rows: 1
-
-   * - Field
-     - Meaning
-   * - ``active``
-     - The component's selected artifact.
-   * - ``activated``
-     - The artifact has served as active.
-   * - ``served``
-     - The artifact serves beside the active artifact.
-   * - ``operation: creation``
-     - A starting artifact; ``source`` identifies its origin.
-
-Skipped and rejected jobs create no artifact row. Read
-``GET /reef/scenarios/{scenario}/operations`` for all operations.
-See `Artifacts <../reference/http-api-artifacts.rst#http-api-artifacts>`__
-for the complete response.
-
-For harness trees, use ``GET /reef/harness/artifacts`` and
-``GET /reef/harness?artifact_id=<id>``. An artifact awaiting activation has
-``active: false`` and ``activated: false``.
+Use ``GET /reef/harness/artifacts`` for harness step results.
+See `artifact fields <../reference/http-api-artifacts.rst#http-api-artifacts>`__.
 
 Starting artifacts
 ------------------
 
-A new scenario gets one starting artifact per component. It serves that artifact
-and uses it for the first training job. An explicit artifact item overrides
-the component's default start.
-
-.. list-table::
-   :header-rows: 1
-
-   * - Backend
-     - Default start
-   * - Slime or Tinker
-     - The configured base model and adapter settings, without copied weight files.
-   * - ``spindle_full``
-     - The configured Hugging Face base revision.
-   * - Harness
-     - ``evolution.seed``, the recipe's seed, or an empty tree.
-
-Existing scenarios keep their stored starts after a configuration change.
-A start incompatible with the new configuration fails that scenario.
-Slime accepts only the inputs its workers loaded from ``inference.model-path``.
-See `Train with Tinker <tinker.rst#jobs-checkpoints-and-recovery>`__ for
-adapter initialization and seed behavior.
+A new scenario starts each component from its configured base model or harness
+seed. An explicit artifact item overrides that default. Existing scenarios
+keep stored starts; incompatible configuration changes fail the scenario.
+See `backend starts <../reference/http-api-artifacts.rst>`__ and
+`Tinker initialization <tinker.rst#jobs-checkpoints-and-recovery>`__.
 
 Choose a scenario's start
 -------------------------
 
-Name an artifact item owned by the new scenario's owner:
+Name an artifact item owned by the scenario's owner:
 
 .. code:: bash
 
@@ -96,23 +61,17 @@ Name an artifact item owned by the new scenario's owner:
      -d '{"name": "code-repair-2", "owner": "acme", "artifact_id": "code-repair/<artifact_id>"}' \
      "$REEF_URL/reef/scenarios"
 
-The item can be an existing scenario artifact or an uploaded artifact item.
-Add ``component`` for a scenario with several components. Other components use
-their defaults. The response's ``components`` gives their starting artifact IDs.
+Add ``component`` for a composite scenario. Missing items return 404;
+invalid or unsupported starts return 400 without reserving the name.
+Slime requires its default start and rejects artifact-item starts.
 
-Reef checks access, file layout and backend support before registering the scenario.
-An unusable start leaves the name available. Missing items return 404; invalid
-layouts or unsupported starts return 400. Slime refuses artifact-item starts,
-including in a composite scenario: use its default start.
-
-An existing scenario ignores ``artifact_id`` and ``component`` in a create request.
-Inference never creates a scenario. Reports and record imports can create one
-from defaults when implicit creation is enabled.
+Existing scenarios ignore start fields. Inference never creates scenarios;
+reports and record imports can, when implicit creation is enabled.
 
 Import an artifact
 ------------------
 
-Import weights or a harness tree from a URI the service can read:
+Import from a URI the service can read:
 
 .. code:: bash
 
@@ -121,30 +80,18 @@ Import weights or a harness tree from a URI the service can read:
      -d '{"source": "s3://my-bucket/checkpoints/step-400/"}' \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-.. list-table::
-   :header-rows: 1
+Imports create artifacts without changing serving or training starts.
+Invalid layouts return 400. Supported sources:
 
-   * - Source
-     - Requirements
-   * - ``hf://org/model@revision``
-     - A full 40-digit commit SHA remains a remote reference. Branches and tags are copied.
-   * - ``s3://bucket/prefix/``
-     - Install ``reef-infra[s3]`` and supply boto3 credentials through its standard environment, profile or role.
-   * - ``file:///absolute/path``
-     - The directory must be on the service's host.
+- ``hf://org/model@revision``: a full commit SHA stays a remote reference;
+  branches and tags are copied.
+- ``s3://bucket/prefix/``: requires ``reef-infra[s3]`` and boto3 credentials.
+- ``file:///absolute/path``: files on the service's host.
 
-The files must match the component's layout. A failed layout check returns
-400 and changes nothing. The `import API
-<../reference/http-api-artifacts.rst#import-an-artifact>`__ lists supported layouts.
-Restrict import access to callers allowed to read those sources and train the scenario.
-
-An import creates an artifact but does not activate it or change the training
-start. Copied imports need cache and artifact-store space, approximately twice
-the model size. A pinned Hugging Face reference downloads weights when needed;
-keep the referenced repository available.
-
-Harness sync differs: ``POST /reef/harness/import`` merges changed files and
-makes the result both active and the next training start.
+Copied imports need approximately twice the model size across cache and storage.
+Pinned references require the source repository to remain available.
+See `layouts and access <../reference/http-api-artifacts.rst#import-an-artifact>`__.
+Harness sync instead merges files and changes both serving and the training start.
 
 Set what a scenario serves
 --------------------------
@@ -188,37 +135,18 @@ For an artifact beside it, add ``?model=<artifact-id>``.
 Resend the mapping to retry a failed startup immediately.
 Selections survive restarts.
 
-A served artifact also has its own inference URL:
+Use an artifact's dedicated URL to select it explicitly; see
+`Traffic split <../reference/http-api-serving.rst#traffic-split>`__.
 
-.. code:: bash
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"model": "reef", "messages": [{"role": "user", "content": "hi"}]}' \
-     "$REEF_URL/reef/scenarios/code-repair/artifacts/<id>/v1/chat/completions"
-
-See `Traffic split <../reference/http-api-serving.rst#traffic-split>`__ for
-conversation routing and explicit artifact selection.
-
-**Capacity.** Tinker can serve any of a scenario's artifacts. Reef's adapter
-serving supports one artifact per scenario. Full-weight serving needs one
-inference component per checkpoint; configure additional components with
+**Capacity.** Tinker can serve several artifacts per scenario; adapter engines
+support one. Full weights need one component per checkpoint, configured through
 ``inference.remote.slot-urls``.
 
-Traffic-weight changes reuse loaded checkpoints. Removing a checkpoint schedules
-its component for retirement after ``inference.timeout-s`` plus 5 seconds
-(default 305 seconds). Running work or release failures can delay retirement;
-no API reports when the component becomes free.
-
-To replace ``a`` while two components serve ``a`` and ``b``:
-
-#. Send ``{"served": {"b": 100}}``.
-#. Allow retirement time after the new routes are published, not after HTTP 200.
-#. Add ``c`` with ``{"served": {"b": 100, "c": 0}}`` and poll ``c``'s startup status.
-
-If no component is free, startup fails and the previous routes remain.
-Wait, then resend the mapping. The `serving API
-<../reference/http-api-serving.rst#set-what-a-scenario-serves>`__ describes limits and errors.
+Removing full weights retires their component after ``inference.timeout-s``
+plus 5 seconds (default 305), measured from route publication. Work or release
+failures can delay this. No API reports when the component becomes free.
+If replacement startup fails, wait and resend the mapping. See
+`replacement procedure <../reference/http-api-serving.rst#set-what-a-scenario-serves>`__.
 
 Activation rule
 ---------------
@@ -327,52 +255,33 @@ saved checkpoint.
 Track experiments with W&B
 --------------------------
 
-Tracking is off by default. Configure ``observability.wandb`` and export
-``WANDB_API_KEY`` before startup. See the `tracking example
+Tracking is off by default. Set ``observability.wandb`` and export
+``WANDB_API_KEY``; see the `tracking example
 <../reference/configuration-observability.rst#experiment-tracking>`__.
-Reef refuses Slime's ``--wandb-key``; credentials do not belong in the config.
+Reef rejects Slime's ``--wandb-key``.
 
-Each scenario has one group and one run. Train-from starts a new run;
-activation does not. Training results use ``train/step`` and include the
-commit number and job ID. Composite trainers prefix metrics by component.
-
-``operations/*`` metrics arrive every 10 seconds, including for inference-only
-scenarios. See `Operational metrics
-<../reference/configuration-observability.rst#operational-metrics>`__ before
-interpreting queue counts or waiting times.
-
-Tracking runs in the background. A tracking failure is logged and does not
-fail training or its commit. Shutdown flushes queued events.
+Each scenario has one group and run. Train-from starts a new run; activation
+does not. Tracking failures are logged without failing training.
+See `operational metrics
+<../reference/configuration-observability.rst#operational-metrics>`__ for queue and timing data.
 
 Restart and recovery
 --------------------
 
-Keep the deployment's `stores and backend state <storage.rst#back-up-a-deployment>`__
-on persistent storage. On restart:
+Keep `stores and backend state <storage.rst#back-up-a-deployment>`__ persistent.
+Reef restores committed selections and training progress. Jobs resume from
+saved checkpoints; unsaved work can run again. Settled harness steps commit
+their durable result, while unsettled steps rerun.
 
-- Reef restores committed settings, artifact selections and record progress.
-- Training resumes the submitted job from its last saved checkpoint.
-  Unsaved work can run again.
-- Checkpoints with committed evaluation decisions are not evaluated again.
-- A settled harness step commits its durable result without rerunning.
-  An unsettled step reruns from the same start and harness state.
+``artifact_head_sync`` reports ``synchronized``, ``pending`` or ``conflict``.
+A repository conflict does not undo a committed operation, but blocks later
+commits until synchronization succeeds. See the `recovery contract
+<../advanced_topics/state-model.rst#commit-ordering>`__.
 
-One control instance holds the deployment's lease. A normal stop releases it;
-a crash can delay takeover until its 30-second lease expires. Use separate
-stores for independent deployments. See `Control restarts
-<split-services.rst#control-restarts>`__ for standby instances.
-
-**Repository synchronization.** ``artifact_head_sync`` in status is
-``synchronized``, ``pending`` or ``conflict``. A conflict means another writer
-moved the repository head to an unrelated snapshot. Reef does not overwrite it.
-The committed operation remains successful, but later commits wait for
-synchronization. Reef retries before the next commit and after a restart.
-
-**Deletion.** ``DELETE /reef/scenarios/{scenario}`` removes the scenario from
-use immediately; its ID cannot be reused. Background cleanup cancels jobs,
-archives state and removes cached or discarded content. Failed cleanup retries
-at the next hourly sweep, including after restart. Harness history moves under
-an ``archived/`` sibling when the training service handles the request.
+**Deletion.** ``DELETE /reef/scenarios/{scenario}`` removes the scenario immediately;
+its ID cannot be reused. Background cleanup cancels jobs and archives state.
+Failed cleanup retries hourly, including after restart.
+See `Control restarts <split-services.rst#control-restarts>`__ for failover.
 
 Run the services in separate processes
 --------------------------------------
@@ -384,7 +293,7 @@ for shared-store requirements and request routing.
 Import Harbor tasks
 -------------------
 
-Configure task directories and a train/eval split:
+Configure a task directory and split manifest:
 
 .. code:: yaml
 
@@ -396,23 +305,15 @@ Configure task directories and a train/eval split:
 
    {"version": 1, "seed": 0, "eval_fraction": 0.5, "train": ["sum-391"], "eval": ["sort-17"]}
 
-Each name identifies a Harbor directory under ``tasks-root``. Names start with
-a lowercase letter or digit and contain only lowercase letters, digits,
-``.``, ``_`` and ``-``. Binary files are allowed.
+Names identify Harbor directories under ``tasks-root``. Reef imports them when
+the scenario loads. Update the manifest and reload to add tasks or change
+splits; changed files need new names. Invalid tasks, changed imported files
+or conflicting names prevent loading.
 
-Reef imports tasks when the scenario loads. To add tasks or change splits,
-update the manifest and reload the scenario. Unchanged tasks stay unchanged.
-Give changed task files a new name. Missing directories, invalid Harbor tasks,
-changed imported files or conflicting sample names prevent the scenario from loading.
-
-For a running scenario, use
-``POST /reef/namespaces/{owner}/data/tasks`` instead of restarting.
-See `Create task items <../reference/http-api-data-upload.rst#create-task-items>`__.
-
-Harness evaluation uses the eval split when
-``evolution.evaluation.imported_tasks: true``. Each step reads that split again,
-so later imports join the next evaluation. See
-`Task directories <evolve-your-harness.rst#task-directories>`__.
+For running scenarios, use the `task upload API
+<../reference/http-api-data-upload.rst#create-task-items>`__.
+Harness evaluation rereads the eval split each step when
+``evolution.evaluation.imported_tasks: true``.
 
 Limit the scenarios a service holds
 -----------------------------------
@@ -427,17 +328,11 @@ For persistent scenarios, configure:
      max-loaded-scenarios: 50
      max-scenarios: 1000
 
-``scenario-idle-unload-s`` unloads idle scenarios after the stated time.
-``max-loaded-scenarios`` unloads the oldest idle scenario before loading another.
-If none is idle, the request returns 503 with ``Retry-After``.
-``max-scenarios`` refuses additional registrations with 409; delete a scenario
-to free a place. These settings are off by default.
+Idle limits unload persistent scenarios; the next request reloads them.
+If no loaded scenario is idle, admission returns 503 with ``Retry-After``.
+The registered-scenario limit returns 409; deletion frees a place.
+Weight-training scenarios never unload automatically.
 
-Unloading preserves durable state. The next request reloads it; in-memory
-metrics restart at zero. A scenario is idle only without active requests,
-local training or pending training records. Weight-training scenarios are never
-unloaded; deletion releases them.
-
-``reef.scenario-admission`` selects a custom policy and cannot accompany the
-two count limits. Its contract is in
-``reef.control.scenario.admission.ScenarioAdmission``.
+These limits default to off. ``reef.scenario-admission`` selects a custom
+policy and cannot accompany the count limits. See `service settings
+<../reference/configuration-settings.rst#service>`__ for idle conditions and options.

@@ -1,10 +1,6 @@
 # Join the Reef WeChat Group
 
-The group no longer accepts direct QR-code joins. To request an invitation:
-
-1. Scan the assistant's QR code with WeChat.
-2. Add the assistant as a friend.
-3. Wait for the group invitation.
+Scan this QR code with WeChat and add the assistant as a friend to receive a group invitation.
 
 ![Reef WeChat assistant QR code](../assets/reef-wechat-assistant.jpg)
 

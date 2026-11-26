@@ -5,10 +5,9 @@ Implement a training backend when adding a framework or hosted training service.
 Weight-method authors normally need only an
 `objective <recipe-training-service.rst>`__.
 
-A backend has three parts: ``TrainingDeployment`` describes startup,
-``TrainingComponent`` runs jobs, and ``TrainingBackendFacts`` describes its
-capabilities without starting training. Only the training service builds
-the component. Control submits jobs and reads results through queues.
+``TrainingDeployment`` defines startup; ``TrainingComponent`` runs jobs;
+``TrainingBackendFacts`` describes capabilities without starting training.
+Only the training service builds components.
 
 The deployment definition
 -------------------------
@@ -26,14 +25,9 @@ Required methods:
   configuration whose ``type`` references a ``TrainingComponentFactory``.
   Parameters are grouped by sample kind and may be empty before recipe selection.
 
-Optional methods provide service environment variables (``http_environment``),
-trainer-owned serving configuration (``trainer_serving_config``) and engine
-weights for snapshots without files (``engine_weights``).
-
-Class attributes declare ``requires_local_model`` (default true),
-``supports_teacher_engine`` (default false) and ``default_serving``
-(``engines`` by default, or ``trainer``).
-The inference configuration selects serving independently.
+Optional methods and capability flags declare serving, environment and
+model requirements. See `TrainingDeployment <../../reef/train/deployment.py>`__.
+Inference settings select serving independently.
 
 An in-process backend
 ~~~~~~~~~~~~~~~~~~~~~
@@ -98,10 +92,6 @@ parameters and scenario. The component owns the framework's training loop.
    * - ``root_start(root)``
      - Resolve a scenario root, including the facts' default start.
        By default, import its files.
-   * - ``changed_parts(start, checkpoint)``
-     - Report changed component parts for activation. Default: none.
-   * - ``check_remote_artifact(names)``
-     - Validate names returned by the facts' import check on the training service.
    * - ``start_jobs()``
      - Start or resume jobs. Acquire exclusive ownership of persistent job state here.
 
@@ -109,17 +99,14 @@ parameters and scenario. The component owns the framework's training loop.
 Enable them only when jobs remain independent across scenarios or starting
 checkpoints respectively. Serving must also preserve per-scenario weights.
 
-``SavedCheckpoint.path`` identifies the next training start.
+``SavedCheckpoint.path`` identifies the next training start;
 ``artifact_path`` contains publishable weights without training state.
-Both are local to training. Do not change artifact files after reporting
-a checkpoint. Its ``step`` is nonnegative and counts within the job;
-metrics must encode as JSON. The worker stores artifact files and sends their
-content reference to control; control does not read training-local paths.
+Do not modify reported artifacts. ``step`` is nonnegative within the job;
+metrics must encode as JSON. Control receives stored references, not local paths.
 
-``LocalJobComponent`` provides durable per-job directories and background
-threads. Implement ``check_job`` and ``run``. Jobs wait for ``start_jobs``;
-restart resumes unfinished jobs in submission order.
-Concurrent components use one thread per job.
+``LocalJobComponent`` supplies durable directories and background execution.
+Implement ``check_job`` and ``run``; jobs start or resume through ``start_jobs``.
+See `component contracts <../../reef/train/component.py>`__ for optional hooks.
 
 Backend facts
 -------------
@@ -129,25 +116,18 @@ Every factory must implement
 This call must build no component, start no work, contact no service and
 import no training framework or SDK.
 
-Facts and the live component must agree on backend name, artifact format,
-scenario sharing and concurrency. Facts also define:
+Facts must agree with the live component on name, artifact format,
+scenario sharing and concurrency. They define default roots, parameter schemas
+and read-only start/import checks.
 
-- ``default_start_inputs``: settings that determine root content.
-- ``default_start()``: small text files plus those inputs, without weights.
-  Common forms are ``base.json`` or ``hf-reference.json``.
-- ``parameters_schema(kind)``: parameter JSON Schema, or ``None``.
-- ``start_files``: files needed for start validation; ``None`` requests
-  the whole component. Declare narrow paths to avoid fetching weights.
-- ``check_root_start(root)`` and ``check_import_start(directory)``:
-  read-only checks matching the component's acceptance rules.
-  Raise ``ValueError`` for unsupported starts.
-- ``check_artifact(files)``: validate an import locally.
-  Return ``None`` when complete, or a JSON object for
-  ``check_remote_artifact`` to resolve on training.
+``default_start`` returns small text files and their determining inputs,
+without downloading weights. ``start_files`` narrows validation reads.
+Reject unsupported starts with ``ValueError``.
+``check_artifact`` returns ``None`` when validation finishes locally, or a
+JSON object for the component's ``check_remote_artifact``.
 
-Facts are the sole source of default roots.
-Service-dependent operations remain on the component.
-Harness training uses ``HarnessFacts.from_settings`` instead of a factory.
+Facts alone define default roots. Service-dependent work stays on the component.
+See `TrainingBackendFacts <../../reef/train/component.py>`__ for complete signatures.
 
 How a trainer runs jobs
 -----------------------
@@ -157,16 +137,10 @@ commits each saved checkpoint and the job's final status.
 Submission consumes samples; failed jobs do not return them.
 The activation rule decides whether a committed checkpoint serves.
 
-A normal job advances the training start with each checkpoint.
-Only one job can continue that start at a time.
-A request with ``train_from`` uses its own start and never advances the
-shared training start. ``concurrent_jobs`` permits these independent jobs to overlap.
-
-A scenario-level train-from validates the snapshot, cancels the job continuing
-the old start and commits the new start.
-Training imports its files when taking the next job.
-Unsupported starts return HTTP 400.
-Activation changes serving only and never resets training.
+Only one job advances the shared training start at a time.
+Per-request ``train_from`` jobs never advance it; ``concurrent_jobs`` allows
+them to overlap. Scenario-level train-from cancels the continuing job and
+sets a validated new start. Activation never resets training.
 
 Control and the training service
 --------------------------------
@@ -174,15 +148,9 @@ Control and the training service
 Control uses ``JobQueueComponent`` in both split and single-process deployments.
 Backend authors implement the component and facts; they add no control-side worker.
 
-Job checks run before submission. While a check is pending, control releases
-the reservation and consumes no samples. Refusal returns the component's error.
-Accepted jobs enter the jobs queue; training resolves snapshot starts and
-reports checkpoints through queue progress.
-
-Imports can require a remote artifact check. Control waits up to 60 seconds:
-refusal returns HTTP 400, and no answer returns HTTP 503.
-Checks that cannot run eventually fail. Request samples remain untrained.
-Checks no longer requested for ten minutes are not executed.
+Pending job checks consume no samples. Accepted jobs enter the queue;
+training resolves their starts and reports checkpoints through queue progress.
+Remote artifact checks return HTTP 400 on refusal and 503 on timeout.
 
 The job data directory
 ----------------------
@@ -194,21 +162,15 @@ The job data directory
    job.json        format 2, key, sample_count, kind
    samples.jsonl   one sample per line, in job order
 
-The kind is ``trajectory``, ``task`` or null for no samples.
-Task lines name stored files by partition, digest and name; they contain
-no local ``task_path``. The directory includes neither task files nor the
-training request.
+The kind is ``trajectory``, ``task`` or null.
+Task entries reference stored files; the directory contains neither task files
+nor the training request.
 
 Host components use ``job.read_data()`` or ``job.data_dir``.
-These materialize data and fetch task directories.
-Remote components pass ``job.data_uri``, transfer or mount the directory,
-and fetch task files from their store. They must not access host-local data paths.
-
-Do not modify job or task directories. Missing files fail reads;
-tasks without stored file references are refused.
-Directory keys are SHA-256 hashes of their lines, so identical data is reused.
-``storage.job_directory_ttl_s`` defaults to seven days.
-Keep it above the longest job, including restart reads.
+Remote components use ``job.data_uri`` and fetch task files separately;
+never access host-local paths remotely.
+Directories are immutable. Missing files fail reads.
+Keep ``storage.job_directory_ttl_s`` above the longest job, including restart reads.
 
 Decide what a scenario trains
 -----------------------------
@@ -217,31 +179,18 @@ A ``TrainingManager`` selected by ``training.manager`` replaces automatic
 sample-count scheduling. Control calls ``actions(view)`` every two seconds
 for each loaded automatic trainer.
 
-``ManagerView`` includes the training start, serving readiness, available
-samples, job size, waiting requests, active jobs and artifact metrics.
-Return actions in execution order:
-
-- ``Train(samples, reason, parameters, train_from)`` files a training request.
-- ``TrainFrom(artifact_id)`` changes the training start.
-- ``Cancel(job_id)`` cancels a job.
-
-Reef validates actions again because views can become stale.
-``job_limit`` defaults to 1 and bounds manager requests waiting or running.
-Managers cannot change serving selection. Requests use session
-``training-manager`` and retain ``reason`` as their text.
-
-Decisions run outside scenario locks on one control thread.
-Slow decisions delay other managed trainers. Errors are logged and retried
-on the next scheduling round.
+Return ordered ``Train``, ``TrainFrom`` or ``Cancel`` actions from the current
+``ManagerView``. Reef revalidates them because views can become stale.
+``job_limit`` bounds waiting and running manager requests; default 1.
+Managers cannot change serving selection.
+Keep decisions short: they share one thread. Errors retry on the next round.
+See `manager contracts <../../reef/train/manager.py>`__.
 
 Slime integration
 -----------------
 
-Slime's component launches a driver per job and holds no GPU itself.
-Drivers own training workers. Dataset/task rollout engines can persist across
-jobs in a shared serving session; component closure disposes it.
-Production inference never shares training GPUs. Slime ``colocate`` applies
-to its own rollout engines.
+Slime owns training workers and task/dataset rollout engines.
+``colocate`` shares their GPUs, never production inference GPUs.
 
 For a sample job, each ``save_interval`` optimizer steps form one Slime rollout.
 Without this parameter, the sample job is one rollout.
@@ -259,7 +208,5 @@ Its root must match the configured default-start inputs.
 It rejects ``import_start`` and train-from.
 Queued jobs whose starts became obsolete fail before training.
 
-Restart resumes from the last checkpoint. If Megatron saved before the
-component recorded it, recovery records that checkpoint without retraining
-its rollout. See `Slime worker executors
-<executors.rst#slime-worker-executors>`__ for launch contracts.
+Restart resumes the last saved checkpoint without repeating its rollout.
+See `Slime worker executors <executors.rst#slime-worker-executors>`__ for launch contracts.

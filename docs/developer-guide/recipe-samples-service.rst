@@ -12,13 +12,9 @@ The training component renders tokens and log probabilities.
 When the service calls the stage
 --------------------------------
 
-Each trainer processes one record selection at a time. New records, commits,
-data writes and completed background work can request a selection.
-Each selection delivers job outcomes, checks staleness, pushes new records
-in append order, advances timed work and stores ready samples.
-
-Stateful stage work runs only in the samples service.
-Control also calls ``uploaded_sample``; keep that method pure and dependent
+Selections run serially per trainer and push records in append order.
+They also deliver job outcomes, check staleness and advance background work.
+Control calls ``uploaded_sample`` separately; keep it pure and dependent
 only on its argument and configuration.
 
 The contract
@@ -37,10 +33,8 @@ Keep ``push``, ``advance`` and ``make_samples`` free of blocking network or
 model calls. Raise on invalid training data; do not silently discard broken
 contracts.
 
-Optional hooks provide timed work (``advance``, ``next_due``), staleness,
-background work, generated samples and job outcomes.
-Use ``status`` and ``operational_metrics`` for monitoring.
-Release resources in ``close``.
+Release resources in ``close``. The `base contract <../../reef/samples/base.py>`__
+defines optional hooks for timing, monitoring and background work.
 
 Select and configure the stage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -94,15 +88,10 @@ An aborted inference or incomplete stream rejects its entire record set.
 Built-in stages
 ---------------
 
-- ``ReportSamples``: samples from reports, optionally grouped.
-- ``TrajectorySamples``: completed trajectories after
-  ``trajectory_idle_seconds`` without continuation; default 300 seconds.
-- ``JudgedSamples``: background model judgments.
-- ``InferenceRecordSamples``: one set per inference record; ends other records.
-- ``DistillSamples``: student trajectories with ``extra.reef.teacher``.
-  Override ``teacher_request``.
-- ``TraceSamples`` and ``InferenceSamples``: inputs for harness evolution.
-- ``NoSamples``: no output.
+Use ``ReportSamples`` for reported feedback, ``JudgedSamples`` for model
+judgments, or ``TrajectorySamples`` for trajectories completed after an idle timeout.
+``DistillSamples`` adds teacher context; ``TraceSamples`` supplies harness traces.
+The `package exports <../../reef/samples/__init__.py>`__ list other stages.
 
 Record sets and units
 ---------------------
@@ -111,13 +100,9 @@ A ``RecordSet`` contains records whose samples are made together.
 A report normally brings its referenced trajectories into that set.
 A stage cannot put one record in two sets; ``form`` raises ``ValueError``.
 
-``form`` either creates ready samples or ends the records as skipped.
-A ``RecordSetUnit`` joins sets that must train in one job, such as grouped
-reports. The service stores the unit's samples and marks its records consumed.
-Its samples share a group, which job selection keeps whole.
-
-Recovery skips consumed records. Stored samples therefore survive restarts
-without rerunning a nondeterministic judge.
+``form`` produces samples or skips records. A ``RecordSetUnit`` joins sets
+that must train together. Storage consumes their records atomically;
+recovery reuses stored samples without rerunning the judge.
 
 Reported feedback
 -----------------
@@ -131,37 +116,24 @@ The default combines the report's trajectories with its score and feedback.
 Use ``context.require_score()`` when training requires a finite reward.
 Set ``exclusive_sources=True`` when each report owns its inference records.
 
-For grouped reports, implement ``ReportGrouping`` without blocking calls:
-
-- ``is_training_report(report)`` filters reports for this method.
-- ``placement(context)`` returns ``(group_key, slot)``.
-  ``(None, None)`` means an independent sample. A missing slot uses the
-  report ID; duplicate slots keep the first accepted report.
-- ``decide(key, members)`` returns ``INCOMPLETE``, ``READY`` or ``DISCARD``.
-  Members arrive in report order.
-
-Ready groups are fixed. Later reports with the same key form another group.
-Conflicting ownership of inference records ends a report without training.
-
-``SampleAssemblySettings`` controls policy samples:
-``accept_multi_turn_policy_samples=false`` trains only the last reply;
-``true`` trains every reply. ``realign_threshold`` defaults to 1024 and
-``scaffold_tolerance`` to 0 when prompts rewrite earlier turns.
+For groups, implement nonblocking ``ReportGrouping`` methods:
+``is_training_report`` filters reports, ``placement`` assigns group and slot,
+and ``decide`` returns ``INCOMPLETE``, ``READY`` or ``DISCARD``.
+Ready groups are fixed; duplicate slots keep the first report.
+Conflicting record ownership skips the report.
+See the contracts for `grouping <../../reef/samples/reports.py>`__ and
+`multi-turn assembly <../../reef/samples/assembly.py>`__.
 
 Computed feedback
 -----------------
 
 Implement ``RecordJudging`` and extend ``JudgedSamples``:
 
-- ``observe(record, now, stage)`` correlates records with ``track``,
-  ``tracked_record``, ``dispatch`` and ``retire``. It must not block.
-- ``async judge(job)`` runs on a ``BackgroundJobWorker`` and can call models.
-- ``expire(now)`` returns tracked receipts whose wait expired; default none.
-- ``make_sample(record, judgment)`` returns a ``TrajectorySample`` or ``None``.
-
-Construct ``JudgedSamples(judging, worker)``. Without a worker, records can
-track and expire but receive no judgments.
-See ``recipes/openclawrl/`` for an implementation.
+``observe(record, now, stage)`` tracks and dispatches work without blocking.
+``async judge(job)`` can call models; ``make_sample(record, judgment)``
+returns a ``TrajectorySample`` or ``None``.
+Construct ``JudgedSamples(judging, worker)`` with a ``BackgroundJobWorker``;
+without one, no judgments run. See `OpenClaw-RL <../../recipes/openclawrl>`__.
 
 Slow work
 ---------
@@ -182,20 +154,13 @@ Staleness
 still train automatically. ``served`` describes this scenario's served
 artifact history and artifacts served beside the active selection.
 
-The service rechecks after serving changes or stage configuration changes.
-Control waits for the current judgment and excludes stale groups.
+The default ``lags_behind(samples, served, 0)`` requires on-policy samples.
+A larger bound permits lag, counting only artifacts this scenario served.
+Reef rechecks after serving or configuration changes.
 
-- The default ``lags_behind(samples, served, 0)`` is on-policy.
-  Samples from another artifact, or with no source artifact, are stale.
-- Pass a larger bound to ``lags_behind`` to permit artifact lag.
-  ``SAOSamples`` uses ``max_artifact_lag``, default 0.
-- SFT and harness trace stages set ``goes_stale=False``.
-- Tasks and uploaded trajectories are never stale.
-  Neither are samples from scenarios without served weight artifacts.
-
-Staleness is permanent once marked. Serving an earlier artifact again does
-not restore its samples. Manual requests can explicitly train stale samples.
-Lag counts only artifacts that this scenario actually served.
+Staleness is permanent; manual requests can bypass it.
+Tasks, uploads and scenarios without served weights never become stale.
+SFT and harness stages disable checks with ``goes_stale=False``.
 
 Samples from no record set
 --------------------------
@@ -210,6 +175,4 @@ These samples have no group or consumed records.
 Handle repeated outcomes; startup can deliver the last outcome again.
 
 Both hooks default to no work. `Task generators <task-generators.rst>`__
-use them to train generated tasks. Access task storage through
-``context.task_storage.open(name)`` when a scenario session exists;
-otherwise ``task_storage`` is ``None``.
+use them for generated training tasks.

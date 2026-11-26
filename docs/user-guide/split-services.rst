@@ -7,6 +7,9 @@ during control restarts. Start from a working single-process deployment.
 The seven services coordinate through shared stores and work queues.
 By default, ``reef serve`` runs them in one process.
 
+.. figure:: ../assets/services-light.svg
+   :alt: Control queues work in the shared store. Inference, data, harness, samples, training and evaluation read or write the store.
+
 Start the services
 ------------------
 
@@ -70,85 +73,41 @@ of each behind one address. A one-process ``reef serve`` answers all routes.
 Inference
 ---------
 
-Inference loads selected artifacts asynchronously. Check
-``GET /reef/scenarios/{scenario}/inference/status`` for ``pending``, ``starting``,
-``ready`` or ``failed`` and the artifact ID.
+Poll ``GET /reef/scenarios/{scenario}/inference/status`` after changing served
+artifacts. Inference requests return 503 during startup; unknown or nonserving
+scenarios return 404. See `inference errors
+<../reference/http-api-inference.rst#request>`__.
 
-Send inference to this service with ``x-reef-scenario``. The scenario must
-already exist. Requests use the active selection or traffic split unless they
-name a served artifact. Reef returns ``x-reef-agent-record-id`` and
-``x-reef-artifact-id`` with successful recorded responses.
+Control retries failed startup after 60 seconds, doubling the delay to at
+most one hour. Resending ``served`` retries immediately and resets the delay.
 
-A scenario without a route returns 503 ``inference_starting`` with
-``Retry-After: 30`` during startup, or ``inference_start_failed`` after failure.
-An unknown scenario or one serving nothing returns 404.
-See `Inference errors <../reference/http-api-inference.rst#request>`__ for
-provider errors, timeouts and retry behavior.
+One worker owns the runtime under a lease; replicas answer requests. On
+takeover, it removes routes outside the new runtime before opening it. Local
+addresses usually change, so requests return 503 until selections reload.
+Remote routes survive only when the runtime confirms them. Native engines
+restart and interrupt requests. Startup status is not a continuous health check.
 
-Buffered responses are recorded before delivery. Streams are recorded when
-they end; a stream that fails after headers has no receipt.
-
-**Startup retries.** Control retries a failed startup after 60 seconds.
-The delay doubles after each automatic failure, up to one hour.
-Resend the scenario's ``served`` mapping to retry immediately and reset the delay.
-
-**Runtime ownership.** One inference worker owns the serving runtime.
-Other replicas handle requests. After ownership changes, remote runtimes can
-retain routes only when they confirm that the engines still serve them.
-Reef's native engines restart and reload artifacts, interrupting requests in flight.
-Startup status is not a continuous health check.
-
-**Request pinning.** Reef's engines keep each request on its selected weights.
-Weight changes wait up to ``inference.timeout-s`` for requests to finish,
-then interrupt remaining requests. They never continue on different weights.
-See `Request pinning <../developer-guide/serving-runtimes.rst#request-pinning>`__.
-
-- Use the same Reef version for control, inference replicas and components.
-- Keep native engine addresses private; clients call Reef's inference API.
-- Restart the inference component after resetting coordination storage.
-- A failed adapter load leaves its engine stack unavailable. Correct the artifact
-  or restart the serving worker before selecting a replacement.
-- Control calls wait at most 30 seconds behind another call, then return retryable 503.
-  A native call that never returns requires operator recovery.
+Use the same Reef version throughout. Keep engine addresses private and
+restart the inference component after resetting coordination storage.
+A failed adapter load leaves the engine unavailable; fix the artifact or
+restart the worker. A native control call that hangs requires operator recovery.
+See `request pinning and control deadlines
+<../developer-guide/serving-runtimes.rst#request-pinning>`__.
 
 Training
 --------
 
-Install backend dependencies where the training service runs.
-Other services do not build training components:
+Install the selected backend's dependencies and credentials on the training
+service: `Slime <evolve-your-model.rst>`__, `Tinker <tinker.rst>`__ or the
+`harness binary and sandbox <evolve-your-harness.rst>`__.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
+Training reads starts and writes checkpoints through shared artifact storage.
+Other services need no shared training directory. While training is unavailable,
+new jobs wait for admission without consuming samples or appearing as running.
+Tinker/Spindle imports return 503 after 60 seconds without a training-service response.
 
-   * - Backend
-     - What only the training service needs
-   * - ``slime``
-     - Slime, Megatron, Ray, PyTorch and Transformers
-   * - ``tinker``, ``spindle_full``
-     - The backend's API key and its ``state-dir``
-   * - a harness recipe
-     - The adapter's binary, the sandbox, and ``evolution.state_dir``
-   * - a training backend plugin
-     - The plugin's own dependencies
-
-When training is unavailable, new jobs wait for its admission checks without
-consuming samples. Status shows no running job until that check completes.
-
-Training reads starts from the artifact backend and stores checkpoints there.
-Control commits them by reference; it needs no shared training directory.
-Uncommitted checkpoint content is removed when the ended job is deleted
-(``storage.work-retention-s``, default 7 days).
-
-Tinker and Spindle artifact imports also need the training service.
-They return 503 if it does not answer within 60 seconds.
-
-**Harness training.** The training service runs evolution methods, agents and
-their evaluations. Only it reads ``evolution.state_dir``. Control reads job
-progress from the shared store and ended step records from the artifact backend.
-
-After scenario deletion, cleanup asks training to archive its history directory.
-That request waits while training is unavailable.
+For harness recipes, keep ``evolution.state_dir`` on the training host.
+It owns evolution runs and archives history after scenario deletion.
 
 Harness clients
 ---------------
@@ -156,36 +115,27 @@ Harness clients
 Point harness clients at the harness service. Set ``harness.inference_url``
 to the address those clients can reach for model calls.
 
-The service reads trees and forwards file imports to control through the
-``harness_sync`` queue. Control merges and commits the files.
-After 30 seconds without an answer, import returns 503 but remains queued.
-Resending the same files waits for the same request.
+Control merges imported files. After 30 seconds without a response, import
+returns 503 but stays queued. Resending the same files waits for that request.
 
 Data
 ----
 
-Data writes request a scenario sync and wait up to 30 seconds.
-The response's ``synced`` field reports whether it finished.
-Pending syncs run when control handles them or the scenario next loads.
-Data, samples and evaluation workers do not change the production engine merely
-by loading a scenario.
+Data writes wait up to 30 seconds for control to sync the scenario.
+``synced: false`` means the write remains pending synchronization, not lost.
+The next control cycle or scenario load applies it.
 
 Evaluation
 ----------
 
-Evaluation needs a running inference service. It asks inference to load each
-candidate, waits for readiness and sends rollout calls to that candidate.
-These loads do not publish a production route. Their calls do not become
-scenario training records.
+Evaluation requires inference. Candidates load without changing production
+routes, and evaluation calls do not become training records.
 
-Set ``evaluation.on-stop`` and ``evaluation.finish-timeout-s`` for graceful
-shutdown. See `Evaluation settings
+Choose graceful shutdown with ``evaluation.on-stop`` and
+``evaluation.finish-timeout-s``. Keep the timeout below the supervisor's kill
+deadline. Graceful requeue consumes no attempt; a forced kill consumes one
+and waits for lease expiry. See `evaluation settings
 <../reference/configuration-settings.rst#evaluation>`__.
-Keep the finish timeout below your supervisor's kill deadline.
-
-A rollout returned during graceful shutdown uses no work attempt.
-After a forced kill, its lease must expire before another worker takes it,
-and that attempt counts toward ``storage.work-max-attempts``.
 
 Control restarts
 ----------------

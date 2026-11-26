@@ -1,16 +1,12 @@
 HTTP API: artifacts
 ===================
 
-List the artifacts of a scenario, read their files, and import a directory as a new artifact.
-
-An artifact is an immutable component output, such as checkpoint weights or a harness tree. Training, import and harness sync create artifacts. Each component starts with an artifact from the default configuration or a selected artifact item.
-
-Treat ``artifact_id`` as an opaque string. Do not derive a repository revision or component name from it. Updating one component leaves the other components' IDs unchanged. Activating or serving existing artifacts records operations and changes selections. Neither action creates an artifact or repository revision.
+List, download and import immutable component artifacts. ``artifact_id`` is opaque; component updates preserve other components' IDs. Activation and serving record operations without creating artifacts or repository revisions. See `Artifact <glossary.rst#artifact>`__.
 
 List the artifacts
 ------------------
 
-``GET /reef/scenarios/{scenario}/artifacts`` answers ``{scenario, artifacts}``, **newest first**. Each row is one artifact of one component:
+``GET /reef/scenarios/{scenario}/artifacts`` returns ``{scenario, artifacts}``, newest first:
 
 .. list-table::
    :header-rows: 1
@@ -25,7 +21,7 @@ List the artifacts
    * - ``parent_artifact_id``
      - The artifact that this one derives from, or null.
    * - ``operation``
-     - ``creation`` for the creation artifact, ``training``, ``import``, ``sync``, or ``recovery`` for the artifact that a store without a durable commit log served at a restart.
+     - ``creation``, ``training``, ``import``, ``sync``, or ``recovery`` when restored without a durable commit log.
    * - ``recorded_at``
      - The commit time, ``null`` for the creation artifact.
    * - ``active``
@@ -39,19 +35,17 @@ List the artifacts
    * - ``source``
      - Import rows: ``{uri, version}`` that the import read. The creation row: ``{kind: "default", inputs}`` or ``{kind: "item", item, uri, version}``.
 
-``parent_artifact_id`` names a parent in the same scenario. For training, it is the component's training start. For harness sync, it is the previously active artifact. Creation and ordinary imports have no parent. Imports retain their source in ``source``, including ``source.item`` for artifact items. Importing from another scenario creates no cross-scenario parent link.
-
-Only operations that create artifacts appear here. Read `operation history <http-api-records.rst#record-and-commit-history>`__ for skipped or rejected steps, job submissions and completions, activations, training-start changes, and serving changes.
+Parents are scenario-local: training uses its start; sync uses the previous active artifact; creation and ordinary imports have none. Imports keep ``source`` and optional ``source.item``, never cross-scenario parent links. Non-artifact steps and selection changes appear only in `operation history <http-api-records.rst#record-and-commit-history>`__.
 
 Files of an artifact
 --------------------
 
-``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` answers ``{scenario, artifact_id, files}``: each file of the artifact as ``{path, bytes, url, url_expires_at}``, in path order. The data service answers this route.
+Data serves ``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files``: ``{scenario, artifact_id, files}``, with ``{path, bytes, url, url_expires_at}`` in path order.
 
-- If the backend supports signed URLs, ``url`` downloads the file directly from storage without a Reef token. It expires at ``url_expires_at`` (Unix seconds). Set its lifetime with ``?expires_in=``: 1–86400 seconds, default 3600. Use direct downloads for large artifacts.
-- Otherwise, both URL fields are null and the data service serves the files. This applies to ``git_lfs``.
+- Signed ``url`` values download directly from storage without tokens until ``url_expires_at`` (Unix seconds). ``expires_in``: 1–86400 seconds, default 3600. Prefer these for large files.
+- Unsupported backends, including ``git_lfs``, return null URL fields; data serves downloads.
 
-With ``?path=<path>``, the route downloads that file. In a scenario of several components, name the component with ``?component=``. An artifact that the scenario does not list, or a path that is not one of its files, returns 404. ``?signed=1`` returns a `signed download URL <http-api-data-items.rst#signed-download-urls>`__ of the list or the file.
+``path`` downloads one file; multi-component scenarios require ``component``. Unlisted artifacts or files return 404. ``signed=1`` returns a `signed URL <http-api-data-items.rst#signed-download-urls>`__ for the list or file.
 
 Import an artifact
 ------------------
@@ -61,14 +55,14 @@ Import an artifact
 - ``{"source": "<uri>"}`` to read a directory by URI.
 - ``{"item": "<id>"}`` to read the ``source_uri`` of an `artifact item <http-api-data-items.rst#artifact-items>`__ owned by the scenario's owner.
 
-Reef validates the source layout before copying it. Supported sources are:
+Layout validation precedes copying. Sources:
 
-- ``hf://org/model@revision``: a Hugging Face snapshot. With a full 40-digit commit SHA as ``revision``, a component that holds model weights keeps a reference instead of a copy (see below).
-- ``s3://bucket/prefix/``: every object under the prefix. Empty folder markers, keys that end in ``/``, are skipped.
-- ``file:///absolute/path``: a directory on the service's file system, percent encoded as ``Path.as_uri()`` writes it. Its files are copied.
+- ``hf://org/model@revision``: Hugging Face snapshot; full 40-digit commit SHAs allow weight references below.
+- ``s3://bucket/prefix/``: prefix objects, excluding folder markers ending in ``/``.
+- ``file:///absolute/path``: service-local directory, percent-encoded as ``Path.as_uri()``; files are copied.
 - A scheme that ``storage.artifact-sources`` adds.
 
-To import a directory from your own machine, first put it in one of these places, such as an S3 prefix.
+Upload local files to an accessible source first:
 
 .. code:: bash
 
@@ -77,15 +71,11 @@ To import a directory from your own machine, first put it in one of these places
      -d '{"source": "s3://my-bucket/adapters/run-7/"}' \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-The response is HTTP 201 with ``{scenario, component, artifact_id}`` after durable storage completes. Allow a long client timeout for large imports. URI imports get new artifact IDs, even for identical content. Artifact-item imports preserve the item's artifact ID.
+HTTP 201 returns ``{scenario, component, artifact_id}`` after durable storage; allow long timeouts. URI imports create new IDs even for identical content; item imports preserve IDs. The ``import`` operation changes no serving/training selection and runs no activation rule.
 
-Reef records an ``import`` operation. Import does not change serving selections or training starts, or run the activation rule. Select the artifact explicitly to serve or train from it.
+**Hugging Face references.** Full-SHA weight imports store ``hf-reference.json``, using Hub metadata, small files and weight checksums without downloading weights. Other components copy files. Keep repositories available for serving/training and configure private-repository authentication, such as ``HF_TOKEN``. Unavailable revisions return 400.
 
-**Hugging Face references.** A model-weight import with a full commit SHA stores ``hf-reference.json`` instead of downloading the weights. Reef checks the layout through Hub metadata and small files, and stores the Hub's weight-file checksums. Other components, including harnesses, store copies.
-
-Keep the Hub repository available while Reef serves or trains the referenced artifact. For private repositories, configure standard Hugging Face authentication, such as ``HF_TOKEN``, on the service. An unavailable revision returns 400.
-
-**Layout.** Match the snapshot layout required by the component's training backend and configuration. Components without a snapshot layout do not accept imports.
+**Layout.** Imports require the backend/configuration's snapshot layout; components without one reject imports.
 
 +-----------------------------+------------------------------------------------+------------------+
 | Component                   | The directory holds                            | Other files      |
@@ -110,9 +100,7 @@ Keep the Hub repository available while Reef serves or trains the referenced art
 |                             |                                                | validation       |
 +-----------------------------+------------------------------------------------+------------------+
 
-**Base roots.** Slime and Tinker weight components also accept a directory containing only ``base.json``. It identifies the deployment's default start, for example ``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``.
-
-The inputs must match ``source`` on the scenario's ``creation`` row. A different model, rank or service returns 400 and lists the mismatched inputs. Serving or training from this artifact starts at the base model without an adapter. Reef creates a base root for each new Slime or Tinker scenario; see `Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__.
+**Base roots.** Slime/Tinker accept ``base.json`` alone, for example ``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``. Inputs must match the creation row's ``source``; mismatched model/rank/service returns 400 naming differences. These artifacts serve/train the base without adapters and are created for new scenarios (`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
 
 +--------+--------------------------------------------------------------------+
 | Status | Cause                                                              |

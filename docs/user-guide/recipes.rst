@@ -1,13 +1,10 @@
 Choose a recipe for agent learning
 ==================================
 
-Choose what changes: model weights or the agent harness. Then match the recipe
-to the feedback available in your workload.
-
-Weight training uses the `GPU stack <evolve-your-model.rst>`__ or a supported
-`Tinker objective <tinker.rst>`__. Harness methods need a model endpoint.
-Most methods live in the checkout's ``recipes/`` tree and do not ship in the
-wheel. Reef includes `SFT <recipes/sft.rst>`__ for training on target responses.
+Match a recipe to your feedback. Weight methods need the
+`GPU stack <evolve-your-model.rst>`__ or a supported `Tinker objective <tinker.rst>`__.
+Harness methods need a model endpoint. Most methods require a checkout;
+built-in `SFT <recipes/sft.rst>`__ also ships in the wheel.
 
 Open-ended discovery
 --------------------
@@ -82,38 +79,22 @@ Use these methods with agent conversations or scored sessions.
 How a recipe is selected
 ------------------------
 
-A deployment selects one recipe. Every scenario in it uses that recipe:
-
-.. code:: yaml
-
-   recipe:
-     implementation: recipes.sao.recipe:SAORecipe
-     config:
-       training_mode: auto
-
-``recipe.implementation`` accepts ``recipe``, a dotted class reference or a
-preset. Reef imports a method only when selected. See
-`Recipe configuration <../reference/configuration-recipe.rst#recipe-configuration>`__.
-
-Requests select a scenario, not a recipe. Snapshots store no recipe definition.
-Do not share an artifact repository between deployments that use different recipes.
+Set ``recipe.implementation``; see `recipe configuration
+<../reference/configuration-recipe.rst#recipe-configuration>`__.
+All scenarios use that recipe. Snapshots contain no recipe definition;
+do not share artifact repositories between different recipes.
 
 Run the recipe you chose
 ------------------------
 
-Start with the recipe's linked example. Use `the quickstart
-<../getting-started/quickstart.rst>`__ to check inference and feedback first.
-Then follow `weight training <evolve-your-model.rst>`__ or
-`harness evolution <evolve-your-harness.rst>`__ for deployment options.
-
-To add a method, see `Write a recipe <../developer-guide/write-a-recipe.rst>`__.
+Start with its linked example. For new methods, see
+`Write a recipe <../developer-guide/write-a-recipe.rst>`__.
 
 Beta recipes
 ------------
 
-Beta methods have not published the complete, reproducible learning results
-required for the main catalog. Passing integration tests does not establish
-learning performance.
+Beta methods lack the complete, reproducible learning results required for
+the main catalog. Integration tests do not establish learning performance.
 
 - `CORAL TTT <../../recipes/beta/coral/README.md>`__: test-time training.
 - `SPADE <../../recipes/beta/spade/README.md>`__: one policy writes Harbor tasks

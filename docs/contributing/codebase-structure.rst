@@ -38,94 +38,38 @@ and exchanges work through the shared store.
 Entry layer
 -----------
 
-``reef/deploy/`` reads deployment configuration and starts, supervises and stops
-processes. ``reef/api/`` assembles each service's HTTP app and handles routes,
-authentication and streaming. The dependency runs from ``deploy`` to ``api``.
-
-For an HTTP endpoint, start in ``reef/api/routes/``. Parse the request there,
-then call the operation that owns the behavior. Update the
-`HTTP reference <../reference/http-api.rst>`__ and its tests in ``tests/api/``.
-Deployment configuration and process changes belong in ``deploy`` and
-``tests/deploy/``.
+``deploy`` starts and supervises processes. ``api`` parses HTTP requests and calls control operations.
+For a route change, update ``reef/api/routes/``, ``tests/api/`` and the `HTTP reference <../reference/http-api.rst>`__.
 
 Control layer
 -------------
 
-``reef/control/`` coordinates the scenarios loaded in a process:
-
-- ``scenario/`` owns scenario state, commit ordering, recovery and lifecycle.
-- ``workers/`` coordinates background work.
-- ``operations/`` handles client operations, such as importing artifacts or
-  starting evaluations, without HTTP request objects.
-
-For example, both a harness import route and a sync worker pass the scenario
-name to the same control operation. Only the route reads HTTP headers.
-
-Use ``tests/control/`` for scenario behavior. Keep HTTP-specific assertions in
-``tests/api/``. Control imports neither the entry layer nor ``aiohttp``.
+In ``reef/control/``, ``scenario/`` owns lifecycle, commits and recovery.
+``operations/`` handles client requests and ``workers/`` runs background work.
+Keep HTTP objects in the entry layer. Test scenario behavior in ``tests/control/``.
 
 Domain layer
 ------------
 
-Choose the capability that owns the behavior:
+- ``samples`` selects records and builds training samples. ``train`` groups samples into jobs and runs training backends.
+- ``evaluation`` runs and scores candidates. ``inference`` serves requests and loads weights.
+- ``harness`` renders, runs and syncs harness trees. ``routing`` integrates Semantic Router.
+- ``recipe`` defines shared recipe contracts. Put method-specific code in ``recipes/<name>/`` and tests in ``tests/recipes/<name>/``.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 25 75
-
-   * - Package
-     - Owns
-   * - ``reef/samples/``
-     - Select records, group them and make training samples; generate Harbor tasks.
-   * - ``reef/train/``
-     - Shape samples into job data (``sample2job/``), run training jobs and connect training backends.
-   * - ``reef/evaluation/``
-     - Run and score candidates; apply harness selection and artifact activation rules.
-   * - ``reef/inference/``
-     - Serve model requests, start engines and load saved weights.
-   * - ``reef/harness/``
-     - Describe, render and run harness trees; read trajectories and sync files.
-   * - ``reef/recipe/``
-     - Define recipe configuration and shared recipe contracts.
-   * - ``reef/routing/``
-     - Integrate the Semantic Router.
-
-A new learning method belongs in ``recipes/<name>/``. Keep its runnable
-examples in ``recipes/<name>/examples/`` and its tests in
-``tests/recipes/<name>/``. Core Reef never imports these method packages.
-Shared mechanisms belong in ``reef/``.
-
-Keep concrete engines and training frameworks inside their integration
-packages. Training and inference do not import each other; shared values go
-in ``core``.
-
-``TrainingPipeline`` in ``reef/train/pipeline.py`` connects the two stages.
-They share sample storage and state under the trainer's lock.
-The wheel includes the generated-task recipe and ``TaskGenerator`` in
-``reef/recipe/generated_tasks/``.
+Training and inference share types through ``core``. Keep concrete engines inside their integrations.
 
 Foundation layer
 ----------------
 
-- ``reef/core/``: shared value types, wire contracts and errors; no storage or I/O.
-- ``reef/storage/``: scenario state, data items and coordination queues.
-  ``scenario/``, ``data/`` and ``coordination/`` define the stores;
-  ``sql/`` implements them in SQLite and PostgreSQL.
-- ``reef/artifact/``: versioned artifact files, repositories and materialization.
-  Loading those files into an engine belongs in ``inference``.
-- ``reef/execution/``: worker processes, executors, sandboxes and the queue worker loop.
-- ``reef/observability/``: shared metrics, tracing and experiment logging.
-- ``reef/tinker/``: SDK code shared by Tinker training and serving.
+- ``core`` defines shared values, wire contracts and errors.
+- ``storage`` persists scenario state, data items and coordination queues. ``artifact`` stores versioned files.
+- ``execution`` runs processes, executors and sandboxes. ``observability`` provides metrics and tracing.
+- ``tinker`` provides SDK code for training and serving.
 
-Storage contracts do not import database implementations. Dependency tests in
-``tests/contributing/test_dependency_boundaries.py`` check package cycles and
-the layer boundaries.
+``tests/contributing/test_dependency_boundaries.py`` checks imports across these boundaries.
 
 Extending Reef
 --------------
-
-Use the guide for the extension you are writing. Its contracts belong in the
-named classes' docstrings.
 
 - `Write a recipe <../developer-guide/write-a-recipe.rst>`__ or
   `a harness method <../developer-guide/write-a-harness-method.rst>`__.
@@ -136,7 +80,4 @@ named classes' docstrings.
 - Define a `snapshot component <../developer-guide/components.rst>`__ or
   `worker executor <../developer-guide/executors.rst>`__.
 
-Read `CONTRIBUTING.md <../../CONTRIBUTING.md>`__ for review and RFC policy.
-Keep dependencies and package data in ``pyproject.toml``, environments in
-``docker/``, and tests under their `owning component
-<https://github.com/Human-Agent-Society/reef/blob/main/tests/AGENTS.md>`__.
+For review and RFC policy, read `CONTRIBUTING.md <../../CONTRIBUTING.md>`__.

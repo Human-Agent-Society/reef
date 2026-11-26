@@ -1,18 +1,12 @@
 Python API for custom learning methods
 ======================================
 
-Find the Python interfaces for custom learning methods, storage plugins and serving integrations.
+Implement the abstract base classes below; matching method names alone is insufficient. Optional capabilities require their own base classes. Docstrings define signatures, defaults and errors.
 
-Class docstrings define signatures, defaults and errors. The linked guides explain how to implement each interface. Reef handles record replay, job-data retention, state commits, job submission and checkpoint publication.
-
-Inherit each interface's abstract base class and implement its abstract members. Matching method names alone is insufficient. Inherit optional capability classes only when supported.
-
-Depend only on interfaces named here, in the linked guides, or in their docstrings. Other ``reef.`` APIs are internal and can change.
+Only interfaces named here, in linked guides or in their docstrings are public. Other ``reef.`` APIs can change.
 
 Learning methods
 ----------------
-
-Start with a recipe and add only what the method needs.
 
 .. list-table::
    :header-rows: 1
@@ -55,7 +49,7 @@ Start with a recipe and add only what the method needs.
 Integrations and plugins
 ------------------------
 
-A deployment names each of these in its config, as a built-in name or as ``package.module:ClassName``.
+Configure plugins by built-in name or ``package.module:ClassName``.
 
 .. list-table::
    :header-rows: 1
@@ -123,7 +117,7 @@ Harness adapters use descriptor files. See `Harness adapters <../developer-guide
 Embed the service
 -----------------
 
-Use ``reef.api.assembly.build_app`` to embed Reef in an application. It builds the dispatcher and HTTP app from ``ServiceSettings``. Add routes before startup; service tokens protect them too.
+``reef.api.assembly.build_app`` builds the dispatcher and HTTP app from ``ServiceSettings``. Add custom routes before startup; service tokens protect them.
 
 .. code:: python
 
@@ -141,9 +135,9 @@ Use ``reef.api.assembly.build_app`` to embed Reef in an application. It builds t
    app.router.add_get("/my-app/scenario-count", scenario_count)
    web.run_app(app, host=settings.host, port=settings.port)
 
-The optional ``inference_handler`` supplies an application-owned ``InferenceHandler``. It needs only the inference methods.
+Optional ``inference_handler`` supplies an ``InferenceHandler`` implementing inference methods only.
 
-``build_app`` also runs record retention and data-store maintenance. When using ``Dispatcher`` alone, periodically call:
+``build_app`` runs maintenance. With ``Dispatcher`` alone, periodically call:
 
 - ``Dispatcher.prune_record_archives`` with ``RecordRetention`` (``reef.storage.scenario.records``).
 - ``DataStore.maintain``.
