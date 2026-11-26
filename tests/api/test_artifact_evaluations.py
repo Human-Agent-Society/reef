@@ -791,6 +791,51 @@ def test_filtered_rollout_pages_keep_numeric_repeat_order(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
+def test_a_rollout_view_counts_the_attempts_that_waited_for_sandbox_capacity_or_a_stopped_worker(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            harness = {"name": "terminus-2"}
+            request = ArtifactEvaluationRequest(
+                artifact_id, "weights", harness=harness, task_names=("add",), rollouts_per_task=2
+            )
+            for repeat in (0, 1):
+                rollout = EvaluationRollout(
+                    "s", "e", artifact_id, "weights", 0, "add", repeat, PolicyModel("m"), harness, "docker", {}
+                )
+                queue.append(rollout_work(rollout))
+            with dispatcher.locked_scenario("s") as current:
+                current.store.evaluations.create(
+                    evaluation_id="e", owner="test", request=request, created_at=time.time()
+                )
+            # Repeat 0 finds no sandbox capacity twice and then loses its worker; repeat 1 runs once.
+            for deferred in (True, True, False):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                assert item is not None and item.payload["repeat"] == 0
+                error = "waiting for sandbox capacity: no node has 12 vCPUs free" if deferred else "the worker stopped"
+                # The last give-back keeps repeat 0 out of the queue, so the next take gets repeat 1.
+                later = None if deferred else time.time() + 3600
+                queue.give_back(EVALUATIONS_QUEUE, item.id, "w", error=error, deferred=deferred, available_at=later)
+            other = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            assert other is not None and other.payload["repeat"] == 1
+            response = await client.get("/reef/scenarios/s/evaluations/e/rollouts?calls=false", headers=AUTH)
+            assert response.status == 200, await response.text()
+            counts = [
+                (row["repeat"], row["attempt_count"], row["stopped_attempt_count"], row["deferred_attempt_count"])
+                for row in (await response.json())["rollouts"]
+            ]
+            # attempt_count minus stopped_attempt_count is the attempts that count: none for repeat 0.
+            assert counts == [(0, 3, 3, 2), (1, 1, 0, 0)]
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
 def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
@@ -2331,6 +2376,96 @@ def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_with
     assert [record["agent_record_id"] for record in first["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:3"]
     assert [trajectory["extra"]["reef"]["evaluation"]["conversation"] for trajectory in (first, second)] == [0, 1]
     assert first["extra"]["reef"]["reward"] == second["extra"]["reef"]["reward"] == 0.5
+
+
+@pytest.mark.unit
+def test_auxiliary_title_generation_gets_no_reward_while_toolless_subagents_keep_reward() -> None:
+    """Single-turn auxiliary title-generation conversations without tools receive ``scored=False`` and no reward,
+    while both tool-bearing conversations and required tool-less subagent conversations (such as a native ``writer``
+    role) keep ``scored=True`` and the parent rollout's reward."""
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 1.0},
+    )
+    tool_spec = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+    title_call = chat_call(
+        1,
+        0,
+        [
+            {"role": "system", "content": "You are a title generator. You output ONLY a thread title."},
+            {"role": "user", "content": "Generate a title for this conversation:\nsolve add"},
+        ],
+        "Solve add task",
+    )
+    title_user_only_base = chat_call(
+        1,
+        1,
+        [{"role": "user", "content": "Generate a title for this conversation:\nwrite tests"}],
+        "Write tests",
+    )
+    title_user_only = replace(title_user_only_base, request={**(title_user_only_base.request or {}), "tools": []})
+    writer_subagent_base = chat_call(
+        1,
+        2,
+        [
+            {"role": "system", "content": "You are the writer. Return only the final number."},
+            {"role": "user", "content": "verified: the count is 9592"},
+        ],
+        "9592",
+    )
+    writer_subagent = replace(writer_subagent_base, request={**(writer_subagent_base.request or {}), "tools": []})
+    main_base = chat_call(1, 3, [{"role": "user", "content": "solve add"}], "running tests")
+    main_call = replace(main_base, request={**(main_base.request or {}), "tools": tool_spec})
+
+    title_traj, title_user_traj, writer_traj, main_traj = attempt_trajectories(
+        "s", "e1", item, [title_call, title_user_only, writer_subagent, main_call]
+    )
+    assert title_traj["extra"]["reef"]["reward"] is None
+    assert title_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert title_user_traj["extra"]["reef"]["reward"] is None
+    assert title_user_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert writer_traj["extra"]["reef"]["reward"] == 1.0
+    assert writer_traj["extra"]["reef"]["evaluation"]["scored"] is True
+    assert main_traj["extra"]["reef"]["reward"] == 1.0
+    assert main_traj["extra"]["reef"]["evaluation"]["scored"] is True
+
+
+@pytest.mark.unit
+def test_single_conversation_without_tools_still_carries_the_rollout_reward() -> None:
+    """A text-only benchmark rollout without tool definitions keeps scored=True and the rollout reward."""
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "coser", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.8},
+    )
+    first = [{"role": "user", "content": "Act out the scene."}]
+    second = [*first, {"role": "assistant", "content": "Line one."}, {"role": "user", "content": "Continue."}]
+    calls = [chat_call(1, 0, first, "Line one."), chat_call(1, 1, second, "Line two.")]
+
+    (trajectory,) = attempt_trajectories("s", "e1", item, calls)
+    assert trajectory["extra"]["reef"]["reward"] == 0.8
+    assert trajectory["extra"]["reef"]["evaluation"]["scored"] is True
 
 
 @pytest.mark.unit

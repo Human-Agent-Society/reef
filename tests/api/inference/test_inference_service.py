@@ -24,6 +24,7 @@ from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import (
     EngineClients,
     EngineReplica,
+    EngineReplicaLoad,
     EngineReplicas,
     InferenceHandler,
     StartupStep,
@@ -471,6 +472,11 @@ def test_inference_records_do_not_need_snapshot_history(tmp_path):
         lambda: EngineReplica("a", "idle"),  # type: ignore[arg-type]
         lambda: EngineReplica("a", "serving", started_at=-1.0),
         lambda: EngineReplicas(-1, 0),
+        lambda: EngineReplicaLoad(-1, 0, 0.0, 1.0),
+        lambda: EngineReplicaLoad(True, 0, 0.0, 1.0),
+        lambda: EngineReplicaLoad(1, 0, -1.0, 1.0),
+        lambda: EngineReplicaLoad(1, 0, float("nan"), 1.0),
+        lambda: EngineReplica("a", "starting", load=EngineReplicaLoad(1, 0, 10.0, 1.0)),
     ],
 )
 def test_engine_replicas_refuse_names_that_do_not_match_their_counts_and_bad_values(make) -> None:
@@ -497,7 +503,7 @@ class ColdHandler(HttpInferenceHandler):
                 1,
                 1,
                 (
-                    EngineReplica("ta-1", "serving", started_at=50.0),
+                    EngineReplica("ta-1", "serving", started_at=50.0, load=EngineReplicaLoad(3, 1, 412.5, 120.0)),
                     EngineReplica("ta-2", "starting", started_at=100.0, startup=self.engine_steps(served)),
                 ),
             )
@@ -546,7 +552,13 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                     start = {"phase": "start", "started_at": 100.0, "ended_at": 108.0, "detail": None}
                     expected = {"steps": [start, load], "estimate_seconds": 60.0}
                     assert status["startup"] == (expected if state == "starting" else None)
-                # A warm engine that adds a replica gives the replica's step and phases.
+                # A warm engine that adds a replica gives the replica's step and phases, and the serving one its load.
+                served_load = {
+                    "running_requests": 3,
+                    "waiting_requests": 1,
+                    "output_tokens_per_second": 412.5,
+                    "measured_at": 120.0,
+                }
                 ColdHandler.adding = True
                 response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
                 status = await response.json()
@@ -555,8 +567,8 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
                     "serving": 1,
                     "starting": 1,
                     "replicas": [
-                        {"id": "ta-1", "state": "serving", "started_at": 50.0, "startup": None},
-                        {"id": "ta-2", "state": "starting", "started_at": 100.0, "startup": expected},
+                        {"id": "ta-1", "state": "serving", "started_at": 50.0, "startup": None, "load": served_load},
+                        {"id": "ta-2", "state": "starting", "started_at": 100.0, "startup": expected, "load": None},
                     ],
                 }
                 assert status["startup"] == expected

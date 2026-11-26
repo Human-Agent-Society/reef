@@ -4,7 +4,7 @@ Serving runtimes
 An inference runtime (``reef.inference.interfaces.InferenceRuntime``) admits requests and serves the weights that Reef published. It never trains.
 
 :For: developers who add or change an inference runtime or engine integration
-:Before you start: `Adding components <../contributing/adding-components.rst#add-a-runtime-kind>`__
+:Before you start: `Codebase structure <../contributing/codebase-structure.rst#domain-layer>`__
 :You will have: the production inference contract, the built-in runtimes, request pinning, and the qualification cases
 
 Production inference contract
@@ -44,7 +44,7 @@ Every ``InferenceRuntime`` implements three members:
 Every other member has a default. Override one only for a capability that the runtime has:
 
 - Engines of its own: ``open``, ``shutdown``, ``set_owner_sequence``.
-- Takeover of a retained endpoint: ``adopt``.
+- Takeover of a retained endpoint: ``adopt``, and ``handler_for`` for an endpoint at a URL other than ``base_url``.
 - Several artifacts at the same time: ``serve_artifact``, ``served_artifact_capacity``, ``stop_serving``, ``release_unreferenced_artifacts``, ``handler_for``.
 - Any artifact on request: ``serves_any_artifact``, ``artifact_model``.
 - Snapshots without weights: ``endpoint_model_name``.
@@ -59,7 +59,7 @@ Automatic weight training waits while the selected artifact has no served route.
 When a binding is in doubt, the runtime must fail safely:
 
 - After an ambiguous load, the affected engines stay unavailable until a known binding is restored and checked.
-- On takeover, ``adopt(served)`` returns false when the retained endpoint cannot establish its binding.
+- On takeover, the new owner removes each route at a URL that ``handler_for`` gives no handler for, before ``open``. After ``open``, ``adopt(served)`` gets each other route, and returns false when the retained endpoint cannot establish its binding.
 - Retirement lets admitted requests finish on their pinned weights, or it interrupts them explicitly.
 - A stream that has sent output never retries on another artifact. An incomplete stream can keep a diagnostic record, but it gets no receipt.
 
@@ -175,7 +175,7 @@ Two commands run a real integration through the real inference HTTP app and reco
 
 ``--output`` must be an absolute path to a new or empty directory outside the checkout. The command stores the records and ``report.json`` there, and exits with status 0 only when every check passes. The report lists the checked cases and the cases that the run does not cover. The CPU suite runs the same check against toy SGLang and vLLM components that pin each request.
 
-**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own SGLang and vLLM integrations on one GPU, with two synthetic checkpoints. `Run one area <../contributing/testing.rst#run-one-area>`__ gives its command, its profiles and their limits. Only its ``lifecycle`` profile covers control-plane publication and a public deployment of several artifacts. Neither command covers a managed router lifecycle, or validation of the router's deployment image.
+**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own SGLang and vLLM integrations on one GPU, with two synthetic checkpoints. Its module docstring describes the profiles; run ``python -m tests.smoke.native_inference --help`` for options. Only its ``lifecycle`` profile covers control-plane publication and a public deployment of several artifacts. Neither command covers a managed router lifecycle, or validation of the router's deployment image.
 
 Engine supervision
 ------------------

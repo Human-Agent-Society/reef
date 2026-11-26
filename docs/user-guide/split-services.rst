@@ -46,7 +46,7 @@ No service calls another. Each one reads and writes the deployment's shared stor
      - Serves the routes that a harness client calls: the active tree, the harness artifacts, the import of a person's files, and the adapters.
      - Harness import requests
 
-`Codebase structure <../contributing/codebase-structure.rst#services-and-the-shared-store>`__ maps each service to its code and its queues.
+`Codebase structure <../contributing/codebase-structure.rst>`__ maps the code to its packages and layers.
 
 Start the services
 ------------------
@@ -141,8 +141,9 @@ The service never returns a buffered answer without its record. A stream goes ou
 
 **Runtime ownership.** One inference worker owns the serving runtime through a work lease, also while it is idle. Other inference replicas only serve requests. An interrupted startup returns to the queue after its work lease expires. When ownership changes:
 
-- The new owner opens its runtime and offers it the routes from before. A route stays when the runtime reports that its engine still serves it, as a remote endpoint can. Requests to it go on without a gap.
-- The other routes go, and their scenarios' requests get ``inference_starting``. The completed selections return to starting, and the new owner activates them again.
+- Before the new owner opens its runtime, it removes each route at a URL that the runtime does not serve. ``reef serve`` picks a free loopback port for a local engine or inference component at each start. So this step usually removes the routes of the stopped one. Their scenarios' requests get ``inference_starting`` until the new owner activates their selections again.
+- Then the new owner opens its runtime and offers it the other routes from before. A route stays when the runtime reports that its engine still serves it, as a remote endpoint can. Requests to it go on without a gap.
+- The routes that the runtime does not take over go after the open, and their scenarios' requests get ``inference_starting``. The completed selections return to starting, and the new owner activates them again.
 - Reef's own engines keep no route. The new owner starts a new engine stack, which ends the requests in flight, and loads each selection again.
 
 The startup status is not a continuous engine health check. The runtime backend controls the cancellation of engine calls that were in progress when a worker lost its lease.

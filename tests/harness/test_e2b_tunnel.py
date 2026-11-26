@@ -387,6 +387,77 @@ def test_a_lost_reply_acknowledgement_does_not_duplicate_stream_content(lost_ack
 
 
 @pytest.mark.unit
+def test_a_request_whose_handout_was_lost_goes_out_again_and_reaches_the_gateway_once(monkeypatch) -> None:
+    # The pump's first poll loses the answer that carried the request, as a failed sandbox exchange does.
+    monkeypatch.setattr(relay_module, "REOFFER_SECONDS", 0.3)
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    lost: list[str] = []
+
+    class LoseHandout(relay.tunnel_handler()):
+        def answer(self, status: int, body: bytes = b"") -> None:
+            if self.path == "/next" and status == 200 and not lost:
+                lost.append(json.loads(body)["id"])
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            super().answer(status, body)
+
+    local_server = serve(relay.local_handler())
+    tunnel_server = serve(LoseHandout)
+    pump = TunnelPump(f"http://127.0.0.1:{tunnel_server.server_port}", "test-secret", gateway.port, pollers=2)
+    try:
+        pump.start(timeout=10)
+        with urllib.request.urlopen(
+            post(f"http://127.0.0.1:{local_server.server_port}/echo", {"x": 1}), timeout=10
+        ) as r:
+            assert r.status == 201 and json.loads(r.read())["body"] == {"x": 1}
+        assert len(lost) == 1
+        assert len(gateway.received) == 1
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
+
+
+@pytest.mark.unit
+def test_a_slow_answer_goes_out_again_but_reaches_the_gateway_once(monkeypatch) -> None:
+    monkeypatch.setattr(relay_module, "REOFFER_SECONDS", 0.1)
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    local_server = serve(relay.local_handler())
+    tunnel_server = serve(relay.tunnel_handler())
+    pump = TunnelPump(f"http://127.0.0.1:{tunnel_server.server_port}", "test-secret", gateway.port, pollers=3)
+    waited: list[bytes] = []
+    try:
+        pump.start(timeout=10)
+        waiter = threading.Thread(
+            target=lambda: waited.append(
+                urllib.request.urlopen(
+                    post(f"http://127.0.0.1:{local_server.server_port}/wait", {}), timeout=10
+                ).read()
+            )
+        )
+        waiter.start()
+        assert gateway.waiting.wait(10)
+        # The relay gives the unanswered request out again several times while the gateway holds it.
+        threading.Event().wait(0.6)
+        urllib.request.urlopen(post(f"http://127.0.0.1:{local_server.server_port}/arrive", {}), timeout=10).read()
+        waiter.join(10)
+        assert waited == [b"waited"]
+        assert len(gateway.received) == 2
+        assert not relay.given and not relay.waiting
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
+
+
+@pytest.mark.unit
 def test_a_relay_that_answers_after_a_refused_poll_starts_the_pump() -> None:
     # The sandbox is reachable a moment before its relay listens, and E2B answers that first poll with 502.
     gateway = Gateway()

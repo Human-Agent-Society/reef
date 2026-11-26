@@ -668,6 +668,62 @@ def test_the_bridge_starts_one_idle_exchange_and_expands_while_the_first_answer_
     asyncio.run(run())
 
 
+def test_a_bridge_loop_outlives_a_failed_exchange_and_answers_a_call_given_out_again_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sandbox service fails one exchange and one upload; the relay then gives the same call out twice.
+    call = json.dumps({"id": "c1", "method": "POST", "path": "/v1/chat/completions", "headers": {}, "body": ""})
+
+    class FlakyBridge(RecordingEnvironment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.outputs: list[str | Exception] = [RuntimeError("Request timed out"), call, call]
+            self.failed_uploads = 0
+            self.delivered = asyncio.Event()
+
+        async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+            result = await super().exec(command, user=user, env=env, cwd=cwd, timeout_sec=timeout_sec)
+            if "client.py" not in command or command.endswith(" ready"):
+                return result
+            if command.endswith("c1 /tmp/reef-relay/replies/c1.json"):
+                self.delivered.set()
+            output = self.outputs.pop(0) if self.outputs else ""
+            if isinstance(output, Exception):
+                raise output
+            await asyncio.sleep(0.01)
+            return SimpleNamespace(return_code=0, stdout=output, stderr="")
+
+        async def upload_file(self, source, target) -> None:
+            if target.endswith("c1.json") and not self.failed_uploads:
+                self.failed_uploads += 1
+                raise RuntimeError("Request timed out")
+            await super().upload_file(source, target)
+
+    async def run() -> tuple[FlakyBridge, list[str]]:
+        container = FlakyBridge()
+        python = get_adapter("python")
+        kwargs = adapter_agent_kwargs(python, python.install, tmp_path / "files", 60.0)
+        agent = AdapterAgent(tmp_path / "logs", bridge_port=8901, **kwargs)
+        answered: list[str] = []
+
+        async def answer(local: ClientSession, request: Mapping[str, str]) -> dict[str, object]:
+            answered.append(request["id"])
+            return {"status": 200, "end": True, "sequence": 0}
+
+        monkeypatch.setattr(agent, "answer", answer)
+        async with agent.bridged(container):
+            await asyncio.wait_for(container.delivered.wait(), 10)
+            # Let the loops take the call that the relay gave out again.
+            await asyncio.sleep(0.1)
+        return container, answered
+
+    (tmp_path / "logs").mkdir()
+    container, answered = asyncio.run(run())
+    assert answered == ["c1"]
+    assert container.failed_uploads == 1
+    assert json.loads(container.uploads["/tmp/reef-relay/replies/c1.json"])["status"] == 200
+
+
 def test_a_bridged_agent_refuses_a_relayed_target_that_is_not_a_path_of_the_proxy_port(tmp_path: Path) -> None:
     """The container chooses the request target. ``@host/`` after the proxy port's address would name another host, so
     the agent answers 400 and sends nothing."""

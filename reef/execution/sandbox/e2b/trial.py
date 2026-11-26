@@ -477,14 +477,16 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         )
 
     # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The decorator
-    # preserves Harbor's retry for transient failures. A bad request can fail immediately.
+    # preserves Harbor's retry for transient failures. Bad requests and capacity refusals fail immediately:
+    # verifiers already wait for capacity inside this method, and agent rollouts defer in the queue.
     # The create call, in create_sandbox_once, is Harbor's call with one more argument.
     # When Harbor adds an argument to the call, add it there too: the parity test in
     # tests/sandbox/test_task_environment.py compares the two calls. A refusal for want of capacity becomes
     # ``SandboxCapacityError``, so that an evaluation waits for capacity instead of failing, and a bad request becomes
     # ``SandboxRequestError``.
     @retry(
-        retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(SandboxRequestError),
+        retry=retry_if_exception_type(Exception)
+        & retry_if_not_exception_type((SandboxCapacityError, SandboxRequestError)),
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
