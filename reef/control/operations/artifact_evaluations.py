@@ -444,9 +444,54 @@ def call_record(scenario: str, evaluation_id: str, call: EvaluationCall) -> Agen
     return AgentRecord(record_id, scenario, RequestType.INFERENCE, payload, summary.started_at)
 
 
+#: Prompt prefixes that identify an auxiliary title-generation model call.
+TITLE_GENERATOR_SYSTEM_PREFIX = "You are a title generator."
+TITLE_GENERATOR_USER_PREFIX = "Generate a title for this conversation:"
+
+
 def request_has_tools(call: EvaluationCall) -> bool:
     """Return True when ``call`` sent a non-empty ``tools`` field in its request body."""
     return isinstance(call.request, dict) and has_tools(call.request) and bool(call.request["tools"])
+
+
+def content_text(content: object) -> str:
+    """Return the joined text of a chat/responses message ``content`` field, or an empty string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray)):
+        parts = [
+            block["text"] for block in content if isinstance(block, Mapping) and isinstance(block.get("text"), str)
+        ]
+        return "\n".join(parts)
+    return ""
+
+
+def is_title_generation_call(call: EvaluationCall) -> bool:
+    """Return True when ``call`` is a tool-less auxiliary title-generation request.
+
+    Checks OpenAI Chat (``messages``), Anthropic Messages (``system`` + ``messages``), and OpenAI Responses
+    (``instructions`` + ``input``) payloads for the standard title-generator system or user prompt prefix.
+    Tool-bearing calls always return False.
+    """
+    if request_has_tools(call) or not isinstance(call.request, Mapping):
+        return False
+    for key in ("system", "instructions"):
+        if content_text(call.request.get(key)).lstrip().startswith(TITLE_GENERATOR_SYSTEM_PREFIX):
+            return True
+    for key in ("messages", "input"):
+        entries = call.request.get(key)
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            role = entry.get("role")
+            text = content_text(entry.get("content")).lstrip()
+            if role in ("system", "developer") and text.startswith(TITLE_GENERATOR_SYSTEM_PREFIX):
+                return True
+            if role == "user" and text.startswith(TITLE_GENERATOR_USER_PREFIX):
+                return True
+    return False
 
 
 def attempt_trajectories(
@@ -464,10 +509,11 @@ def attempt_trajectories(
     Each conversation excludes calls that a retry replaced. Set ``include_records=False`` to omit ``extra.reef.records``.
 
     Only the agent trajectories from a finished rollout's final attempt carry its reward, which is null if scoring failed.
-    When that attempt includes tool-bearing calls, conversations without tool definitions (such as auxiliary title
-    generation) receive ``scored=False`` and no reward. Each trajectory's ``extra.reef.evaluation`` identifies the
-    evaluation, task, task index, repeat, attempt, caller, conversation and scoring status. Conversation numbers start
-    at zero within each attempt. Use ``iter_attempt_trajectories`` to read one conversation at a time.
+    When that attempt includes another conversation, single-turn auxiliary title-generation conversations without tools
+    receive ``scored=False`` and no reward, while required tool-less roles and subagents keep the rollout reward. Each
+    trajectory's ``extra.reef.evaluation`` identifies the evaluation, task, task index, repeat, attempt, caller,
+    conversation and scoring status. Conversation numbers start at zero within each attempt. Use
+    ``iter_attempt_trajectories`` to read one conversation at a time.
     """
     return list(
         iter_attempt_trajectories(scenario, evaluation_id, item, calls, caller, include_records=include_records)
@@ -490,7 +536,7 @@ def iter_attempt_trajectories(
     indexes: dict[int, TrajectoryIndex] = {}
     record_ids: dict[int, list[str]] = {}
     positions: dict[str, int] = {}
-    tool_positions: set[int] = set()
+    title_positions: set[int] = set()
     for position, call in enumerate(calls):
         if call.summary.status != 200:
             continue
@@ -498,8 +544,8 @@ def iter_attempt_trajectories(
         indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record)
         record_ids.setdefault(call.summary.attempt, []).append(record.agent_record_id)
         positions[record.agent_record_id] = position
-        if request_has_tools(call):
-            tool_positions.add(position)
+        if is_title_generation_call(call):
+            title_positions.add(position)
     for attempt in sorted(record_ids):
         ids = record_ids[attempt]
         conversation_of: dict[str, int] = {}
@@ -513,8 +559,10 @@ def iter_attempt_trajectories(
             group = conversation_of.get(record_id)
             if group is not None:
                 groups[group].append(positions[record_id])
-        group_has_tools = [any(pos in tool_positions for pos in group_positions) for group_positions in groups]
-        attempt_has_tools = any(group_has_tools)
+        group_is_auxiliary = [
+            len(group_positions) == 1 and group_positions[0] in title_positions for group_positions in groups
+        ]
+        attempt_has_primary = any(not auxiliary for auxiliary in group_is_auxiliary)
         ordered = (pos for group_positions in groups for pos in group_positions)
         if isinstance(calls, StoredCalls):
             # Read originals in bounded batches, even when a rollout has hundreds of single-call conversations.
@@ -525,7 +573,7 @@ def iter_attempt_trajectories(
             builder = TrajectoryBuilder(include_records)
             for _ in group_positions:
                 builder.add(call_record(scenario, evaluation_id, next(members)))
-            is_auxiliary = attempt_has_tools and not group_has_tools[conversation]
+            is_auxiliary = attempt_has_primary and group_is_auxiliary[conversation]
             scored = caller == "agent" and finished and attempt == item.attempt_count and not is_auxiliary
             trajectory = builder.sample(reward=score if scored else None).trajectory
             evaluation = {

@@ -2379,9 +2379,10 @@ def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_with
 
 
 @pytest.mark.unit
-def test_auxiliary_toolless_conversation_gets_no_reward_when_attempt_has_tool_calls() -> None:
-    """When a rollout attempt includes tool-bearing agent calls, a tool-less side conversation (such as title
-    generation) must not inherit scored=True or the parent rollout's reward."""
+def test_auxiliary_title_generation_gets_no_reward_while_toolless_subagents_keep_reward() -> None:
+    """Single-turn auxiliary title-generation conversations without tools receive ``scored=False`` and no reward,
+    while both tool-bearing conversations and required tool-less subagent conversations (such as a native ``writer``
+    role) keep ``scored=True`` and the parent rollout's reward."""
     rollout = EvaluationRollout(
         "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
     )
@@ -2402,23 +2403,40 @@ def test_auxiliary_toolless_conversation_gets_no_reward_when_attempt_has_tool_ca
         1,
         0,
         [
-            {"role": "system", "content": "You are a title generator."},
-            {"role": "user", "content": "Generate a title for this conversation:"},
+            {"role": "system", "content": "You are a title generator. You output ONLY a thread title."},
+            {"role": "user", "content": "Generate a title for this conversation:\nsolve add"},
         ],
         "Solve add task",
     )
-    empty_base = chat_call(1, 1, [{"role": "user", "content": "Summarize."}], "Done.")
-    empty_tools_side = replace(empty_base, request={**(empty_base.request or {}), "tools": []})
-    main_base = chat_call(1, 2, [{"role": "user", "content": "solve add"}], "running tests")
+    title_user_only_base = chat_call(
+        1,
+        1,
+        [{"role": "user", "content": "Generate a title for this conversation:\nwrite tests"}],
+        "Write tests",
+    )
+    title_user_only = replace(title_user_only_base, request={**(title_user_only_base.request or {}), "tools": []})
+    writer_subagent_base = chat_call(
+        1,
+        2,
+        [
+            {"role": "system", "content": "You are the writer. Return only the final number."},
+            {"role": "user", "content": "verified: the count is 9592"},
+        ],
+        "9592",
+    )
+    writer_subagent = replace(writer_subagent_base, request={**(writer_subagent_base.request or {}), "tools": []})
+    main_base = chat_call(1, 3, [{"role": "user", "content": "solve add"}], "running tests")
     main_call = replace(main_base, request={**(main_base.request or {}), "tools": tool_spec})
 
-    title_traj, summary_traj, main_traj = attempt_trajectories(
-        "s", "e1", item, [title_call, empty_tools_side, main_call]
+    title_traj, title_user_traj, writer_traj, main_traj = attempt_trajectories(
+        "s", "e1", item, [title_call, title_user_only, writer_subagent, main_call]
     )
     assert title_traj["extra"]["reef"]["reward"] is None
     assert title_traj["extra"]["reef"]["evaluation"]["scored"] is False
-    assert summary_traj["extra"]["reef"]["reward"] is None
-    assert summary_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert title_user_traj["extra"]["reef"]["reward"] is None
+    assert title_user_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert writer_traj["extra"]["reef"]["reward"] == 1.0
+    assert writer_traj["extra"]["reef"]["evaluation"]["scored"] is True
     assert main_traj["extra"]["reef"]["reward"] == 1.0
     assert main_traj["extra"]["reef"]["evaluation"]["scored"] is True
 
