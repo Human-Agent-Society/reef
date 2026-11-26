@@ -128,7 +128,8 @@ Connect a new agent
 -------------------
 
 1. Define installation, paths, model templates and run settings.
-2. Add a ``TrajectoryReader`` for new session formats; ``to_atif`` supplies verifier trajectories.
+2. Add a ``TrajectoryReader`` for new session formats; ``to_atif`` supplies verifier trajectories,
+   and ``agent_work`` the turns, steps, tool calls and tokens of an evaluation step's metrics.
 3. Register in ``BUILTIN_ADAPTERS`` or ``reef.harness_adapters`` entry points.
 4. Test descriptors, golden renders, model routes and captured sessions.
 

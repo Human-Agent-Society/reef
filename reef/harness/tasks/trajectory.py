@@ -50,6 +50,11 @@ class TrajectoryReader(ABC):
     Implement:
         ``__call__`` — read the trajectory directory and return an ordered
         tuple of event objects.
+
+    Optionally override:
+        ``to_atif`` — the run as ATIF documents for verifiers.
+        ``agent_work`` — per agent name, the ``AGENT_COUNTERS`` of a run's
+        events, for the step metrics of an evaluation.
     """
 
     format: str
@@ -66,6 +71,13 @@ class TrajectoryReader(ABC):
         holds no session.
         """
         return ()
+
+    def agent_work(self, trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+        """The ``AGENT_COUNTERS`` of each agent in ``trajectory``, the events of a run in this format.
+
+        A format whose reader does not count them gives none, and so does a trajectory with no session.
+        """
+        return {}
 
 
 TRAJECTORY_READERS: dict[str, type[TrajectoryReader]] = {}
@@ -290,6 +302,45 @@ class PiSessionReader(TrajectoryReader):
 
         return harbor_atif(path, Pi._SESSIONS_DIRECTORY, convert)
 
+    def agent_work(self, trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+        """The counters of a pi session tree, all under ``root``: pi runs no other agent.
+
+        A ``session`` line is one turn. An assistant message is one step, the reply of one model call, and each
+        of its ``toolCall`` parts is one tool call. A ``toolResult`` message with ``isError`` is one tool error.
+        A ``compaction`` or ``branch_summary`` entry carries the usage of the model call that wrote its summary.
+        pi splits the input tokens that the endpoint reported into ``input``, ``cacheRead`` and ``cacheWrite``, so
+        their sum is the input tokens; ``output`` is the output tokens.
+        """
+        work: dict[str, int] | None = None
+        for event in trajectory:
+            type_, message = event.get("type"), event.get("message")
+            if type_ != "message" or not isinstance(message, Mapping):
+                message = {}
+            role = message.get("role")
+            if type_ == "session":
+                work = work or dict.fromkeys(AGENT_COUNTERS, 0)
+                work["turns"] += 1
+                continue
+            if work is None:
+                continue
+            if role == "assistant":
+                work["steps"] += 1
+                parts = message.get("content")
+                work["tool_calls"] += sum(
+                    isinstance(part, Mapping) and part.get("type") == "toolCall" for part in parts or ()
+                )
+                usage = message.get("usage")
+            elif type_ in ("compaction", "branch_summary"):
+                usage = event.get("usage")
+            else:
+                if role == "toolResult" and message.get("isError"):
+                    work["tool_errors"] += 1
+                continue
+            if isinstance(usage, Mapping):
+                work["input_tokens"] += sum(int(usage.get(key) or 0) for key in ("input", "cacheRead", "cacheWrite"))
+                work["output_tokens"] += int(usage.get("output") or 0)
+        return {} if work is None else {"root": work}
+
 
 @register_trajectory_reader
 class ClaudeSessionReader(TrajectoryReader):
@@ -362,6 +413,35 @@ class DeepseekSessionReader(TrajectoryReader):
     def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
         return log_documents(path, "dsh", dsh_items)
 
+    def agent_work(self, trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+        """The counters of a dsh session tree, all under ``root``.
+
+        A ``session`` line is one turn, a ``step/start`` event one step and a ``tool/call`` event one tool call.
+        Each ``tool-result`` block with ``isError`` in a ``tool/result`` message is one tool error. The ``usage`` of
+        an ``assistant/message`` event holds the ``inputTokens`` and ``outputTokens`` that dsh reported.
+        """
+        work: dict[str, int] | None = None
+        for event in trajectory:
+            type_ = event.get("type")
+            if type_ == "session":
+                work = work or dict.fromkeys(AGENT_COUNTERS, 0)
+                work["turns"] += 1
+            elif work is None:
+                continue
+            elif type_ == "step/start":
+                work["steps"] += 1
+            elif type_ == "tool/call":
+                work["tool_calls"] += 1
+            elif type_ == "tool/result" and isinstance(message := event.get("message"), Mapping):
+                work["tool_errors"] += sum(
+                    isinstance(block, Mapping) and block.get("type") == "tool-result" and bool(block.get("isError"))
+                    for block in message.get("content") or ()
+                )
+            elif type_ == "assistant/message" and isinstance(usage := event.get("usage"), Mapping):
+                work["input_tokens"] += int(usage.get("inputTokens") or 0)
+                work["output_tokens"] += int(usage.get("outputTokens") or 0)
+        return {} if work is None else {"root": work}
+
 
 @register_trajectory_reader
 class HermesSessionReader(TrajectoryReader):
@@ -407,6 +487,26 @@ class HermesSessionReader(TrajectoryReader):
                 if trajectory is not None:
                     documents.append(trajectory.to_json_dict())
         return tuple(documents)
+
+    def agent_work(self, trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+        """The counters of hermes session snapshots, all under ``root``.
+
+        A snapshot is one turn. An assistant message is one step, and each entry of its ``tool_calls`` is one tool
+        call. Its ``usage``, when present, holds ``prompt_tokens`` and ``completion_tokens``, as Harbor's converter
+        reads them. A tool message records no failure, so tool errors stay 0.
+        """
+        work: dict[str, int] | None = None
+        for event in trajectory:
+            if event.get("type") == "session":
+                work = work or dict.fromkeys(AGENT_COUNTERS, 0)
+                work["turns"] += 1
+            elif work is not None and event.get("role") == "assistant":
+                work["steps"] += 1
+                work["tool_calls"] += len(calls) if isinstance(calls := event.get("tool_calls"), list) else 0
+                if isinstance(usage := event.get("usage"), Mapping):
+                    work["input_tokens"] += int(usage.get("prompt_tokens") or 0)
+                    work["output_tokens"] += int(usage.get("completion_tokens") or 0)
+        return {} if work is None else {"root": work}
 
 
 @register_trajectory_reader
@@ -539,6 +639,28 @@ class NativeSessionReader(TrajectoryReader):
     def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
         return log_documents(path, "reef-native", native_items)
 
+    def agent_work(self, trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+        """Turns, steps, tool calls, tool errors and reported tokens per agent of a native-jsonl trajectory."""
+        work: dict[str, dict[str, int]] = {}
+        agent: str | None = None
+        for event in trajectory:
+            type_, data = event.get("type"), event.get("data") or {}
+            if type_ == "session":
+                agent = str(data.get("agent") or "root")
+                work.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))["turns"] += 1
+            elif agent is None:
+                continue
+            elif type_ in ("assistant/message", "context/compacted") and isinstance(data.get("usage"), Mapping):
+                work[agent]["input_tokens"] += int(data["usage"].get("input_tokens", 0) or 0)
+                work[agent]["output_tokens"] += int(data["usage"].get("output_tokens", 0) or 0)
+            elif type_ == "step/start":
+                work[agent]["steps"] += 1
+            elif type_ == "tool/call":
+                work[agent]["tool_calls"] += 1
+            elif type_ == "tool/result" and data.get("is_error"):
+                work[agent]["tool_errors"] += 1
+        return work
+
 
 def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
     """Read the final assistant text from flat, pi, or Codex session events.
@@ -614,30 +736,6 @@ def stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 #: The counters a result carries per agent; the token pair is what the endpoint reported, zero when it reported none.
 AGENT_COUNTERS = ("turns", "steps", "tool_calls", "tool_errors", "input_tokens", "output_tokens")
-
-
-def agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
-    """Turns, steps, tool calls, tool errors and reported tokens per agent of a
-    native-jsonl trajectory; empty for other formats."""
-    work: dict[str, dict[str, int]] = {}
-    agent: str | None = None
-    for event in trajectory:
-        type_, data = event.get("type"), event.get("data") or {}
-        if type_ == "session":
-            agent = str(data.get("agent") or "root")
-            work.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))["turns"] += 1
-        elif agent is None:
-            continue
-        elif type_ in ("assistant/message", "context/compacted") and isinstance(data.get("usage"), Mapping):
-            work[agent]["input_tokens"] += int(data["usage"].get("input_tokens", 0) or 0)
-            work[agent]["output_tokens"] += int(data["usage"].get("output_tokens", 0) or 0)
-        elif type_ == "step/start":
-            work[agent]["steps"] += 1
-        elif type_ == "tool/call":
-            work[agent]["tool_calls"] += 1
-        elif type_ == "tool/result" and data.get("is_error"):
-            work[agent]["tool_errors"] += 1
-    return work
 
 
 def sum_agents(runs: Iterable[Mapping[str, Mapping[str, int]]]) -> dict[str, dict[str, int]]:

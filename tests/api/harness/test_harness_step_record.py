@@ -372,6 +372,73 @@ def test_a_run_that_could_not_run_has_no_path_and_a_pi_session_has_no_stages(tmp
     assert result.metrics["candidate_paths"] == ({"stages": [], "reason": None},)
 
 
+# A pi that writes two sessions in the shape pi 0.84.2 writes. The first makes two tool calls, one of whose results
+# failed, compacts its context, then answers; the second summarizes a branch, then answers. pi reports the cached
+# parts of the input tokens apart, as cacheRead and cacheWrite, and a compaction or a branch summary carries the usage
+# of the call that wrote its summary.
+PI_SESSION_FAKE = """\
+#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+
+def usage(input, output, cache_read=0, cache_write=0):
+    total = input + output + cache_read + cache_write
+    return {"input": input, "output": output, "cacheRead": cache_read, "cacheWrite": cache_write, "totalTokens": total}
+
+def bash(id, command):
+    return {"type": "toolCall", "id": id, "name": "bash", "arguments": {"command": command}}
+
+def result(id, text, failed):
+    return {"role": "toolResult", "toolCallId": id, "toolName": "bash", "content": [{"type": "text", "text": text}], "isError": failed}
+
+def message(message):
+    return {"type": "message", "message": message}
+
+first = [
+    {"type": "session", "version": 3, "id": "s1"},
+    {"type": "model_change", "provider": "reef", "modelId": "qwen3-8b"},
+    message({"role": "user", "content": [{"type": "text", "text": "task"}]}),
+    message({"role": "assistant", "content": [{"type": "thinking", "thinking": "run it"}, bash("c1", "false"), bash("c2", "true")], "usage": usage(1578, 380, cache_write=64), "stopReason": "toolUse"}),
+    message(result("c1", "exit 1", True)),
+    message(result("c2", "", False)),
+    {"type": "compaction", "summary": "ran two commands", "firstKeptEntryId": "e5", "tokensBefore": 2042, "usage": usage(900, 120)},
+    message({"role": "assistant", "content": [{"type": "text", "text": "42"}], "usage": usage(496, 317, cache_read=1472), "stopReason": "stop"}),
+]
+second = [
+    {"type": "session", "version": 3, "id": "s2"},
+    {"type": "branch_summary", "fromId": "e2", "summary": "left a branch", "usage": usage(200, 30)},
+    message({"role": "user", "content": [{"type": "text", "text": "again"}]}),
+    message({"role": "assistant", "content": [{"type": "text", "text": "42"}], "usage": usage(300, 20), "stopReason": "stop"}),
+]
+session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
+session_dir.mkdir(parents=True, exist_ok=True)
+for name, events in (("1.jsonl", first), ("2.jsonl", second)):
+    (session_dir / name).write_text("".join(json.dumps(event) + "\\n" for event in events))
+"""
+
+
+def full_score(task: str, result) -> float:
+    return 1.0
+
+
+def test_a_pi_steps_metrics_count_the_tokens_and_tool_calls_of_its_sessions(tmp_path: Path) -> None:
+    binary = tmp_path / "fake-pi-session"
+    binary.write_text(PI_SESSION_FAKE)
+    binary.chmod(0o755)
+    pi, _ = harness_backend(tmp_path, lambda workspace, services: MARKER, binary=str(binary), score=full_score)
+    result = step(pi)
+    counts = {
+        "turns": 2,
+        "steps": 3,
+        "tool_calls": 2,
+        "tool_errors": 1,
+        "input_tokens": (1578 + 64) + 900 + (496 + 1472) + 200 + 300,
+        "output_tokens": 380 + 120 + 317 + 30 + 20,
+    }
+    assert result.metrics["candidate_agents"] == {"root": counts}
+    assert result.metrics["current_agents"] == {"root": counts}
+
+
 # -- the run seam -------------------------------------------------------
 
 
@@ -493,7 +560,7 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
     """Per agent, the usage on the assistant messages and compactions of a
     native trajectory adds up beside the turn and tool counters, and the
     side's sum keeps every counter."""
-    from reef.harness.tasks.trajectory import agent_work, sum_agents
+    from reef.harness.tasks.trajectory import NativeSessionReader, sum_agents
 
     trajectory = [
         {"type": "session", "data": {"agent": "root"}},
@@ -506,7 +573,7 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
         {"type": "step/start", "data": {"step": 1}},
         {"type": "assistant/message", "data": {"step": 1, "usage": {"input_tokens": 7, "output_tokens": 1}}},
     ]
-    work = agent_work(trajectory)
+    work = NativeSessionReader().agent_work(trajectory)
     assert work == {
         "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 130, "output_tokens": 15},
         "checker": {"turns": 1, "steps": 1, "tool_calls": 0, "tool_errors": 0, "input_tokens": 7, "output_tokens": 1},
