@@ -8,7 +8,7 @@ A training backend is the integration that trains weights for a deployment: Slim
 - the backend's facts (``TrainingBackendFacts``), which answer questions about the component in a service that does not build it
 
 :For: authors of a training integration beside Slime and Tinker
-:Before you start: `Write a recipe <write-a-recipe.rst>`__ and `Adding components <../contributing/adding-components.rst#add-a-training-integration>`__
+:Before you start: `Write a recipe <write-a-recipe.rst>`__ and `Codebase structure <../contributing/codebase-structure.rst#domain-layer>`__
 :You will have: the deployment definition, the component contract, the backend facts, and the format of a job's data
 
 A recipe author does not need this page: a weight method plugs into an existing backend with an objective (see `Training service <recipe-training-service.rst>`__).

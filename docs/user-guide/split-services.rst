@@ -46,7 +46,7 @@ No service calls another. Each one reads and writes the deployment's shared stor
      - Serves the routes that a harness client calls: the active tree, the harness artifacts, the import of a person's files, and the adapters.
      - Harness import requests
 
-`Codebase structure <../contributing/codebase-structure.rst#services-and-the-shared-store>`__ maps each service to its code and its queues.
+`Codebase structure <../contributing/codebase-structure.rst>`__ maps the code to its packages and layers.
 
 Start the services
 ------------------
