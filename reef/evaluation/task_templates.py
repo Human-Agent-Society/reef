@@ -39,13 +39,6 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
     ``build_for_version``. The override uses the admitted digest or builds from the supplied pinned directory.
     A subclass that changes a legacy build hook must also declare how to build the admitted version.
 
-    ``build_for_version`` returns None, or the images that the builder verified for this owner and task version, as
-    a JSON list of ``PreparedImage`` objects (``reef.execution.sandbox.agentenv.images``). Each image gets a
-    template ID only for a template that is ready. A trial of the task then starts each listed environment from its
-    template, or from its image when the template is missing or not ready, and builds nothing for it. So a builder
-    returns the images also when it could not make their templates. The list applies only to the trials of the task
-    digest that the call received; a call with None gives no trial an image.
-
     Purpose: the evaluation service's ``TaskTemplateWorker`` calls ``build_for_version`` for each template item.
     """
 
@@ -75,6 +68,8 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
         *,
         task_digest: str | None,
     ) -> list[PreparedImageJson] | None:
+        """Return None once the templates are ready. For a pinned task, a builder may instead return image records
+        verified for the given owner and task digest."""
         await self.build_for_owner(owner, scenario, task_name, task_directory)
         return None
 

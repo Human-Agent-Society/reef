@@ -6,9 +6,8 @@ environment from the descriptor's template when the template is ready. Otherwise
 AgentENV's ``POST /sandboxes-cold`` (``ColdSandbox``). So a template that is missing or not ready never sends a task
 with a verified image back through a Dockerfile build.
 
-Only a trusted caller gives the descriptors, never a task's own files. An evaluation reads them from the result of the
-task's template item (``TaskTemplateBuilder.build_for_version``). A training process reads them from the file that
-``TASK_IMAGES_VARIABLE`` names (``TaskImages.from_environ``).
+The deployment supplies these records. Evaluations read the result of ``TaskTemplateBuilder.build_for_version``.
+For training, ``REEF_AGENTENV_TASK_IMAGES`` names a JSON file mapping each absolute task directory to its image records.
 """
 
 from __future__ import annotations
