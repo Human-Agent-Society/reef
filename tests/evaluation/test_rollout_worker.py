@@ -31,9 +31,11 @@ from reef.core.snapshot import SnapshotRef
 from reef.evaluation import artifact_endpoint
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
+    AGENT_TIMEOUT_ENV,
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
     TASK_TEMPLATE_KIND,
+    TREE_AGENT_TIMEOUT_S,
     CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
@@ -43,6 +45,7 @@ from reef.evaluation.rollout_worker import (
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
+    agent_timeout_seconds,
     check_finish_timeout,
     evaluation_call,
     reply_summary,
@@ -54,6 +57,7 @@ from reef.evaluation.rollout_worker import (
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv.build import AgentEnvBuildError
+from reef.execution.sandbox.task_environment import environment_config
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.inference.http import HttpInferenceHandler
@@ -1861,3 +1865,159 @@ def test_the_longest_finish_timeout_is_a_wait_that_the_timer_can_keep():
     with pytest.raises(OverflowError):
         threading.Lock().acquire(timeout=2 * threading.TIMEOUT_MAX)
     check_finish_timeout("finish", threading.TIMEOUT_MAX)
+
+
+@pytest.mark.unit
+def test_tree_harness_agent_timeout_env_caps_agent_and_sandbox_timeouts(tmp_path: Path) -> None:
+    """When ``REEF_AGENT_TIMEOUT_SECONDS`` is unset, ``TreeHarness.agent`` preserves ``TREE_AGENT_TIMEOUT_S`` and sets
+    no ``override_timeout_sec``. When set, it overrides unbounded tasks, caps longer task timeouts, preserves shorter
+    task timeouts, and bounds the E2B ``sandbox_timeout_secs``."""
+    unbounded_task = tmp_path / "unbounded"
+    unbounded_task.mkdir()
+    (unbounded_task / "task.toml").write_text("", encoding="utf-8")
+
+    long_task = tmp_path / "long"
+    long_task.mkdir()
+    (long_task / "task.toml").write_text("[agent]\ntimeout_sec = 7200\n", encoding="utf-8")
+
+    short_task = tmp_path / "short"
+    short_task.mkdir()
+    (short_task / "task.toml").write_text("[agent]\ntimeout_sec = 600\n", encoding="utf-8")
+
+    string_short_task = tmp_path / "string-short"
+    string_short_task.mkdir()
+    (string_short_task / "task.toml").write_text('[agent]\ntimeout_sec = "600"\n', encoding="utf-8")
+
+    default_tree = TreeHarness("opencode", "openai-chat", {})
+    default_agent = default_tree.agent(tmp_path / "default", task_directory=unbounded_task)
+    assert "override_timeout_sec" not in default_agent
+    assert cast(Mapping[str, object], default_agent["kwargs"])["timeout_s"] == TREE_AGENT_TIMEOUT_S
+    default_env = environment_config("e2b", unbounded_task, default_agent)
+    assert "sandbox_timeout_secs" not in default_env.get("kwargs", {})
+
+    capped_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "1800"})
+    unbounded_agent = capped_tree.agent(tmp_path / "capped-unbounded", task_directory=unbounded_task)
+    assert unbounded_agent["override_timeout_sec"] == 1800.0
+    assert cast(Mapping[str, object], unbounded_agent["kwargs"])["timeout_s"] == 1800.0
+    bounded_env = environment_config("e2b", unbounded_task, unbounded_agent)
+    sandbox_timeout = bounded_env["kwargs"]["sandbox_timeout_secs"]
+    assert isinstance(sandbox_timeout, int) and 1800 < sandbox_timeout < 86400
+
+    long_agent = capped_tree.agent(tmp_path / "capped-long", task_directory=long_task)
+    assert long_agent["override_timeout_sec"] == 1800.0
+    assert cast(Mapping[str, object], long_agent["kwargs"])["timeout_s"] == 1800.0
+
+    short_agent = capped_tree.agent(tmp_path / "capped-short", task_directory=short_task)
+    assert short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], short_agent["kwargs"])["timeout_s"] == 600.0
+
+    string_short_agent = capped_tree.agent(tmp_path / "capped-string-short", task_directory=string_short_task)
+    assert string_short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], string_short_agent["kwargs"])["timeout_s"] == 600.0
+
+    subsecond_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "0.5"})
+    subsecond_agent = subsecond_tree.agent(tmp_path / "subsecond", task_directory=unbounded_task)
+    assert subsecond_agent["override_timeout_sec"] == 0.5
+    assert cast(Mapping[str, object], subsecond_agent["kwargs"])["timeout_s"] == 1.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["", " ", "0", "-5", "abc", "nan", "inf", "-inf"])
+def test_tree_harness_refuses_invalid_agent_timeout_env(raw: str) -> None:
+    """``agent_timeout_seconds`` and ``TreeHarness`` reject non-positive, non-finite, or non-numeric values of
+    ``REEF_AGENT_TIMEOUT_SECONDS``."""
+    with pytest.raises(ValueError, match=AGENT_TIMEOUT_ENV):
+        agent_timeout_seconds({AGENT_TIMEOUT_ENV: raw})
+    with pytest.raises(ValueError, match=AGENT_TIMEOUT_ENV):
+        TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: raw})
+
+
+class RecordingAgentLab(TaskLab):
+    """A ``TaskLab`` double that records the agent and environment overrides passed to ``run`` and returns no calls.
+
+    Values hold ``recorded``, a list of ``(agent, overrides)`` pairs collected in call order, initially empty.
+    ``run`` appends ``(dict(agent), dict(overrides))`` and returns a failed ``RolloutRow`` with no rewards.
+    ``build_environment`` returns an empty string without external side effects.
+    """
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    async def run(
+        self,
+        task_path: Path,
+        agent: Mapping[str, object],
+        *,
+        key: str,
+        tags: Mapping[str, str],
+        overrides: Mapping[str, object],
+    ) -> RolloutRow:
+        self.recorded.append((dict(agent), dict(overrides)))
+        return RolloutRow(rewards={}, error="recorded")
+
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        return ""
+
+
+class TimedTaskEndpoints(CandidateEndpoints):
+    """Test ``CandidateEndpoints`` whose task directory declares ``[agent].timeout_sec`` in ``task.toml``.
+
+    Values hold ``root`` (``Path``), ``task_timeout_sec`` (``float | None``), and ``calls`` / ``trajectories`` lists
+    (initially empty). ``task_directory`` creates ``root / rollout.task_name``, writes
+    ``[agent]\\ntimeout_sec = <value>\\n`` when ``task_timeout_sec`` is not None (or an empty ``task.toml``
+    otherwise), and returns that directory. ``open`` yields ``CandidateEndpoint("http://127.0.0.1:9", None)`` without
+    starting a server. ``add_call`` and ``add_trajectory`` append to ``calls`` and ``trajectories``.
+    """
+
+    def __init__(self, root: Path, task_timeout_sec: float | None) -> None:
+        self.root = root
+        self.task_timeout_sec = task_timeout_sec
+        self.calls: list[EvaluationCall] = []
+        self.trajectories: list[EvaluationTrajectory] = []
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        content = f"[agent]\ntimeout_sec = {self.task_timeout_sec}\n" if self.task_timeout_sec is not None else ""
+        (task / "task.toml").write_text(content, encoding="utf-8")
+        return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        self.calls.append(call)
+
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        self.trajectories.append(trajectory)
+
+
+@pytest.mark.unit
+def test_rollout_worker_applies_agent_timeout_cap_with_task_directory(tmp_path: Path) -> None:
+    """``EvaluationRolloutWorker.score`` passes ``task_directory`` into ``TreeHarness.agent`` so
+    ``REEF_AGENT_TIMEOUT_SECONDS`` caps the task's timeout and bounds E2B ``sandbox_timeout_secs``."""
+    lab = RecordingAgentLab()
+    endpoints = TimedTaskEndpoints(tmp_path / "tasks", task_timeout_sec=3600.0)
+    worker = ServedWorker(memory_coordination().work_queue, endpoints, worker_id="w", lab=lab)
+    capped_rollout = replace(
+        rollout(),
+        agent=None,
+        environment="e2b",
+        tree=TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "1200"}),
+    )
+    with pytest.raises(ReefError, match="recorded"):
+        worker.score(capped_rollout, threading.Event(), 1)
+    [(recorded_agent, recorded_overrides)] = lab.recorded
+    assert recorded_agent["override_timeout_sec"] == 1200.0
+    assert cast(Mapping[str, object], recorded_agent["kwargs"])["timeout_s"] == 1200.0
+    env_override = cast(Mapping[str, object], recorded_overrides["environment"])
+    env_kwargs = cast(Mapping[str, object], env_override["kwargs"])
+    task_dir = tmp_path / "tasks" / capped_rollout.task_name
+    uncapped_timeout = environment_config("e2b", task_dir, {})["kwargs"]["sandbox_timeout_secs"]
+    expected_timeout = environment_config("e2b", task_dir, {"override_timeout_sec": 1200.0})["kwargs"][
+        "sandbox_timeout_secs"
+    ]
+    assert env_kwargs["sandbox_timeout_secs"] == expected_timeout
+    assert isinstance(expected_timeout, int) and isinstance(uncapped_timeout, int)
+    assert expected_timeout < uncapped_timeout

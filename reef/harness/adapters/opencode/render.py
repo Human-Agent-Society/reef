@@ -7,10 +7,11 @@ hook merges the snapshot's ``config.json`` over opencode's, adds
 command file, as opencode reads one) and the ``skill/`` directory, and which
 merges the hooks and tools of the modules in ``extensions/``.
 
-``process_config`` checks what the declaration cannot state: an agent must
-keep its own name and carry the fields opencode's schema types, a command
-names an agent the run has, and a tree with no ``default_agent`` must keep
-an agent that can start one.
+``finalize_render`` checks what the declaration cannot state against the
+merged run configuration (``opencode.json`` with ``plugin/config.json``
+merged over it): an agent must keep its own name and carry the fields
+opencode's schema types, a command names an agent the run has, and a tree
+with no ``default_agent`` must keep an agent that can start one.
 
 It also keeps the model Reef's. The descriptor sets ``enabled_providers`` to
 ``["reef"]``, so opencode offers no provider but the binding's, its own zen
@@ -58,6 +59,7 @@ from typing import Any, ClassVar
 
 import yaml
 
+from reef.core.values import deep_merge
 from reef.harness.adapters.common.frontmatter import skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
@@ -261,13 +263,14 @@ def check_binding_shape(config: Mapping[str, object]) -> None:
         raise RenderError("opencode harness tree must not set model: Reef's model binding chooses it")
 
 
-def check_agent_name(where: str, agent: object, agents: Collection[str]) -> None:
-    """``agent`` names an agent the run has."""
+def check_agent_name(where: str, agent: object, agents: Collection[str]) -> str:
+    """Return ``agent`` after verifying it is a string naming an agent the run has."""
     if not isinstance(agent, str):
         raise RenderError(f"opencode {where} must name an agent as a string, got {agent!r}")
     if agent not in agents:
         known = ", ".join(sorted(agents))
         raise RenderError(f"opencode {where} names agent {agent!r}, which the tree does not define (agents: {known})")
+    return agent
 
 
 def check_command(where: str, command: Mapping[object, object], agents: Collection[str]) -> None:
@@ -428,32 +431,32 @@ def configured_agents(config: Mapping[str, object]) -> tuple[dict[str, str], set
     return agents, hidden
 
 
-class OpencodeAdapterRenderer(AdapterRenderer):
-    @staticmethod
-    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        if path != TREE_CONFIG:
-            return config
-        agents, hidden = configured_agents(config)
-        if "default_agent" in config:
-            default_agent = config["default_agent"]
-            check_agent_name("default_agent", default_agent, agents)
-            if agents[default_agent] == "subagent" or default_agent in hidden:
-                raise RenderError(
-                    f"opencode default_agent names agent {default_agent!r}, a subagent or a hidden agent, which "
-                    "cannot start a run"
-                )
-        elif all(mode == "subagent" or name in hidden for name, mode in agents.items()):
-            # With no default_agent opencode starts a run with the first agent that is neither, and fails with none.
+def validate_merged_agents(config: Mapping[str, object]) -> dict[str, str]:
+    """Return the runnable agent modes of the merged runtime ``config`` after validating ``default_agent``,
+    runnable-agent availability, and inline ``command`` entries. Raises ``RenderError`` if opencode would fail
+    at startup or when running an inline command."""
+    agents, hidden = configured_agents(config)
+    if "default_agent" in config:
+        default_agent = check_agent_name("default_agent", config["default_agent"], agents)
+        if agents[default_agent] == "subagent" or default_agent in hidden:
             raise RenderError(
-                "opencode harness tree leaves no agent that can start a run: every agent it keeps is a subagent or "
-                "hidden"
+                f"opencode default_agent names agent {default_agent!r}, a subagent or a hidden agent, which "
+                "cannot start a run"
             )
-        commands = config.get("command")
-        for name, command in commands.items() if isinstance(commands, dict) else ():
-            if isinstance(command, dict):
-                check_command(f"command {name!r} in config.json", command, agents)
-        return config
+    elif all(mode == "subagent" or name in hidden for name, mode in agents.items()):
+        # With no default_agent opencode starts a run with the first agent that is neither, and fails with none.
+        raise RenderError(
+            "opencode harness tree leaves no agent that can start a run: every agent it keeps is a subagent or "
+            "hidden"
+        )
+    commands = config.get("command")
+    for name, command in commands.items() if isinstance(commands, dict) else ():
+        if isinstance(command, dict):
+            check_command(f"command {name!r} in config.json", command, agents)
+    return agents
 
+
+class OpencodeAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_skill(path: str, text: str) -> str:
         skill_name = path[len(SKILL_DIR) : -len("/SKILL.md")]
@@ -486,8 +489,9 @@ class OpencodeAdapterRenderer(AdapterRenderer):
 
     @staticmethod
     def finalize_render(files: dict[str, str]) -> dict[str, str]:
-        # A command file names agents, which only the config defines.
-        agents, _ = configured_agents(json.loads(files[TREE_CONFIG]))
+        # Validate agents and commands against the merged runtime config (opencode.json + plugin/config.json).
+        merged_config = deep_merge(json.loads(files[AGENT_CONFIG]), json.loads(files[TREE_CONFIG]))
+        agents = validate_merged_agents(merged_config)
         commands: dict[str, dict[str, object]] = {}
         for path, text in files.items():
             if path.startswith(COMMAND_DIR) and path.endswith(".md"):
