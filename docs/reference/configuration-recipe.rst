@@ -1,13 +1,15 @@
 Recipe configuration
 ====================
 
-How a deployment selects its recipe, and the rules of the ``recipe``, ``activation`` and ``pipeline`` sections that their keys do not show. `Settings reference <configuration-settings.rst#recipe>`__ lists the keys. `Write a recipe <../developer-guide/write-a-recipe.rst>`__ describes the recipe contract.
+Select a recipe, configure its pipeline, and choose when new artifacts start serving.
+For all keys and defaults, see `Settings reference <configuration-settings.rst#recipe>`__.
 
-``recipe.implementation`` selects the recipe. The recipe's declared fields go under ``recipe.config``, and a field that the recipe does not declare is an error. It takes one of three forms:
+Set ``recipe.implementation`` to one of the following values.
+Put the recipe's fields under ``recipe.config``. Unknown fields are errors.
 
-- **The core recipe:** ``recipe``, the default. It records, and it trains nothing.
-- **A dotted class**, such as ``my_pkg.my_method:MyMethodRecipe``. The package does not have to be installed. ``reef serve`` walks up from the directory of the config file to the nearest directory that holds ``<package>/__init__.py``, and appends that directory to ``PYTHONPATH`` for every service. Entries already in ``PYTHONPATH`` keep their precedence.
-- **A preset name**, such as ``my-preset``: the file ``my-preset.yaml`` under ``REEF_RECIPE_CONFIG_DIR``. The variable has no default, and Reef bundles no presets. A bare name other than ``recipe`` is always a preset name.
+- **Core recipe:** ``recipe`` (default). Records requests and reports without training.
+- **Dotted class:** for example, ``my_pkg.my_method:MyMethodRecipe``. The package can be installed or located above the config file. Reef searches parent directories for ``<package>/__init__.py`` and appends the nearest match to each service's ``PYTHONPATH``. Existing entries take priority.
+- **Preset:** a bare name other than ``recipe``, such as ``my-preset``. Reef reads ``$REEF_RECIPE_CONFIG_DIR/my-preset.yaml``. Set this variable explicitly; Reef bundles no presets.
 
 Rules for all recipes:
 
@@ -19,7 +21,7 @@ Rules for all recipes:
 Presets
 -------
 
-A preset is a file in the configuration file layout that holds a recipe and its settings. Reef reads it as it is: ``${VAR}`` interpolates in a deployment config, never in a preset.
+A preset uses the deployment configuration layout. Reef does not expand ``${VAR}`` references inside presets.
 
 .. code:: yaml
 
@@ -35,14 +37,16 @@ A preset is a file in the configuration file layout that holds a recipe and its 
    inference:
      upstream-model: qwen3-8b
 
-- A preset holds ``recipe.implementation``, which is ``recipe`` or a dotted class, and ``recipe.config``. Its stage config goes in its own ``pipeline`` section.
-- An optional ``recipe.runtime`` makes the recipe build its own runtime, in place of the deployment's upstream proxy. Such a preset must name its model (``inference.upstream-model`` or ``inference.model-path``). A preset without ``recipe.runtime`` can omit the model and takes the model of the deployment's runtime.
-- A preset cannot select a weight-training recipe. Select that recipe by dotted class in the deployment config, so that the service can build its training component.
+- Set ``recipe.implementation`` to ``recipe`` or a dotted class. Put recipe fields under ``recipe.config`` and stage fields under ``pipeline``.
+- With ``recipe.runtime``, also set ``inference.upstream-model`` or ``inference.model-path``. Otherwise, the preset can use the deployment's model and runtime.
+- Presets cannot select weight-training recipes. Select those by dotted class in the deployment config.
 
 Composite recipes
 -----------------
 
-A composite recipe serves and evolves several snapshot components in one scenario, with one recipe for each. ``recipe.config.components`` maps each component name to a section with ``implementation``, the recipe class, and ``config``, the recipe's fields and sections with its own ``pipeline``.
+A composite recipe serves and evolves several components in one scenario.
+Under ``recipe.config.components``, give each component an ``implementation`` and ``config``.
+Put its pipeline inside that component's ``config``.
 
 .. code:: yaml
 
@@ -65,7 +69,7 @@ A composite recipe serves and evolves several snapshot components in one scenari
      options:
        global-batch-size: 8
 
-- ``components`` holds at least two recipes. At most one trains weights, at most one is a harness evolution recipe, and none is a composite.
+- Use at least two components. At most one can train weights and one can evolve a harness. Components cannot be composites.
 - Reef refuses the component names ``train``, ``step``, ``reef`` and ``operations``, because experiment tracking uses them as metric prefixes.
 - A component has no ``runtime``: every component uses the deployment's model, inference runtime and training component.
 - The components share the ``training-mode`` of the composite.
@@ -75,7 +79,8 @@ A composite recipe serves and evolves several snapshot components in one scenari
 The ``activation`` section
 --------------------------
 
-Training makes artifacts, and the activation rule of this section decides which new artifacts serve (`Activation rule <../developer-guide/recipe-control-service.rst#activation-rule>`__). Without the section, the rule is ``always``. A scenario can select a built-in rule for itself (`Scenario updates <http-api-scenarios.rst#scenario-updates>`__).
+The activation rule decides which new training artifacts serve. The default is ``always``.
+A scenario can override it with a built-in rule through `Scenario updates <http-api-scenarios.rst#scenario-updates>`__.
 
 .. code:: yaml
 
@@ -89,20 +94,22 @@ The keys of ``activation.config`` take underscores only.
 .. container:: config
 
    ``activation.module`` : always
-       ``always``, ``never``, ``evaluated``, or the ``package.module:ClassName`` of an ``ActivationRule`` subclass. A class of your own receives ``activation.config`` in ``from_config``; ``never`` takes no config.
+       ``always``, ``never``, ``evaluated``, or an ``ActivationRule`` subclass as ``package.module:ClassName``. Custom classes receive ``activation.config`` in ``from_config``. ``never`` takes no config.
 
    ``activation.config.review_kinds`` : []
-       For ``always``: the kinds of harness tree parts whose change waits for a person, such as ``rules``, ``skill`` or ``extension``. The harness recipe refuses a kind that the adapter does not evolve.
+       For ``always``: part kinds that require manual activation, such as ``rules``, ``skill`` or ``extension``. Each kind must be evolvable by the adapter.
 
    ``activation.config.min_mean_score``
-       For ``evaluated``, required: the least ``mean_score`` with which a finished evaluation activates its artifact.
+       Required for ``evaluated``: the minimum ``mean_score`` needed to activate an artifact after evaluation.
 
-``evaluated`` needs the scenario's ``artifact_evaluation`` (`Automatic evaluation <http-api-evaluation.rst#automatic-evaluation>`__), so that Reef evaluates each new artifact. A scenario without it activates no new artifact, and Reef logs a warning when it creates or loads the scenario.
+For ``evaluated``, configure the scenario's ``artifact_evaluation`` (`Automatic evaluation <http-api-evaluation.rst#automatic-evaluation>`__).
+Without it, no new artifact activates. Reef logs a warning when it creates or loads the scenario.
 
 The ``pipeline`` section
 ------------------------
 
-A recipe's pipeline has two stages, and the recipe names a default class for each (`Training pipeline <../developer-guide/write-a-recipe.rst>`__). This section gives each stage its config, and it can name another class for a stage.
+Use ``pipeline`` to configure or replace a recipe's two stages: record-to-sample and sample-to-job.
+The recipe supplies each stage's default class.
 
 .. code:: yaml
 
@@ -114,9 +121,9 @@ A recipe's pipeline has two stages, and the recipe names a default class for eac
          groups_per_step: 8
          rollouts_per_group: 64
 
-- ``pipeline.record2sample`` is the record-to-sample stage, and ``pipeline.sample2job`` is the sample-to-job stage. Each takes ``config`` and an optional ``module``, the ``package.module:ClassName`` of a ``Record2Sample`` or ``Sample2Job`` subclass. Another key under ``pipeline`` fails the startup.
-- A stage without a key is the recipe's class with no config.
-- Each stage reads only its own ``config``. A stage key under ``recipe.config`` is an unknown recipe key and fails the startup.
-- A stage parses its ``config`` when a scenario builds its pipeline. An unknown key or a value out of range fails then, not at startup.
+- ``record2sample`` and ``sample2job`` accept ``config`` and optional ``module``. Other keys under ``pipeline`` fail startup.
+- ``module`` names a ``Record2Sample`` or ``Sample2Job`` subclass as ``package.module:ClassName``. Omitted stages use the recipe's class with no config.
+- Put each stage's fields in its own ``config``. Stage keys under ``recipe.config`` fail startup.
+- Stage config is validated when a scenario builds its pipeline. Unknown keys and out-of-range values fail then.
 - The settings reference lists the keys of the built-in stages, and the page of each recipe lists the keys of its own stages. A scenario can replace keys of ``pipeline.record2sample.config`` for itself (`Record-to-sample config <http-api-scenarios.rst#record-to-sample-config>`__).
 - `Job size <../developer-guide/recipe-control-service.rst#job-size>`__ describes ``job-samples`` and ``buffer-size``, and `Staleness <../developer-guide/recipe-samples-service.rst#staleness>`__ describes which samples are stale.

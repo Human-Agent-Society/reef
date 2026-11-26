@@ -1,30 +1,22 @@
 Control service: reports, jobs and activation
 =============================================
 
-The control service calls three recipe plug-ins. The report type checks each
-report before Reef stores it. The sample-to-job stage sets the size of a
-training job and makes its data. The activation rule decides whether a new
-artifact serves. This page defines each contract.
-
-:For: authors of a weight method, and deployers who write an activation rule
-:Before you start: the plug-in map in `Write a recipe <write-a-recipe.rst>`__
-:You will have: a report type, a sample-to-job stage with its job size, and an activation rule
+Extend control to validate reports, build training job data or choose which
+artifacts serve. These are separate contracts; implement only what your
+recipe needs.
 
 Report type
 -----------
 
-``Recipe.report_type`` is the typed contract of the reports that the recipe
-trains on. Control parses each ``POST /reef/report`` with it before it stores
-the report.
-
-**Contract.** Return a frozen dataclass that inherits
-``reef.core.reports.ReportBase``:
+``Recipe.report_type`` selects a frozen ``ReportBase`` dataclass.
+Control validates each ``POST /reef/report`` before storing it:
 
 .. code:: python
 
    from dataclasses import dataclass
 
    from reef.core.reports import ReportBase
+   from reef.recipe import WeightTrainingRecipe
 
 
    @dataclass(frozen=True)
@@ -38,81 +30,33 @@ the report.
        def report_type(self) -> type[ReportBase]:
            return MyReport
 
-- ``score`` reads the payload's top-level ``score``. Every other field reads
-  ``metadata.<field>``.
-- Field types: ``float`` (finite), ``int``, ``str``, ``bool``,
-  ``Mapping[str, str]``, each optionally ``| None``. A field without a
-  default is required.
-- Override ``validate()`` for rules between fields. Raise
-  ``ReportValidationError``.
-- Reef ships ``ScoredRolloutReport`` (a required ``score``) and
-  ``TeacherContextReport`` (``teacher_context`` and an optional ``score``).
+``score`` reads the payload's top-level field. Other fields read
+``metadata.<field>``. Supported types are finite ``float``, ``int``, ``str``,
+``bool`` and ``Mapping[str, str]``, including optional forms.
+Fields without defaults are required. Override ``validate()`` and raise
+``ReportValidationError`` for cross-field checks.
 
-**Default.** ``None``: Reef accepts every well-formed report. A
-computed-feedback recipe keeps the default.
+Use ``ScoredRolloutReport`` for a required score, or ``TeacherContextReport``
+for teacher context and an optional score. The default ``report_type=None``
+accepts any well-formed report.
 
-**Failure behavior.** A report that the type refuses returns HTTP 400, and
-the body names the field. Reef stores nothing. For every recipe, control
-also refuses a report that:
+Invalid reports return HTTP 400 without storage. Reef also rejects:
 
-- references a record that is not an inference of the same scenario;
-- repeats a reference, or references a call inside another referenced
-  trajectory. A report references only the last call of each trajectory;
-- sets ``metadata.training.eligible``. A report cannot opt out of training.
+- References to records outside the scenario or to non-inference records.
+- Duplicate references, including an earlier call in an already referenced
+  trajectory. Reference only each trajectory's last call.
+- ``metadata.training.eligible``. Reports cannot opt out of training.
 
-An identical retry of a stored report returns the original receipt.
-
-In a scenario of several components, control accepts a report that any
-component's type accepts. Each trainer releases a report that has the shape
-of another component.
+An identical retry returns the original receipt. With multiple components,
+any component's report type can admit the report. Other trainers release
+reports that do not match their own type.
 
 Sample-to-job stage
 -------------------
 
-The sample-to-job stage (``reef.train.sample2job.Sample2Job``) turns the stored
-samples of the next job into one ``JobData``, and gives the job its
-parameters. Each trainer cycle on control calls it when enough samples wait
-(``auto``) or a training request is queued (``manual``). Then control
-submits the job to the training service.
-
-- ``from_config(config, *, context, record2sample, environ)``: class
-  method. Build the stage of one scenario. ``record2sample`` is the
-  scenario's record-to-sample stage, so the stage can read a value that the
-  other stage owns.
-- ``__init__(context, buffer_size, job_samples, *, max_job_samples=None)``:
-  the base constructor. Pass the parsed sizes to it.
-- ``make_job_data(samples, data_id) -> JobData``: required. Build the job's
-  data from ``samples``, in store order, with the ID ``data_id``. The job's
-  commit consumes every sample of the tuple, also the samples that the
-  stage leaves out. Do not call models or train here.
-- ``job_parameters(data)``: the job's parameters. The default is the
-  recipe's parameters for the kind of the samples, with the request's
-  ``parameters`` merged over them (see `Job parameters
-  <recipe-training-service.rst#job-parameters>`__).
-- ``status()`` and ``close()``: state for ``GET /reef/status``, and release
-  of the stage's resources.
-
-Class attributes tell Reef what the stage accepts:
-
-- ``supported_training_modes`` (default ``auto`` and ``manual``): the
-  `training modes`_ that the job data supports.
-- ``reads_requests`` (default ``False``): in ``manual``, also run a request
-  that names no sample.
-- ``required_request_types`` (default inference and report): the kinds of
-  record that the trainer gives the pipeline.
-- ``accepts_trajectories`` (default ``False``): train `uploaded
-  trajectories`_.
-- ``accepts_imported_tasks`` (default ``False``): train the scenario's
-  imported ``train`` tasks.
-
-Built-in stages (``reef.train.sample2job``):
-
-- ``NoJobData``: the default. The pipeline never becomes ready.
-- ``DistillJobData``: the samples as they come, in store order. The
-  distilling recipes and SFT use it.
-- ``TraceJobData`` and ``TrainTaskJobData``: harness evolution's stages.
-
-A minimal stage:
+Subclass ``reef.train.sample2job.Sample2Job`` to turn stored samples into
+``JobData``. Control calls it when an automatic job is ready or a request
+is queued.
 
 .. code:: python
 
@@ -129,136 +73,134 @@ A minimal stage:
        def make_job_data(self, samples, data_id):
            return JobData(data_id, samples)
 
-The recipe names the class in ``pipeline_spec()``. The deployment configures
-it in ``pipeline.sample2job`` (see `the pipeline section
-<../reference/configuration-recipe.rst#the-pipeline-section>`__).
+Name the class in ``Recipe.pipeline_spec()``. Configure it through
+``pipeline.sample2job``.
+
+- ``from_config`` receives scenario context, the record stage and environment.
+  Parse settings and pass sizes to the base constructor.
+- ``make_job_data(samples, data_id)`` receives samples in store order.
+  Return ``JobData`` with the supplied ID. Do not call models or train here.
+  The submission consumes every supplied sample, including any your stage omits.
+- ``job_parameters(data)`` returns training parameters. By default, request
+  parameters override recipe defaults for the sample kind.
+- ``status()`` reports stage state; ``close()`` releases its resources.
+
+Class attributes declare supported inputs:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 35 25
+
+   * - Attribute
+     - Meaning
+     - Default
+   * - ``supported_training_modes``
+     - Accepted training modes
+     - ``auto``, ``manual``
+   * - ``reads_requests``
+     - Allow manual requests without samples
+     - ``False``
+   * - ``required_request_types``
+     - Record kinds the trainer supplies
+     - Inference and report
+   * - ``accepts_trajectories``
+     - Accept uploaded trajectories
+     - ``False``
+   * - ``accepts_imported_tasks``
+     - Accept imported ``train`` tasks
+     - ``False``
+
+Reuse ``DistillJobData`` for samples in store order. Harness recipes use
+``TraceJobData`` or ``TrainTaskJobData``. The default ``NoJobData`` never
+becomes ready.
 
 Job size
 ~~~~~~~~
 
-Reef submits one training job for each job's data.
+Set these fields under ``pipeline.sample2job.config``:
 
-- ``pipeline.sample2job.config.job_samples``: the fewest samples that one
-  automatic job trains; a positive int.
-- ``pipeline.sample2job.config.buffer_size``: the most samples that one
-  automatic job takes, beside the rest of a group. It is at least
-  ``job_samples``, and ``job_samples`` when absent.
-- A weight recipe has no default ``job_samples``. Without it, building a
-  scenario's trainer raises ``PluginConfigError``.
-- The harness stages default ``job_samples`` to 1.
-- A stage whose job data is one fixed unit, such as the TTTD grid, passes
-  ``max_job_samples`` to ``Sample2Job.__init__``. A larger ``job_samples``
-  or ``buffer_size`` raises ``PluginConfigError``.
+- ``job_samples``: minimum samples for an automatic job; a positive integer.
+- ``buffer_size``: maximum samples before completing any touched groups.
+  The base default is ``job_samples``; the value cannot be smaller.
 
-The training component cuts the job's data into optimizer steps by its own
-batch size: Slime's ``--global-batch-size`` or Tinker's ``batch_size``.
-Usually, set ``job_samples`` to that batch size, so that one job is one
-optimizer step. The two can differ:
+Stages without their own size default require ``job_samples``.
+Harness and generated-task stages default it to 1; generated tasks default
+the buffer to at least 4. Missing required sizes raise ``PluginConfigError``.
+Pass ``max_job_samples`` to the base constructor for a stage with a fixed
+capacity. Configured sizes above that limit raise ``PluginConfigError``.
 
-- A job takes whole groups, so its data can hold more than ``job_samples``
-  samples. The component then trains more than one step.
-- Job data smaller than the batch size trains as one partial step. The
-  ``remainder`` field of the ``scheduling`` parameter decides what happens
-  to a shorter last step.
-- With ``scheduling.packing_length``, a step trains batch-size packs of
-  tokens. ``job_samples`` still counts samples; set it to the samples of
-  many steps.
+Job size and optimizer batch size are independent. Whole groups can exceed
+the configured job size. The backend divides job data into optimizer steps;
+``scheduling.remainder`` controls a shorter final step.
+With ``scheduling.packing_length``, batches count token packs while
+``job_samples`` still counts samples.
 
 The next job
 ~~~~~~~~~~~~
 
-In ``auto``, the pipeline selects the samples of the next job from the
-scenario's stored samples:
+Automatic jobs select untrained samples in store order:
 
-1. It takes the samples that the trainer can train and did not train yet,
-   in store order: the samples that the trainer's stage made, uploaded
-   trajectories, and imported ``train`` tasks, when the stage accepts them.
-   Imported ``eval`` tasks never train.
-2. It keeps the samples of one kind, trajectory or task: the kind of the
-   first sample. A kind without job parameters does not count.
-3. It leaves out each sample that the samples service marked stale (see
-   `Staleness <recipe-samples-service.rst#staleness>`__).
-4. It takes the first ``buffer_size`` samples that remain, and the rest of
-   each group that those samples touch.
+1. Keep accepted inputs of the first available sample kind.
+2. Exclude kinds without job parameters and samples marked stale.
+3. Take ``buffer_size`` samples, then complete every group they touch.
+4. Submit when at least ``job_samples`` samples remain.
 
-The job is ready when it holds at least ``job_samples`` samples. Reef then
-reserves the samples, calls ``make_job_data``, and submits the job. The
-commit of the submission counts each sample as trained. A job that later
-fails does not give its samples back.
-
-The other samples wait in the store for later jobs. ``GET /reef/status``
-reports ``ready_samples``, ``buffer_size`` and ``job_samples``.
+Imported ``eval`` tasks never train. The submission commit counts all reserved
+samples as trained. A later job failure does not return them.
+Other samples stay available for subsequent jobs.
 
 Training modes
 ~~~~~~~~~~~~~~
 
-``training_mode`` is ``auto`` (the default) or ``manual``. The recipe's
-``training_mode`` field sets the initial value.
+``auto`` is the default. ``manual`` runs queued training requests and uses
+the samples they name, regardless of ``job_samples`` or previous training.
+Manual requests bypass staleness checks.
 
-- ``auto`` makes job data when the next job holds ``job_samples`` samples.
-- ``manual`` makes job data only for a queued training request. The job
-  takes the samples that the request names, in store order, whatever
-  ``job_samples``. A sample that trained before trains again, and staleness
-  does not apply.
+A request's samples must exist, have one kind, fit ``max_job_samples`` and
+be accepted by the trainer. Empty requests require ``reads_requests=True``.
+Invalid requests fail. Reef processes the oldest request first and exposes
+it as ``JobData.request``.
 
-When Reef accepts a request, a trainer must be able to take its samples: the
-store holds each one, the trainer can train each one, they are of one kind,
-and they are at most ``max_job_samples``. Otherwise the request returns an
-error. A request that names no sample is refused, unless the stage sets
-``reads_requests``, as the harness stages do.
-
-The pipeline runs the oldest request first. Automatic job data has the ID
-``<scenario>:data:<number>``, and a request's data
-``<scenario>:request:<request id>``. The request is in ``JobData.request``.
-
-``POST /reef/scenarios/{scenario}/update`` changes the mode of a running
-scenario. Reserved job data stays unchanged. Reef stores the mode in the
-scenario's settings, so a restart applies it again. The samples of records
-are stored in both modes, so a change to ``auto`` trains the data that was
-collected in ``manual``. A mode that the stage does not support raises
-``NotImplementedError``; an unknown mode name raises ``ValueError``.
+``POST /reef/scenarios/{scenario}/update`` changes the mode persistently.
+Reserved job data stays unchanged. Both modes collect samples; switching
+to ``auto`` can train samples collected in ``manual``.
+Unsupported modes raise ``NotImplementedError``; unknown names raise
+``ValueError``.
 
 Uploaded trajectories
 ~~~~~~~~~~~~~~~~~~~~~
 
-A client can give a scenario complete ATIF trajectories as data items (see
-the `HTTP API <../reference/http-api-data-items.rst#http-api-data-items>`__). A trajectory item
-is not a record: no stage forms a record set of it.
+Uploaded ATIF trajectories are data items, not records. No record stage
+forms sets from them. See the `data API
+<../reference/http-api-data-items.rst#http-api-data-items>`__.
 
-- A recipe takes uploads when its ``Sample2Job`` sets
-  ``accepts_trajectories = True``. Reef refuses with HTTP 400 an upload to a
-  scenario with no trainer that accepts them.
-- Control turns each upload into its training sample with
-  ``Record2Sample.uploaded_sample(trajectory)`` when it reads the upload. The
-  default returns the trajectory unchanged. Override it to check the
-  structure or add metadata, as ``SFTSamples`` does. The method must be
-  pure.
-- A trajectory that ``uploaded_sample`` refuses with ``ValueError`` is
-  skipped with a warning and stays untrained.
-- An upload counts as one sample toward ``job_samples`` and
-  ``buffer_size``, and it is never stale. In a scenario of several
-  components, each trainer that accepts uploads trains it once.
-- An objective that needs a reward needs a finite ``extra.reef.reward`` in
-  the trajectory. An SFT sample needs none.
+Set ``accepts_trajectories=True`` to accept them. Without an accepting trainer,
+the scenario refuses uploads with HTTP 400.
+
+Control calls ``Record2Sample.uploaded_sample(trajectory)`` when reading an
+upload. Keep this method pure. The default returns the trajectory unchanged.
+A ``ValueError`` skips the upload with a warning and leaves it untrained.
+
+Each upload counts as one sample and is never stale. Each accepting component
+can train it once. Reward-based objectives require finite
+``extra.reef.reward``; SFT does not.
 
 Activation rule
 ---------------
 
-A recipe trains; it does not decide what serves. Each artifact that a
-training job saves goes onto the scenario's snapshot chain, and the next job
-starts from it. The activation rule decides whether the artifact also
-serves. The rule applies to every recipe.
+Training appends artifacts to the snapshot chain. The activation rule decides
+whether they also serve; subsequent training can use an inactive artifact.
 
-Control asks the rule at two moments:
+Subclass ``ActivationRule`` and implement:
 
-- ``activates(made) -> bool``: when a training step publishes an artifact.
-  ``made`` is a ``MadeArtifact``: the ``component`` whose trainer made it,
-  and ``changed_kinds``, the harness node kinds that it changes (empty for
-  weights).
-- ``activates_evaluated(artifact_id, evaluation) -> bool``: when an
-  evaluation of the artifact finishes. The default returns ``False``.
+- ``from_config(config)``: build the rule from deployment configuration.
+- ``activates(made) -> bool``: decide from ``MadeArtifact.component`` and
+  ``changed_kinds``. Weight artifacts have no changed harness kinds.
+- ``activates_evaluated(artifact_id, evaluation) -> bool``: decide after an
+  artifact evaluation. The default returns ``False``.
 
-Name the rule in the top-level ``activation`` section:
+Both decision methods must depend only on their arguments.
+Select a built-in rule or ``package.module:ClassName``:
 
 .. code:: yaml
 
@@ -267,55 +209,18 @@ Name the rule in the top-level ``activation`` section:
      config:
        min_mean_score: 0.8
 
-.. list-table::
-   :header-rows: 1
-   :widths: 16 30 54
+Built-in rules:
 
-   * - Rule
-     - Config
-     - Activates
-   * - ``always``
-     - ``review_kinds`` (optional list)
-     - each new artifact, except a harness tree that changes a part in
-       ``review_kinds``. The default rule
-   * - ``never``
-     - none
-     - nothing: a person activates each artifact
-   * - ``evaluated``
-     - ``min_mean_score`` (required)
-     - an artifact whose evaluation ends with a mean score of at least
-       ``min_mean_score``
+- ``always`` activates new artifacts unless they change a harness kind in
+  ``review_kinds``. This is the default.
+- ``never`` requires manual activation.
+- ``evaluated`` requires a finished evaluation with mean score at least
+  ``min_mean_score``.
 
-A rule of your own is an ``ActivationRule`` subclass, named by
-``package.module:ClassName``. Reef builds it with the class method
-``from_config(config)``:
+Unknown rules and invalid configuration raise ``RecipeConfigError`` at load.
+Scenario settings can select built-in rules, but cannot name custom classes.
 
-.. code:: python
-
-   from reef import ActivationRule
-
-
-   class ComponentRule(ActivationRule):
-       def __init__(self, components):
-           self.components = frozenset(components)
-
-       @classmethod
-       def from_config(cls, config):
-           return cls(config["components"])
-
-       def activates(self, made):
-           return made.component in self.components
-
-Both methods must decide from their arguments alone.
-
-**Failure behavior.** Reef imports the class and builds the rule once when
-it loads the deployment. An unknown name or a config that the rule refuses
-raises ``RecipeConfigError`` then. A scenario can select a built-in rule for
-itself in its settings; it cannot name a class.
-
-A harness job's own evaluation (``evolution.evaluation``) decides only
-which candidate tree the job keeps (see `Evaluation
-<write-a-harness-method.rst#evaluation>`__). The activation rule then
-decides whether the kept tree serves. `Configuration
-<../reference/configuration-recipe.rst#the-activation-section>`__ lists the rule
-settings.
+Harness job evaluation chooses the candidate tree to keep. The activation
+rule separately decides whether that tree serves. See
+`harness evaluation <write-a-harness-method.rst#evaluation>`__ and
+`activation configuration <../reference/configuration-recipe.rst#the-activation-section>`__.

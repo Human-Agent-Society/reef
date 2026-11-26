@@ -1,23 +1,20 @@
 Glossary
 ========
 
-The vocabulary of these docs, from what a client sees to what a method
-implements. Each entry is a short definition; the linked page owns the details.
+Terms used by Reef clients and method authors. Linked guides provide details.
 
 Scenario
 --------
 
-One workload: its records, training state and snapshot chain, isolated from
-every other scenario. ``POST /reef/scenarios``, a harness install, or the first
-report or imported record with a new ``x-reef-scenario`` creates it and binds
-its recipe permanently. An inference request never creates a scenario. See
+An isolated workload with its own records, training state and snapshot chain.
+A scenario binds its recipe permanently. See
 `Scenarios <http-api-scenarios.rst#http-api-scenarios-and-their-settings>`__.
 
 Agent
 -----
 
-The complete system that acts: **model + harness**. Reef improves an agent by
-updating the model weights or the harness tree.
+The complete system: **model + harness**. Reef updates its model weights or
+harness tree.
 
 Agent record
 ------------
@@ -43,19 +40,16 @@ report.
 Feedback
 --------
 
-What you send back about a served response. A report carries it in ``score``
-(a number) and ``feedback`` (a string or a structured object, such as a rubric
-breakdown). Reef stores both without interpreting them; the recipe decides
-what they mean.
+Information about a served response, sent in a report's ``score`` (number)
+and ``feedback`` (string or object). The recipe defines their meaning.
 
 Recipe
 ------
 
-The method that a deployment runs. It names the stages of its training
-pipeline, its training objective and the components of its snapshots. A recipe
-is configuration only: the process that runs a service builds the inference
-runtime and the training component. The core ``recipe`` records without
-producing updates. See `Choose a recipe <../user-guide/recipes.rst>`__.
+Configuration for a learning method: pipeline stages, objective and artifact
+components. Services build the inference runtime and training component.
+The core ``recipe`` records without producing updates.
+See `Choose a recipe <../user-guide/recipes.rst>`__.
 
 Recipe reference
 ----------------
@@ -106,9 +100,8 @@ components' artifact IDs.
 Creation artifact
 -----------------
 
-The first artifact of each component, made when the scenario starts
-(``operation: creation``). Reef serves it until the first activation, and it is
-each trainer's first training start. A weight creation artifact holds no
+The first artifact of a component (``operation: creation``). It is the initial
+active selection and training start. A weight creation artifact has no
 optimizer state. See `Starting artifacts
 <../user-guide/operate.rst#starting-artifacts>`__.
 
@@ -170,31 +163,27 @@ files create two artifacts.
 Training pipeline
 -----------------
 
-The method's data side. The record-to-sample stage decides which records train
-and in which groups, and turns each record set into samples. The sample-to-job
-stage shapes the samples into one job's data. See `Training pipeline
+The stages that turn records into job data. Record-to-sample selects and
+groups records, then creates samples. Sample-to-job assembles a job's data.
+See `Training pipeline
 <../developer-guide/write-a-recipe.rst>`__.
 
 Reported and computed feedback
 ------------------------------
 
-Two ways a signal reaches the record-to-sample stage. **Reported** feedback
-arrives in a ``POST /reef/report``. **Computed** feedback is derived from
-recorded traffic alone, with no report. The choice picks the base class of the
-stage: ``ReportSamples`` for reported feedback, ``JudgedSamples`` for computed
-feedback.
+**Reported** feedback arrives through ``POST /reef/report`` and uses
+``ReportSamples``. **Computed** feedback comes from recorded traffic without
+a report and uses ``JudgedSamples``.
 
 Sample
 ------
 
-One item of job data, a ``Sample`` (``reef.core.job_data``): a
-``TrajectorySample`` that trains as it is, or a ``TaskSample``, a Harbor task
-that the training component rolls out. The trajectory of a
-``TrajectorySample`` is an `ATIF document
+One item of job data, represented by ``Sample`` (``reef.core.job_data``).
+A ``TrajectorySample`` contains an `ATIF document
 <https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__,
-and a ``TaskSample`` names a `Harbor task directory
-<https://www.harborframework.com/docs/tasks>`__. ``job_samples`` and
-``buffer_size`` count samples. A sample is not a sampling call to a model.
+ready for training. A ``TaskSample`` names a `Harbor task directory
+<https://www.harborframework.com/docs/tasks>`__ that the training component
+runs. ``job_samples`` and ``buffer_size`` count samples, not model calls.
 
 Staleness
 ---------
@@ -207,24 +196,23 @@ the rule, and the samples service marks a stale sample in the store. See
 Job data
 --------
 
-The data of one training job: a ``JobData`` value of at least
-``pipeline.sample2job.config.job_samples`` samples. The training component
-cuts it into optimizer steps by its own batch size.
+The samples supplied to one training job as a ``JobData`` value. Automatic
+jobs wait for ``pipeline.sample2job.config.job_samples``; requests select
+their own samples. The training component's batch size determines optimizer steps.
 
 Training job
 ------------
 
-One ``TrainingJob``: its job data directory, the weights it starts from, and
-the backend's parameters. The job ID is a hash of the scenario, the backend,
-the start, the records of the job's data and the parameters, so a retry submits
-the same job.
+One ``TrainingJob`` with a data directory, starting weights and backend
+parameters. Its ID hashes the scenario, backend, start, data records and
+parameters, so retries submit the same job.
 
 Training component
 ------------------
 
-A ``TrainingComponent`` runs bounded training jobs with its framework's own
-training loop, for example Slime or Tinker. Reef submits a job, reads its
-status and can cancel it; the component saves checkpoints. See `Training
+A ``TrainingComponent`` runs bounded jobs through a framework such as Slime
+or Tinker. Reef submits, monitors and cancels jobs; the component saves checkpoints.
+See `Training
 backends <../developer-guide/training-backends.rst>`__.
 
 Training objective
@@ -286,19 +274,17 @@ through an inference runtime.
 Harness tree
 ------------
 
-Reef's versioned form of the files that a harness may change: config, rules,
-prompt templates, skills and extension code. A tree is one directory of text
-files. The adapter decides which parts a tree may hold. Reef serves the tree
-over ``GET /reef/harness``. See `Evolve your harness
+A versioned directory of harness text files: config, rules, prompts, skills
+and extension code. The adapter defines allowed parts. ``GET /reef/harness``
+serves the tree. See `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__.
 
 Adapter
 -------
 
-Two meanings. For harness evolution, the descriptor that combines a rendered
-tree with an executable to make a running harness (`Harness adapters
-<../developer-guide/harness-adapters.rst>`__). For weight serving, a LoRA/PEFT
-adapter on a frozen base model.
+- **Harness:** a descriptor combining a rendered tree with an executable
+  (`Harness adapters <../developer-guide/harness-adapters.rst>`__).
+- **Weights:** a LoRA/PEFT adapter on a frozen base model.
 
 Render
 ------
@@ -310,9 +296,8 @@ agent reads. Rendering writes nothing to disk and starts no agent. See
 Skill
 -----
 
-A ``SKILL.md`` instruction file that the model reads, stored under ``skills/``
-in a harness tree. A client pulls it with the rest of the tree. Updating one
-needs no GPU.
+A ``SKILL.md`` instruction file under a harness tree's ``skills/`` directory.
+The model reads it; clients pull it with the tree.
 
 Patch
 -----
@@ -331,9 +316,9 @@ step's candidate.
 History
 -------
 
-Every tree that a harness scenario's steps proposed or evaluated, published or
-not, with every run and every decision. It is the evaluation's score cache, and
-methods read it. See `History <../user-guide/evolve-your-harness.rst#history>`__.
+Proposed and evaluated harness trees, their runs and decisions, including
+unpublished candidates. Methods read this history, which also caches evaluation
+scores. See `History <../user-guide/evolve-your-harness.rst#history>`__.
 
 Task
 ----

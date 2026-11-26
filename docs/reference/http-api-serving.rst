@@ -1,12 +1,12 @@
 HTTP API: what a scenario serves
 ================================
 
-Choose the artifacts that a scenario serves, divide its requests between them, call one served artifact, stop serving, and restore an earlier selection.
+Choose served artifacts, split traffic, call a specific artifact, or restore an earlier selection.
 
 Set what a scenario serves
 --------------------------
 
-A scenario serves one or more artifacts of each component, and one of them is the active artifact. ``GET /reef/harness`` serves the active harness tree. The default inference routes answer from the active artifact that completed startup. Pulling an older artifact changes only your local copy.
+A scenario can serve multiple artifacts per component, with one active artifact. ``GET /reef/harness`` returns the active harness tree. Default inference routes use the active artifact once startup completes. Pulling an older artifact changes only your local copy.
 
 The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` sets what the scenario serves of one component. It maps artifact IDs to weights:
 
@@ -48,15 +48,21 @@ Reef reads the mapping as follows:
 - **Weight 0 loads an artifact.** It answers only the requests that name it (`Call one served artifact`_).
 - **An artifact that the mapping leaves out stops serving.**
 
-Reef checks the mapping before it changes anything, so a refused mapping changes nothing. `Runtime limits <../user-guide/operate.rst#set-what-a-scenario-serves>`__ gives the number of weight artifacts that the runtime keeps loaded at once, and the wait before a stopped checkpoint frees its place.
+Reef validates the mapping before applying it. Rejected mappings change nothing. See `Runtime limits <../user-guide/operate.rst#set-what-a-scenario-serves>`__ for artifact capacity and the delay before stopped checkpoints release their slots.
 
-The answer is ``{"scenario": "<name>", "served": {...}}`` with the mapping that Reef accepted for the component. It does not show that the artifacts serve: inference loads them in the background, and publishes the new routes when the startup completes.
+The response is ``{"scenario": "<name>", "served": {...}}`` with the accepted component mapping. Inference loads artifacts asynchronously and publishes routes after startup.
 
 - Poll `Startup status <http-api-inference.rst#startup-status>`__ for ``ready`` or ``failed`` before you send requests that require a new artifact. Name an artifact that serves beside the active one with ``?model=<artifact-id>``.
 - A startup can fail after Reef accepted the mapping, for example when a new checkpoint finds no free inference component.
 - A repeated request retries a failed startup at once without another operation, and sets the wait of the automatic retries back to 60 seconds.
 
-Reef appends one operation for each artifact that changes: ``activate`` for a new active artifact, ``serve`` for an artifact that starts to serve beside it, and ``stop_serving`` for one that stops. Each operation holds the complete component mapping, so a restart keeps what the scenario serves. Other components keep their artifacts. The request creates no artifact or repository revision, and never changes a trainer's training start. A full-weight serving runtime that makes the root snapshot active after it served a checkpoint loads the root's files.
+Reef records one operation per changed artifact:
+
+- ``activate`` selects a new active artifact.
+- ``serve`` starts serving another artifact beside it.
+- ``stop_serving`` removes a served artifact.
+
+Each operation stores the complete component mapping, which survives restarts. Other components keep their artifacts. The request creates no artifact or repository revision and preserves training starts. Reactivating a root snapshot on a full-weight runtime loads the root's files.
 
 +--------+--------------------------------------------------------------------+
 | Status | Cause                                                              |
@@ -92,14 +98,14 @@ When ``served`` gives more than one artifact a weight above 0, the weights divid
 
    {"served": {"artifact:a": 95, "artifact:b": 5}}
 
-Reef starts each artifact of the mapping that does not serve yet. Until an artifact has started, the active artifact answers its requests. Without a ready active route, as at the first startup or when the scenario serves again after serving nothing, they get HTTP 503 until a route is ready. Inference replicas use new weights within a few seconds, without a restart. A mapping with one weight above 0 ends the split.
+Reef starts artifacts that are not already served. The active artifact handles their requests until startup completes. Without a ready active route, these requests return 503. Inference replicas apply new weights within seconds, without restarting. One positive weight ends the split.
 
 The activation rule can make a newer artifact active during a split. The new active artifact then answers the requests of each artifact of the split that the scenario no longer serves, and the other artifacts keep their shares.
 
 The weights apply to a model request that names ``active``, or a model that the scenario does not serve under that name:
 
 - **One conversation stays on one artifact.** Send the ``x-reef-session-key`` header with an identifier of the conversation. Reef then computes a bucket from the scenario and that identifier.
-- **Without the header, Reef reads the first messages.** It computes the bucket from the scenario and the text of the system message, the first message and the first user message. Later turns repeat these messages, so a client that shortens its history can move to another artifact. Conversations that start with the same messages get the same artifact, so fixed prompts can change the observed percentages.
+- **Without the header, Reef uses the initial messages.** The bucket uses the scenario and text from the system, first and first user messages. Shortening history can move a conversation to another artifact. Identical initial messages select the same artifact, so fixed prompts can skew observed percentages.
 - **A changed weight moves few conversations.** A change from 95/5 to 80/20 moves only the conversations of the 15 buckets that go to another artifact.
 - **Some requests do not use the weights** and keep their usual target:
 
@@ -113,7 +119,7 @@ The weights apply to a model request that names ``active``, or a model that the 
 
 The weights select the artifact, and the artifact's engine selects its own replica.
 
-The record names the artifact that answered in ``artifact_id``, and holds the bucket and the weights in ``metadata.traffic``. While the scenario serves an artifact, the samples service does not mark its records' samples stale, whatever its weight (`Call one served artifact`_). A job can then hold samples of several artifacts. Each sample keeps its own ``artifact_id`` and recorded log probabilities.
+Records identify the responding artifact in ``artifact_id`` and store the bucket and weights in ``metadata.traffic``. Samples remain non-stale while their artifact is served, regardless of weight (`Call one served artifact`_). Jobs can include samples from several artifacts, each with its own artifact ID and recorded log probabilities.
 
 Serve nothing
 -------------
@@ -140,7 +146,7 @@ The state applies to the whole scenario, with every component. While the scenari
 
 The scenario serves again when ``served`` names one or more artifacts. The other components then serve the artifacts of the active selection. The state holds after a restart.
 
-A nonempty mapping can follow at once, without a wait for the delayed stop. The runtime can reuse a verified binding; a retired checkpoint loads again. Poll the `Startup status <http-api-inference.rst#startup-status>`__ of each requested artifact before calling it. A checkpoint that the scenario did not serve before still needs a free inference component (`Replace a checkpoint <../user-guide/operate.rst#set-what-a-scenario-serves>`__).
+You can submit a nonempty mapping immediately. The runtime reuses verified bindings or reloads retired checkpoints. Poll each artifact's `Startup status <http-api-inference.rst#startup-status>`__ before calling it. New checkpoints still need a free inference component (`Replace a checkpoint <../user-guide/operate.rst#set-what-a-scenario-serves>`__).
 
 Call one served artifact
 ------------------------
@@ -157,7 +163,12 @@ Each served artifact also answers at its own URL, beside the default inference r
      -d '{"served": {"<active id>": 100, "<id>": 0}}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
 
-Send an inference call to ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where ``{route}`` is ``chat/completions``, ``responses``, ``messages`` or ``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and never creates a scenario. Reef records it like a call to ``/v1/{route}``, and the record names the ``artifact_id`` that answered. A served artifact also answers a call to ``/v1/{route}`` whose ``model`` is its ``artifact_id``. An artifact that the scenario does not serve has no URL: its calls answer HTTP 404.
+Call ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where ``{route}`` is ``chat/completions``, ``responses``, ``messages`` or ``messages/count_tokens``.
+
+- No ``x-reef-scenario`` header is needed. The call never creates a scenario.
+- Reef records the call as for ``/v1/{route}``, including the responding ``artifact_id``.
+- You can also call ``/v1/{route}`` with the artifact ID as ``model``.
+- An artifact that is not served returns 404.
 
 The same prefix with ``/evaluation/v1/{route}`` makes the same call without a record.
 
@@ -174,9 +185,8 @@ These rules apply to an artifact that serves beside the active one:
 Bind one chat attempt
 ~~~~~~~~~~~~~~~~~~~~~
 
-Use this optional contract when the caller must select a target before sending a model request.
-It supports non-streaming Chat Completions on the artifact routes, including the unrecorded evaluation route.
-Existing calls without the new headers keep their routing, streaming and retry behavior.
+Select a target before sending a non-streaming Chat Completions request on an artifact route.
+This also supports unrecorded evaluation calls. Calls without binding headers keep their usual behavior.
 
 First read ``GET /reef/scenarios/{scenario}/inference/target?model={name}`` with the existing service token.
 ``model`` names an exact serving row and defaults to ``active``. An unknown name returns 404, without fallback.
@@ -221,23 +231,21 @@ An accepted request keeps its selected row and settings, even if another artifac
 An engine binding refusal returns 503; an engine abort returns 409. The replica does not retry either response.
 It invokes the configured inference handler at most once per accepted HTTP request.
 
-The binding describes a serving configuration, not new engine guarantees.
-Weight-bearing runtimes must already pin admitted requests to the selected model name or use an immutable provider revision.
-A record-only artifact identifies its configured model, not immutable weights at an external provider.
-The response does not invent token counts or token limits. Callers must validate their handler's usage and configured limits.
+The binding identifies the serving configuration.
+Weight-bearing runtimes must pin admitted requests to the selected model name or use an immutable provider revision.
+A record-only artifact identifies the configured model; it cannot guarantee an external provider's weights.
+Callers must validate their handler's reported usage and configured token limits.
 
-``attempt_id`` correlates a request; Reef does not persist it or deduplicate repeated HTTP requests.
-The caller owns durable admission, retry decisions and result recovery.
-After a timeout or lost response, it must treat execution as uncertain rather than resend the same attempt.
-This addition changes no stored format, service configuration, dependencies or payment behavior.
-It can be rolled out before callers opt in. Older servers reject both new paths without calling a model.
-Thus a mixed deployment can return an unsupported-route error, but cannot silently run a strict call through the old retry loop.
+``attempt_id`` correlates requests but is neither persisted nor used for deduplication.
+The caller owns durable admission, retries and result recovery.
+After a timeout or lost response, treat execution as uncertain. Do not resend the same attempt.
+Older servers reject both attempt paths without calling a model, so mixed deployments cannot silently use the ordinary retry behavior.
 
 
 Restore a scenario selection
 ----------------------------
 
-To restore every component's active artifact together, send ``POST /reef/scenarios/{scenario}/restore`` with ``{"commit_number": 12}``. The commit number names an existing operation, and Reef restores the active selection as it stood after that commit. Use ``{"commit_number": 0}`` for the starting artifacts.
+Send ``POST /reef/scenarios/{scenario}/restore`` with ``{"commit_number": 12}`` to restore all components' active artifacts after that commit. Use ``{"commit_number": 0}`` for starting artifacts.
 
 The answer is ``{scenario, components}``, where ``components`` maps every component name to its restored ``artifact_id``. A changed selection appends a ``restore`` operation. It creates no artifact or repository revision and leaves each trainer's start, the other served artifacts and the traffic split unchanged. Restoring the current selection changes nothing. Poll `Startup status <http-api-inference.rst#startup-status>`__ before you use the restored inference artifact.
 
@@ -252,7 +260,7 @@ Artifact validation and runtime capabilities still apply.
 Serving settings
 ----------------
 
-An artifact holds only its content, not which model serves it or how. A deployment that serves artifacts of several base models gives each scenario a `serving config <http-api-scenarios.rst#serving-config>`__ field that chooses the model of each artifact. The deployment's inference runtime defines and checks that field. An artifact without a setting is served with the deployment's model.
+Artifacts contain content; serving configuration selects their model and runtime settings. For multiple base models, use each scenario's `serving config <http-api-scenarios.rst#serving-config>`__. The inference runtime defines and validates these fields. Artifacts without an override use the deployment's model.
 
 You can change a setting at any time. The runtime applies it when inference next serves the scenario. An artifact that runs keeps its engine.
 

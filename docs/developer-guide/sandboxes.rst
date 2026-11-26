@@ -1,412 +1,253 @@
 Sandbox environments
 ====================
 
-``reef.execution.sandbox`` isolates what Reef runs for a harness or a task.
-This page is for developers who run a program through a sandbox, or who run
-Harbor tasks on a cloud provider. It covers two things that callers must not
-confuse:
+Use ``reef.execution.sandbox`` to run harness programs or Harbor tasks.
+Choose the interface for the work:
 
-.. list-table::
-   :header-rows: 1
-   :widths: 24 38 38
+- ``ProgramExecutor`` runs one program through ``local``, ``sandbox``,
+  ``e2b`` or ``modal``.
+- A Harbor task environment builds the task's Dockerfile and runs its
+  agent and verifier through ``docker``, ``e2b`` or ``modal``.
 
-   * - What
-     - Runs
-     - Kinds
-   * - ``ProgramExecutor``
-     - one program, such as a harness's pinned binary
-     - ``local``, ``sandbox`` (bubblewrap on Linux, Seatbelt on macOS),
-       ``e2b``, ``modal``
-   * - Harbor task environment
-     - a task's ``environment/Dockerfile``, with the task's agent and
-       verifier inside it
-     - ``docker``, ``e2b``, ``modal``
-
-`Executors <executors.rst>`__ describes the executor settings of a
-deployment. Harness rendering and candidate evaluation are outside this
-package.
-
-Callers do not name a sandbox kind or a provider. They use these interfaces
-of ``reef.execution.sandbox``:
-
-- ``build_executor(config)`` returns the ``ProgramExecutor`` of the
-  deployment's ``executor`` setting.
-- ``remote_executor(kind, section, environ)`` returns the cloud sandbox of
-  provider ``kind`` (a key of ``REMOTE_EXECUTORS``: ``e2b`` or ``modal``). A
-  caller with its own settings, such as ``evolution.agent``, passes its
-  section. The factory reads only the provider's options, ``forward_ports``
-  and ``env_from``.
-- ``task_environment`` names the Harbor task environment types and makes
-  their trial config (`Harbor task environments`_).
+``build_executor(config)`` selects a program executor.
+``remote_executor(kind, section, environ)`` builds a cloud executor from
+provider options, forwarded ports and ``env_from``.
+Use `Executors <executors.rst>`__ for worker placement.
 
 Run a command
 -------------
 
-``reef.execution.sandbox.environment.ExecutorEnvironment`` adapts an executor
-to Harbor's ``BaseEnvironment`` without building a task image. Create the root
-and the workspace first. This local example prints ``hello`` and exit code
-zero::
+``ExecutorEnvironment`` adapts a program executor to Harbor's async interface
+without building a task image:
 
-    import asyncio
-    from pathlib import Path
-    from tempfile import TemporaryDirectory
+.. code:: python
 
-    from harbor.environments.base import BaseEnvironment
-    from reef.execution.sandbox.environment import ExecutorEnvironment
-    from reef.execution.sandbox.process import LocalExecutor
+   import asyncio
+   from pathlib import Path
+   from tempfile import TemporaryDirectory
 
-    async def example():
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            workspace = root / "workspace"
-            workspace.mkdir()
-            environment: BaseEnvironment = ExecutorEnvironment(
-                LocalExecutor(), root=root, workspace=workspace
-            )
-            try:
-                await environment.start(force_build=False)
-                result = await environment.exec("printf hello")
-                print(result.stdout, result.return_code)
-            finally:
-                await environment.stop(delete=True)
+   from reef.execution.sandbox.environment import ExecutorEnvironment
+   from reef.execution.sandbox.process import LocalExecutor
 
-    asyncio.run(example())
 
-``exec`` accepts a shell command, a working directory inside the root,
-environment variables and a timeout in seconds. It returns Harbor's
-``ExecResult`` with ``stdout``, ``stderr`` and ``return_code``.
+   async def example():
+       with TemporaryDirectory() as directory:
+           root = Path(directory)
+           workspace = root / "workspace"
+           workspace.mkdir()
+           environment = ExecutorEnvironment(LocalExecutor(), root=root, workspace=workspace)
+           try:
+               await environment.start(force_build=False)
+               result = await environment.exec("printf hello")
+               print(result.stdout, result.return_code)  # hello 0
+           finally:
+               await environment.stop(delete=True)
 
-- A nonzero command exit is a result.
-- A launch failure raises ``ProgramLaunchError``.
-- A timeout raises ``ProgramTimeoutError``.
-- Commands run as the executor's configured user. Selecting another ``user``
-  is unsupported.
 
-``execute`` and ``run_sync`` bridge synchronous callers to this async
-interface. Inside a running event loop, use the async methods directly.
+   asyncio.run(example())
+
+``exec`` accepts a shell command, working directory, environment and timeout.
+It returns ``ExecResult`` with ``stdout``, ``stderr`` and ``return_code``.
+Nonzero exit codes are results; launch failures raise ``ProgramLaunchError``
+and timeouts raise ``ProgramTimeoutError``.
+Changing the executor's configured user is unsupported.
+Use async methods inside an event loop; ``execute`` and ``run_sync`` bridge
+synchronous callers.
 
 Files and lifecycle
 ~~~~~~~~~~~~~~~~~~~
 
-**Files.** Upload and download files or directories with Harbor's methods.
-Environment paths refer to the local staged root, including in a cloud
-sandbox. Relative paths start at the workspace, and a transfer refuses a path
-outside the root. Uploads call the session's ``push`` and downloads call its
-``pull``, so a cloud sandbox's download refreshes the staged copy first.
-Upload files before you start the commands that use them.
+Upload files before commands use them. Relative paths start at the workspace;
+transfers outside the staged root are refused. Cloud uploads push staged
+files, and downloads pull fresh files before reading them.
 
-**Ownership.** The caller owns the staged root. ``stop`` terminates the
-environment's local processes but does not delete the caller's files.
-``start`` opens the executor's session:
+The caller owns the staged root. Stopping an environment leaves those files.
+A session opened by ``start`` is owned and closed by ``stop(delete=True)``.
+An explicitly supplied session is borrowed and normally remains open.
 
-- When ``start`` opens a new session, such as a cloud sandbox, the environment
-  owns it and ``stop(delete=True)`` closes it.
-- When the caller passes an open session, the environment borrows it.
-  ``stop`` leaves it running, and its owner must close it after the agent
-  finishes.
-
-**Cancellation.** Cancelling a command terminates its environment's processes
-before it returns, and closes the session, including a borrowed one. Transfer
-and cleanup failures propagate. Retaining a stopped owned session and forcing
-template rebuilds are unsupported.
+Cancellation terminates environment processes and closes even borrowed
+sessions before returning. Transfer and cleanup failures propagate.
+Keeping stopped owned sessions and forcing template rebuilds are unsupported.
 
 Bind an executor to a program
 -----------------------------
 
-An executor runs one program, such as a harness binary. Describe the program
-with a ``reef.execution.sandbox.process.SandboxProgram`` subclass, then bind
-it::
+Describe the program with ``SandboxProgram``, then bind it:
 
-    executor, binary = build_executor(config).for_program(program)
+.. code:: python
 
-``for_program`` returns the bound executor and the binary its processes
-launch. Pass ``binary=`` to override the resolved binary. The harness package
-provides ``reef.harness.tasks.vendor_install.AdapterProgram`` for an adapter.
+   executor, binary = build_executor(config).for_program(program)
 
-.. list-table::
-   :header-rows: 1
-   :widths: 24 76
+``binary=`` can override resolution.
+Host executors use ``program.host_binary()`` and may install it.
+Local sandboxes expose ``host_install_dir()`` read-only.
+Cloud executors use ``program.binary`` from their image, install nothing on
+the host and reject self-isolating programs.
+Harness adapters supply ``AdapterProgram``.
 
-   * - Executor
-     - How it resolves the binary
-   * - On the Reef host
-     - ``program.host_binary()``, which can install the binary. Bubblewrap
-       binds ``program.host_install_dir()`` read-only, and Seatbelt allows
-       reads of it.
-   * - Cloud sandbox
-     - ``program.binary`` in its image (an E2B template, a Modal image). It
-       never installs on the Reef host, and it refuses a ``self_isolating``
-       program.
+Open a session when multiple processes need shared sandbox state or forwarded
+host ports:
 
-A run of several processes that must reach ports on the Reef host opens a
-session::
+.. code:: python
 
-    session = executor.open_session(forward_ports=(gateway_port,), timeout_s=600)
-    try:
-        ...  # launch processes; session.pull(root, "workspace") refreshes their files
-    finally:
-        session.close()
+   session = executor.open_session(forward_ports=(gateway_port,), timeout_s=600)
+   try:
+       ...  # Run processes and pull their output files.
+   finally:
+       session.close()
 
-- The local executor and a local sandbox on its default network already reach
-  the host, so the session is the executor itself.
-- An isolated bubblewrap network forwards the ports. An isolated Seatbelt
-  profile allows them.
-- A cloud sandbox opens one sandbox with a tunnel for each port.
-
-``push``, ``pull`` and ``close`` do nothing for an executor whose processes
-use the host's files. ``runs_on_host`` tells a caller whether processes see
-the host's paths, environment and container runtime.
+Host-backed sessions can reuse the executor. Cloud sessions own one sandbox
+and its tunnels. ``runs_on_host`` identifies access to host paths and resources.
 
 Isolation
 ~~~~~~~~~
 
-The local executor provides no isolation. Bubblewrap, Seatbelt and the cloud
-sandboxes each keep their read-only inputs, writable state and network rules;
-`Running runs <../user-guide/evolve-your-harness.rst#running-runs>`__ lists
-them, and the evaluation runs and a method's own agent are configured
-separately.
+``local`` provides no isolation. ``sandbox`` selects bubblewrap on Linux or
+Seatbelt on macOS. Evaluation and coding-agent isolation are configured separately.
+See `Running runs <../user-guide/evolve-your-harness.rst#running-runs>`__.
 
-On macOS, ``executor: sandbox`` selects ``SeatbeltExecutor``. It launches the
-program with ``sandbox-exec`` under a profile with the same read, write and
-credential rules as bubblewrap. It differs in three ways:
+Seatbelt differs from bubblewrap:
 
-- Seatbelt profiles do not nest. A native loop in this sandbox runs its tool
-  calls under the run's profile, and its trajectory reports enforcement
-  ``none`` instead of a narrower profile per call.
-- An isolated network denies every loopback port except the forwarded ones,
-  but the host's LAN addresses stay reachable.
-- macOS cannot limit address space, so preflight refuses
-  ``limits.memory_bytes``. The other limits apply.
+- Profiles cannot nest; native tool calls retain the outer run profile.
+- Isolated networking restricts loopback ports but leaves host LAN addresses reachable.
+- ``limits.memory_bytes`` is unsupported and fails preflight.
 
 Harbor task environments
 ------------------------
 
-Select a Harbor environment by name: ``docker``, ``e2b`` or ``modal``
-(``HARBOR_TASK_ENVIRONMENTS``); ``checked_task_environment`` refuses any
-other name. Use ``e2b`` for a self-hosted service that implements E2B's API,
-such as AgentENV. Configure its endpoints in the rollout process, as
-`Rollout job parameters
-<../reference/configuration-generated-tasks.rst#rollout-job-parameters>`__
-describes.
+``checked_task_environment`` accepts ``docker``, ``e2b`` and ``modal``.
+``task_environment_probes`` checks each provider's packages, credentials or daemon.
+``environment_config(environment, task_path, agent)`` builds the Harbor section.
+Use E2B settings for compatible services such as AgentENV.
 
-``task_environment_probes(environment)`` returns a readiness probe for each
-thing a host needs to run tasks in the type: the Docker daemon; the E2B key,
-the e2b package and dockerfile-parse; or the two Modal token variables and
-the modal package. ``remote.REMOTE_TASK_ENVIRONMENTS`` lists the variables
-that each provider's credentials come from.
+Cloud lifetime includes build, agent and verifier limits plus one hour,
+capped at one day. Agent timeout overrides replace its task limit;
+setup timeout overrides add to it.
+Without an agent limit, Modal uses two hours and E2B uses Harbor's one-day default.
 
-``environment_config(environment, task_path, agent)`` makes the
-``environment`` section of a Harbor trial config. ``agent`` is the trial's
-Harbor agent config, or ``None``. For ``docker``, the section holds the type
-alone. For ``e2b`` and ``modal``, it also holds the sandbox's lifetime. For
-``modal``, it selects Modal's VM runtime when the task has
-``environment/docker-compose.yaml`` and asks for no GPU. For ``e2b``, it
-names the class ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``
-in Harbor's ``import_path`` field. For ``modal``, Reef also supplies an
-environment class so evaluations can wait when Modal has no capacity.
+Reef's E2B environment requests deletion on timeout and preserves
+``COPY --chmod`` modes. ``REEF_E2B_DOCKERFILE_BUILD=aenv`` uses
+``aenv build`` for AgentENV Dockerfiles, including multi-stage builds.
+Modal uses a VM runtime for Compose tasks without GPUs.
 
-**Lifetime.** ``sandbox_timeout_secs`` is the sum of the task's build, agent
-and verifier time limits, plus one hour, at most one day. A nonzero
-``override_timeout_sec`` in ``agent`` replaces the task's agent time limit,
-and an ``override_setup_timeout_sec`` adds to the sum. When the agent has no
-time limit, the sum does not apply: ``modal`` gets a lifetime of two hours,
-and ``e2b`` gets none, so Harbor's default of one day applies.
-
-**The E2B class.** ``KillOnTimeoutE2BEnvironment`` is Harbor's
-``E2BEnvironment`` with three differences:
-
-- It creates the sandbox with ``lifecycle={"on_timeout": "kill"}``, which
-  asks the service to delete the sandbox at the end of its lifetime. Without
-  the argument, a self-hosted service can pause the sandbox instead.
-- E2B's Dockerfile parser drops ``COPY --chmod``. The class adds a ``chmod``
-  after each such copy, so the files keep their modes.
-- AgentENV's E2B template builds refuse every ``COPY`` step. With
-  ``REEF_E2B_DOCKERFILE_BUILD=aenv``, Reef runs ``aenv build``, which supports
-  multi-stage Dockerfiles.
-
-With ``aenv``, the class uses a ready template and waits for a build that
-another trial runs. It deletes and rebuilds a failed template, and a template
-that stays ``waiting`` for three minutes with no build behind it. A failed
-``aenv build`` deletes only the template that it made itself. Reef retries
-HTTP 429, 502, 503 and 504 responses from the AgentENV API, the HTML page of
-a proxy's HTTP 500, and connection timeouts until the build timeout. The
-AgentENV API's own HTTP 500, for example for a full disk, fails the build at
-once. An AgentENV worker answers 429 when it has no free build slot.
+AgentENV builds reuse ready templates and wait for active builders.
+Failed templates and templates stuck waiting without a builder for three
+minutes are rebuilt. Retryable capacity, proxy and connection errors retry
+until the build timeout; AgentENV's own HTTP 500 fails immediately.
 
 Tasks with Compose services on AgentENV
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A task can name more services next to ``main`` in
-``environment/docker-compose.yaml``, for example the server of a CTF
-challenge. By default, an ``e2b`` trial starts only the task's image, and the
-agent reaches no other service. With ``REEF_E2B_COMPOSE=aenv``, which needs
-``REEF_E2B_DOCKERFILE_BUILD=aenv``, the class runs the project in one sandbox
-with ``aenv compose up``. The agent's commands and files go to ``main``, and
-the services reach one another by name, as under Docker Compose.
+Set both ``REEF_E2B_DOCKERFILE_BUILD=aenv`` and ``REEF_E2B_COMPOSE=aenv``
+to run ``environment/docker-compose.yaml`` in one sandbox.
+Agent commands target ``main``; services communicate by name.
+Without this setting, E2B starts only the task image.
 
-Before you set ``REEF_E2B_COMPOSE=aenv``, check the tools that manage the
-repository of the AgentENV deployment. ``aenv build --image`` and
-``aenv compose up`` write image tags and image descriptions there
-(``images/tags`` and ``images/descriptions`` in a file repository). A tool
-that removes unused layers must read these records.
+- ``main`` uses the task's Dockerfile or ``docker_image``.
+  Other services require ``image`` and cannot declare ``build``.
+- All services share the task's CPU and memory.
+- Compose uses images, not templates. ``build_task_main_image`` can prepare
+  only the main image. Missing prepared images raise ``TemplateNotPreparedError``.
+- Trials delete their sandboxes. AgentENV itself pauses them on lifetime expiry.
+- ``aenv`` and ``aenv-compose-plan`` must share a directory on ``PATH``.
 
-- ``main`` runs the image that ``aenv build --image`` builds from the task's
-  Dockerfile, or the task's ``docker_image``. Every other service needs an
-  ``image``: the class refuses a ``build``.
-- All services share the sandbox, which has the task's CPU and memory.
-- The task uses no template. ``build_task_template`` builds the image of
-  ``main`` instead. ``build_task_main_image(task_path)`` builds only that
-  image, for a deployment that makes its templates in another way. A trial
-  that builds no template fails with ``TemplateNotPreparedError`` when the
-  image is missing.
-- AgentENV pauses the sandbox at the end of its lifetime, and does not delete
-  it. A trial deletes its sandbox when it ends.
-- ``aenv`` and its planner ``aenv-compose-plan`` must be in one directory on
-  ``PATH``.
-
-AgentENV accepts 1 to 24 services, bridge networks and named volumes. It
-refuses a project that reads files of the host, such as ``env_file`` or
-``secrets``. It takes no variable for ``${NAME}`` in the Compose file.
+AgentENV supports 1–24 services, bridge networks and named volumes.
+It rejects host file inputs such as ``env_file`` and ``secrets``, and does
+not supply Compose variable substitutions.
+Repository cleanup tools must preserve images referenced by AgentENV's
+image-tag and description records.
 
 Build templates before the trials
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-By default, a trial builds a missing template inside its environment start
-limit, and a wait for a free AgentENV builder counts against that limit. A
-trial builds a verifier template only after its agent ends, so a late build
-there loses the agent's work.
+Call ``reef.execution.sandbox.e2b.build_task_template(task_path)`` to prepare
+the task and separate verifier templates before spending rollout time.
+It returns the task template alias and uses trial build limits and resources.
 
-``reef.execution.sandbox.e2b.build_task_template(task_path)`` builds the
-templates that a trial of the task would build, with the same aliases,
-resources and build timeouts: the template of the task's environment, and the
-template of each separate verifier environment of the task or of its steps.
-It returns the alias of the task environment's template. A trial after it
-finds the templates ready.
+E2B evaluations prepare templates before admitting their rollouts.
+Template work consumes neither rollout concurrency nor sandbox slots.
+Capacity waits can retry for up to six hours per attempt.
+Set ``evaluation.require_prepared_templates`` to prohibit trial-time builds.
 
-An evaluation on ``e2b`` uses it as follows. A deployment can also call the
-function for each task before an evaluation.
+For custom preparation, subclass ``TaskTemplateBuilder`` and configure
+``evaluation.task_template_builder``:
 
-- The evaluation makes the templates in one template item for each task,
-  before it adds the task's rollouts. The item calls the deployment's
-  ``evaluation.task_template_builder``, or ``build_task_template`` without
-  one.
-- It keeps template items for the first 32 tasks that still have rollouts to
-  add, so their templates build while earlier rollouts run. The rollouts of a
-  task whose template is ready start before those of an earlier task whose
-  template still builds.
-- A template item holds no rollout slot of ``max_concurrent_rollouts`` and no
-  sandbox slot of a worker. When the build finds no free builder within the
-  build timeout, the item waits again, for at most six hours in each attempt.
-- ``evaluation.require_prepared_templates`` keeps template builds out of
-  trials.
+- ``async build(scenario, task_name, task_directory)`` returns when templates
+  are ready. Raise ``TimeoutError`` for unavailable builder capacity;
+  other errors fail the attempt.
+- Override ``build_for_owner`` when owner identity selects templates.
+  Reject missing or unsupported owners; never substitute another owner.
+- Override ``build_for_version(..., task_digest=...)`` for pinned work.
+  Use the admitted digest or supplied pinned directory.
 
-A deployment's builder subclasses ``TaskTemplateBuilder``
-(``reef.evaluation.task_templates``), whose docstring gives the contract. With
-``evaluation.pin-task-files``, startup refuses a builder that does not override
-``build_for_version``.
+``evaluation.pin-task-files`` rejects builders without version-aware support.
 
 Keep the files of a trial
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The evaluation worker removes the directory of each trial when the attempt
-ends. To keep more of a trial, such as the logs of the agent and the verifier,
-name a ``TrialObserver`` (``reef.evaluation.trials``) in
-``evaluation.trial-observer``. The worker gives it each trial before it removes
-the directory. The docstring of ``TrialObserver`` gives the contract.
+Configure ``evaluation.trial-observer`` with a ``TrialObserver`` subclass.
+``observe(trial)`` runs before scoring and directory removal.
+Copy needed files before returning; do not retain the directory reference.
+``trial.directory`` can be ``None``. Observer exceptions are logged without
+changing the rollout or its score.
 
 Who applies the config
 ~~~~~~~~~~~~~~~~~~~~~~
 
-- ``reef.harness.harbor.rollouts.TaskRolloutRunner`` gives the config to each
-  in-process trial and each environment build: the generator's runs, the
-  evaluation rollouts and the training rollouts. The caller decides this, not
-  the agent.
-- A generator check on ``e2b`` runs ``harbor run -e <import path>``, with
-  ``--ek sandbox_timeout_secs=<seconds>`` when the section holds a lifetime.
-  A check passes no agent config, so only the task's time limits count. A
-  check on ``docker`` or ``modal`` runs ``harbor run -e <type>`` without the
-  config.
-- Other Harbor runs get Harbor's own ``E2BEnvironment``: a ``harbor run -e
-  e2b`` that Reef does not start, and the task environment that the
-  ``terminus`` adapter of the Meta-Harness Terminal-Bench campaign drives
-  from its own runner.
+Reef's task rollout runner supplies environment settings for generation,
+evaluation and training. Harbor commands started outside Reef use Harbor's
+own environment defaults. See
+`Rollout job parameters <../reference/configuration-generated-tasks.rst#rollout-job-parameters>`__.
 
 Shared execution control
 ------------------------
 
-``reef.execution.lifecycle.Execution`` controls a run, or an owner of several
-runs, without a result type. ``ProcessScope``, ``JobContext``,
-``BackgroundJobWorker`` and ``ProgramExecution`` implement it. Results stay
-on the concrete interfaces.
+``Execution`` controls cancellation and closure independently of result types:
 
-- ``request_stop()`` is thread-safe and idempotent. It requests cancellation
-  and does not wait for cleanup.
-- ``wait_closed(timeout_seconds)`` returns true only after the work and the
-  owned cleanup finish, and false when the timeout expires. It raises a
-  reported cleanup failure. ``None`` waits without a deadline; zero polls.
-  Closure does not imply that the work succeeded.
+- ``request_stop()`` is thread-safe, idempotent and nonblocking.
+- ``wait_closed(timeout_seconds)`` returns ``True`` only after work and
+  owned cleanup finish. It returns ``False`` on timeout and raises cleanup failures.
+  ``None`` waits indefinitely; zero polls.
 
-Do not block the thread or event loop that the execution needs to finish.
-
-``reef.execution.sandbox.environment.ProgramExecution(environment, argv)``
-owns one run through an unstarted ``ExecutorEnvironment``. Call ``run()``
-from synchronous code or await ``run_async()``; both return
-``ProcessOutcome`` after cleanup. Another thread can cancel the run through
-``Execution``. A stopped run cannot start again. A ``ProgramExecutor`` is the
-executor or session resource, not the lifetime of a run.
+Closure does not imply success. Do not block the event loop or thread needed
+for cleanup.
+``ProgramExecution`` owns one run through an unstarted ``ExecutorEnvironment``.
+``run`` and ``run_async`` return ``ProcessOutcome`` after cleanup;
+a stopped execution cannot restart.
 
 Local process ownership
 -----------------------
 
-Use ``ProcessScope`` when a local command needs a timeout and coordinated
-shutdown. ``run(ProcessRequest(...))`` starts a child, waits for it, and
-returns a ``ProcessResult``: the captured output, the exit status and the
-termination reason. The request supplies an absolute working directory and
-the complete environment mapping. A missing executable or another launch
-error propagates without registering a child.
+``ProcessScope.run(ProcessRequest(...))`` launches a child and returns output,
+exit status and termination reason. Supply an absolute working directory and
+a complete environment mapping. Launch errors propagate.
 
-- **Reason.** A result's reason is ``exited``, ``timed_out`` or ``stopped``.
-  The first accepted termination request decides it, even if the child
-  handles the signal and exits with code zero.
-- **Grace.** ``grace_seconds`` gives a child time to clean up after SIGTERM;
-  SIGKILL follows. Zero requests SIGKILL at once. The local executor
-  terminates at once on a timeout. Harbor checks keep a cleanup grace.
-- **Stop.** ``request_stop()`` refuses new launches and signals the current
-  children. ``wait_closed`` returns true only when the scope and its attached
-  scopes have reaped their direct children and handled their output.
-- **Attachment.** A child scope has one owner, and attaching it transfers
-  shutdown responsibility. Attaching again to the same owner is allowed. A
-  second owner and a cycle are refused.
+The first accepted termination request fixes the reason:
+``exited``, ``timed_out`` or ``stopped``. A later zero exit does not change it.
+``grace_seconds`` allows SIGTERM cleanup before SIGKILL; zero kills immediately.
+Stopping refuses new launches. Closure waits for owned children and output.
 
-Scopes signal POSIX process groups by default. They cannot reclaim
-descendants that leave the group, Docker containers or remote sandboxes.
-Harbor remains responsible for its task environments, and a termination grace
-for Harbor does not prove that remote cleanup succeeded.
+Attaching a child scope transfers shutdown ownership. Reattachment to the
+same owner is safe; other owners and cycles are refused.
+POSIX process-group cleanup cannot reclaim detached descendants, containers
+or remote sandboxes. Their owners must clean them up separately.
 
 Background job ownership
 ------------------------
 
-``BackgroundJobWorker`` gives each running submission a ``JobContext`` and
-binds its process scope across async calls and ``asyncio.to_thread``. Local
-executor launches attach their scopes to this owner; generator checks use it
-directly. A runner implements ``run(job)``, or overrides
-``run_in_context(job, context)`` to read cancellation or use the scope.
+``BackgroundJobWorker`` gives each accepted submission a ``JobContext``.
+Its process scope follows async calls and ``asyncio.to_thread``.
+Runners implement ``run(job)`` or ``run_in_context(job, context)``.
 
-**Results.** Every accepted submission produces one result, including
-separate submissions with the same receipt. The runner must preserve the
-receipt. A result becomes available after the runner's cleanup and after its
-processes are reaped. Failure and cancellation produce ``Failed``. A runner
-must await the cleanup of its own threads, async tasks and remote resources:
-cancelling a coroutine does not stop a detached thread.
+Each submission produces one result, even for duplicate receipts.
+Preserve the receipt. Publish results only after cleanup;
+failures and cancellation produce ``Failed``.
+Runners must join their own threads, tasks and remote resources.
+Coroutine cancellation alone cannot stop detached threads.
 
-**Shutdown.**
-
-- ``request_stop()`` stops admission and cancels queued work. Running jobs
-  have five seconds to finish before cancellation. Their local processes then
-  get a ten-second termination grace.
-- ``wait_closed(timeout_seconds)`` returns false while the worker thread is
-  alive, including when a runner delays cancellation.
-- ``close()`` requests shutdown and waits up to twenty seconds, then raises
-  ``TimeoutError`` if closure is incomplete. A caller can wait again. A
-  timeout does not reopen the worker, and it does not show that the worker
-  released its resources.
+Shutdown rejects new work and cancels queued jobs.
+Running jobs receive five seconds before cancellation, then local processes
+receive ten seconds of termination grace.
+``close()`` waits at most twenty seconds and raises ``TimeoutError`` if
+cleanup remains. Callers can wait again; timeout neither reopens the worker
+nor proves that resources were released.

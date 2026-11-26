@@ -1,82 +1,54 @@
 Reef: continual learning for AI agents
 ======================================
 
-Reef is infrastructure for continual learning. It sits between your agent's
-harness and the model that the harness calls. It records each request, its
-response, and the feedback about the response. Reef then uses these signals to
-produce a better version of the model weights or of the agent's harness.
+Use Reef to train model weights or update an agent harness from feedback.
+Reef records model requests, responses and feedback. A recipe uses these
+records to produce, evaluate and select new versions.
 
 .. figure:: ../assets/reef-overview-light.svg
    :alt: Reef between the harness and the model: requests and feedback in, answers and a new harness tree back; inference and new weights to the model
 
-   Reef serves the model, loads new weights into the engine, and sends a new
-   harness tree to the agent.
+   Reef connects model inference, feedback and versioned updates.
 
 Why Reef
 --------
 
-AI agents accumulate feedback all the time: passing tests, user thumbs-downs,
-rubric scores. Turning these signals into a better agent usually needs an
-offline pipeline: export logs, build datasets, retrain, evaluate, redeploy.
-
-Reef puts that loop into the serving lifecycle:
+Connect your existing tests, graders or user feedback to this loop:
 
 .. container:: flow
 
    Serve
-       forward the request and keep the exchange
+       forward the model request
 
    Record
-       store the snapshot that produced the response
+       store the exchange and the version that served it
 
    **Learn**
-       the recipe uses records to create a candidate version
+       use feedback to create a candidate version
 
    Publish
-       an accepted candidate becomes the active selection
+       make an accepted candidate available to the agent
 
-   :Loop: the next request is served by the new version
-
-Existing inference engines and RL frameworks cover parts of that loop, but not
-the whole thing:
-
-+----------------------------+-------------+---------------+----------+
-| Ability                    | Inference   | RL training   | **Reef** |
-|                            | engine      | framework     |          |
-|                            | (vLLM,      | (slime, veRL, |          |
-|                            | SGLang, …)  | AReaL, …)     |          |
-+============================+=============+===============+==========+
-| Serves live traffic        | ✓           | ✗             | ✓        |
-+----------------------------+-------------+---------------+----------+
-| Trains weights             | ✗           | ✓             | ✓        |
-+----------------------------+-------------+---------------+----------+
-| Versions what it served    | ✗           | ✗             | ✓        |
-+----------------------------+-------------+---------------+----------+
-| Stays live through updates | ✗           | ✗             | ✓        |
-+----------------------------+-------------+---------------+----------+
-| Evolves beyond weights     | ✗           | ✗             | ✓        |
-| (skills, harness)          |             |               |          |
-+----------------------------+-------------+---------------+----------+
+   :Loop: collect feedback on the next version
 
 What Reef evolves
 -----------------
 
-Reef can evolve both the model weights and the `harness tree
-<../reference/glossary.rst#harness-tree>`__. A `recipe
-<../reference/glossary.rst#recipe>`__ controls which.
-
-- **Model weights.** Reef runs the training step and hot-swaps the result
-  into the serving engine. See `Evolve your model
+- **Model weights.** Train from agent feedback and load accepted weights
+  into the inference engine. See `Evolve your model
   <../user-guide/evolve-your-model.rst>`__.
-- **The harness tree.** Reef proposes an edit, runs the current and proposed
-  versions on your tasks, and keeps the winner. Adapters cover pi, opencode,
-  Claude Code, Codex, DeepSeek Harness, Hermes Agent, Terminus 2, and Reef's
-  own native harness, whose tools, hook listeners, and loop graph evolve too.
+- **The harness tree.** Update the agent's prompts, rules, skills or code.
+  Compare candidates on your tasks and publish the selected version.
   See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__.
+
+A `recipe <../reference/glossary.rst#recipe>`__ defines the learning method.
 
 Start using Reef
 ----------------
 
-Follow the `inference and feedback quickstart <quickstart.rst>`__ to run
-Reef locally and submit your first report. Then `choose a learning recipe
-<../user-guide/recipes.rst>`__ for your workload and compute budget.
+- `Record inference and feedback <quickstart.rst>`__: start a local service
+  and send your first report.
+- `Evolve a coding agent's harness <harness-tutorial.rst>`__: connect an agent
+  and use feedback to update its rules.
+- `Choose a recipe <../user-guide/recipes.rst>`__: select a method for your
+  feedback and compute resources.

@@ -1,116 +1,73 @@
 OpenClaw-RL: learn from agent conversations
 ===========================================
 
-OpenClaw-RL (`arXiv:2603.10165 <https://arxiv.org/abs/2603.10165>`__) trains
-a personal agent to satisfy the preferences of its user. It learns from their
-conversations: the user's next message shows whether a reply was accepted,
-and the model is updated while the agent stays in service.
+Use `OpenClaw-RL <https://arxiv.org/abs/2603.10165>`__ to train an agent from
+its conversations. A judge reads the user's next message as feedback on the
+previous reply. Reef updates the weights while the agent stays in service.
+The recipe requires Slime, GPUs, and a separately served judge model.
 
-+-------------+------------------------------------------------------------+
-| Evolves     | model weights                                              |
-+-------------+------------------------------------------------------------+
-| Signal      | none sent by the agent; Reef reads its recorded traffic    |
-+-------------+------------------------------------------------------------+
-| Loss family | ``openclawrl``                                             |
-+-------------+------------------------------------------------------------+
-| Package     | ``recipes/openclawrl/``                                    |
-+-------------+------------------------------------------------------------+
-| Pipeline    | computed feedback                                          |
-+-------------+------------------------------------------------------------+
-| Needs       | GPUs, plus a second served model for the PRM judge         |
-+-------------+------------------------------------------------------------+
-| Example     | ``recipes/openclawrl/examples/openclawrl/``                |
-+-------------+------------------------------------------------------------+
+Run the example
+---------------
+
+The `homework example
+<../../../recipes/openclawrl/examples/openclawrl/README.md>`__ runs 72 GSM8K
+sessions with a Hermes agent and a simulated student. It requires Docker
+and seven GPUs: four for training, and one each for serving, the PRM,
+and the student model.
+
+.. code:: bash
+
+   docker build -f docker/Dockerfile.reef -t reef-openclawrl .
+   hf download Qwen/Qwen3-4B-Thinking-2507 --local-dir ~/models/Qwen3-4B-Thinking-2507
+   hf download Qwen/Qwen3-32B --local-dir ~/models/Qwen3-32B
+   bash recipes/openclawrl/examples/openclawrl/run.sh
+
+``run.sh`` builds the simulated student's image, starts the stack, and runs
+the sessions in order. The agent sends no training reports.
 
 How it works
 ------------
 
-The learning signal comes from the conversation itself. When the user accepts
-a reply and moves on, the turn counts as positive. When the user complains,
-it counts as negative. Reef reads this from the traffic it already records,
-so the agent sends no training reports.
-
-.. container:: flow
-
-   Traffic
-       requests and responses recorded by Reef
-
-   Sessions
-       turns correlated by session tag, with trace matching as a fallback
-
-   **Judge**
-       score each turn from the state that followed it
-
-   Step
-       train the policy on judged turns
-
-   :Loop: the next session is served by the updated weights
+Reef groups recorded calls into sessions. When a session's next state
+arrives, a separate process reward model (PRM) judges the previous turn.
+The judge scores acceptance and can propose hindsight hints.
 
 Correlate sessions
-~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
 
-The judging stage rebuilds sessions from the recorded traffic. Send a stable
-``x-reef-tag-session`` header on every inference of a conversation. The value
-must be unique to the conversation within its scenario: Reef binds the turns
-of one tag in arrival order, so concurrent or distinct conversations must not
-share a tag. The tag also supports agents that keep or rewrite their history
-locally. Hermes cannot set the tag itself, so the included example uses a
-small header shim.
+Send a stable ``x-reef-tag-session`` header on every call in a conversation.
+The value must be unique within the scenario. Reef orders matching turns by
+arrival, so concurrent conversations must not share a tag. The example adds
+this header through a shim for Hermes.
 
-Without the tag, the stage falls back to trace matching: the client must
-resend an extending transcript on each request. The fallback has limits:
-
-- Identical histories can be ambiguous.
-- A history change that does not preserve a prefix, such as compaction or a
-  sliding window, breaks the chain and leaves the earlier turn unmatched.
-- A turn that never correlates is never judged and never trains, so a run on
-  the fallback can produce an empty training set.
-
-The recipe warns once when it sees untagged traffic, and again when sessions
-keep expiring without a bound turn. It counts both under ``correlation`` in
-the ``prm_record_file`` line. ``max_open_sessions`` caps the session table
-and evicts the least recently active sessions above it.
+Without a tag, Reef matches extending transcripts. Identical histories can
+be ambiguous; compaction and sliding windows can break the chain.
+An unmatched turn never trains. Reef warns about untagged traffic and
+sessions that expire without a match. The ``correlation`` counters appear
+in the ``prm_record_file`` output.
 
 Judge and train
 ~~~~~~~~~~~~~~~
 
-When a session's next state arrives, an independently deployed PRM judges the
-finished turn. The PRM votes on whether the next message shows acceptance. On
-acceptance, it also proposes a hindsight hint: a short instruction that would
-have produced this reply if the user had given it first. Judged turns go
-directly into job data.
+The objective combines two signals:
 
-OpenClaw-RL trains with two signals:
+- RL uses a PPO clipped surrogate with the judged reward as its advantage.
+  ``openclawrl-w-rl`` sets the weight; default 1.0.
+- Distillation uses a frozen base model conditioned on an accepted hindsight
+  hint. ``openclawrl-w-opd`` sets its weight; default 1.0.
+  ``openclawrl-topk`` sets the candidate token count; default 4.
 
-- **RL.** A PPO clipped surrogate on the sampled tokens, with the turn's raw
-  reward as its advantage. ``--openclawrl-w-rl`` sets its weight (default
-  1.0).
-- **On-policy distillation (OPD).** The policy is pulled toward a teacher on
-  the student's top-K token candidates. The teacher is the frozen base model
-  conditioned on one accepted hindsight hint; the objective selects the hint
-  whose teacher top-K best overlaps the policy's. ``--openclawrl-topk`` sets K
-  (default 4) and ``--openclawrl-w-opd`` sets the weight (default 1.0).
-
-Set these flags in ``training.options``. The actor computes the top-K
-candidates and their old-policy log-probabilities with the weights of the
-step's start.
-
-The training component renders the judged turn, and one hint-enhanced teacher
-request for each candidate hint, with the model's chat template. Give the
-component the serving engine's chat template arguments (`Chat template
-arguments <../../reference/configuration-inference.rst#chat-template-arguments>`__). A
-turn that cannot render, or whose candidates all fail to render, does not
-train, and the job metric ``unrenderable_samples`` counts it.
+Set these flags in ``training.options``. Match training and serving
+`chat template arguments
+<../../reference/configuration-inference.rst#chat-template-arguments>`__.
+A turn that cannot render does not train. The same applies when no hint
+candidate renders. ``unrenderable_samples`` counts these exclusions.
 
 Configuration
 -------------
 
-The deployment's ``pipeline`` section configures the recipe's two stages. The
-recipe's own classes are the defaults, so the section needs no ``module``.
-
-- ``record2sample`` (``OpenClawRLSamples``) correlates sessions, runs the PRM
-  judge, and makes one sample of each judged turn.
-- ``sample2job`` sets the job size and writes the PRM record file.
+Set the PRM endpoint and tokenizer under ``pipeline.record2sample``.
+Set the number of judged turns per job under ``pipeline.sample2job``.
 
 .. code:: yaml
 
@@ -134,7 +91,7 @@ recipe's own classes are the defaults, so the section needs no ``module``.
        idle time in seconds before a session expires
 
    ``pipeline.record2sample.config.max_open_sessions`` : 4096
-       ceiling on live sessions; the least recently active are evicted above it
+       Maximum live sessions. Reef evicts the least recently active sessions.
 
    ``pipeline.record2sample.config.prm_url`` : ""
        the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
@@ -161,7 +118,8 @@ recipe's own classes are the defaults, so the section needs no ``module``.
        hint candidates collected per turn
 
    ``pipeline.sample2job.config.job_samples`` : required
-       judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+       Judged turns per job. Match ``training.config.global_batch_size`` for
+       one optimizer step per job.
 
    ``training.config.global_batch_size``
        judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
@@ -169,67 +127,32 @@ recipe's own classes are the defaults, so the section needs no ``module``.
    ``pipeline.sample2job.config.prm_record_file`` : ""
        judged population, one JSON line per job; empty disables it
 
-Reef checks the stage config when it loads the recipe. An unknown key or an
-invalid value stops the deployment at startup. A stage key in
-``recipe.config``, such as ``prm_url``, also stops it, and the error names the
-key's ``pipeline`` path.
+Unknown keys and invalid values stop startup. Stage settings such as
+``prm_url`` must be under ``pipeline``, not ``recipe.config``.
 
-The example's ``serve.yaml`` overrides several defaults:
-
-- ``prm_url`` and ``prm_tokenizer_path`` point at the example's PRM engine.
-- ``prm_timeout_s`` is 3600, because a thinking model can spend minutes on a
-  single vote.
-- ``prm_record_file`` is set, so each job writes one line with its
-  ``data_id``, the reward split, and the judge counters.
-
-Reef does not register, schedule or stop the PRM process. The example's
-Compose file owns PRM and student-model startup, health checks and GPU
-allocation. The simulation harness uses the student-model endpoint, outside
-Reef.
-
-Run the example
----------------
-
-The `example <../../../recipes/openclawrl/examples/openclawrl>`__ reproduces
-the paper's personal-agent experiment. A simulated student brings 72 GSM8K
-homework problems to a Hermes agent with one session per problem. Each
-session is scored on whether the agent's first solution reply satisfies the
-student's preferences.
-
-.. code:: bash
-
-   docker build -f docker/Dockerfile.reef -t reef-openclawrl .
-   hf download Qwen/Qwen3-4B-Thinking-2507 --local-dir ~/models/Qwen3-4B-Thinking-2507   # policy and PRM
-   hf download Qwen/Qwen3-32B --local-dir ~/models/Qwen3-32B                             # the student
-
-   bash recipes/openclawrl/examples/openclawrl/run.sh
-
-``run.sh`` builds the simulated student's image, starts the stack that
-``serve.yaml`` describes, and runs the 72 sessions in order. The stack
-uses seven GPUs: four for the tensor-parallel actor, one for the rollout
-engine, one for the PRM, and one for the Qwen3-32B student model.
+The example sets ``prm_timeout_s`` to 3600 for its thinking model.
+It also sets ``prm_record_file`` to save each job's reward split and judge
+counters. Reef does not manage the PRM process. The example's Compose file
+starts the PRM and simulated-student models.
 
 Results
 -------
 
-The example's README records one run over the first 36 sessions of the stream.
+The example records one run over the first 36 sessions. A session passes
+when the first solution is correct, shows its work, and matches the student's
+formatting preferences.
 
 .. image:: ../../assets/openclawrl/learning-curve.png
-   :alt: Accumulated accepts and the rolling bold and list rates
+   :alt: Accumulated accepts and rolling bold and list rates
 
-A session passes when the agent's first solution reply already matches the
-student's preferences, with the work shown and the correct answer. The
-student wants homework that does not look AI-written, so a reply that uses
-bold text or a list draws a complaint. The bold rate and the list rate are
-the fractions of the last ten sessions whose first reply still contains bold
-text or a list. Both fall as training goes on. The run reaches the paper's
-adaptation criterion, three passed sessions in a row, at session 14.
+The bold and list rates fall during training. The run reaches three passed
+sessions in a row at session 14. This is one run, not a multi-seed estimate.
 
 .. image:: ../../assets/openclawrl/demo.gif
-   :alt: A failing and a passing session replayed from the run, with the student's ask, the agent's reply, and the student's reaction
+   :alt: Replays of a rejected formatted answer and a later accepted answer
 
-The demo replays two sessions from the same run. In session 1 the student
-rejects a formatted reply. By session 16 the first reply passes directly.
+The replay shows a rejected reply from session 1 and an accepted first reply
+from session 16.
 
 Related guides
 --------------

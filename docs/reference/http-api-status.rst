@@ -1,12 +1,12 @@
 HTTP API: status, status codes and browser access
 =================================================
 
-Read what a deployment trains and serves, look up the cause of a status code, and let a browser console call the API.
+Inspect deployment status, look up errors, and enable browser access.
 
 Health
 ------
 
-``GET /healthz`` answers ``{"ok": true}`` from a running process and needs no token. It is a liveness check: on a managed routed deployment it does not show that the deployment accepts inference (`Managed routing lifecycle <http-api-routing.rst#managed-routing-lifecycle>`__). An inference service with the external router lifecycle also answers ``GET /readyz`` without a token.
+``GET /healthz`` returns ``{"ok": true}`` from a running process without authentication. It checks liveness, not inference admission (`Managed routing lifecycle <http-api-routing.rst#managed-routing-lifecycle>`__). Inference services with the external router lifecycle also serve ``GET /readyz`` without authentication.
 
 Status
 ------
@@ -52,11 +52,16 @@ Fields of each scenario:
 
 - ``commit_number`` is the number of the scenario's newest commit.
 - ``last_training_commit`` holds the commit number of the latest durable training commit, its commit time, and its recipe-owned metrics. It is ``null`` before the first training commit. An activation, a train-from, an import or a sync advances ``commit_number`` without replacing it.
-- ``served_artifact_id`` is the ``artifact_id`` of the artifact that answers the scenario's requests now, the one that ``served_models`` names: the active artifact of the weight trainer's component, or of the only component. It is null before inference publishes a route.
+- ``served_artifact_id`` identifies the currently served artifact from ``served_models``. It belongs to the weight trainer's component, or the only component. It is null before inference publishes a route.
 - ``job_data_ready`` says whether the processor has a job's data waiting.
 - ``training_mode`` is the selected mode.
 - ``artifacts`` gives two ``artifact_id`` values for each component: its active artifact and its trainer's training start. A value is ``null`` when Reef does not know it. Both values start at the creation artifact.
-- ``processor`` includes ``ready_samples``, the untrained samples that the next automatic job takes, from recorded traffic and uploaded trajectories; ``job_samples``, the samples that automatic job data needs (``pipeline.sample2job.config.job_samples``); and ``buffer_size``, the most samples that one automatic job takes, beside the rest of a group. A processor that takes requests also reports ``pending_requests``.
+- ``processor`` reports sample counts for automatic jobs:
+
+  - ``ready_samples``: untrained samples from recorded traffic and uploaded trajectories.
+  - ``job_samples``: the required sample count (``pipeline.sample2job.config.job_samples``).
+  - ``buffer_size``: the maximum samples per job, plus any remaining samples in a group.
+  - ``pending_requests``: present when the processor accepts requests.
 
 A scenario that trains weights also reports its training jobs:
 
@@ -70,7 +75,9 @@ A scenario that trains weights also reports its training jobs:
 - ``finished_jobs`` counts the jobs of the scenario that ended, finished or failed.
 - A runtime that serves each scenario its own adapter adds ``adapter_runtime_load_id``: the runtime load ID of the scenario's served adapter, or ``null`` while the scenario samples the base model.
 
-A scenario whose recipe runs one trainer per recipe component adds a ``components`` object. For each recipe component, it holds the component's own ``job_data_ready``, ``training_mode``, ``processor`` status and ``last_training_commit``. The scenario-wide ``job_data_ready``, ``training_mode`` and ``processor`` then describe the first trainer that trains, else the first trainer. The scenario-wide ``last_training_commit`` is the latest training commit of any recipe component.
+Recipes with one trainer per component also return ``components``. Each entry has its own ``job_data_ready``, ``training_mode``, ``processor`` and ``last_training_commit``.
+
+The scenario-level fields describe the first trainer that supports training jobs, or the first trainer if none does. The scenario-level ``last_training_commit`` is the latest training commit across all components.
 
 Status codes
 ------------
@@ -128,7 +135,7 @@ Status codes
 Browser consoles
 ----------------
 
-A browser console sends requests to this HTTP API directly, so the browser must be able to open the service URL. To let a console connect, add ``reef.console-origins`` to the serve YAML. List each trusted console origin explicitly, with no path, trailing slash, credentials, or wildcard:
+The browser must be able to reach the service URL. Add trusted browser origins to ``reef.console-origins`` in the serve YAML. Use exact origins without paths, trailing slashes, credentials or wildcards:
 
 .. code-block:: yaml
 
@@ -146,4 +153,4 @@ Restart the service after you change the configuration.
 - Clients without an ``Origin`` header keep their behavior.
 - A browser can also require local network permission or HTTPS. An origin that Reef allows does not override browser policy.
 
-A connected console acts with the permissions of the service token, on the scenarios of this service. The CORS connection does not create a cloud deployment or upload history.
+A console uses the service token's permissions for this service's scenarios. Connecting does not create a cloud deployment or upload history.

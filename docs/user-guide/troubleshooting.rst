@@ -1,55 +1,71 @@
 Troubleshooting
 ===============
 
-Symptoms, their usual cause, and the fix. Each entry names where to look.
-
-:For: anyone whose deployment, request, or learning step did not do what they expected
-:Before you start: access to the deployment's logs, ``reef.run-dir/*.log`` (``.reef/run/`` by default; the tutorials use ``work/reef.log``)
-:You will have: the cause found, or the right log to read
+Start with ``GET /reef/status`` and the affected service's log under
+``reef.run-dir`` (default ``.reef/run/``). Match the symptom below, then check
+the response body for the specific cause.
 
 Starting Reef
 -------------
 
-**reef serve cannot find the config.** A relative ``-c`` path is resolved against the current working directory. Pass an absolute path, or run from the directory that holds the stack file.
+**The config cannot be found.** Relative ``-c`` paths use the current directory.
+Pass an absolute path or run from the directory containing the file.
 
-**A setting is not what the config says.** The first lines of the launcher log list every resolved setting with its source (``file``, ``command line``, ``environment``, ``automatic``, ``default``), so a command-line flag or ``REEF_*`` variable that overrode the file shows up there; ``reef serve ... --print-config`` prints the full list, defaults included, without starting anything. A file that repeats a key, spells one field two ways, or sets ``null`` on a field that is not optional is refused before startup, naming the field and lines.
+**A setting differs from the file.** Run ``reef serve ... --print-config``.
+It shows resolved values and their sources without starting the deployment.
+Check command-line overrides and ``REEF_*`` variables. Duplicate keys,
+conflicting spellings and null values for required fields prevent startup.
 
-**A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits that service's ``ready_timeout`` before giving up. The default is 30 seconds for the Reef HTTP service and 3600 seconds for a managed engine or a training stack, which download weights. Read that service's log under ``reef.run-dir``. For a training stack, the usual causes are a model that is still downloading, serving engines that fail to start on the inference component (read ``inference.log``), or GPUs already in use.
+**A service never becomes ready.** Read its log and check its ``ready`` probe.
+The usual deadlines are 30 seconds for Reef HTTP and 3600 seconds for managed
+engines or training stacks. Training can extend the HTTP deadline.
+Check downloads, GPU availability and engine startup errors in ``inference.log``.
 
-**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; a harness evolution recipe reads its settings from ``recipe.config.evolution`` (`Harness evolution keys <../reference/configuration-harness.rst#harness-evolution-keys>`__).
+**Startup names an invalid setting.** Unknown settings are errors, not ignored
+options. Check the `settings reference <../reference/configuration.rst>`__.
+Harness options belong under ``recipe.config.evolution``.
 
-**Boot fails naming a credential in the tree.** A harness evolution seed whose config holds a literal key (``apiKey``, ``token``, and their plural and list forms), or whose other files hold a credential-shaped string, refuses startup: the seed becomes the scenario's first snapshot, and every snapshot stores its tree in git. A proposed patch that holds one is refused the same way. Rotate the key, remove it from the file, and keep credentials in ``inference.upstream-api-key`` or an ``api_key_env``.
+**Startup finds a credential in a harness tree.** Reef refuses literal keys
+and credential-shaped strings because snapshot trees are stored in Git.
+Rotate exposed credentials and remove them from the tree.
+Use ``inference.upstream-api-key`` or the adapter's ``api_key_env`` instead.
+Candidate patches have the same restriction.
 
 Requests
 --------
 
-An inference request reaches Reef on ``/v1/chat/completions``, ``/v1/responses``
-or ``/v1/messages``; all three take the provider's own request body. Reef
-answers it from the scenario's row in ``served_models``, as `Run the services in
-separate processes <split-services.rst>`__
-describes.
+**401: invalid token.** Check ``Authorization: Bearer`` against ``reef.token``
+or ``reef.tokens``. Without Authorization, Reef also accepts ``x-api-key``.
+Empty expanded token values are dropped. A deployment with no tokens accepts
+requests without authentication.
 
-**401 invalid service token.** The ``Authorization: Bearer`` value (or ``x-api-key``, when no Authorization header is sent) is not one of ``reef.token`` / ``reef.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.
+**400: missing scenario.** Send ``x-reef-scenario`` for inference, reports and
+harness reads, or use an API path that identifies the scenario.
 
-**400 missing or empty x-reef-scenario.** Every inference, report, and harness read needs the header.
+**404: unknown scenario or no served model.** Create the scenario before inference
+with ``POST /reef/scenarios`` or a harness install. Check
+``GET /reef/scenarios`` and its ``settings`` response.
+An empty ``served`` mapping, ``serves: false`` or ``inference.backend: none``
+leaves it without serving.
 
-**404 unknown scenario, or a scenario that serves no model.** An inference request never creates a scenario. Create it first with ``POST /reef/scenarios`` or a harness install, and check the name with ``GET /reef/scenarios``. A scenario serves no model when its runtime has no engine that the inference routes can reach, for example with ``inference.backend: none``, or when the scenario serves nothing: it was created with ``"serves": false`` or got ``{"served": {}}``, and ``GET /reef/scenarios/{scenario}/settings`` then returns an empty ``served`` mapping. A report answers 404 for an unknown scenario only when the deployment sets ``allow_implicit_scenario_creation: false``. With implicit creation on, a typo in a report's scenario silently creates a second scenario instead. ``POST /reef/train`` answers 404 with either setting and creates nothing.
+Reports can create missing scenarios when implicit creation is enabled.
+A typo can therefore create another scenario. ``POST /reef/train`` never creates one.
 
-**409 on an inference request.** The engine answered under another model name, or aborted the request, on two attempts. Reef reads the scenario's row again before the second attempt, so a single change of the served model does not cause it. A repeated 409 means that the engine does not serve the model name that the row names. Check the model names that the engine serves.
+**503: model startup or selected weights unavailable.** Poll
+``GET /reef/scenarios/{scenario}/inference/status``.
+``inference_starting`` includes ``Retry-After: 30``.
+For failed startup, fix the reported cause and resend the ``served`` mapping.
+See `Inference <split-services.rst#inference>`__ for ownership and retry behavior.
 
-**502 the engine failed.** The engine returned a 5xx status, answered with something that is not a JSON object, or could not be reached. The response body carries the engine's message; read it. An engine that refuses the request with a 4xx, for example a prompt longer than the model's context, answers the client with that status and its message.
+**409: the engine repeatedly aborts.** Reef rereads routing state and retries once.
+Check the engine log if the second attempt also aborts.
 
-**404 on a deployment that runs no inference engine.** The deployment sets
-``inference.backend: none``, so it trains without an engine and its scenarios
-serve no model. This is expected. Serve a published checkpoint from a separate
-deployment, or select an engine with ``inference.backend``. See `Train without
-an inference engine
-<../reference/configuration-training.rst#train-without-an-inference-engine>`__.
+**502: inference failed.** Read the engine message in the response body.
+The engine may be unreachable, return 5xx or send an invalid response.
+Provider 4xx errors retain their status, including context-length errors.
 
-**504 the engine did not answer in time.** One inference took longer than
-``inference.timeout-s`` (300 seconds by default). If one valid generation can
-take longer—for example, a Designer call against a slow local model—raise the
-request timeout:
+**504: inference timed out.** The default ``inference.timeout-s`` is 300 seconds.
+Increase it when valid generations need more time:
 
 .. code:: bash
 
@@ -58,50 +74,91 @@ request timeout:
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``pipeline.sample2job.config.job_samples`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether job data is ready (``job_data_ready``), and its ``processor`` entry compares ``ready_samples`` with ``job_samples``. A sample that the samples service marked stale (item metadata ``stale``), because its data is of an artifact that the scenario no longer serves, stays untrained.
+**A report was accepted but training does not start.** Check:
 
-**400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
+- The trigger: enough ``job_samples`` or a complete recipe-specific group.
+- ``job_data_ready`` and ``processor`` in ``/reef/status``.
+- The scenario's contract at ``GET /reef/scenarios/{scenario}/contract``.
+- Training errors, consumed receipts and samples marked ``stale``.
 
-**409 on a report.** The client-chosen ``agent_record_id`` was sent before with different content. Use a new id, or resend identical content.
+Reports cannot override training eligibility. Missing references are rejected
+when the report arrives.
 
-**A training job fails and /reef/status reports an error.** The service log has the traceback. Slime rejecting ``--wandb-key`` or ``--use-wandb`` means tracking must be configured under ``observability.wandb`` instead. A mismatch between the recipe's loss family and the Slime flags is refused at startup by design.
+**400 on a report.** The body violates the recipe's schema, such as a missing
+score or invalid metadata. Check the `recipe guide <recipes.rst>`__.
 
-**A Slime job fails with checkpoint storage is full.** Slime admits a new checkpoint under the checkpoint root only when it fits. Retention first deletes older checkpoints in the order of ``--reef-checkpoint-policy`` (``latest`` or ``best_reward``). It never deletes the latest checkpoint or the checkpoint the job starts from. The error names the reason:
+**409 on a report.** The same ``agent_record_id`` already has different content.
+Use a new ID or resend the original content unchanged.
 
-- the storage cap: ``--reef-checkpoint-max-storage-fraction`` (default 0.8) or ``--reef-checkpoint-max-storage``
-- the free-space floor: ``--reef-checkpoint-min-free-space-fraction`` (default 0.1) or ``--reef-checkpoint-min-free-space``
-- ``unowned checkpoint assets``: files in the checkpoint directories that Slime did not save
+**A training job failed.** Read its traceback in the service log.
+Configure W&B through ``observability.wandb``; Slime's tracking flags are refused.
+The recipe's loss family must match its Slime loss flags.
 
-Free disk space, change the limits, or move the extra files out of the checkpoint root.
+**Checkpoint storage is full.** Slime preserves the latest checkpoint and the
+job's start. Check these limits in ``training.options``:
 
-**After a restart, a job trains its data again.** Reef keeps each submitted job, and the training component resumes a job that did not end. Slime's workers load their latest saved checkpoint again. A job that stopped after Megatron saved its checkpoint records that checkpoint and does not train again. A job that stopped before the save trains its data again from the latest checkpoint. A Tinker job continues after its last saved checkpoint.
+- ``reef-checkpoint-max-storage-fraction`` (default 0.8) or ``reef-checkpoint-max-storage``.
+- ``reef-checkpoint-min-free-space-fraction`` (default 0.1) or ``reef-checkpoint-min-free-space``.
 
-**A train-from is refused on a Slime scenario.** Slime's workers continue from their own latest checkpoint and cannot load a published snapshot, so Reef answers ``train-from`` with HTTP 400. ``activate`` still works: it changes what serves, not where training continues. Tinker scenarios accept both. `Train from an artifact <operate.rst#train-from-an-artifact>`__ describes how to train again from an earlier Slime checkpoint.
+Retention uses ``reef-checkpoint-policy``: ``latest`` or ``best_reward``.
+Free space or adjust the limits. If the error names ``unowned checkpoint assets``,
+move unrelated files out of the checkpoint directories.
+
+**A job repeats work after restart.** Jobs resume from saved checkpoints.
+Unsaved optimizer work can run again. A Slime job that saved its checkpoint
+before stopping records that checkpoint without retraining. Tinker resumes after
+its last saved checkpoint.
+
+**Slime refuses train-from.** Slime continues its workers' latest checkpoint.
+Activation can change serving, but train-from returns 400.
+See `Train from an artifact <operate.rst#train-from-an-artifact>`__ for starting
+a new deployment from an earlier Slime checkpoint.
 
 Harness evolution
 -----------------
 
-**reports are accepted but no evolve step runs.** Check the configured training mode and ``pipeline.sample2job.config.job_samples`` (1 by default for harness evolution). Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
+**Reports arrive but no step starts.** Check ``training_mode`` and
+``pipeline.sample2job.config.job_samples`` (default 1).
+Both successful and failed reports count. Inspect training errors for invalid
+trajectory data or missing inputs.
 
-**The first job fails installing the harness binary.** With ``evolution.binary`` unset, the first job of a scenario installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
+**The harness binary cannot install.** Install the tool named in the error,
+such as npm for pi. Otherwise, set ``evolution.binary`` to an existing executable.
+Without that setting, the first job installs the adapter's pinned binary.
 
-**No step publishes a change.** A step ran and its candidate was not selected. Read the step's ``candidate_runs`` in its snapshots row, and each rollout's record under the scenario's history (``<evolution.state_dir>/<scenario>/<component>/history/runs/``, where ``<component>`` is ``harness`` for ``HarnessEvolutionRecipe``; see `History <evolve-your-harness.rst#history>`__). Execution can fail if the adapter binary cannot be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejects ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeds ``evolution.evaluation.task_timeout_s`` (600 seconds by default). Both sides scoring the same means the patch did not change the outcome; ``evolution.evaluation.policy: none`` publishes every valid candidate if that is what you want.
+**No change is published.** Inspect ``candidate_runs`` and the step page in
+``GET /reef/harness/artifacts``. A tie or unchanged tree keeps the current tree.
+For failures, check the binary, tool-call support and
+``evolution.evaluation.task_timeout_s`` (default 600 seconds).
+``policy: none`` publishes valid candidates without evaluation.
+See `History <evolve-your-harness.rst#history>`__.
 
-**GET /reef/harness returns 404.** The scenario does not exist, the recipe's seed is empty and no step has published a tree, or the scenario's recipe serves no files; the answer's message says which. An inference call never creates a scenario. Create it with ``POST /reef/scenarios``; its first snapshot holds the seed. The catalog at ``GET /reef/harness/artifacts`` lists what exists.
+**GET /reef/harness returns 404.** The scenario may be missing, have an empty
+seed without a published tree, or expose no files. Read the error message.
+Create the scenario explicitly and inspect ``GET /reef/harness/artifacts``.
 
-**A client captures no receipts, so a report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
+**No receipts are captured.** Upgrade older clients:
+``uv pip install --upgrade 'reef-client>=0.2.0'``.
+Versions before 0.2.0 read an obsolete receipt header.
 
-**An agent on a pulled tree gets HTTP 400 ``missing or empty x-reef-scenario``.** The default ``GET /reef/harness`` files carry no endpoint and no credential, so the client binds the agent's model itself. Install with ``reef-client harness connect``, or pull ``?form=client&service_url=<reef>&root=<directory>``: those files send each call to ``<reef>/reef/scenarios/<scenario>/v1``, which names the scenario in the path. A binding of your own must send the ``x-reef-scenario`` header and the token (`Use a published tree <evolve-your-harness.rst#use-a-published-tree>`__).
+**A pulled agent omits x-reef-scenario.** Raw tree files contain no endpoint
+binding. Install with ``reef-client harness connect`` or request
+``?form=client&service_url=<reef>&root=<directory>``.
+Custom clients must supply the scenario and service token.
 
-**``reef-client harness sync`` says that a snapshot and your files both changed a file.** A step changed the same lines of a file of the install that you changed. Your files stay as they are. Make those lines match one side, then sync again; ``sync --discard`` drops all your changes instead.
+**Sync reports conflicting file changes.** Your changes and the published tree
+changed the same content. Your files remain untouched. Resolve the conflict,
+then sync again. ``sync --discard`` discards your local changes.
 
-**``reef-client harness run`` says to name the scenario.** More than one scenario is installed. Name one, such as ``reef-client harness run code-repair``.
+**Run asks for a scenario.** Several scenarios are installed.
+Name one, for example ``reef-client harness run code-repair``.
 
-**``run`` or ``sync`` says ``kept your files`` because the scenario is running a step.** Reef takes no import while a step runs. Your changes stay in the install, and the next ``run`` or ``sync`` sends them. When the send after a session met a running step, the next ``run`` prints the refusal after ``after the last session:``.
+**Run or sync says it kept your files.** A training step prevents importing
+your changes now. The next run or sync retries them.
+A refused post-session upload appears after ``after the last session:``.
 
 Docs and links
 --------------
 
-**A docs link points at GitHub instead of a page.** Only files under
-``docs/*.rst`` are site pages; historical RFCs, examples, and code are linked
-on GitHub, where they are read.
+Code, examples and repository documents open on GitHub.
+Only RST pages included in the documentation navigation render as site pages.

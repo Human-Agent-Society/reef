@@ -1,143 +1,99 @@
 Scenario components
 ===================
 
-A recipe declares the components that every snapshot of a scenario binds,
-such as ``weights`` or ``harness``. For each component it says what kind of
-artifact the component holds, how Reef admits and imports it, and which
-files a client pulls. This page defines the declaration and says which
-service reads each field.
-
-:For: recipe authors who declare a component other than ``weights`` or ``harness``
-:Before you start: the plug-in map in `Write a recipe <write-a-recipe.rst>`__
-:You will have: a ``build_components`` override, and the admission check of your artifacts
-
-Most recipes need no override: ``WeightTrainingRecipe`` declares ``weights``
-and ``HarnessEvolutionRecipe`` declares ``harness``.
+Components declare the artifacts a scenario holds, imports and exposes to
+clients. Most recipes use the built-in ``weights`` or ``harness`` component.
+Override ``Recipe.build_components`` only when those declarations do not fit.
 
 The declaration
 ---------------
 
-``Recipe.build_components(scenario)`` returns a ``ScenarioComponents``
-(``reef.artifact.components``). Its ``components`` field maps each component
-name to a ``ComponentSpec``. The result must depend on the recipe's
-configuration alone. Every service that loads a scenario calls it, and the
-loader calls it once when the deployment starts.
+``build_components(scenario)`` returns ``ScenarioComponents`` from
+``reef.artifact.components``. Its ``components`` mapping binds names to
+``ComponentSpec`` values. Build the declaration from configuration alone:
+every service that loads the scenario reads it.
 
-- ``validator`` (read by ``training`` and ``control``): an
-  ``ArtifactValidator`` that admits an artifact of the component before Reef
-  stores it (`Admission checks`_). The default accepts every artifact.
-- ``layout`` (read by ``control``): an ``ArtifactLayout`` that checks an
-  imported directory before admission. Without ``layout``, the component
-  takes no import.
-- ``files`` (read by ``harness``): a ``FileTree`` that reads the files a
-  client pulls from a snapshot. Without a component with ``files``, the
-  harness file routes refuse the scenario.
-- ``kind`` (read by ``inference`` and ``control``): the ``ArtifactKind``.
-  The inference service loads a ``model`` or ``model_adapter`` component
-  into the runtime. A kind also makes the component a side of an artifact
-  evaluation. ``None`` declares no kind.
+.. list-table::
+   :header-rows: 1
+   :widths: 20 60 20
 
-Constraints, checked when the value is built (``ValueError``):
+   * - Field
+     - Contract
+     - Default
+   * - ``validator``
+     - Admit an artifact before Reef stores it.
+     - Accept all
+   * - ``layout``
+     - Check and import an artifact directory.
+     - No imports
+   * - ``files``
+     - Read the file tree a harness client pulls.
+     - No file routes
+   * - ``kind``
+     - Declare the artifact kind. ``model`` and ``model_adapter`` load into inference.
+     - No kind
 
-- at most one component has a weight kind (``model`` or ``model_adapter``);
-- at most one component has ``files``.
-
-The default declares no component: the scenario records traffic only.
+At most one component can load weights, and at most one can expose ``files``.
+Invalid declarations raise ``ValueError``.
 
 Built-in recipes
 ----------------
 
-+----------------------------+-------------+--------------------------+----------------------------+------------------+
-| Recipe                     | Component   | Kind                     | Layout                     | Files            |
-+============================+=============+==========================+============================+==================+
-| ``Recipe``                 | none        |                          |                            |                  |
-+----------------------------+-------------+--------------------------+----------------------------+------------------+
-| ``WeightTrainingRecipe``   | ``weights`` | the runtime's            | ``TrainingArtifactLayout`` | none             |
-|                            |             | ``served_weight_kind``   |                            |                  |
-+----------------------------+-------------+--------------------------+----------------------------+------------------+
-| ``HarnessEvolutionRecipe`` | ``harness`` | ``harness_plugin``       | ``HarnessLayout``          | ``HarnessFiles`` |
-+----------------------------+-------------+--------------------------+----------------------------+------------------+
-| ``CompositeRecipe``        | one per     | each recipe's            | each recipe's              | each recipe's    |
-|                            | recipe      |                          |                            |                  |
-+----------------------------+-------------+--------------------------+----------------------------+------------------+
+- ``Recipe`` declares no components; it records traffic.
+- ``WeightTrainingRecipe`` declares ``weights``, with the runtime's weight
+  kind and the backend's training layout.
+- ``HarnessEvolutionRecipe`` declares ``harness``, with ``HarnessLayout``
+  and ``HarnessFiles``. File reads render the source for the selected adapter.
+- ``CompositeRecipe`` combines the declarations of its component recipes.
 
-The kind and the layout of ``weights`` are not configuration: the runtime
-and the training backend give them. ``HarnessFiles`` renders the stored
-source tree for the descriptor's adapter on each read, so the client gets
-the files that its agent reads (see `Rendering
-<harness-adapters.rst#rendering>`__).
+See `Rendering <harness-adapters.rst#rendering>`__ for harness file behavior.
 
 Declare components
 ------------------
 
+For a component that exposes text files:
+
 .. code:: python
 
-   from reef.artifact import ArtifactValidator
    from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
    from reef.recipe import Recipe
 
 
-   class PromptValidator(ArtifactValidator):
-       def validate(self, artifact):
-           validate_prompt_artifact(artifact)
-
-
    class PromptRecipe(Recipe):
        def build_components(self, scenario: str) -> ScenarioComponents:
-           prompt = ComponentSpec(validator=PromptValidator(), files=TextFileTree())
-           return ScenarioComponents({"prompt": prompt})
+           return ScenarioComponents({"prompt": ComponentSpec(files=TextFileTree())})
 
-The declaration of a scenario that serves two components has both:
+Add an ``ArtifactValidator`` to reject invalid artifacts and an
+``ArtifactLayout`` to accept imports.
 
-.. code:: python
+Use ``CompositeRecipe`` for multiple components. Each recipe has its own
+trainer, and each training commit names the component it publishes.
+Reef carries the other components forward. Each artifact retains its own ID.
 
-   ScenarioComponents(
-       {
-           "weights": ComponentSpec(kind="model_adapter"),
-           "harness": ComponentSpec(files=TextFileTree()),
-       }
-   )
-
-- Only a ``CompositeRecipe`` (``reef.recipe.composite``) makes such a
-  declaration. It builds the declaration from a mapping of component name to
-  recipe, and runs each recipe's trainer as its own worker (see `Recipe
-  configuration
-  <../reference/configuration-recipe.rst#recipe-configuration>`__). Another
-  recipe has one trainer, so Reef refuses it when it declares two components.
-- A training step publishes one component and names it in
-  ``TrainingCommit.component``. Reef carries the other components forward
-  from the previous snapshot.
-- A snapshot of at most one component is flat. A snapshot of several
-  components has one directory per component (``weights/``, ``harness/``).
-- Each artifact keeps its own ``artifact_id``.
+Snapshots with zero or one component are flat. Multi-component snapshots
+have one directory per component. See `Recipe configuration
+<../reference/configuration-recipe.rst#recipe-configuration>`__.
 
 Admission checks
 ----------------
 
-A validator reads the files of one artifact of its component, in a local
-directory. It raises ``ValueError`` or a ``ReefError`` that names what does
-not hold. The service that holds the files runs it once, before Reef stores
-the artifact:
+An ``ArtifactValidator`` reads one component's local artifact directory.
+Raise ``ValueError`` or ``ReefError`` with the reason for refusal.
 
-- The ``training`` service checks each checkpoint of a training job. A
-  refusal fails the job with the validator's message, and Reef does not
-  store the checkpoint. The samples of the job count as trained.
-- The ``control`` service checks an import, a person's synced tree, and the
-  artifact item that starts a scenario. A refusal returns HTTP 400.
+- Training checks each checkpoint before storing it. Refusal fails the job;
+  its samples still count as trained.
+- Control checks imports, synced trees and scenario starting artifacts.
+  Refusal returns HTTP 400.
 
-Activation, restore, serving and a train-from run no check, so a check
-applies only to artifacts stored after it was configured. A snapshot of
-several components has no check of its own: Reef checks each component
-alone.
+Activation, restore, serving and train-from operations do not rerun validation.
+A new validator therefore applies only to subsequently stored artifacts.
+Multi-component snapshots require per-component checks; they cannot have a
+separate snapshot validator.
 
 What components do not own
 --------------------------
 
-Components declare facts. They do not produce or select artifacts, store
-them, order commits, or load weights. Activation changes the scenario's
-complete selection atomically and runs no check. How the inference runtime
-loads a ``model`` or ``model_adapter`` component, including one adapter per
-scenario, is the runtime's contract: see `What a runtime implements
-<serving-runtimes.rst#what-a-runtime-implements>`__ and `Serving saved weights
-<serving-runtimes.rst#serving-saved-weights>`__. The `state model
-<../advanced_topics/state-model.rst>`__ defines ordering and recovery.
+Components declare artifact contracts. Training produces artifacts, control
+commits and selects them, and inference loads weights. See
+`Serving runtimes <serving-runtimes.rst>`__ and the
+`state model <../advanced_topics/state-model.rst>`__.

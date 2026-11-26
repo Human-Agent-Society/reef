@@ -1,12 +1,14 @@
 HTTP API: training requests and jobs
 ====================================
 
-Queue a training request for a scenario in ``manual`` mode, read and cancel the scenario's training jobs, and set the artifact that a trainer starts from.
+Submit training requests, inspect or cancel jobs, and choose a trainer's starting artifact.
 
 Manual training
 ---------------
 
-``POST /reef/train`` queues one training request for a scenario. A request trains in both training modes; in ``manual`` mode, only a request starts a job. In harness evolution, every method takes it. A request is not a record: it waits in the deployment's training request queue until a training commit consumes it, and the commit keeps it in its ``training_request`` metrics. The request needs no inference receipts and no score.
+``POST /reef/train`` queues a training request in either training mode. In ``manual`` mode, only requests start jobs. Every harness evolution method accepts requests.
+
+Requests need no inference receipts or score. They remain in the training request queue until a training commit consumes them. The commit stores the request in ``training_request`` metrics; Reef creates no record for it.
 
 .. code:: bash
 
@@ -37,7 +39,9 @@ The response is ``{agent_record_id, scenario, request_type: "train"}``, plus ``p
 How a request trains
 ~~~~~~~~~~~~~~~~~~~~
 
-``auto``, the default, also starts a job on its own: when ``job_samples`` samples wait, or when the deployment's training manager says so (``training.manager``, see `Configuration <configuration.rst>`__). ``manual`` starts a job only for a request. A request trains before the samples that wait, oldest request first, one per step. The step trains the samples that the request names, whatever ``job_samples``:
+In the default ``auto`` mode, jobs also start when ``job_samples`` samples wait or ``training.manager`` requests one (`Configuration <configuration.rst>`__). In ``manual`` mode, only requests start jobs.
+
+Requests take priority over waiting samples. Reef processes them oldest first, one per step, using their selected samples regardless of ``job_samples``:
 
 - A weight recipe trains the request's ``samples``. Its ``text`` goes into the commit's ``training_request`` metrics.
 - Harness evolution runs the request with the traces that it names, possibly none. The method reads the request next to them.
@@ -50,7 +54,9 @@ How a request trains
 
 A later request does not change a step that already runs. The evaluation and publication rules still decide whether the result becomes served.
 
-A step that fails with a request, for example on a method error, is not retried. The next step consumes the request with a committed row whose ``skipped`` reads ``request failed`` and whose ``error`` carries the failure, and the queue moves on. Send the request again to run it again. That row consumes the request alone: the samples that were in the step stay held for the next job. The ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count every step, request steps included, but stop automatic steps only; a request still runs past them.
+Reef does not retry a failed request step. The next step consumes the request with ``skipped: "request failed"`` and the failure in ``error``. Its samples remain available for the next job. Submit another request to try again.
+
+``evolution.max_steps`` and ``evolution.max_failure_streak`` count all steps, including requests. These limits stop automatic steps only; requests can run beyond them.
 
 The metrics of the commit that answered a request include ``training_request``, with the request ID, text, session, artifact ID and ``requires``:
 
@@ -61,15 +67,19 @@ The metrics of the commit that answered a request include ``training_request``, 
                          "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID",
                                        "prompt": "The Twilio account SID"}]}}
 
-The commit metrics also keep the method's summary as ``method_summary``, plain text, and its notes as ``method_notes``, the JSON object that it returned. Reef clips their long text and redacts credential-shaped literals in them, and never reads them to decide. Each is present only when the method returned it non-empty, and each method chooses its own note keys.
+Commit metrics also include nonempty ``method_summary`` (text) and ``method_notes`` (JSON). Methods choose their note keys. Reef truncates long text and redacts credential-shaped literals. These fields do not affect decisions.
 
 Job parameters
 ~~~~~~~~~~~~~~
 
-``parameters`` sets the parameters of a weight recipe's training job: a JSON object of at most 16 KiB. Reef merges it into the recipe's parameters for the kind of the job's samples: nested objects merge key by key, and every other value of the request wins, lists included. A request cannot remove a key that the recipe sets. Reef does not read the parameters: the training component checks them, as it checks the recipe's. A refused job fails the request with the component's reason. A job with no objective, from the recipe or the request, is refused.
+``parameters`` overrides a weight recipe's job parameters with a JSON object of at most 16 KiB. Reef merges nested objects by key. Other request values, including lists, replace recipe values. Requests cannot remove recipe keys.
+
+The training component validates the merged parameters. Rejection fails the request with the component's reason. Either the recipe or the request must supply an objective.
 
 - The Tinker component takes ``objective``, ``learning_rate_schedule``, ``scheduling``, ``batch_size``, ``learning_rate``, ``kl_coef``, ``save_interval`` and ``rollout``; ``rollout`` only on a job of tasks.
 - Slime takes ``objective``, ``learning_rate_schedule``, ``scheduling``, ``save_interval``, ``dataset`` and ``harbor``; ``harbor`` only on a job of tasks.
+
+For Slime, ``save_interval`` counts optimizer steps for sample jobs and rollout iterations for both task and dataset jobs. Checkpoint ``step`` uses the same units. Omit ``save_interval`` for one checkpoint at the end.
 
 ``GET /reef/scenarios/{scenario}/contract`` serves the JSON Schema. For example, after an SFT job on uploaded trajectories, run an RL job on uploaded train tasks:
 
@@ -111,7 +121,12 @@ The method may add items of its own in its step's result:
 The requesting machine
 ~~~~~~~~~~~~~~~~~~~~~~
 
-An optional ``client`` describes the requesting machine: ``platform``, ``arch`` and ``release`` (short words) and ``commands``, a map of command names to whether each is on the machine's PATH (at most 64). A client fills ``commands`` by looking each name up on the PATH; it runs nothing. The field only informs the method, which can then build for that machine and not for its evaluation sandbox. Reef drops what does not fit that shape and never refuses the request for it. ``training_request.client`` carries what was kept.
+The optional ``client`` describes the requesting machine:
+
+- ``platform``, ``arch`` and ``release``: short words.
+- ``commands``: up to 64 command names mapped to whether they exist on PATH. Clients check PATH without running commands.
+
+The method uses this information to target the requesting machine. Reef drops invalid values without rejecting the request. ``training_request.client`` contains the accepted values.
 
 Training jobs
 -------------
@@ -126,7 +141,7 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as ``2026
 - ``checkpoints``: the saved checkpoints that the job reported, in step order, each ``{step, path, content, metrics, changed_parts}``. ``path`` is a directory of the training service. ``content`` is the name under which the training service stored the checkpoint's files in the artifact backend; Reef removes that content after it commits the checkpoint. ``changed_parts`` lists the parts of the scenario component that the checkpoint changed from the job's start, ``[]`` for a weight job.
 - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else ``null``.
 - ``error``: the error of a failed job, or the last retryable error of a queued job, else ``null``.
-- ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's samples, with the request's parameters merged in. The training component owns their names, such as ``objective`` and ``scheduling``.
+- ``parameters``: recipe parameters for the sample kind, merged with request overrides. The training component defines their names, such as ``objective`` and ``scheduling``.
 - ``sample_count``: the number of samples that the job trains, an integer from 0.
 - ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples. It is ``null`` for a job with no sample.
 - ``train_from_artifact_id``: the artifact that the job started from.
@@ -134,7 +149,7 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as ``2026
 - ``created_at``: when control added the job.
 - ``started_at``: when a training worker first took the job; ``null`` until then, and for a job from a store that an older Reef wrote.
 - ``ended_at``: when the job finished or failed; ``null`` until then.
-- ``experiment``: ``{tracker, project, entity, run_id, url}`` of the experiment run that records the job, such as ``{"tracker": "wandb", ...}``. Control writes it when its tracker records the first commit of the job. ``entity`` and ``url`` are ``null`` when the tracker does not know them. It is ``null`` until then, and always ``null`` without an experiment tracker. See `Commit correlation <configuration-observability.rst#commit-correlation>`__ for how W&B gives the run's URL.
+- ``experiment``: ``{tracker, project, entity, run_id, url}`` for the job's experiment run, such as ``{"tracker": "wandb", ...}``. It is ``null`` until the tracker records the job's first commit, and always ``null`` without a tracker. Unknown ``entity`` and ``url`` values are ``null``. See `Commit correlation <configuration-observability.rst#commit-correlation>`__ for W&B URLs.
 
 For example:
 
@@ -176,7 +191,7 @@ A request that the scenario does not have returns 404.
 Train from an artifact
 ----------------------
 
-Each trainer has a training start: the artifact that its next training job (a weight trainer) or evolve step (a harness trainer) starts from:
+Each trainer has a training start: the starting artifact for its next weight-training job or harness evolution step.
 
 - A new trainer starts from its component's creation artifact.
 - After each job or step, the trainer moves its training start to its own newest output.

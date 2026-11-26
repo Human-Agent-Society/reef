@@ -1,50 +1,91 @@
 Inference serving
 =================
 
-The rules of the ``inference`` section that its keys do not show: the serving engines of a weight-training deployment, remote inference components, the engines' native options, the options of the request handler, and the chat template arguments. `Settings reference <configuration-settings.rst#inference>`__ lists every key with its type and default.
+Configure serving engines, remote hosts and request handlers in ``inference``.
+See the `Settings reference <configuration-settings.rst#inference>`__ for key types and defaults.
 
 Serving of a weight-training deployment
 ---------------------------------------
 
-The ``inference`` section alone decides how a weight-training deployment serves its snapshots. With ``inference.serving: engines``, Reef starts SGLang or vLLM engines on an inference component, and the engines load each published snapshot. `Serving runtimes <../developer-guide/serving-runtimes.rst>`__ describes what the engines load, request pinning and engine supervision.
+With ``inference.serving: engines``, Reef starts SGLang or vLLM to serve
+published weights. The ``inference`` section controls these engines.
+See `Serving runtimes <../developer-guide/serving-runtimes.rst>`__ for loading,
+request pinning and supervision.
 
-- **Engine settings.** ``inference.backend``, ``inference.num-gpus``, ``inference.tensor-parallel-size``, ``inference.options``, ``inference.remote``, ``inference.handler-factory``, ``inference.handler-config``, ``inference.max-loaded-adapters`` and ``inference.prefix-sharing`` configure the engines. One of them selects ``engines`` when ``inference.serving`` is unset. Another serving mode refuses them.
-- **Prefix sharing.** With adapter snapshots, SGLang keeps its prefix cache only when it keys the entries by adapter. Otherwise the engines run without a prefix cache.
-- **KV outside the engine.** Engine serving refuses the ``inference.options`` that keep KV outside the engine, with or without prefix sharing: SGLang's ``hicache_storage_backend`` and ``enable_lmcache``, and vLLM's ``kv_transfer_config``, ``kv_offloading_size`` and ``kv_offloading_backend``. Reef checks these option names only. Do not give the engines another KV store through a plugin or an environment variable.
-- **SGLang engines.** Options use SGLang's names without a ``sglang-`` prefix. ``router-port`` binds the router's HTTP port, and other router flags keep their ``router-*`` names. A standalone engine has no router. Reef probes the router's metrics port from 4000 up, so use a ``router-port`` outside that range. A conflict on a configured ``router-port`` stops the launch.
-- **vLLM engines.** Options use vLLM's engine-argument names. Reef sets ``model``, ``host``, ``port`` and ``tensor_parallel_size`` itself and refuses ``enable_sleep_mode``. Reef defaults ``generation_config`` to ``vllm``, so the model's own generation defaults add no truncation or temperature that the trainer does not see. Reef starts no vLLM router, so ``inference.num-gpus`` must equal ``inference.tensor-parallel-size``.
+- **Engine settings:** ``backend``, ``num-gpus``, ``tensor-parallel-size``, ``options``,
+  ``remote``, ``handler-factory``, ``handler-config``, ``max-loaded-adapters``
+  and ``prefix-sharing`` under ``inference`` select ``engines`` when ``serving``
+  is unset. Other serving modes reject them.
+- **Prefix cache:** SGLang can retain cache entries for adapter snapshots only
+  if the cache keys include the adapter. Otherwise Reef disables the cache.
+- **External KV stores:** Reef rejects SGLang's ``hicache_storage_backend``
+  and ``enable_lmcache``. It also rejects vLLM's ``kv_transfer_config``,
+  ``kv_offloading_size`` and ``kv_offloading_backend``.
+  These restrictions apply with or without prefix sharing.
+  Reef checks only these option names. Do not configure another KV store through plugins or environment variables.
+- **SGLang:** use native option names without a ``sglang-`` prefix.
+  Router options retain ``router-*`` names; ``router-port`` sets its HTTP port.
+  Standalone engines have no router. Reef selects a router metrics port from
+  4000 upward, so choose an HTTP port outside that range.
+  A configured port conflict stops startup.
+- **vLLM:** use native engine-argument names.
+  Reef controls ``model``, ``host``, ``port`` and ``tensor_parallel_size``;
+  it rejects ``enable_sleep_mode``.
+  ``generation_config`` defaults to ``vllm`` to avoid model-specific generation
+  defaults that training does not see.
+  There is no router, so ``inference.num-gpus`` must equal ``inference.tensor-parallel-size``.
 
 Remote inference components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-An ``inference.remote`` section runs the engines on an inference component on another host, in place of the local component that ``reef serve`` starts. Any training backend can serve on a remote component. `Serve from a remote GPU host <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
+Set ``inference.remote`` to run engines on another host.
+Any training backend can use a remote component.
+Follow `Serve from a remote GPU host
+<../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ for setup.
 
-One component serves one full-weight checkpoint. ``inference.remote.slot-urls`` names further components, so that a scenario serves one more checkpoint on each (`Set what a scenario serves <../user-guide/operate.rst#set-what-a-scenario-serves>`__):
+Each component serves one full-weight checkpoint.
+Add ``inference.remote.slot-urls`` to serve more checkpoints
+(`Set what a scenario serves <../user-guide/operate.rst#set-what-a-scenario-serves>`__):
 
-- Start each further component in the same way as the first one, with the same ``--engine`` and the same two tokens. Reef starts the same model and engine options on each one, and ``inference.num-gpus`` counts the GPUs of one component.
-- Give each component GPUs that no other component uses: its own host or visible GPUs, or one Ray cluster that all of them join (``--ray-address``). Different URLs alone do not separate the GPUs.
-- Reef refuses ``slot-urls`` for adapter snapshots and for a trainer's rollout engines.
+- Start each component with the same ``--engine`` and both tokens.
+  Reef uses the same model and options on each component.
+  ``inference.num-gpus`` counts GPUs per component.
+- Allocate separate hosts or visible GPUs, or join one Ray cluster with ``--ray-address``.
+  Different URLs alone do not isolate GPUs.
+- ``slot-urls`` does not support adapter snapshots or trainer rollout engines.
 
 Native backend options
 ----------------------
 
-``inference.options`` and ``training.options`` hold the native options of the selected backend, by flag name without the leading ``--``. The backend owns their types, defaults and validation. Reef copies no schema.
+``inference.options`` and ``training.options`` accept native backend flags
+without the leading ``--``. The backend defines their types, defaults and validation.
 
 .. code:: bash
 
    reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
      --inference.options.mem-fraction-static 0.8
 
-- An override of one option keeps the other options of the file. An explicit whole object, such as ``--inference.options '{}'``, replaces all of them.
-- Reef refuses an option that it sets itself, such as the model, the parallel sizes, the bind address and the API key. Engine serving also refuses ``trust-remote-code`` and the adapter options (``enable-lora``, ``max-lora-rank``, ``max-loaded-loras``, ``max-loras-per-batch``, ``lora-target-modules``). The error names the option.
-- **A standalone engine and Slime** get the options as command-line arguments. ``true`` gives a switch, ``false`` or ``null`` gives nothing, a list gives several values, and an object is passed as JSON. To turn off a feature that the engine enables by default, use the engine's own disabling flag.
-- **The serving engines of a weight-training deployment** differ. SGLang engines get the options as fields of SGLang's ``ServerArgs``: ``false`` is a value, and Reef drops a name that ``ServerArgs`` does not have, without an error. vLLM engines get ``false`` as ``--no-<flag>``.
-- **An in-process training backend**, such as Tinker, parses ``training.options`` with the types that it declares (`Settings reference <configuration-settings.rst#training>`__).
+- A leaf override preserves other options. A whole object, such as
+  ``--inference.options '{}'``, replaces all options.
+- Reef rejects options it controls: model, parallel sizes, bind address and API key.
+  Engine serving also rejects ``trust-remote-code``, ``enable-lora``,
+  ``max-lora-rank``, ``max-loaded-loras``, ``max-loras-per-batch`` and ``lora-target-modules``.
+- **Standalone engines and Slime:** ``true`` becomes a switch;
+  ``false`` and ``null`` add no argument. Lists become multiple values; objects become JSON.
+  To disable a default feature, use the backend's disabling flag.
+- **SGLang engines for weight training:** options become ``ServerArgs`` fields.
+  ``false`` remains a value. Reef silently drops names absent from ``ServerArgs``.
+- **vLLM engines for weight training:** ``false`` becomes ``--no-<flag>``.
+- **In-process training backends**, including Tinker, parse the types they declare
+  (`Settings reference <configuration-settings.rst#training>`__).
 
 Request handler options
 -----------------------
 
-The serving engines answer through Reef's own request handler for ``inference.backend``. ``inference.handler-config`` holds the handler's options, with underscores as shown; another option fails the handler's start. ``inference.handler-factory`` selects no other handler: every built-in deployment refuses a class that is not the engine's own.
+Each engine uses its Reef request handler.
+Set its options in ``inference.handler-config`` with underscores as shown below.
+Unknown options fail startup. Built-in deployments reject a
+``handler-factory`` other than the engine's own handler.
 
 .. container:: config
 
@@ -52,24 +93,35 @@ The serving engines answer through Reef's own request handler for ``inference.ba
        Name of the engine's tool-call parser. A request with tools fails without it.
 
    ``sampling_defaults`` : {}
-       Sampling fields, in the engine's names, for a request that does not set them. A scenario's `serving config <http-api-scenarios.rst#serving-config>`__ sets ``temperature``, ``top_p`` and ``top_k`` over them.
+       Defaults for omitted request fields, in the engine's names.
+       A scenario's `serving config <http-api-scenarios.rst#serving-config>`__
+       overrides ``temperature``, ``top_p`` and ``top_k``.
 
    ``chat_template_kwargs`` : {}
-       Chat template arguments for a request that omits them, such as ``{enable_thinking: false}``. A request's own ``chat_template_kwargs`` win key by key.
+       Default template arguments, such as ``{enable_thinking: false}``.
+       Request-level ``chat_template_kwargs`` override individual keys.
 
    ``force_reasoning``
-       ``true`` if the chat template ends the prompt with an open ``<think>``, ``false`` if not. Unset, the handler checks the end of each rendered prompt.
+       Set ``true`` if the template ends with an open ``<think>``, or ``false`` otherwise.
+       If unset, the handler inspects each rendered prompt.
 
-What a client of these engines gets:
+Response behavior:
 
-- **Streaming.** SGLang engines relay their incremental stream. vLLM engines answer a streaming request with the completed turn as one burst of frames.
-- **Sampling extras.** Engine-specific sampling fields of one request go in ``sglang_sampling_params`` or ``vllm_sampling_params``. vLLM engines refuse a ``top_p`` below 1, a ``top_k`` above 0 and a ``min_p`` above 0, because the trainer cannot reproduce the log probabilities.
-- **Reasoning.** The reply is split into ``content`` and ``reasoning_content``: ``<think>`` starts the reasoning, and the first ``</think>`` or ``<tool_call>`` ends it. A reply that ends inside the reasoning has an empty ``content``.
+- **Streaming:** SGLang relays incremental output. vLLM sends the completed
+  turn as one burst of frames.
+- **Sampling:** use ``sglang_sampling_params`` or ``vllm_sampling_params``
+  for engine-specific request fields. vLLM rejects ``top_p < 1``,
+  ``top_k > 0`` and ``min_p > 0`` because training cannot reproduce their log probabilities.
+- **Reasoning:** ``<think>`` starts ``reasoning_content``.
+  The first ``</think>`` or ``<tool_call>`` ends it.
+  If the reply ends during reasoning, ``content`` is empty.
 
 Chat template arguments
 -----------------------
 
-Serving records the provider exchange only. The training component renders each recorded call again with the model's chat template, and it must render the call as the serving engine did. Give it the same chat template arguments that the engine uses: the handler's ``chat_template_kwargs``, or the arguments that the clients send.
+Reef records the provider exchange. Training renders it again with the model's
+chat template, so its template arguments must match serving.
+Use the handler's ``chat_template_kwargs`` or the values sent by clients:
 
 - Slime reads ``training.options.apply-chat-template-kwargs``, a JSON object.
 - Tinker reads ``training.options.chat-template-kwargs``, a mapping.

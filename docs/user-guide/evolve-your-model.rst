@@ -1,49 +1,20 @@
 Train model weights from agent feedback
 =======================================
 
-This page sets up a GPU deployment that trains model weights with the default
-Slime backend. Use it when the model itself has to change. To evolve a harness
-or another text artifact, see `Evolve your harness <evolve-your-harness.rst>`__.
-For hosted LoRA training from a CPU machine, see `Train with Tinker
-<tinker.rst>`__.
+Train model weights with Slime on your own GPUs. Reef records agent calls,
+uses feedback to build training jobs, and serves the checkpoints you select.
 
-With Slime, weight training runs on one Ray cluster. Reef submits each job's
-ready data to its training component as one training job, and the component
-runs the job in a Slime driver process of its own. Each checkpoint that a job
-saves is a candidate. Reef publishes a selected candidate, and the serving
-engines load its weights from files.
-
-+--------------------------+-----------------------------------------------+
-| Process                  | Owns                                          |
-+==========================+===============================================+
-| Reef HTTP service        | requests, records, the snapshot chain, and the|
-|                          | Slime training component, which queues the    |
-|                          | jobs and starts their drivers                 |
-+--------------------------+-----------------------------------------------+
-| Slime driver (one per    | Slime's training workers; it continues the    |
-| job, while it trains)    | latest checkpoint, with its optimizer state,  |
-|                          | and saves the job's own. Without a serving    |
-|                          | session, it also reserves the job's GPUs      |
-+--------------------------+-----------------------------------------------+
-| Slime serving session    | the rollout engines of task jobs and dataset  |
-| (from the first such job | jobs, their router and the training GPUs,     |
-| until the component      | across jobs                                   |
-| closes)                  |                                               |
-+--------------------------+-----------------------------------------------+
-| Inference component      | SGLang or vLLM engines on their own GPUs,     |
-| (service ``inference``)  | serving the published weights                 |
-+--------------------------+-----------------------------------------------+
+For hosted LoRA training from a CPU host, use `Tinker <tinker.rst>`__.
+To change rules, skills or tools while keeping the model fixed, use
+`harness evolution <evolve-your-harness.rst>`__.
 
 Before you start
 ----------------
 
-The Slime backend needs the supported GPU environment: Ray, Slime, and
-CUDA-specific builds of torch, SGLang, and Megatron. ``pip install -e .`` from
-the quickstart brings none of them. Build the image as `Installation
-<../getting-started/installation.rst#gpu-image-for-weight-training>`__
-describes. Then start a container. Mount the model directory that
-``inference.model-path`` points at and the directory where Reef keeps its
-state:
+Build the `GPU training image
+<../getting-started/installation.rst#gpu-image-for-weight-training>`__.
+A base Reef installation does not include Slime, Ray or the CUDA training stack.
+Mount persistent directories for the model and deployment state:
 
 .. code:: bash
 
@@ -53,204 +24,160 @@ state:
      -v "$PWD":/workspace/Reef \
      reef bash
 
-``--network host`` lets the HTTP service, the inference component, and Ray
-reach each other on localhost. ``--ipc host --shm-size 32g`` gives the training
-stack its shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs
-the same invocation non-interactively.
-
 The model at ``inference.model-path`` must be present or downloadable.
+The container's host network lets Reef, Ray and inference reach each other.
 
 Start from a config
 -------------------
 
-Each weight-training example ships a complete ``serve.yaml``. Copy the closest
-one and edit it. ``reef serve`` manages the shared Ray runtime and starts the
-inference component before the HTTP service. The component listens on a free
-loopback port; an ``inference.remote`` section names a component elsewhere
-instead. The HTTP service starts Slime's training workers and the serving
-engines before it answers, and ``reef serve`` stops the stack on exit.
+Copy the closest working ``serve.yaml``. Keep its training options until
+both the model and recipe work.
 
-- `SAO rollout training <recipes/sao.rst>`__ uses
-  ``recipes/sao/examples/imo_answerbench/serve.yaml``, the smallest: two GPUs, one actor
-  that shares its GPU with the critic, and one serving engine. Its ``run.sh``
-  defaults the local Ray pool to two visible devices.
-- `TTT-Discover test-time training <recipes/tttd.rst>`__ uses
-  ``recipes/tttd/examples/tttd/serve.yaml``, four GPUs with LoRA training: two
-  for the actor and two for the serving engines.
-- `OpenClaw-RL conversation learning <recipes/openclawrl.rst>`__ uses
-  ``recipes/openclawrl/examples/openclawrl/serve.yaml``, the paper's seven-GPU
-  stack with a PRM engine and a student model.
+.. list-table::
+   :header-rows: 1
+   :widths: 25 55 20
 
-`Configuration <../reference/configuration.rst>`__ covers interpolation, command-line
-overrides, and log locations.
-
-What to review
---------------
-
-.. container:: config
-
-   ``inference.model-path``
-       a local HF model directory or a repo id, downloaded on start
-
-   ``recipe.implementation``
-       the recipe this deployment serves; its fields live in ``recipe.config``
-
-   ``reef.token``
-       the bearer token the service accepts
-
-   ``training.config.num_gpus``
-       example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-
-   ``pipeline.sample2job.config.job_samples``
-       the fewest samples of one job; required for a weight recipe
-
-   ``training.config.global_batch_size``
-       samples in one optimizer step
-
-   ``training.config.checkpoint_dir``
-       where checkpoints land, with the ``storage.artifact-*`` paths
-
-   ``training.options``
-       GPU layout, optimizer, sequence length, loss settings
-
-Three things to get right:
-
-1. **Set the job size and the batch size.** ``training.config.global_batch_size``
-   is Slime's ``--global-batch-size``, the samples of one optimizer step.
-   ``pipeline.sample2job.config.job_samples`` is the samples of one job: Reef
-   submits a job when it holds this many samples, and Slime cuts the job's
-   data into optimizer steps of the batch size. Set ``job_samples:
-   ${training.config.global_batch_size}``, so that one job is one optimizer
-   step. A weight recipe without ``job_samples`` fails its build. A
-   ``batch_size`` key in the ``pipeline`` section fails as an unknown key.
-2. **The recipe and the loss flags must describe the same objective.** The Slime
-   component checks this at startup. Each recipe page names its loss family, and
-   `Loss families <../developer-guide/loss-families.rst#family-to-slime-flags>`__
-   maps each one to its flags.
-3. **Training must render as the engine serves.** Serving records the
-   provider exchange only, without tokens or log probabilities. The training
-   component renders each sample with the model's chat template and computes
-   the log probabilities with the weights of the job's start. Give Slime the
-   serving engine's chat template arguments in
-   ``training.options.apply-chat-template-kwargs``, for example
-   ``'{"enable_thinking": false}'``. A sample that cannot render does not
-   train, and the job metric ``unrenderable_samples`` counts it.
-
-Keep the ``training.options`` mapping from the closest working config and change only what
-your model or recipe needs.
+   * - Example
+     - Configuration
+     - GPUs
+   * - `SAO <recipes/sao.rst>`__
+     - ``recipes/sao/examples/imo_answerbench/serve.yaml``
+     - 2
+   * - `TTT-Discover <recipes/tttd.rst>`__
+     - ``recipes/tttd/examples/tttd/serve.yaml``
+     - 4, with LoRA
+   * - `OpenClaw-RL <recipes/openclawrl.rst>`__
+     - ``recipes/openclawrl/examples/openclawrl/serve.yaml``
+     - 7, including the judge
 
 Run the example
 ---------------
 
+From the checkout in the container:
+
 .. code:: bash
 
-   export REEF_TOKEN=reef-local     # the token recipes/sao/examples/imo_answerbench/serve.yaml declares
-
+   export REEF_TOKEN=reef-local
    reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
      --inference.model-path ~/models/Qwen2.5-1.5B-Instruct
 
-You can override any config value on the command line. Startup takes several
-minutes. Wait for the inference component and the HTTP service to report ready.
+Startup can take several minutes. In another terminal, check readiness:
 
 .. code:: bash
 
    curl -f http://127.0.0.1:8900/healthz
    curl -H "Authorization: Bearer reef-local" http://127.0.0.1:8900/reef/status
 
-``/healthz`` says the HTTP service is up. Read ``/reef/status`` when something
-is wrong: it reports asynchronous training and preload failures, current weight
-versions, inference admission, processor state, and the running training job.
+``/healthz`` checks the HTTP service. ``/reef/status`` reports training errors,
+preload failures and the current jobs. ``reef serve`` stops the managed stack
+when it exits. See `Configuration <../reference/configuration.rst>`__ for
+command-line overrides and log locations.
 
 Watch it learn
 --------------
 
-Send inference through Reef and report feedback per response, exactly as in
-`Quickstart <../getting-started/quickstart.rst>`__. When the recipe has enough eligible records
-it builds one job's data and submits it to Slime as one training job. The job
-trains the data and saves one checkpoint. Reef evaluates the checkpoint,
-publishes it, loads it into the engines, and records a new version.
+Send inference and feedback as in the `quickstart
+<../getting-started/quickstart.rst>`__. Once enough eligible samples arrive,
+Reef submits a job. Slime trains it and saves checkpoints. Reef evaluates
+candidates and publishes selected artifacts.
 
 .. code:: bash
 
-   export SCENARIO=<the x-reef-scenario you sent>   # examples/imo_answerbench uses sao-smoke
-
+   export SCENARIO=sao-smoke
    curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/artifacts
-   # {"scenario": "...", "artifacts": [{"operation": "training", "active": true, ...}, ...]}
+     "http://127.0.0.1:8900/reef/scenarios/$SCENARIO/artifacts"
 
-A new ``training`` entry shows that training ran. It appears once
-``job_samples`` eligible samples have arrived. Later requests use the current
-version without a restart. Slime saves one checkpoint per job, whatever
-``save-interval`` says, so each published version is a durable checkpoint.
-Megatron requires ``save-interval`` whenever ``save`` is set, so the examples
-keep it.
+A new ``training`` artifact confirms that a job produced a published checkpoint.
+Activation decides whether later requests use it. Check
+`checkpoint cadence <operate.rst#set-the-checkpoint-cadence>`__ when a job
+needs intermediate checkpoints.
 
-Training is linear: each job continues from the workers' latest checkpoint,
-whether or not Reef selected it. The workers cannot load a published snapshot,
-so Reef refuses a ``train-from`` on a Slime scenario. Activating an older
-artifact still works: it changes what serves, not where training continues.
-Under the default rule, Reef activates the next checkpoint again; `Go back to
-an older artifact <operate.rst#go-back-to-an-older-artifact>`__ describes how
-to keep the older one serving.
+Slime continues from its latest saved checkpoint, including checkpoints that
+Reef did not select. It refuses ``train-from`` on an existing scenario.
+Activating an older artifact changes serving only. A Slime stack trains one
+scenario for its lifetime; use another stack and ports for another scenario.
 
-A Slime stack trains one scenario for its lifetime: its workers hold one set
-of weights. To train another scenario, run another stack on different ports.
+What to review
+--------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Setting
+     - Check
+   * - ``inference.model-path``
+     - The local model path or Hugging Face repository ID.
+   * - ``recipe.implementation``
+     - The recipe to run; its settings are under ``recipe.config``.
+   * - ``reef.token``
+     - The token clients send to Reef.
+   * - ``pipeline.sample2job.config.job_samples``
+     - The stored samples required to submit a job.
+   * - ``training.config.global_batch_size``
+     - The optimizer batch size in examples that expose this setting.
+   * - ``training.options``
+     - Slime's GPU layout, optimizer, sequence length and loss flags.
+   * - Checkpoint and ``storage.artifact-*`` paths
+     - Persistent storage with room for checkpoints and exports.
+
+A weight recipe requires ``job_samples``. Set it to the example's batch size
+for its usual one-step jobs. Trajectory rendering can produce more optimizer
+samples than stored samples; see `SFT <recipes/sft.rst>`__.
+``pipeline.batch_size`` is not a valid setting.
+
+The recipe and Slime loss flags must agree. Reef checks this at startup.
+Use the recipe's example or the `loss-family mapping
+<../developer-guide/loss-families.rst#family-to-slime-flags>`__.
+
+Match training and serving chat-template arguments. For example, set
+``training.options.apply-chat-template-kwargs`` to
+``'{"enable_thinking": false}'`` when serving disables thinking.
+Samples that cannot render do not train; ``unrenderable_samples`` counts them.
 
 Choose what serves
 ------------------
 
-By default Reef activates every saved checkpoint, so the newest one serves.
-To serve a checkpoint only after an evaluation of it passes, or only when a
-person activates it, add an ``activation`` section. The rules and their
-settings are in `Configuration
-<../reference/configuration-recipe.rst#the-activation-section>`__. Training continues
-from the newest checkpoint either way.
+The default activation rule serves each new artifact. Choose ``evaluated``
+to require a score threshold, or ``never`` for manual activation.
+See `Activation rule <operate.rst#activation-rule>`__.
+Training continues from its latest checkpoint under all three rules.
 
 Train a LoRA adapter
 --------------------
 
-Slime can train a LoRA adapter on a frozen base model instead of the full
-weights. Add these native flags to ``training.options`` (without leading
-``--``):
+To train an adapter on a frozen base model, add these Slime options:
 
-.. code:: text
+.. code:: yaml
 
-   --megatron-lora-rank=32 --megatron-lora-alpha=32
-   --megatron-lora-target-modules linear_qkv linear_proj linear_fc1 linear_fc2
+   training:
+     options:
+       megatron-lora-rank: 32
+       megatron-lora-alpha: 32
+       megatron-lora-target-modules: [linear_qkv, linear_proj, linear_fc1, linear_fc2]
 
-Each snapshot then holds the PEFT adapter alone, and the engines load it under
-a new adapter name. The engines start with the adapter's rank and target
-modules. ``inference.max-loaded-adapters`` (default 1) sizes their adapter
-table: the adapters they keep resident. With 1, the engines unload the
-served adapter before they load the new one, while generation is paused; with
-2, the new adapter loads beside it. ``/reef/status`` reports the scenario's
-``adapter_runtime_load_id``. LoRA needs ``inference.backend: sglang``; vLLM
-serves full weights only. To train one adapter per scenario on one base
-model, use `Tinker with inference engines <tinker.rst#serve-on-inference-engines>`__.
+Use ``inference.backend: sglang``. Reef's vLLM integration serves full weights
+only. Each published artifact contains the adapter, and SGLang loads it under
+a new name.
 
-An adapter the scenario did not train, such as one from an offline SFT run,
-is admitted the same way. It enters the snapshot chain only if
-``adapter_config.json`` declares a
-``peft_type``, the weights are present, and its base model matches the one the
-engine holds.
+``inference.max-loaded-adapters`` defaults to 1. With one slot, generation
+pauses while the old adapter is replaced. With two slots, the new adapter
+can load beside it. For several scenarios on one base model, use
+`Tinker with inference engines <tinker.rst#serve-on-inference-engines>`__.
+
+Reef also accepts imported adapters. Their configuration must declare
+``peft_type``, their weights must exist, and their base model must match serving.
 
 What a published adapter contains
 ---------------------------------
 
-Every published LoRA artifact holds the adapter alone in its ``adapter/``
-directory, never a merged or full-model checkpoint. A rank-32 adapter is a few
-megabytes where the base model is gigabytes, so the snapshot chain can keep
-every revision.
+The artifact's ``adapter/`` directory contains:
 
-.. code:: text
+- ``adapter_config.json``: the PEFT configuration.
+- ``adapter_model.safetensors``: the adapter tensors.
+- ``reef-adapter.json``: training metadata and checksums.
 
-   adapter_config.json          standard PEFT config: peft_type, r, lora_alpha,
-                                target_modules, lora_dropout, base_model_name_or_path
-   adapter_model.safetensors    the adapter tensors, and only those
-   reef-adapter.json            Reef's training metadata for this revision
-
-The first two files are a plain Hugging Face PEFT adapter, so a published
-revision loads outside Reef with nothing but ``transformers`` and ``peft``:
+The first two files load outside Reef with Transformers and PEFT:
 
 .. code:: python
 
@@ -260,57 +187,33 @@ revision loads outside Reef with nothing but ``transformers`` and ``peft``:
    base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
    model = PeftModel.from_pretrained(base, "/path/to/snapshot/adapter")
 
-``reef-adapter.json`` lets you check a revision. It records:
-
-- the base model, plus a checksum of its tokenizer and chat-template files;
-- the PEFT settings the export wrote;
-- the dtype of the tensors it wrote;
-- the rollout that produced it;
-- a SHA-256 for each of the two PEFT files.
-
-PEFT loaders ignore files they do not recognize, so this file does not affect
-loading the adapter elsewhere.
-
-Reef checks this file whenever it is present. Reef refuses the adapter when a
-checksum does not match its file, a setting contradicts
-``adapter_config.json``, or a listed file is missing. Adapters from elsewhere
-have no such file and are accepted without one; a deployment that should serve
-only its own exports can require it.
+When ``reef-adapter.json`` exists, Reef checks its files, checksums and settings.
+A mismatch refuses the adapter. External adapters can omit this metadata unless
+the deployment requires it. PEFT ignores the extra file.
 
 Connect your agent
 ------------------
 
-Use the `HTTP API reference <../reference/http-api.rst>`__ for inference,
-feedback reports, and artifact queries. To compare learning signals before
-choosing a training config, see `Choose a recipe for agent learning
-<recipes.rst>`__.
+Use the `HTTP API <../reference/http-api.rst>`__ for inference and feedback.
+`Choose a recipe <recipes.rst>`__ compares the supported learning signals.
 
 Run Harbor tasks and report
 ---------------------------
 
-To train from Harbor tasks, run them through Reef. This needs Docker.
+With Docker available, run a task manifest through Reef:
 
-.. code-block:: bash
+.. code:: bash
 
    python -m reef.harness.harbor.rollouts \
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 
-Each task directory runs one rollout with a Harbor agent (``terminus-2`` unless
-``--agent-json`` names another). The agent's model calls go through Reef, so
-every inference is a record. When the verifier scores the rollout, the command
-sends one report to ``/reef/report``: the reward as the score, the receipts as
-the references, and the task's name, path and digest under ``metadata.task``.
-The recipe's reported processor turns those records into training samples like
-any other report.
+Each task runs with ``terminus-2`` unless ``--agent-json`` selects another agent.
+Reef records its model calls. The verifier result becomes one report with the
+score, inference receipts and task metadata. The recipe decides what trains.
 
-Options:
-
-- ``--instructions FILE`` appends a file to every task's instruction.
-- ``--label name=value`` tags the calls and the report, so two arms of one task
-  stay apart.
-- ``--agent-host host.docker.internal`` is for an agent that runs inside the
-  task container (``claude-code``, ``codex`` and the other installed agents).
-  By default the proxy that the agent talks to listens on this host's
-  loopback; with this option it listens on every interface. On Linux, give
-  the container that name with Docker's ``host-gateway``.
+- ``--instructions FILE`` appends instructions to each task.
+- ``--label name=value`` tags calls and reports to distinguish experimental arms.
+- ``--agent-host host.docker.internal`` lets an agent inside the container reach
+  the capture proxy. The proxy then listens on all interfaces. On Linux,
+  configure Docker's ``host-gateway`` for that name.

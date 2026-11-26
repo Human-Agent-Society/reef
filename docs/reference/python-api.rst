@@ -1,13 +1,13 @@
 Python API for custom learning methods
 ======================================
 
-The Python API is the set of base classes that a learning method, a storage plugin or a serving integration implements. This page says where each contract is.
+Find the Python interfaces for custom learning methods, storage plugins and serving integrations.
 
-The docstring of each class is the reference for its contract: it gives the signature, the default and the errors of each member. The guide in the last column explains how to use the contract. Reef owns everything around the contracts: it accepts and replays records, holds a job's data until it is acknowledged, commits algorithm state, submits training jobs, and publishes the saved checkpoints.
+Class docstrings define signatures, defaults and errors. The linked guides explain how to implement each interface. Reef handles record replay, job-data retention, state commits, job submission and checkpoint publication.
 
-Every contract is an abstract base class. Inherit it explicitly and implement each abstract member. Reef rejects an object that only has methods of the same names. Optional capabilities are separate base classes: inherit only those that the implementation supports.
+Inherit each interface's abstract base class and implement its abstract members. Matching method names alone is insufficient. Inherit optional capability classes only when supported.
 
-Method code must depend only on the classes that this page and the guides name, and on what the docstrings of those classes name. Anything else under ``reef.`` is an implementation detail and can change.
+Depend only on interfaces named here, in the linked guides, or in their docstrings. Other ``reef.`` APIs are internal and can change.
 
 Learning methods
 ----------------
@@ -36,10 +36,10 @@ Start with a recipe and add only what the method needs.
    * - Generate tasks
      - ``TaskGenerator`` (``reef.recipe.generated_tasks.generator``)
      - `Task generators <../developer-guide/task-generators.rst>`__
-   * - Shape samples into the data of a job
+   * - Assemble job data from samples
      - ``Sample2Job`` (``reef.train.sample2job``); ``JobData``, ``TrajectorySample``, ``TaskSample`` (``reef.core.job_data``)
      - `Sample-to-job stage <../developer-guide/recipe-control-service.rst#sample-to-job-stage>`__
-   * - Turn the data of a job into a training signal
+   * - Prepare training signals
      - ``SlimeObjective`` (``reef.train.slime_backend.objectives``), ``TinkerObjective`` (``reef.train.tinker_backend.objectives``)
      - `The objective <../developer-guide/recipe-training-service.rst#the-objective>`__
    * - Add a tensor loss
@@ -109,21 +109,21 @@ A deployment names each of these in its config, as a built-in name or as ``packa
      - ``ScenarioAdmission`` (``reef.control.scenario.admission``)
      - ``reef.scenario-admission``
      - `Limit the scenarios a service holds <../user-guide/operate.rst#limit-the-scenarios-a-service-holds>`__
-   * - Make the sandbox templates of a task
+   * - Build task sandbox templates
      - ``TaskTemplateBuilder`` (``reef.evaluation.task_templates``)
      - ``evaluation.task-template-builder``
      - `Build templates before the trials <../developer-guide/sandboxes.rst#build-templates-before-the-trials>`__
-   * - Keep more of an evaluation trial
+   * - Retain evaluation trial files
      - ``TrialObserver``, ``EvaluationTrial`` (``reef.evaluation.trials``)
      - ``evaluation.trial-observer``
      - `Keep the files of a trial <../developer-guide/sandboxes.rst#keep-the-files-of-a-trial>`__
 
-An agent connects through an adapter, which is a file and not a class: `Harness adapters <../developer-guide/harness-adapters.rst>`__.
+Harness adapters use descriptor files. See `Harness adapters <../developer-guide/harness-adapters.rst>`__.
 
 Embed the service
 -----------------
 
-An application can run the complete Reef service in its own process. ``reef.api.assembly.build_app`` makes the dispatcher and the HTTP app from a ``ServiceSettings``. The application adds its routes before it starts the app, and the service tokens protect them too.
+Use ``reef.api.assembly.build_app`` to embed Reef in an application. It builds the dispatcher and HTTP app from ``ServiceSettings``. Add routes before startup; service tokens protect them too.
 
 .. code:: python
 
@@ -141,6 +141,9 @@ An application can run the complete Reef service in its own process. ``reef.api.
    app.router.add_get("/my-app/scenario-count", scenario_count)
    web.run_app(app, host=settings.host, port=settings.port)
 
-``inference_handler`` is optional: it gives the app an ``InferenceHandler`` that the application made. Such a handler needs only the inference methods.
+The optional ``inference_handler`` supplies an application-owned ``InferenceHandler``. It needs only the inference methods.
 
-The app of ``build_app`` also runs record retention and the data store's maintenance. An application that uses a ``Dispatcher`` without this app runs them itself, at intervals: ``Dispatcher.prune_record_archives`` with a ``RecordRetention`` (``reef.storage.scenario.records``), and ``DataStore.maintain``.
+``build_app`` also runs record retention and data-store maintenance. When using ``Dispatcher`` alone, periodically call:
+
+- ``Dispatcher.prune_record_archives`` with ``RecordRetention`` (``reef.storage.scenario.records``).
+- ``DataStore.maintain``.

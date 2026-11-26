@@ -1,12 +1,12 @@
 HTTP API: records and operation history
 =======================================
 
-Import existing inferences and reports as records, and read the records and the operations that a scenario keeps.
+Import inference exchanges and reports, then inspect retained records and operation history.
 
 Record
 ------
 
-Reef stores every inference exchange and every report as an ``AgentRecord`` with a record ID. The same ID with different content returns a conflict; it never overwrites. Reef tracks consumed records, so retried reports, and late reports whose references already trained, are not counted twice.
+Reef stores inference exchanges and reports as ``AgentRecord`` values with unique IDs. Reusing an ID with different content returns a conflict. Consumed records are tracked, so retried reports and late reports referencing trained records do not count twice.
 
 Records remain readable after training consumes them (`Record and commit history`_). Retention deletes the oldest record items only when the shared capacity budget is exceeded (20 GiB by default), and keeps durable loss totals. See `Record retention <../user-guide/storage.rst#record-retention>`__.
 
@@ -48,27 +48,27 @@ Reef answers these statuses:
 
 Import does not assign the active artifact to externally generated examples. Training reads no token IDs or log probabilities from an imported record: the training component renders the recorded exchange with the model's chat template. To train on complete ATIF trajectories, see `Data items <http-api-data-items.rst>`__.
 
-Imported records enter the same scenario storage and wake the same training worker as live traffic. Keep the same scenario header for later inference calls: their records continue through the same processor, with no processor replacement or end-of-dataset signal. A processor that needs report feedback needs it for imported and live records alike. Submit each example's feedback promptly so that completed jobs can drain:
+Imported and live records use the same scenario storage and training processor. Keep the same scenario header for later inference calls. Processors that require reports need them for both sources. Submit feedback promptly so completed jobs can proceed:
 
 .. code:: json
 
    {"agent_record_id": "offline-score-0001", "request_type": "report",
     "payload": {"references": ["offline-0001"], "score": 1.0}}
 
-The selected recipe and processor own job size, buffering, retention and training policy. Uploading can overlap training. This API adds no dataset epochs, no cold-start completion barrier and no automatic algorithm switch. Use the recipe's progress and commit status to learn when training has consumed the imported examples.
+The recipe and processor control job size, buffering, retention and training policy. Uploads can overlap training. Imports define no epochs, completion barrier or automatic algorithm switch. Check recipe progress and commit status to see which examples training consumed.
 
 Batch imports and resume
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each record uses the envelope of ``POST /reef/records``. The batch holds 1 to 1000 records within the 10 MiB body limit. All records share the request's scenario and tag headers. Put an inference before the reports that reference it, including within one batch.
 
-Reef validates the whole batch and stores it in one database transaction. The response is ``{"records": [receipt, ...]}``, in input order. A successful import wakes the consumer once after commit. Atomicity applies to one request, not to the whole dataset or to later training.
+Reef validates and stores each batch atomically. The response is ``{"records": [receipt, ...]}`` in input order. Successful imports wake the consumer after commit. Atomicity covers one request, not the whole dataset or subsequent training.
 
 - Malformed records or missing references return 400, and conflicting IDs return 409. Neither stores any new record of the batch.
 - Identical retries are accepted, including after training or capacity eviction.
 - Oversized requests return 413.
 
-For a large local dataset, use the importer of the standalone ``reef-client`` package, which needs no Reef service or training dependencies. Save one envelope per line in an immutable UTF-8 JSONL file. Keep the original record IDs and report references: the importer generates no IDs and converts no other dataset schema.
+For large local datasets, use the standalone ``reef-client`` importer, without Reef service or training dependencies. Save one envelope per line in an immutable UTF-8 JSONL file. Preserve record IDs and report references; the importer generates neither and converts no schemas.
 
 .. code:: bash
 
@@ -78,9 +78,9 @@ For a large local dataset, use the importer of the standalone ``reef-client`` pa
 The importer:
 
 - **Batches.** It reads incrementally and sends batches limited by ``--batch-size`` (default 128 records) and ``--max-batch-bytes`` (default 524288 bytes). It buffers one batch and one look-ahead record. One JSONL line must fit the byte limit; raise the limit, below 1048576, for larger records.
-- **Progress.** It saves progress to ``records.jsonl.reef-import.json``, or to ``--progress PATH``: the destination, scenario, source checksum and last acknowledged byte offset and count, with no token or record payload. Each run first hashes the whole file to verify its identity, then seeks to the saved offset. The source must not change during the import. A local file lock prevents two runs on one progress file.
+- **Progress.** ``records.jsonl.reef-import.json``, or ``--progress PATH``, stores the destination, scenario, source checksum, and acknowledged byte offset and count. It contains no token or payload. Each run verifies the whole file's checksum before resuming. Keep the source unchanged. A local file lock prevents concurrent runs sharing progress.
 - **Resume.** Run the same command again after an interruption. A modified source or another destination needs a separate progress file; known IDs still deduplicate at the server.
-- **Retries.** It retries transient connection failures and HTTP 408, 429, 500, 502, 503 and 504 up to ``--retries`` times (default 3), with backoff and unchanged IDs. If a reply is lost after commit, server deduplication prevents a second insert. A permanent error stops the import without advancing that batch's progress; earlier acknowledged batches stay stored.
+- **Retries.** Transient connection failures and HTTP 408, 429, 500, 502, 503 and 504 retry up to ``--retries`` times (default 3). Retries use backoff and unchanged IDs, preventing duplicate inserts after lost responses. Permanent errors stop without advancing the failed batch's progress. Earlier batches remain stored.
 - **Count.** The reported count includes every acknowledged source row, including retries of records already present. It does not count trained samples.
 
 The importer supports local JSONL on platforms with POSIX file locking, including Linux and macOS. It does not convert Parquet or Hugging Face schemas, and it runs no server-side S3 import.
@@ -90,7 +90,7 @@ The batch limits do not bound processor memory. A processor that waits for repor
 Record and commit history
 -------------------------
 
-All these reads require service authentication and return ``Cache-Control: no-store``. Payloads and recorded metrics can contain request content, so a platform must bind the upstream scenario to the authenticated workspace. Each response is a live read: concurrent training and retention can change later pages.
+History reads require service authentication and return ``Cache-Control: no-store``. Payloads and metrics can contain request content. Platforms must bind the upstream scenario to the authenticated workspace. Concurrent training and retention can change later pages.
 
 **Records.** ``GET /reef/scenarios/{scenario}/records`` reads retained record metadata, including consumed records, oldest first:
 
@@ -120,4 +120,4 @@ The operations are:
 
 A ``served`` request appends ``activate``, ``serve`` and ``stop_serving`` operations, one for each artifact that changes (`Set what a scenario serves <http-api-serving.rst#set-what-a-scenario-serves>`__). Activation, restore and serving create no artifacts or repository revisions. An import or a training step can create an artifact without changing what serves. Restore appends a new operation; it does not remove or rewind history. Recovery replays serving selections and training starts independently.
 
-Consumption does not prove that a snapshot made from the records serves. Reef assigns no learning state, explanation or evaluation result to these rows: the console that reads them owns that interpretation.
+A consumed record does not establish that its resulting artifact serves. Consoles must interpret operation history; Reef adds no learning state or evaluation result.

@@ -1,159 +1,18 @@
 SFT: train on target responses
 ==============================
 
-Supervised fine-tuning (SFT) trains the served model to give a target
-response to a recorded request. The loss is the cross-entropy of the target
-tokens. Use SFT to train on demonstrations that a harness reports. You can
-also use it to train on a dataset that you import. SFT ships with
-``reef-infra`` as ``reef.recipe.sft:SFTRecipe``.
-
-+-------------+------------------------------------------------------------+
-| Evolves     | model weights                                              |
-+-------------+------------------------------------------------------------+
-| Signal      | one report for each recorded request; the target is the    |
-|             | report's ``teacher_context`` or the recorded response      |
-+-------------+------------------------------------------------------------+
-| Loss family | ``sft`` (Slime's ``sft_loss``, Tinker's ``cross_entropy``) |
-+-------------+------------------------------------------------------------+
-| Package     | ``reef/recipe/sft/``                                       |
-+-------------+------------------------------------------------------------+
-| Pipeline    | reported feedback, singleton                               |
-+-------------+------------------------------------------------------------+
-| Needs       | a training backend: Slime (on GPUs) or Tinker              |
-+-------------+------------------------------------------------------------+
-
-How it works
-------------
-
-Each report references one recorded request. The ``target`` setting selects
-the response that the sample trains:
-
-- ``demonstration`` (default): the report's ``teacher_context``. The harness
-  sends a request through Reef, gets a reference response from a different
-  source, and reports that response against the request's receipt. The recipe
-  ignores the model's own response. SDFT uses the same reports, so the two
-  methods can train on the same feedback.
-- ``response``: the recorded response message, with its tool calls. Use this
-  target for imported examples, where the recorded response is the dataset's
-  answer.
-
-SFT has two pipeline stages
-(`Training pipeline <../../developer-guide/write-a-recipe.rst>`__):
-
-- ``SFTSamples`` makes one sample from each report: the recorded request with
-  the target as the final assistant turn. Only that turn trains. All samples
-  have the same weight, and a reported ``score`` is only metadata. The stage
-  never finds a sample stale, because an SFT target is fixed text.
-- ``SFTJobData`` puts the samples into job data in arrival order, reports and
-  uploaded trajectories interleaved (`Train on whole conversations`_). With
-  the default ``buffer_size``, one job's data holds ``job_samples`` samples.
-
-The training component renders each sample with the model's chat template
-(`Chat template arguments
-<../../reference/configuration-inference.rst#chat-template-arguments>`__). It leaves out
-a sample that cannot render or that is longer than ``max_tokens``, and counts
-it in the job metric ``unrenderable_samples``.
-
-The ``sft`` objective is built in on Slime (``sft_loss``) and on Tinker
-(``cross_entropy``, with ``training.backend: tinker``). Neither loss reads
-old-policy log probs, so the objective accepts more than one epoch on a job's
-data.
-
-The report contract
--------------------
-
-The report type is ``TeacherContextReport``. With ``target: demonstration``,
-the report contains the demonstration:
-
-.. code:: json
-
-   {
-     "references": ["<receipt of the request>"],
-     "metadata": {"teacher_context": "<the demonstration>"}
-   }
-
-With ``target: response``, the report only marks the example as ready to
-train: ``{"references": ["<receipt of the request>"]}``.
-
-Train on a dataset
-------------------
-
-Write each example as an inference record. Its ``response`` is the dataset's
-answer. After each inference record, write a report that references it. Put
-one envelope on each line of a JSONL file:
-
-.. code:: json
-
-   {"agent_record_id": "sft-0001", "request_type": "inference", "payload": {"model": "served-model", "messages": [{"role": "user", "content": "What is 2 + 2?"}], "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]}}}
-   {"agent_record_id": "sft-0001-report", "request_type": "report", "payload": {"references": ["sft-0001"]}}
-
-Import the file with ``reef-client`` (`Import records for cold-start learning
-<../../reference/http-api-records.rst#import-records-for-cold-start-learning>`__):
-
-.. code:: bash
-
-   reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
-
-A job trains when Reef holds ``job_samples`` reports, so the last reports of
-a dataset wait until that number is available. Reef reads the imported reports
-only as fast as jobs train, so a large import waits in the record store, not
-as samples. Reef does not repeat a dataset. To train on the data again, import
-it again with new record IDs.
-
-Train on whole conversations
-----------------------------
-
-A complete conversation, such as an agent rollout with tool calls, can train
-every agent turn at once. Create it as a trajectory item that the scenario uses
-(`Create trajectory items <../../reference/http-api-data-upload.rst#create-trajectory-items>`__).
-Each uploaded trajectory is one sample. The training component renders it:
-
-- The steps become chat messages: an ``agent`` step is an assistant turn with
-  its tool calls, and each observation result is a tool message.
-- An agent step with ``is_copied_context: true``, ATIF's mark for a step
-  copied from earlier context, is context only: it renders, and it trains
-  nothing. Every other agent turn trains.
-- The tokens are the conversation, rendered with the chat template and the
-  agent's ``tool_definitions`` as the tools, up to the last trained agent
-  turn. Steps after it are left out.
-- The loss mask selects the tokens of every trained agent turn. System, user,
-  tool and copied context tokens get no loss.
-
-For example, to keep an earlier answer as context and train only the last one:
-
-.. code:: json
-
-   {"steps": [
-     {"step_id": 1, "source": "user", "message": "What is 37 + 45?"},
-     {"step_id": 2, "source": "agent", "message": "82", "is_copied_context": true},
-     {"step_id": 3, "source": "user", "message": "Show the sum."},
-     {"step_id": 4, "source": "agent", "message": "37 + 45 = 82."}
-   ]}
-
-Reef checks the structure of each trajectory when it accepts the upload. It
-refuses the whole upload with 400, naming the trajectory, when one cannot
-train:
-
-- it has no agent step that trains (all its agent steps are copied context),
-  or its first trained agent step has no step before it;
-- ``is_copied_context`` is not a boolean;
-- a step's ``observation`` is not empty and is not an object; a content part
-  of a message or an observation result is not an object, a text part has a
-  ``text`` that is not a string, or an image part has no ``source.path``.
-
-The training component leaves a trajectory out of its job when:
-
-- the chat template does not render each trained turn as a prefix of the
-  whole conversation. A template that removes the reasoning of earlier
-  turns, for example, does not. Set the component's chat template arguments
-  so that it keeps them, or upload each turn as its own trajectory;
-- the sample is longer than ``max_tokens``.
+Use supervised fine-tuning (SFT) to train on reported demonstrations,
+imported request-response pairs, or uploaded conversations. The target tokens
+receive cross-entropy loss. ``reef.recipe.sft:SFTRecipe`` ships with Reef and
+supports Slime on GPUs or Tinker.
 
 Configuration
 -------------
 
-The top-level ``pipeline`` section of the deployment configures the stages.
-Each stage reads only its own ``config``.
+Use ``target: response`` for the dataset example below. Set the model and
+runtime using `Train model weights <../evolve-your-model.rst>`__ or
+`Train with Tinker <../tinker.rst>`__. This Slime configuration trains batches
+of 64 samples:
 
 .. code:: yaml
 
@@ -179,13 +38,17 @@ Each stage reads only its own ``config``.
 .. container:: config
 
    ``pipeline.record2sample.config.target`` : demonstration
-       ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
+       Train ``teacher_context`` by default, or select ``response`` to train
+       the recorded assistant response.
 
    ``pipeline.record2sample.config.max_tokens`` : 0
-       the maximum tokens in a sample, prompt and target together. The training component leaves a longer sample out and counts it in ``unrenderable_samples``. 0 disables the limit. Set it to the trainer's sequence length.
+       Maximum tokens per rendered segment, including prompt and target.
+       A sample with an over-limit segment is excluded and counted in
+       ``unrenderable_samples``. 0 disables the limit.
 
    ``pipeline.sample2job.config.job_samples`` : required
-       the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
+       Stored samples per job. A trajectory can render as several optimizer
+       samples, so a job can exceed one optimizer step.
 
    ``pipeline.sample2job.config.buffer_size`` : ``job_samples``
        the most samples that one job takes. Later samples wait for the next jobs.
@@ -193,10 +56,8 @@ Each stage reads only its own ``config``.
    ``training.config.global_batch_size`` : none
        the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
 
-Targets without reasoning belong in non-thinking mode. A hybrid-thinking
-template, such as Qwen3.5's or Qwen3.8's, renders thinking mode unless
-``enable_thinking`` is false. Give serving and the training component the same
-chat template arguments:
+For targets without reasoning, set ``enable_thinking: false`` on a
+hybrid-thinking model. Match serving and training chat template arguments:
 
 .. code:: yaml
 
@@ -211,26 +72,116 @@ chat template arguments:
 On Tinker, set ``training.options.chat_template_kwargs`` to the mapping
 instead.
 
-Further rules:
+Set optimizer settings in ``training.options``; ``optimization`` is refused.
+Slime requires ``sft_loss`` and refuses ``use-rollout-logprobs``.
+For an SFT-only run, ``disable-compute-advantages-and-returns`` avoids an
+unneeded forward pass.
 
-- Configure the optimizer, its learning rate, and its schedule in
-  ``training.options``. The recipe refuses an ``optimization`` section.
-- Slime requires ``--loss-type sft_loss`` and refuses
-  ``--use-rollout-logprobs``. If SFT is the only method of the run, also set
-  ``--disable-compute-advantages-and-returns``; it removes a forward pass
-  that ``sft_loss`` does not need.
-- With ``target: demonstration``, a report without ``teacher_context`` raises
-  an error. With ``target: response``, a recorded inference without a
-  response message raises an error.
+Train on a dataset
+------------------
+
+Write the dataset answer as the inference record's ``response``.
+Follow it with a report referencing that record. Save one envelope per JSONL
+line in ``records.jsonl``:
+
+.. code:: json
+
+   {"agent_record_id": "sft-0001", "request_type": "inference", "payload": {"model": "served-model", "messages": [{"role": "user", "content": "What is 2 + 2?"}], "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]}}}
+   {"agent_record_id": "sft-0001-report", "request_type": "report", "payload": {"references": ["sft-0001"]}}
+
+Import the file with ``reef-client`` (`Import records for cold-start learning
+<../../reference/http-api-records.rst#import-records-for-cold-start-learning>`__):
+
+.. code:: bash
+
+   reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
+
+Training starts when ``job_samples`` reports are ready. A final incomplete
+batch waits for more reports. Large imports remain in the record store until
+training consumes them. Reef does not automatically repeat the dataset;
+import it again with new record IDs to repeat it.
+
+The report contract
+-------------------
+
+With ``target: demonstration``, reference one request and supply its target:
+
+.. code:: json
+
+   {
+     "references": ["<receipt of the request>"],
+     "metadata": {"teacher_context": "<the demonstration>"}
+   }
+
+With ``target: response``, send only
+``{"references": ["<receipt of the request>"]}``.
+The report marks the recorded response as ready to train.
+A missing demonstration or recorded response raises an error for its target
+mode. Reports that reference more than one request are also refused.
+
+How it works
+------------
+
+Each report references one inference request. ``target`` selects what trains:
+
+- ``demonstration`` (default): train the report's ``teacher_context`` and
+  ignore the recorded response. These are the same reports that SDFT accepts.
+- ``response``: train the recorded response, including its tool calls.
+  Use this for imported examples with known answers.
+
+Only the target assistant turn receives loss. Scores do not affect sample
+weights or eligibility. SFT targets are fixed text, so they do not become
+stale when a new artifact serves.
+
+Reef consumes reports and uploaded trajectories in arrival order.
+Slime uses ``sft_loss``; Tinker uses ``cross_entropy``. Neither requires
+old-policy log probabilities, and both permit multiple epochs per job.
+
+Train on whole conversations
+----------------------------
+
+Upload an ATIF trajectory as an item that the scenario uses
+(`Create trajectory items
+<../../reference/http-api-data-upload.rst#create-trajectory-items>`__).
+Each trajectory counts as one stored sample.
+
+Every agent turn trains unless it has ``is_copied_context: true``.
+System, user, tool, and copied-context tokens receive no loss.
+The renderer includes ``tool_definitions`` and omits steps after the last
+trained turn. For example, this trajectory trains only the final answer:
+
+.. code:: json
+
+   {"steps": [
+     {"step_id": 1, "source": "user", "message": "What is 37 + 45?"},
+     {"step_id": 2, "source": "agent", "message": "82", "is_copied_context": true},
+     {"step_id": 3, "source": "user", "message": "Show the sum."},
+     {"step_id": 4, "source": "agent", "message": "37 + 45 = 82."}
+   ]}
+
+A trajectory can render as several segments. A new segment starts when a
+turn's prompt no longer extends the previous segment's tokens. This supports
+templates that remove earlier reasoning. Each segment trains only its own
+new agent tokens.
+
+Reef rejects the whole upload with HTTP 400, naming the trajectory, when:
+
+- it has no trained agent turn, or the first trained turn has no preceding step;
+- ``is_copied_context`` is not a boolean;
+- a nonempty ``observation`` is not an object;
+- a message or observation content part is not an object;
+- a text part's ``text`` is not a string, or an image lacks ``source.path``.
+
+During training, Reef excludes a trajectory when any segment exceeds
+``max_tokens``. It also excludes one when a trained turn does not extend its
+own generation prompt under the selected chat template.
+``unrenderable_samples`` counts rejected original samples.
 
 Pack samples into steps
 -----------------------
 
-By default, ``--global-batch-size`` counts samples. The tokens in one
-optimizer step then change with the sample lengths. To count packs of tokens
-instead, as ms-swift's ``--packing`` does, set ``packing_length`` in the
-jobs' ``scheduling`` parameter. ``recipe.config.job_parameters`` sends it
-with every job:
+By default, ``--global-batch-size`` counts samples. For batches based on
+packs of tokens, set ``scheduling.packing_length`` in the job parameters:
 
 .. code:: yaml
 
@@ -246,20 +197,15 @@ with every job:
        config:
          job_samples: 4096
 
-- Slime packs the samples of each job into packs of at most
-  ``packing_length`` tokens, the prompt and the target together. It fills
-  the packs best-fit decreasing and never splits a sample. A sample longer
-  than ``packing_length`` is a pack of its own.
+- Slime groups each job's samples into packs of up to ``packing_length``
+  tokens, including prompts. It never splits a sample. An oversized sample
+  gets its own pack.
 - One optimizer step trains ``--global-batch-size`` packs: about
   ``global_batch_size * packing_length`` tokens.
-- Packing works within one job. A job's packs seldom fill whole steps, so
-  the last step of each job is partial. Set ``job_samples`` to the samples of
-  many steps, so that the partial step is a small part of the job. Or set
-  ``scheduling.remainder`` to ``drop`` to leave it out.
-- Packing decides only which samples share a step. Slime computes the loss
-  of a step as it does without packing. It still splits a step into
-  micro-batches by ``--use-dynamic-batch-size`` and ``--max-tokens-per-gpu``.
-  Set ``--max-tokens-per-gpu`` to at least ``packing_length``.
+- Packing stays within each job. Its last step can be partial.
+  Use larger jobs to reduce that share, or set ``scheduling.remainder: drop``.
+- Packing does not change the loss. Dynamic micro-batching still uses
+  ``--max-tokens-per-gpu``. Set it to at least ``packing_length``.
 
 ``save_interval`` saves a checkpoint after each ``save_interval`` optimizer
 steps of a job, and at its end. Without it, a job saves one checkpoint at its
@@ -293,12 +239,10 @@ request and `Choose the samples that train
 Limitations
 -----------
 
-- A report must reference exactly one recorded request. A report that
-  references more than one request raises an error. To train each turn of an
-  agent rollout, report each request separately, or upload the rollout as an
-  ATIF trajectory (`Train on whole conversations`_).
-- The recipe does not filter reports by score. To train only on accepted
-  responses, report only those responses.
+- The recipe does not filter by score. Report only accepted responses if
+  only those responses should train.
+- Reports train one recorded request each. Report separate turns individually,
+  or upload an ATIF trajectory to train a complete conversation.
 
 Related guides
 --------------

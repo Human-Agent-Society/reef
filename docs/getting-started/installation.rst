@@ -1,55 +1,47 @@
 Install Reef on a laptop or GPU server
 ======================================
 
-Installation depends on what you want Reef to evolve:
+Reef requires Python 3.12 or newer. Choose an installation for your workload:
 
-- **A harness, against a hosted model.** Install the package on your
-  laptop; no GPU involved. See `Laptop, no GPU`_.
-- **Model weights, and optionally a harness.** Build the Docker image that
-  contains the GPU training stack. See `GPU image, for weight training`_.
-- **Neither — you only call a Reef deployment.** See `Client only`_.
+- **Harness updates with a hosted model:** `Laptop, no GPU`_.
+- **Local weight training:** `GPU image, for weight training`_.
+- **Connect to an existing deployment:** `Client only`_.
 
 Laptop, no GPU
 --------------
 
-Enough to serve, record, report, and evolve a harness against a hosted model.
-
-For a released version:
+Install Git LFS, then install a released version of Reef:
 
 .. code:: bash
 
-   pip install reef-infra        # the import package is `reef`
-
-Or, to work on Reef itself:
-
-.. code:: bash
-
-   git clone https://github.com/Human-Agent-Society/reef.git && cd reef
-   pip install -e .
+   pip install reef-infra
    git lfs install
 
-``git lfs`` is required: Reef keeps snapshot history in Git, with weight files
-under LFS. The checkout includes the core ``recipe`` example, the paper-backed
-methods under ``recipes/``, and the harness evolution demo under
-``tutorials/evolve-your-harness/``.
+To use the examples or develop Reef, install from a checkout:
+
+.. code:: bash
+
+   git clone https://github.com/Human-Agent-Society/reef.git
+   cd reef
+   pip install -e .
+
+The distribution is ``reef-infra``; Python imports use ``reef``.
+Git stores snapshot history, and Git LFS stores large artifact files.
+The checkout includes ``recipes/`` and ``tutorials/``; the wheel does not.
 
 GPU image, for weight training
 ------------------------------
 
-Weight training runs Ray, Slime, SGLang, and Reef together, against
-CUDA-specific builds of torch, SGLang, Megatron-Core, and FlashAttention. The
-supported way to get them is the image:
+For local Slime training, build the supported image from the checkout root:
 
 .. code:: bash
 
    docker build -f docker/Dockerfile.reef -t reef .
 
-`docker/README.md <../../docker/README.md>`__ covers the GPU prerequisites and
-how to start the container; `Evolve your model <../user-guide/evolve-your-model.rst>`__
-picks up from there.
+The image includes the compatible CUDA, inference and training dependencies.
+See `docker/README.md <../../docker/README.md>`__ for prerequisites and startup.
 
-Inside the container, to install from source instead of using what the image
-already carries:
+To update the source installation inside the container, run:
 
 .. code:: bash
 
@@ -57,25 +49,25 @@ already carries:
    pip install -e ".[slime]"
    pip install --no-deps --group runtime
 
-Keep ``--no-deps``: the CUDA-specific packages are already in the image, and
-resolving them again replaces working builds. The ``slime`` extra installs only
-the Python-side dependencies; the ``runtime`` group pins the training runtime
-itself.
+Keep ``--no-deps`` to preserve the image's CUDA packages.
+The ``slime`` extra installs adapter dependencies. The ``runtime`` group pins
+the training runtime.
 
 Client only
 -----------
 
-For a harness that just needs to talk to a Reef deployment, install the
-stdlib-only wire client:
+To connect a harness to an existing deployment, install the client:
 
 .. code:: bash
 
    pip install reef-client
 
+The client uses the Python standard library and does not install the Reef service.
+
 Run your first request
 ----------------------
 
-Continue with the `inference and feedback quickstart <quickstart.rst>`__
-to start the service, capture a receipt, and submit feedback. If you installed
-the GPU image for weight training, follow `Train model weights from agent
-feedback <../user-guide/evolve-your-model.rst>`__ for the training stack.
+- `Inference and feedback quickstart <quickstart.rst>`__: record a request
+  and submit feedback.
+- `Evolve your model <../user-guide/evolve-your-model.rst>`__: train with
+  local GPUs or Tinker.

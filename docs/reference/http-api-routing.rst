@@ -1,12 +1,16 @@
 HTTP API: scenario routing
 ==========================
 
-The routes of a deployment that routes each request to an external model: how Reef selects the target, which errors it answers, what the record holds, and how the deployment controller opens and closes a managed deployment.
+Route inference to external models, inspect routing records, and control admission on managed deployments.
 
 Routed external-model requests
 ------------------------------
 
-When `Scenario routing <configuration-routing.rst#scenario-routing-between-students-and-teachers>`__ is enabled, clients send ``POST /v1/chat/completions`` directly to Reef with a service token. Only the base record-only Recipe is supported. A routed Reef serves only this route, ``POST /reef/report`` and ``GET /healthz``; other routes return 404. With the `external router lifecycle <configuration-routing.rst#external-router-lifecycle>`__, the ``inference`` service applies this section to the manifest's Scenarios only, and also serves ``GET /readyz``. Send ``POST /reef/report`` to the ``control`` service there. Calls with ``x-reef-rollout: 1`` or ``true`` return 400 (``unsupported_rollout``). Rollout calls remain available when routing is disabled.
+With `Scenario routing <configuration-routing.rst#scenario-routing-between-students-and-teachers>`__ enabled, send ``POST /v1/chat/completions`` to Reef with a service token. Only the base record-only Recipe is supported.
+
+- Routed Reef serves this route, ``POST /reef/report`` and ``GET /healthz``. Other routes return 404.
+- With the `external router lifecycle <configuration-routing.rst#external-router-lifecycle>`__, inference applies these rules only to manifest Scenarios and also serves ``GET /readyz``. Send reports to control.
+- ``x-reef-rollout: 1`` or ``true`` returns 400 (``unsupported_rollout``). Rollout calls remain available when routing is disabled.
 
 .. list-table:: Client fields
    :header-rows: 1
@@ -18,21 +22,42 @@ When `Scenario routing <configuration-routing.rst#scenario-routing-between-stude
    * - JSON ``model``
      - The manifest's automatic model name, or one of the Scenario's target IDs.
 
-For the automatic model, Reef sends one ``POST /api/v1/routing/preview`` to the Scenario's private Semantic Router entrypoint, with the request's messages and the router runtime hash Reef verified at startup. Reef accepts the reply only if it names that hash, the Scenario's entrypoint, and either ``default`` or one of the Scenario's rules with its configured target. Reef resolves a pin locally and never calls the router. Reef then sets the provider ``model``; the rest of the JSON body is the client's original body, not the router's re-encoded copy. The target is frozen for every attempt of the request. These checks precede Scenario creation and provider execution:
+For the automatic model, Reef sends one ``POST /api/v1/routing/preview`` to the Scenario's private Semantic Router entrypoint. It sends the request messages and the router runtime hash verified at startup. The reply must match that hash, the Scenario's entrypoint, and ``default`` or a configured rule and target.
+
+An explicit target pin needs no router call. Reef sets the provider ``model`` and preserves the rest of the client's original JSON body. Every attempt uses the same target.
+
+Before creating a Scenario or calling a provider, Reef checks the request:
 
 * An unconfigured Scenario returns 403 (``unknown_scenario``), and so does a pin to a target outside the Scenario (``target_not_allowed``).
 * A missing Scenario or model, an unknown target, a private router entrypoint as ``model``, a repeated ``x-reef-*`` header, a client-supplied ``x-reef-routing-*``, ``x-reef-sr-decision`` or ``x-selected-model`` header, and a nonempty ``x-reef-artifact-id`` return 400.
 * A disabled target returns 503.
 * A managed deployment returns 408 when the request body does not finish uploading within 30 seconds.
-* For the automatic model only: messages the router cannot classify return 400, a preview body over the router's 10 MiB limit returns 413 without calling the router, and a full router returns 429. A router connection that is refused, reset or closed before any reply arrives, as when SR stops or restarts, returns 503 (``routing_unavailable``), and so do an unverified runtime (``routing_unpublished``) and a runtime that changed (``routing_runtime_changed``). A router timeout returns 504. A reply that starts but is malformed or cut off, or a selection that does not match the manifest and runtime, returns 502 (``routing_protocol`` or ``routing_selection``).
+
+The automatic model also returns these router errors:
+
+* 400 if the router cannot classify the messages.
+* 413 if the preview body exceeds 10 MiB. Reef does not call the router.
+* 429 if the router is full.
+* 503 for a connection refused, reset or closed before a reply (``routing_unavailable``), an unverified runtime (``routing_unpublished``), or a changed runtime (``routing_runtime_changed``).
+* 504 for a router timeout.
+* 502 for a malformed or truncated reply, or a selection inconsistent with the manifest and runtime (``routing_protocol`` or ``routing_selection``).
 
 Reef does not retry these failures or send the request to another target. See the `Semantic Router tutorial <../../tutorials/semantic-router/README.md>`__.
 
-Each dispatched attempt produces an INFERENCE record in the request's Scenario. Server-generated ``payload.metadata.routing`` replaces caller-supplied routing metadata and contains ``target_id``, ``role``, ``provider_model``, ``model_revision``, ``snapshot_version``, ``router_config_hash`` (``null`` for a pin), ``original_selector``, the selection ``reason`` (``default``, ``rule`` or ``explicit_pin``) and ``rule_name`` (``null`` for pins). ``request_id``, ``attempt_index`` and ``prior_attempt_ids`` link retries; the successful attempt's normal receipt remains the reference for Scenario-local REPORT feedback.
+Each dispatched attempt creates an INFERENCE record in the request's Scenario. Reef replaces caller-supplied ``payload.metadata.routing`` with:
+
+- ``target_id``, ``role``, ``provider_model``, ``model_revision`` and ``snapshot_version``;
+- ``router_config_hash``, or ``null`` for a pin;
+- ``original_selector`` and ``reason`` (``default``, ``rule`` or ``explicit_pin``);
+- ``rule_name``, or ``null`` for a pin.
+
+``request_id``, ``attempt_index`` and ``prior_attempt_ids`` link retries. Use the successful attempt's receipt for Scenario-local REPORT feedback.
 
 The deployment manifest declares ``model_revision``, with ``identity_source: deployment_manifest``. The declared revision identifies the configured target; it does not prove which weights the provider loaded. The record has no Reef ``artifact_id``, and Reef sends the target no artifact identity. Reef preserves the provider's returned log probabilities in the response and the record.
 
-``execution_outcome`` is ``completed``, ``aborted``, ``error``, ``timeout`` or ``cancelled``; interrupted streams whose execution cannot be established use ``unknown``. Failed attempts are diagnostic records without training data. ``delivery_outcome`` is ``not_started`` for failures before delivery, or ``incomplete`` for interrupted streams. Successful generation uses ``unconfirmed``: Reef persists the record before returning a buffered response or writing the SSE receipt and terminal event, so it cannot confirm client receipt. ``client_visible`` likewise describes the serving attempt, not a delivery acknowledgement.
+``execution_outcome`` is ``completed``, ``aborted``, ``error``, ``timeout`` or ``cancelled``. Interrupted streams use ``unknown`` when Reef cannot determine execution. Failed attempts contain diagnostics without training data.
+
+``delivery_outcome`` is ``not_started`` before delivery, ``incomplete`` for an interrupted stream, or ``unconfirmed`` after successful generation. Reef stores the record before sending the response or SSE receipt and terminal event. It cannot confirm client receipt. ``client_visible`` also describes the serving attempt, not a delivery acknowledgement.
 
 Persistence failure produces no success receipt. An SSE response that has already started ends without a successful terminal event. This recording mode does not train models or supply the sampled tensors required for OPD.
 
@@ -52,7 +77,7 @@ A client of the public routes sees these effects:
 - An accepted request remains active through local response EOF or connection termination, including SSE terminal frames. Local EOF does not establish client receipt.
 - Reports can finish during a ``close``. A ``stop`` rejects new mutations and is terminal for the generation.
 
-The controller's side:
+Controller commands:
 
 - ``GET /reef/lifecycle`` returns ``deployment_id``, ``generation``, ``snapshot_version``, ``router_config_hash`` (empty until the owner publishes a verified runtime), ``control_revision``, ``accepting``, ``stopping``, ``policy_closed``, ``active_requests``, ``pending_selections``, ``pending_writes``, ``drain_pending_writes`` and the diagnostic counts ``forced_requests`` and ``failed_writes``.
 - ``POST /reef/lifecycle`` takes the deployment ID, the generation, a nonnegative integer ``control_revision`` and an ``action``: ``open``, ``close``, ``close_policy``, ``abort_policy``, ``activate`` or ``stop``. Revisions increase monotonically. The same revision and command again is idempotent. Stale revisions, conflicting commands and identity mismatches return 409.

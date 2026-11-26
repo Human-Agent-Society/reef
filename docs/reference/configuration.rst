@@ -1,12 +1,16 @@
 Configure a deployment
 ======================
 
-Every setting of ``reef serve`` is a key in one section of a YAML file, and each key is also a command-line flag with the same path, such as ``--inference.model-path``. This page gives the layout of the file and the rules by which Reef reads values. `Settings reference <configuration-settings.rst>`__ lists every key with its type, its default and what it does.
+Configure ``reef serve`` with a YAML file, command-line flags, or both.
+Flags use the same paths as YAML keys, such as ``--inference.model-path``.
+The `Settings reference <configuration-settings.rst>`__ lists types and defaults.
 
 A typical file
 --------------
 
-Most deployments set only these keys. Every other key has a default.
+This example uses SAO with Slime and local inference.
+It requires a checkout and the `GPU training environment
+<../getting-started/installation.rst#gpu-image-for-weight-training>`__.
 
 .. code:: yaml
 
@@ -37,7 +41,9 @@ Most deployments set only these keys. Every other key has a default.
        config:
          job-samples: 32
 
-Run it with ``reef serve -c reef.yaml``. ``reef serve -c reef.yaml --print-config`` prints every resolved setting with its source and starts nothing (`Reef CLI: serve <cli.rst>`__). The runnable stacks of the source checkout are under ``recipes/`` and ``tutorials/``.
+Save the file as ``reef.yaml`` and run ``reef serve -c reef.yaml``.
+To inspect resolved values without starting services, add ``--print-config``.
+For complete examples, use the configurations under ``recipes/`` and ``tutorials/``.
 
 Sections
 --------
@@ -80,16 +86,18 @@ Sections
      - experiment tracking and record tracing
      - `Observability settings <configuration-observability.rst>`__
 
-Rules of the layout:
+Layout rules:
 
-- Reef rejects an unknown section and an unknown key.
-- A section name and a key can use hyphens or underscores. Both spellings of one key in one file are an error. The few sections that take underscores only say so in the settings reference.
-- A file holds no process definitions: Reef rejects ``service``, ``services`` and ``execution.services``. The recipe and the backends decide which processes start.
+- Reef rejects unknown sections and keys.
+- Section names and keys accept hyphens or underscores unless the settings reference requires underscores.
+  Do not use both spellings of one key in a file.
+- The recipe and backends define the processes. Reef rejects ``service``,
+  ``services`` and ``execution.services`` in the file.
 
 Start without a file
 --------------------
 
-Local inference needs one flag, and an external provider needs two:
+Start a local model or connect an external provider:
 
 .. code:: bash
 
@@ -97,38 +105,66 @@ Local inference needs one flag, and an external provider needs two:
    reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
 
 - ``--inference.model-path`` cannot be combined with an upstream URL or model.
-- Without ``-c``, Reef reads ``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and ``REEF_TOKEN`` as fallbacks, and a flag wins over them. An exported ``REEF_UPSTREAM_URL`` therefore makes ``--inference.model-path`` fail. With ``-c``, Reef does not read them.
-- Reef does not start or stop the provider, and readiness does not check the provider's credentials or models.
-- ``REEF_PYTHON`` names the interpreter of the services; the default is the one that launched ``reef serve``. For a local engine, it must have the engine and GPU-enabled PyTorch installed.
-- Weight training needs no file either: pass ``--recipe.implementation``, ``--inference.model-path`` and the ``--training.options.*`` flags that the recipe needs. Reef then looks for the recipe's package from the working directory.
+- Without ``-c``, Reef uses ``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``,
+  ``REEF_UPSTREAM_API_KEY`` and ``REEF_TOKEN`` as fallbacks. Flags take precedence.
+  An exported ``REEF_UPSTREAM_URL`` conflicts with ``--inference.model-path``.
+  With ``-c``, Reef does not use these automatic fallbacks.
+- Reef does not manage the provider's lifecycle. Readiness does not validate
+  its credentials or model IDs.
+- ``REEF_PYTHON`` selects the service interpreter. Its default is the interpreter
+  that launched Reef. Local inference requires the engine and GPU-enabled PyTorch in that environment.
+- For weight training, set ``--recipe.implementation``, ``--inference.model-path``
+  and the required ``--training.options.*`` flags. Reef resolves the recipe
+  package from the working directory.
 
 How Reef reads values
 ---------------------
 
-A file and the command line use the same parser. ``reef serve --help`` lists the flags, and ``reef serve -c reef.yaml --help`` adds the flags of the selected recipe.
+Files and flags use the same type parser. ``reef serve --help`` lists flags.
+Add ``-c reef.yaml`` to include the selected recipe's flags.
 
-- **Precedence.** The command line, then the file, then an environment fallback that a setting declares, then the default. The last occurrence of a flag wins. A selected file that is missing or invalid is an error.
-- **Strings.** A command-line string keeps its text: ``--inference.upstream-model 00123`` stays ``00123``. In a file, quote a string that YAML reads as a number or a boolean.
-- **Numbers and booleans.** Reef parses them by the declared type, and a number must be finite. A boolean takes ``true``, ``yes``, ``on`` or ``1``, or ``false``, ``no``, ``off`` or ``0``. A bare flag is true, and ``--no-<path>`` is false, for example ``--no-reef.allow-implicit-scenario-creation``.
-- **Lists and objects.** A flag takes one quoted JSON or YAML value, such as ``--reef.tokens '[]'``, and that value replaces the value of the file.
-- **Empty string.** An empty value, such as an unset ``${VAR}``, counts as omitted and keeps the default. ``reef.host`` and ``inference.model-path`` refuse an empty value.
-- **Null.** In a file, ``null`` gives an optional key no value. For any other key, ``null`` is an error that names the key: omit the key to use its default.
+- **Precedence:** command line, file, declared environment fallback, default.
+  For repeated flags, the last value wins. A missing or invalid selected file is an error.
+- **Strings:** flags preserve text, so ``--inference.upstream-model 00123`` keeps
+  ``00123``. In YAML, quote strings that resemble numbers or booleans.
+- **Numbers:** values must match the declared type and be finite.
+- **Booleans:** use ``true``, ``yes``, ``on`` or ``1`` for true;
+  ``false``, ``no``, ``off`` or ``0`` for false.
+  A bare flag means true. ``--no-<path>`` means false, as in
+  ``--no-reef.allow-implicit-scenario-creation``.
+- **Lists and objects:** pass one quoted JSON or YAML value.
+  For example, ``--reef.tokens '[]'`` replaces the file's token list.
+- **Empty strings:** empty values, including unset ``${VAR}`` references, count as omitted.
+  Exceptions: ``reef.host`` and ``inference.model-path`` reject empty values.
+- **Null:** YAML ``null`` clears an optional value. Other keys reject it.
+  Omit a key to use its default.
 
-**Interpolation.** A value of the file can take text from the environment or from the file itself:
+**Interpolation.** File values can reference environment variables or other keys:
 
 - ``${VAR}`` is the environment variable, or an empty string when the variable is unset.
-- ``${VAR:?}`` requires the variable. If it is unset or blank, Reef reports the variable and its key and starts nothing. A command-line value for that key supplies it instead.
-- ``${dotted.path}`` is another key of the config, such as ``${training.config.global_batch_size}``. It resolves only a key that the file or the command line sets. A reference to a key at its default stays as text.
+- ``${VAR:?}`` requires a nonempty variable. If it is missing, startup fails
+  with the variable name and key. A flag for that key overrides the reference.
+- ``${dotted.path}`` references a key, such as ``${reef.port}``.
+  Only explicit file or flag values resolve. A reference to a default value stays as text.
 
-**The report of resolved settings.** Before any model download or process start, the launcher logs each setting with its source: ``file``, ``command line``, ``environment``, ``automatic`` (a value that Reef chose because the key was omitted) or ``default``. It lists a default only for the recipe and the HTTP bind; ``--print-config`` lists every default. ``--print-config`` exits with status 0, or with 2 for an invalid config.
+**Resolved settings.** Before downloads or startup, Reef logs values and their
+sources: ``file``, ``command line``, ``environment``, ``automatic`` or ``default``.
+``automatic`` identifies a value Reef chose for an omitted key.
+Startup logs include defaults only for the recipe and HTTP bind.
+``--print-config`` includes all defaults and exits with status 0, or 2 for invalid configuration.
 
 .. warning::
 
-   The report masks tokens, API keys, passwords and database URLs by the name of their key, at any depth. It does not mask a credential inside a URL of another key, such as ``inference.upstream-url`` or ``storage.artifact-repository``.
+   Reef masks tokens, API keys, passwords and database URLs by key name, at any depth.
+   Credentials in other URLs can remain visible, including
+   ``inference.upstream-url`` and ``storage.artifact-repository``.
 
 Startup failures
 ----------------
 
-If a service exits before it is ready, or passes its readiness deadline, Reef stops the stack. It reports the service, the reason and the log directory. Service output goes to the logs under ``reef.run-dir`` and to the terminal.
+If a service exits early or exceeds its readiness deadline, Reef stops the stack.
+The error identifies the service, reason and log directory.
+Service output goes to the terminal and logs under ``reef.run-dir``.
 
-``reef serve`` exits with status 1 for a startup failure and with status 2 for an invalid configuration. `Troubleshooting <../user-guide/troubleshooting.rst>`__ lists common causes.
+Exit status 1 means startup failed. Status 2 means invalid configuration.
+See `Troubleshooting <../user-guide/troubleshooting.rst>`__ for common causes.

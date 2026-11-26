@@ -7,8 +7,9 @@ Set up a checkout and check your change before review. Use the
 Setup
 -----
 
-Use ``uv`` and Python 3.12 or newer; CI uses 3.12. Install Git LFS for
-artifact and checkpoint tests. Reuse an existing ``.venv``. For a new checkout:
+Use ``uv`` and Python 3.12 or newer. CI uses 3.12.
+Install Git LFS for artifact and checkpoint tests.
+Reuse an existing ``.venv`` or set up a new checkout with these commands.
 
 .. code:: bash
 
@@ -74,7 +75,7 @@ real engine behavior.
 Documentation
 -------------
 
-Use Node.js 22. From the repository root:
+Use Node.js 22. Run these commands from the repository root.
 
 .. code:: bash
 

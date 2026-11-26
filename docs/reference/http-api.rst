@@ -1,11 +1,11 @@
 HTTP API: inference, feedback, and artifacts
 ============================================
 
-Reef serves the provider's own inference routes: OpenAI Chat Completions at ``/v1/chat/completions``, OpenAI Responses at ``/v1/responses``, and Anthropic at ``/v1/messages``. It forwards each request to the runtime unchanged. It adds ``/reef/*`` routes for feedback, data, scenarios, artifacts, and status.
+Reef supports OpenAI Chat Completions (``/v1/chat/completions``), OpenAI Responses (``/v1/responses``), and Anthropic Messages (``/v1/messages``). Send provider-format request bodies. Use ``/reef/*`` routes for feedback, data, scenarios, artifacts and status.
 
-The service accepts request bodies up to 64 MiB, so coding agents can send large contexts. The record import routes accept bodies up to 10 MiB.
+Request bodies can be up to 64 MiB. Record imports have a 10 MiB limit.
 
-For a complete request, receipt, and feedback example, start with the `inference and feedback quickstart <../getting-started/quickstart.rst>`__. To put the snapshot routes into practice, follow the `agent harness tutorial <../user-guide/evolve-your-harness.rst>`__ or the `model weight training guide <../user-guide/evolve-your-model.rst>`__.
+Start with the `inference and feedback quickstart <../getting-started/quickstart.rst>`__. For artifact workflows, see `harness evolution <../user-guide/evolve-your-harness.rst>`__ or `model training <../user-guide/evolve-your-model.rst>`__.
 
 .. code:: bash
 
@@ -15,7 +15,7 @@ For a complete request, receipt, and feedback example, start with the `inference
 Pages
 -----
 
-Each page covers one part of the API. The service column names the service that answers most of the page's routes when the services run in separate processes (`Run the services in separate processes <../user-guide/split-services.rst>`__).
+Each page covers one API area. Services below expose its routes in a `split deployment <../user-guide/split-services.rst>`__.
 
 .. list-table::
    :header-rows: 1
@@ -23,15 +23,15 @@ Each page covers one part of the API. The service column names the service that 
 
    * - Page
      - Service
-     - Holds
+     - Coverage
    * - `Inference and feedback <http-api-inference.rst>`__
-     - inference
+     - inference, control
      - Inference routes, startup status, receipts, the report body
    * - `Scenario routing <http-api-routing.rst>`__
      - inference
      - Routed external-model requests and the managed routing lifecycle
    * - `Records and operation history <http-api-records.rst>`__
-     - control
+     - control, data
      - Record imports, record reads, operation history
    * - `Data items <http-api-data-items.rst>`__
      - data
@@ -52,19 +52,19 @@ Each page covers one part of the API. The service column names the service that 
      - control, data
      - Artifact list, artifact files, artifact import
    * - `Training requests and jobs <http-api-training.rst>`__
-     - control
+     - control, data
      - Training requests (``POST /reef/train``), training jobs, train-from
    * - `Samples <http-api-samples.rst>`__
-     - samples
+     - control, data
      - Sample list, next job, sample processing tasks
    * - `Evaluate an artifact <http-api-evaluation.rst>`__
-     - evaluation
+     - control, data
      - Start, read, cancel, retry and resume an artifact evaluation; automatic evaluation
    * - `Calls and trajectories of an evaluation <http-api-evaluation-calls.rst>`__
-     - evaluation
+     - control, data
      - Model calls, verifier calls and trajectories of a rollout
    * - `Harness trees and pages <http-api-harness.rst>`__
-     - harness
+     - harness, control
      - Harness tree, catalog, adapters, sync, step and request pages
    * - `Status, status codes and browser access <http-api-status.rst>`__
      - control
@@ -73,7 +73,7 @@ Each page covers one part of the API. The service column names the service that 
 Routes
 ------
 
-Every route of the service, grouped by the page that documents it. A routed deployment serves fewer routes (`Routed external-model requests <http-api-routing.rst#routed-external-model-requests>`__).
+Routes grouped by their reference page. Routed deployments expose fewer routes (`Routed external-model requests <http-api-routing.rst#routed-external-model-requests>`__).
 
 Inference and feedback routes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -349,4 +349,4 @@ Headers
 Client artifact tags
 ~~~~~~~~~~~~~~~~~~~~
 
-``x-reef-tag-artifact_id`` names the harness artifact that the native client installed. Reef stores it under ``metadata.tags`` like any other tag, so a processor can read which harness artifact made the call. The tag does not change which artifact serves the call, or the record's ``artifact_id``, which names the artifact that answered. It is separate from ``x-reef-artifact-id``, the response header that names the model artifact.
+``x-reef-tag-artifact_id`` identifies the native client's installed harness artifact. Reef stores it in ``metadata.tags`` for processors to read. It changes neither routing nor the record's ``artifact_id``. The response header ``x-reef-artifact-id`` identifies the responding model artifact.

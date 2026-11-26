@@ -1,9 +1,11 @@
 Harness evolution keys
 ======================
 
-The members of the object keys of ``recipe.config.evolution``, and the rules of the section that its keys do not show. `Settings reference <configuration-settings.rst#harness-evolution>`__ lists every key of the section with its type and default. `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ describes what the keys change.
+Configure the coding agent, sandbox and named models under ``recipe.config.evolution``.
+Start with `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the workflow.
+See `Settings reference <configuration-settings.rst#harness-evolution>`__ for all keys, types and defaults.
 
-A complete ``recipe`` section, with the classes of the tutorial; start Reef from the repository root to use it:
+This example uses tutorial classes. Run Reef from the repository root:
 
 .. code:: yaml
 
@@ -32,11 +34,12 @@ A complete ``recipe`` section, with the classes of the tutorial; start Reef from
 Rules
 -----
 
-- The members on this page accept only the underscore spelling. Reef ignores a hyphen spelling and an unknown name without an error in ``evolution.agent``, ``evolution.models.<name>`` and ``evolution.sandbox`` with ``executor: sandbox``.
-- Startup refuses an unknown name in ``evolution.sandbox`` with ``executor: e2b`` or ``modal``. Startup refuses a ``model_metadata`` entry that does not have exactly ``context_window`` and ``reasoning``.
-- Startup refuses an ``evolution.seed`` that is an empty string or a directory that does not exist. A scenario that exists keeps its own root and head when the seed changes.
-- When ``evolution.binary`` or ``evolution.agent.binary`` is unset, Reef installs the adapter's pinned binary under ``$REEF_HARNESS_PREFIX/<adapter>``. The default of ``REEF_HARNESS_PREFIX`` is ``~/.local/share/reef-harness``.
-- ``evolution.evaluation`` takes one task source: ``tasks``, ``task-manifest`` with ``tasks-root``, or ``imported-tasks``. Startup refuses two sources.
+- Use underscores for the object members listed below. In ``agent``, ``models.<name>`` and the local ``sandbox`` object, Reef silently ignores unknown or hyphenated members.
+- For ``executor: e2b`` or ``modal``, unknown ``sandbox`` members fail startup.
+- Each ``model_metadata`` entry must contain exactly ``context_window`` and ``reasoning``.
+- ``seed`` must name an existing directory and cannot be empty. Changing it does not change an existing scenario's root or head.
+- If ``binary`` or ``agent.binary`` is unset, Reef installs the adapter's pinned binary under ``$REEF_HARNESS_PREFIX/<adapter>``. The prefix defaults to ``~/.local/share/reef-harness``.
+- Set one evaluation task source: ``tasks``, ``task-manifest`` with ``tasks-root``, or ``imported-tasks``. Multiple sources fail startup.
 
 The coding agent
 ----------------
@@ -44,18 +47,19 @@ The coding agent
 .. container:: config
 
    ``evolution.agent.adapter`` : pi
-       The agent's harness: an adapter whose prompt is text. The first job checks it, not startup.
+       Harness adapter for the coding agent. It must accept text prompts. The first job validates this choice.
 
    ``evolution.agent.binary``
        The path of the agent's binary.
 
    ``evolution.agent.sandbox`` : ``$REEF_AGENT_SANDBOX``
-       ``bwrap`` (Linux) or ``seatbelt`` (macOS) jails the agent with the internet and only its gateway's host port. ``e2b`` or ``modal`` takes that provider's options from this section; ``none`` runs unisolated.
+       ``bwrap`` (Linux) or ``seatbelt`` (macOS) isolates the agent, with internet access and access to its gateway's host port. ``e2b`` and ``modal`` read provider options here. ``none`` disables isolation.
 
    ``evolution.agent.timeout_s`` : 1800
-       The seconds one agent run may take. It must be positive.
+       Maximum run duration in seconds. Must be positive.
 
-With ``sandbox`` and ``REEF_AGENT_SANDBOX`` unset, the agent runs in the host's local sandbox. If the host cannot run that sandbox, no agent runs. Under ``seatbelt``, the host's LAN addresses stay reachable.
+If both sandbox settings are unset, Reef uses the host's local sandbox.
+The agent cannot start if that sandbox is unavailable. Under ``seatbelt``, the host's LAN addresses remain reachable.
 
 The run sandbox
 ---------------
@@ -65,16 +69,16 @@ Reef reads ``evolution.sandbox`` only when ``evolution.executor`` is not ``local
 .. container:: config
 
    ``evolution.sandbox.egress_hosts`` : []
-       For ``sandbox``: the endpoints a run must reach. A list that is not empty opens the whole network; Reef does not filter by host.
+       For ``sandbox``: required endpoints. Any nonempty list opens the whole network; Reef does not filter individual hosts.
 
    ``evolution.sandbox.limits`` : {}
-       For ``sandbox``: ``cpu_seconds``, ``memory_bytes``, ``processes`` and ``file_bytes``, nonnegative integers; 0 sets no limit. macOS refuses ``memory_bytes``.
+       For ``sandbox``: resource limits as nonnegative integers. Keys: ``cpu_seconds``, ``memory_bytes``, ``processes`` and ``file_bytes``. Zero means unlimited. macOS rejects ``memory_bytes``.
 
    ``evolution.sandbox.env_from`` : []
-       The host environment variables a run gets. Startup refuses a name that is unset or empty.
+       Host environment variables to pass to a run. Unset or empty variables fail startup.
 
    ``evolution.sandbox.forward_ports`` : []
-       For ``e2b`` and ``modal``: the worker-loopback TCP ports, 1 to 65535, that the sandbox reaches.
+       For ``e2b`` and ``modal``: worker loopback TCP ports to forward into the sandbox. Range: 1–65535.
 
    ``evolution.sandbox.e2b_api_key_env`` : E2B_API_KEY
        The variable that holds the E2B key. A literal ``e2b_api_key`` takes priority.
@@ -94,7 +98,8 @@ Reef reads ``evolution.sandbox`` only when ``evolution.executor`` is not ``local
    ``evolution.sandbox.modal_memory_mb``
        The memory of the Modal sandbox, in MB. Unset takes Modal's default.
 
-``e2b`` and ``modal`` refuse ``egress_hosts`` and ``limits`` that are not empty. A cloud sandbox has its image's resources and the outbound internet.
+``e2b`` and ``modal`` reject nonempty ``egress_hosts`` and ``limits``.
+Cloud sandboxes use their image's resources and have outbound internet access.
 
 Named models
 ------------
@@ -111,7 +116,7 @@ Named models
        The API: ``openai``, ``responses`` or ``anthropic``.
 
    ``evolution.models.<name>.timeout_s`` : 600
-       The seconds one call may take.
+       Maximum call duration in seconds.
 
    ``evolution.models.<name>.api_key``
        The literal API key. It takes priority over ``api_key_env``.
@@ -120,7 +125,7 @@ Named models
        The environment variable that holds the API key.
 
    ``evolution.model_metadata.<name>.context_window``
-       The context window of the model, in tokens: a positive integer. Required.
+       Required context window in tokens. Must be a positive integer.
 
    ``evolution.model_metadata.<name>.reasoning``
        True when the endpoint accepts a reasoning effort. Required.

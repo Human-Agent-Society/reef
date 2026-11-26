@@ -1,12 +1,15 @@
 Observability settings
 ======================
 
-Experiment tracking with W&B, its operational metrics, and record tracing over OpenTelemetry. Their keys take underscores only and are in the `Settings reference <configuration-settings.rst#observability>`__. An unknown key is an error at service start; ``reef serve --print-config`` does not check them.
+Use W&B for experiment metrics and OpenTelemetry for record tracing.
+Keys use underscores only; see `Settings reference <configuration-settings.rst#observability>`__.
+Unknown keys fail service startup. ``--print-config`` does not validate these sections.
 
 Experiment tracking
 -------------------
 
-Install ``reef-infra[wandb]`` when the training extra does not already provide it. `Track experiments with W&B <../user-guide/operate.rst#track-experiments-with-w-b>`__ tells how to give the credential and how to read the runs.
+Install ``reef-infra[wandb]`` if the training extra does not provide it.
+For credentials and run navigation, see `Track experiments with W&B <../user-guide/operate.rst#track-experiments-with-w-b>`__.
 
 .. code:: yaml
 
@@ -18,13 +21,16 @@ Install ``reef-infra[wandb]`` when the training extra does not already provide i
        group_prefix: prod-us-east
        tags: [qwen, baseline]
 
-- With ``mode: disabled``, Reef makes no W&B call, also when ``enabled`` is true.
-- A restart resumes the same run. A change to ``project``, ``entity``, ``group_prefix`` or ``name_prefix`` starts new runs: the run id derives from them.
+- ``mode: disabled`` prevents all W&B calls, even with ``enabled: true``.
+- Restarts resume the same run. Changing ``project``, ``entity``, ``group_prefix`` or ``name_prefix`` changes the run ID and starts new runs.
 
 Operational metrics
 ~~~~~~~~~~~~~~~~~~~
 
-When tracking is on, the dispatcher samples each loaded scenario every 10 seconds, inference-only scenarios included. The samples go to the scenario's run under ``operations/*``, against the Unix time in ``operations/time_seconds``. Offline mode records them locally; ``mode: disabled`` samples nothing. The names below are relative to ``operations/``.
+With tracking enabled, Reef samples every loaded scenario every 10 seconds, including scenarios without training.
+Metrics appear under ``operations/*`` with Unix time in ``operations/time_seconds``.
+Offline mode saves them locally. Disabled mode collects none.
+The table omits the ``operations/`` prefix.
 
 .. list-table:: Operational metrics
    :header-rows: 1
@@ -61,10 +67,17 @@ When tracking is on, the dispatcher samples each loaded scenario every 10 second
    * - ``training/execution/*``
      - The trainer's job submissions and polls.
 
-Each of ``ingest/write``, ``serve/request`` and ``training/execution`` has ``started_total``, ``completed_total``, ``failed_total``, ``active``, ``elapsed_seconds`` (the age of the oldest active call), ``duration_seconds_total`` (all ended calls) and ``last_duration_seconds`` (absent until a call ends). For the mean latency over an interval, divide the change in ``duration_seconds_total`` by the change in ``completed_total`` plus ``failed_total``.
+``ingest/write``, ``serve/request`` and ``training/execution`` each expose:
+
+- Counts: ``started_total``, ``completed_total``, ``failed_total`` and ``active``.
+- ``elapsed_seconds``: age of the oldest active call.
+- ``duration_seconds_total``: total duration of ended calls.
+- ``last_duration_seconds``: duration of the last ended call, absent before the first completion.
+
+Mean latency over an interval is ``Δduration_seconds_total / (Δcompleted_total + Δfailed_total)``.
 
 - A completed execution call is not necessarily a commit: a poll that finds no new checkpoint commits nothing.
-- The samples are not persisted history. Execution measurements reset when the trainer is rebuilt, recovery included; ``training/started_at_seconds`` shows the reset. Request and ingestion measurements reset when the scenario is rebuilt; ``started_at_seconds`` shows that reset.
+- Measurements reset when their owner is rebuilt. ``training/started_at_seconds`` marks a trainer reset, including recovery. ``started_at_seconds`` marks a scenario reset for request and ingestion measurements.
 - A request that fails before Reef resolves its scenario is not measured.
 - Other numeric status fields of the processor appear under ``processor/``.
 - When ingestion or a commit holds the trainer lock, that sample has no ``records/unread_count``, ``records/oldest_unread_age_seconds``, ``training/reserved_job_data``, ``training/auto_enabled`` or ``processor/*``.
@@ -72,14 +85,18 @@ Each of ``ingest/write``, ``serve/request`` and ``training/execution`` has ``sta
 Commit correlation
 ~~~~~~~~~~~~~~~~~~
 
-Commit metrics carry ``experiment/provider``, ``experiment/project``, ``experiment/group``, ``experiment/run_id``, and ``experiment/entity`` when ``entity`` is set, to open the run of a Reef version. The run's ``reef/training_job_id`` leads back to the job.
+Commit metrics identify the run with ``experiment/provider``, ``experiment/project``, ``experiment/group`` and ``experiment/run_id``.
+They include ``experiment/entity`` when set. The run's ``reef/training_job_id`` identifies the job.
 
-The ``url`` of a job's ``experiment`` in ``GET /reef/scenarios/{scenario}/jobs`` is the URL that the open W&B run gives. An offline run gives none. The URL is then ``https://wandb.ai/<entity>/<project>/runs/<run_id>``, where the run is after ``wandb sync``. Without ``entity``, it is ``null``.
+The jobs API exposes the W&B run URL in ``experiment.url``.
+For offline runs, Reef constructs ``https://wandb.ai/<entity>/<project>/runs/<run_id>``; it works after ``wandb sync``.
+Without an entity, the offline URL is ``null``.
 
 Record tracing
 --------------
 
-Record tracing exports every accepted record and every commit as OpenTelemetry spans over OTLP/HTTP, independent of experiment tracking. Install ``reef-infra[opentelemetry]``.
+Install ``reef-infra[opentelemetry]`` to export accepted records and commits as OTLP/HTTP spans.
+Tracing works independently of experiment tracking.
 
 .. code:: yaml
 
@@ -94,16 +111,18 @@ Record tracing exports every accepted record and every commit as OpenTelemetry s
 
 The spans:
 
-- An accepted inference record gives the root span of its own trace, ``chat <model>``. A restart or a second host gives it the same ids. It carries ``session.id``, ``reef.scenario``, ``reef.agent_record_id``, ``reef.request_type``, ``reef.artifact_id`` and the OpenTelemetry GenAI ``gen_ai.*`` attributes.
+- An inference record starts a trace with root span ``chat <model>``. IDs remain stable across restarts and hosts. Attributes include ``session.id``, ``reef.scenario``, ``reef.agent_record_id``, ``reef.request_type``, ``reef.artifact_id`` and ``gen_ai.*``.
 - ``reef.tags`` holds the strings of a ``metadata.tags`` list in the request body. The ``x-reef-tag-*`` headers give no span attribute.
 - A feedback record gives a ``feedback`` span in the trace of the first inference that it references, with ``reef.score`` and ``reef.references``. Further references are span links.
 - A commit gives an ``<operation> commit N`` span, such as ``training commit 4``. It carries the artifact ids, the job id, ``reef.component`` for one of several trainers, and the scalar metrics as ``reef.metrics.*``.
 - Each record that a commit consumed gets a ``trained in commit N`` child span, linked to the commit span.
 
-Spans have zero duration. For a streamed response, Reef reads the token usage from the SSE events. When the provider sends none, the counts are absent; for Chat Completions, request ``stream_options: {include_usage: true}``.
+Spans have zero duration. Streamed responses get token counts from SSE events; counts are absent if the provider omits them.
+For Chat Completions, request ``stream_options: {include_usage: true}``.
 
 .. warning::
 
-   Spans carry the exchange: the request messages and the reply in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, and feedback text in ``reef.feedback``. Point tracing only at a backend that you trust with the scenario's traffic.
+   Spans include request messages, replies and feedback in ``gen_ai.input.messages``, ``gen_ai.output.messages`` and ``reef.feedback``.
+   Send traces only to a backend trusted with the scenario's traffic.
 
 An export failure goes to the service log and never fails a record acceptance or a commit.

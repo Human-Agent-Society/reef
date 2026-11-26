@@ -1,87 +1,64 @@
 GEPA: reflective agent harness optimization
 ===========================================
 
-GEPA (`arXiv:2507.19457 <https://arxiv.org/abs/2507.19457>`__) is reflective
-prompt evolution. It trains no weights; it improves the text that an agent is
-given. It keeps an archive of candidates. In each round it picks one candidate
-as the parent, reads how the parent did on a few problems, and asks a stronger
-model to write a better version. It keeps the new candidate only if it scores
-higher than its parent on the same problems. Reef runs that search over a
-whole harness tree, so the tree that the deployment serves improves over time.
+Use GEPA to improve an agent's rules, skills, or commands without training
+model weights. A reflection model proposes changes, and task scores decide
+which candidates enter the archive and which tree serves.
 
-+-------------+--------------------------------------------------------------+
-| Evolves     | the text files of the harness tree: rules, skills, commands  |
-+-------------+--------------------------------------------------------------+
-| Signal      | one report per served request, batched into a minibatch      |
-+-------------+--------------------------------------------------------------+
-| Loss family | none (no weight training)                                    |
-+-------------+--------------------------------------------------------------+
-| Package     | ``recipes/gepa/``                                            |
-+-------------+--------------------------------------------------------------+
-| Pipeline    | reported feedback, producing trace items                     |
-+-------------+--------------------------------------------------------------+
-| Needs       | a Reef process, the ``pi`` binary, and a reflection model.   |
-|             | Reef itself needs no GPU.                                    |
-+-------------+--------------------------------------------------------------+
-| Example     | ``recipes/gepa/examples/aime/``                              |
-+-------------+--------------------------------------------------------------+
+Reef implements the search from `GEPA <https://arxiv.org/abs/2507.19457>`__
+over a harness tree. It needs task feedback and a reflection model.
+
+Run the example
+---------------
+
+Use the `AIME example <../../../recipes/gepa/examples/aime/README.md>`__
+with Pi 0.84.2 and a reflection-model API key. Reef itself needs no GPU.
+From the repository checkout:
+
+.. code:: bash
+
+   cd recipes/gepa/examples/aime
+   uv pip install -e .
+   REEF_PI_BINARY=/path/to/pi ./run.sh --dry-run
+   export OPENAI_API_KEY=...
+   REEF_PI_BINARY=/path/to/pi REEF_GEPA_WORKERS=4 ./run.sh
+
+The dry run checks the binary and pinned datasets, loads the recipe, and
+prints the plan without model calls. The live run evolves the tree, then
+evaluates the first and final trees on the same held-out split.
+
+Use ``--seed`` to select the search seed and ``--budget`` to reduce the
+search budget. ``REEF_GEPA_WORKERS`` defaults to 128 persistent workers.
+Reduce it to fit host memory and provider rate limits.
 
 How it works
 ------------
 
-GEPA is a method on the harness evolution engine: ``recipes.gepa:GEPA`` is a
-``Method``, and a deployment runs it with
-``reef.recipe.harness:HarnessEvolutionRecipe``. `Evolve your harness
-<../evolve-your-harness.rst>`__ describes the engine. One step is one
-reflection round:
+A deployment selects ``recipes.gepa:GEPA`` as its harness evolution method.
+Each step performs one reflection round:
 
-1. **Pick a parent.** Each candidate is weighted by the number of validation
-   problems on which it is the best. A candidate that is mediocre overall but
-   best at one kind of problem still becomes a parent, which keeps the search
-   exploring.
-2. **Run a minibatch.** The parent runs on a small batch of training
-   problems. When the parent is the served tree, the minibatch is free: the
-   engine already holds that tree's real traffic and scores. Any other parent
-   runs on the evaluation's worker pool.
-3. **Reflect.** The reflection model reads the transcripts, with one sentence
-   of feedback about each, and rewrites one component of the tree: one
-   evolvable file.
-4. **Test the child.** The child runs on the same problems as its parent.
-   Only a child that scores strictly higher goes into the step's harness
-   tree. Otherwise the tree is unchanged and the step publishes nothing, but
-   the method's state keeps the iteration.
-5. **Validate.** The step's evaluation scores the candidate on every problem
-   in ``evolution.evaluation.tasks`` with the ``compare`` policy on the mean.
-   Reef publishes the candidate only when its mean is strictly higher than
-   the served tree's. Thus the served tree is the best candidate in the
-   archive.
+1. Choose a parent from the archive. Selection favors candidates that lead
+   on at least one validation problem.
+2. Run the parent on a training minibatch. Reuse recorded traffic when the
+   parent is the served tree.
+3. Ask the reflection model to rewrite one evolvable file using the
+   transcripts and feedback.
+4. Evaluate the child on the same problems. Keep it only when its score
+   exceeds the parent's score.
+5. Validate the candidate. With ``policy: compare`` and ``statistic: mean``,
+   publish only a mean score above the served tree's.
 
-Every run goes through the score cache. A tree that already scored on a
-problem does not run on it again; a run that could not complete runs again.
-The method still counts each evaluation as GEPA does, so ``max_metric_calls``
-means what it means upstream.
-
-The archive is a file in the method's state directory. It holds each
-candidate with its parent, its score on every validation problem, the
-problems on which it is the best, the component to rewrite next, and the
-metric calls spent. Reef commits the state with each step. An interrupted
-search resumes from the last commit, and a step that fails cannot advance the
-archive. The next step reads the per-problem scores and the publication
-decision from the evolution history before it samples the next parent.
-
-Reef does not import the upstream package at runtime. The reflection prompt
-is copied under its MIT licence into ``recipes/gepa/reflection_prompt.md``.
-The parent sampling rule and the per-problem front update are reimplemented
-and tested against upstream (`Results`_).
+Successful cached evaluations are reused; incomplete runs can run again.
+``max_metric_calls`` still counts evaluations according to GEPA's budget.
+Reef commits the archive with each step. An interrupted search resumes from
+the last commit; a failed step does not advance the archive.
 
 Configuration
 -------------
 
-``recipes/gepa/examples/aime/gepa.yaml`` is the recipe config the driver boots.
-It names ``reef.recipe.harness:HarnessEvolutionRecipe`` as its
-``implementation``, GEPA as ``evolution.method`` with GEPA's own settings, and
-GEPA's validation pass as ``evolution.evaluation``. Its ``pipeline`` section
-sets the step's traces to GEPA's minibatch:
+The example's ``gepa.yaml`` uses
+``reef.recipe.harness:HarnessEvolutionRecipe``. Match ``job_samples`` to the
+method's minibatch size:
 
 .. code:: yaml
 
@@ -113,45 +90,34 @@ sets the step's traces to GEPA's minibatch:
 .. container:: config
 
    ``evolution.method.config.components`` : [rules, skill]
-       the parts of the adapter's tree whose files the search may rewrite. Each must be a part whose format is ``text``, ``skill`` or ``command``. GEPA never rewrites config, code or native files, and the files of every other part stay fixed.
+       Parts the search may rewrite. Their formats must be ``text``, ``skill``
+       or ``command``. Config, code, native files, and other parts stay fixed.
 
    ``evolution.method.config.feedback`` : the score restated
-       a ``Feedback`` class. Its sentence about each example is the only signal that the reflection model reads. If the benchmark can explain why an answer was wrong, say so here.
+       A ``Feedback`` class that adds one sentence per example. Use it to
+       explain a wrong answer when the benchmark provides that information.
 
    ``evolution.method.config.trainset_size`` : optional
-       makes each iteration draw its parent from the seeded generator that also orders the training problems, in GEPA's own order. A driver that draws the same plan from the committed archive sends the problems that the plan names, and the method reads them as the step's traffic.
+       Enables GEPA's seeded minibatch order. The driver must send the
+       problems selected by the committed archive's plan.
 
    ``evolution.method.config.reflection_model`` : reflection
-       the name, under ``evolution.models``, of the model that reflects. When no model has this name, the method reflects with the model under test.
+       Model name under ``evolution.models``. If absent, reflection uses
+       the model under test.
 
    ``evolution.evaluation.statistic`` : wins
-       set ``mean`` for GEPA's rule. The default, ``wins``, counts task pairings.
+       Set ``mean`` for GEPA's rule. The default counts task pairings.
 
 `Recipe configuration <../../reference/configuration-recipe.rst#recipe-configuration>`__
 documents the engine's own keys.
 
-Run the example
----------------
-
-`recipes/gepa/examples/aime <../../../recipes/gepa/examples/aime/README.md>`__
-has the prerequisites and the full walkthrough. The driver embeds a Reef
-service and runs every minibatch problem as a real run against the served
-tree. At the end it runs two passes over a held-out split, one on the first
-tree and one on the last, so that the two are comparable. ``--seed`` picks
-the search seed. ``--dry-run`` boots the recipe and prints the plan without a
-model call.
-
 Results
 -------
 
-The example's README records four runs, two of this method and two of
-upstream GEPA. The records are kept beside it.
-
-``tests/recipes/gepa/test_gepa_fidelity.py`` checks the two exact rules. It
-runs upstream ``gepa.optimize`` and this method on a synthetic task from the
-same seed, the method through whole steps of the engine. It requires the same
-candidates, parents, minibatches and validation means at every iteration. The
-test runs where the upstream package is installed.
+The `example README <../../../recipes/gepa/examples/aime/README.md>`__
+records two Reef runs and two upstream GEPA runs, with saved results.
+A synthetic fidelity test checks matching candidates, parents, minibatches,
+and validation means. It does not establish equal performance on every task.
 
 Related guides
 --------------

@@ -1,71 +1,10 @@
 Guidance-TTT: train the guide, keep the executor frozen
 =======================================================
 
-Guidance-TTT trains a small model to propose improvements to a candidate
-program. A frozen execution model turns each proposal into code. A task judge
-evaluates that code, and Reef uses the score to update the guidance model.
-Only the guidance response contributes tokens to the training job's data.
-
-The example includes Polyomino Packing, Lasso Path, AHC058, and TriMul.
-These tasks cover packing, numerical solvers, planning, and GPU kernels.
-The recipe, its grid, and its training transaction are those of
-`TTT-Discover <tttd.rst>`__; this page describes what the guidance loop adds.
-
-.. list-table::
-   :header-rows: 0
-
-   * - Evolves
-     - Guidance-model weights
-   * - Signal
-     - One finite reward linked to each guidance receipt
-   * - Loss family
-     - ``tttd``
-   * - Package
-     - ``recipes/tttd/``
-   * - Needs
-     - Linux, training GPUs, Docker, a frozen executor, and a task judge
-   * - Example
-     - ``recipes/tttd/examples/guidance_ttt/``
-
-How one step runs
------------------
-
-.. container:: flow
-
-   Select parents
-       PUCT selects one archived candidate per group
-
-   Write guidance
-       the trainable model reads the problem, summary, and score
-
-   Execute guidance
-       the frozen model reads the parent code and proposed change
-
-   Judge candidates
-       the task evaluator checks correctness and measures performance
-
-   Report rewards
-       each reward references the guidance receipt and grid coordinate
-
-   Update the guide
-       the TTTD recipe trains and publishes the guidance LoRA adapter
-
-   Commit the archive
-       the controller saves the matching search state
-
-   :Loop: use the committed guidance adapter for the next search step
-
-The guidance model sees the parent's canonical summary, not its source code.
-The executor sees the source code and the new guidance. It returns a complete
-program and a replacement summary for later steps.
-
-Each guidance response must end with one nonempty ``<guidance>`` block.
-Malformed guidance receives zero reward without an executor call. The harness
-does not resample guidance to repair its format.
-
-The archive admits valid programs and ranks them by the task's raw metric.
-The optimizer receives a nonnegative reward. TriMul, for example, minimizes
-latency while its training reward is ``1500 / latency_us``.
+Train a small guidance model while a frozen executor writes candidate
+programs. A task judge scores each program, and only the guidance response
+contributes training tokens. The loop uses the
+`TTT-Discover recipe <tttd.rst>`__ with four discovery tasks.
 
 Choose a task
 -------------
@@ -89,22 +28,19 @@ Choose a task
      - Python module with Triton kernels
      - 18 correctness tests and seven H100 timing cases, latency decreases
 
-Each task has its own instruction, contract, bootstrap, verifier, scenario,
-and state directory. The shared harness uses the same guidance loop for all
-four tasks.
+Each task uses its own scenario and state directory.
 
 Run an example
 --------------
 
-Install Reef's GPU dependencies as described in
-`Installation <../../getting-started/installation.rst>`__. From the repository
-root, install the client and example:
+Use Linux, Docker, and the `Reef GPU environment
+<../../getting-started/installation.rst>`__. From the repository root:
 
 .. code-block:: shell
 
    git submodule update --init third_party/reef-client
-   python -m pip install -e ./third_party/reef-client
-   python -m pip install -e . -e recipes/tttd/examples/guidance_ttt
+   uv pip install -e ./third_party/reef-client
+   uv pip install -e . -e recipes/tttd/examples/guidance_ttt
    cd recipes/tttd/examples/guidance_ttt
 
 Select a task and prepare its pinned bootstrap:
@@ -123,21 +59,21 @@ Set both judge addresses if you change the default port or host:
    export GUIDANCE_JUDGE_URL=http://127.0.0.1:8082
    export GUIDANCE_JUDGE_CONTAINER_URL=http://host.docker.internal:8082
 
-The first address is for the host harness. The second is for the final
-Harbor verifier inside Docker. Polyomino defaults to port 8081. The other
-tasks default to port 8082.
+The host harness uses the first address; Docker's final verifier uses the
+second. Polyomino defaults to port 8081; other tasks use 8082.
 
-Choose the frozen executor:
+Choose a separately served GPT-OSS-120B executor:
 
 .. code-block:: shell
 
-   # A separately served GPT-OSS-120B endpoint:
    export GUIDANCE_EXECUTOR=local
    export GUIDANCE_EXECUTOR_URL=http://127.0.0.1:8000/v1
 
-   # Or GLM-5.2 through OpenRouter:
+Or choose GLM-5.2 through OpenRouter and supply ``OPENROUTER_API_KEY``:
+
+.. code-block:: shell
+
    export GUIDANCE_EXECUTOR=openrouter
-   # Supply OPENROUTER_API_KEY through your environment or credential store.
 
 For a bounded smoke run, set ``GUIDANCE_EXECUTOR_MAX_TOKENS=16384``.
 Without this setting, the executor provider selects its default output limit.
@@ -150,13 +86,28 @@ and two serve the guidance model. ``run.sh`` selects GPUs ``0,1,2,3`` unless
 
    ./run.sh
 
-The default configuration runs one update with two groups of four rollouts.
-It downloads Qwen3-8B once, starts Reef, verifies the bootstrap, and runs the
-selected Harbor trial. It then submits the best archived program for a final
-verification. The final Harbor reward remains evaluation-only.
+The default runs one update with two groups of four rollouts.
+It downloads Qwen3-8B, verifies the bootstrap, runs the search, and verifies
+the best program. The final Harbor reward is evaluation-only.
+This smoke run does not reproduce the paper's budget or executor.
 
-The default run checks integration. It does not reproduce the paper's
-30-update, 8-by-16 search budget or its GLM-5.2 executor.
+How one step runs
+-----------------
+
+1. Select archived parents with PUCT.
+2. Ask the guidance model for an improvement, using the problem, parent
+   summary, and score.
+3. Give the frozen executor the parent code and the guidance.
+4. Judge the returned program and report its reward against the guidance receipt.
+5. Train the guidance adapter and commit the matching archive.
+
+The guidance model sees the parent's summary, not its source code.
+Each response must end with one nonempty ``<guidance>`` block.
+Malformed guidance gets zero reward without resampling or an executor call.
+
+The executor returns a complete program and a replacement summary.
+The archive ranks valid programs by their raw metric. Training uses a
+nonnegative reward; TriMul uses ``1500 / latency_us``.
 
 Configure a search
 ------------------
@@ -226,10 +177,9 @@ receives the task's invalid reward and still counts as a PUCT visit.
 Paper results
 -------------
 
-These values come from the paper's main results at commit ``709c405``. They
-are historical experiment results, not new measurements of this example. Each
-configuration uses a frozen GLM-5.2 executor and 30 updates with eight groups
-of 16 rollouts.
+These historical results are from commit ``709c405``, with a frozen GLM-5.2
+executor and 30 updates of eight groups of 16 rollouts. They are not new
+measurements of the current example.
 
 .. list-table::
    :header-rows: 1
@@ -258,12 +208,10 @@ of 16 rollouts.
 .. image:: ../../assets/guidance-ttt/best-solution-trajectories.png
    :alt: Four paper search trajectories with final reported results and annotated algorithm changes
 
-The lines show the best archived solution during search. Search-time
-measurements and final evaluations use different protocols for some tasks.
-For Lasso, the search peak is about 0.21259, while the frozen-solver result
-is 0.1739. AHC058's search curve uses the 150 public cases, and its reported
-AtCoder score comes from the final submission. TriMul's final value comes
-from fixed-kernel timing, not the lowest observed search latency.
+The curves show best archived solutions, which can use a different protocol
+from final evaluation. Lasso peaks near 0.21259 during search; its final
+frozen-solver score is 0.1739. AHC058 reports an AtCoder submission score
+rather than its 150-case search score. TriMul reports fixed-kernel timing.
 
 The `result records <../../../recipes/tttd/examples/guidance_ttt/results/paper/README.md>`__
 hold the baseline values, source checksums, and numerical histories. The
@@ -274,32 +222,26 @@ eligible GPUMode rank-1 reference of 1,128.
 Inspect progress and resume
 ---------------------------
 
-Each task writes ``reef.log``, ``guidance-run/``, ``checkpoints/``,
-``agent-record/``, and ``lab/`` under its state directory. After each step the
-controller polls ``GET /reef/status`` until the step's training job has ended,
-then reads the job's checkpoint metrics from the scenario's commits. It
-commits the matching archive only after these checks pass.
+Inspect ``reef.log`` and ``guidance-run/`` under the task's state directory.
+The controller waits for each training job and checks its checkpoint metrics
+before committing the corresponding archive.
 
 Restart with the same task, model, executor, grid, configuration, and state
-directory. The controller restores ``committed-library.json`` and checks the
-stored training identity. A changed task contract or executor configuration
-requires a new state directory.
+directory. Reef restores ``committed-library.json`` and checks the stored
+identity. Use a new directory after changing the task contract or executor.
 
-The example saves a checkpoint after each version. Checkpoint availability is
-separate from archive availability. A saved program alone is insufficient
-for a full optimizer resume.
+The example saves a checkpoint after each version. A saved program alone
+cannot restore the optimizer; retain both training checkpoints and archive.
 
 Enable experiment tracking
 --------------------------
 
-Set ``observability.wandb.enabled`` to ``true`` in ``serve.yaml``. Supply the
-project, optional entity, and credentials through the normal W&B configuration.
-`Track experiments with W&B <../operate.rst#track-experiments-with-w-b>`__ describes Reef's tracking behavior.
+Enable ``observability.wandb.enabled`` in ``serve.yaml`` and set the project
+and credentials. See `Track experiments with W&B
+<../operate.rst#track-experiments-with-w-b>`__.
 
-The recipe records the `TTT-Discover search metrics <tttd.rst>`__, such as
-``tttd/reward_mean``. These rewards describe the training job's data. Use the
-committed archive's raw score for the best discovered program, especially
-when the reward is normalized.
+The ``tttd/*`` metrics describe training rewards. Use the committed archive's
+raw score to track the best program, especially with normalized rewards.
 
 Add another task
 ----------------

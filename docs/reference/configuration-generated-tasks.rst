@@ -1,9 +1,9 @@
 Generated tasks
 ===============
 
-The rules of the generated-task recipe, ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, for a deployment that generates Harbor tasks and trains on their rollouts.
+Use ``reef.recipe.generated_tasks:GeneratedTaskRecipe`` to generate Harbor tasks and train on their rollouts.
 
-The settings reference lists the keys of the stages (`Recipe <configuration-settings.rst#recipe>`__, stage ``GeneratedTaskSamples``), of ``generator`` (`Generator <configuration-settings.rst#generator>`__) and of ``task-import`` (`Evaluation <configuration-settings.rst#evaluation>`__).
+This example requires a custom objective. Replace ``my_methods.objectives:MyObjective`` with your implementation:
 
 .. code:: yaml
 
@@ -35,53 +35,57 @@ The settings reference lists the keys of the stages (`Recipe <configuration-sett
          review-interval: 8
          review-band-low: 0.25
 
-``my_methods.objectives:MyObjective`` is a placeholder.
+For all settings, see `Recipe <configuration-settings.rst#recipe>`__ (``GeneratedTaskSamples``),
+`Generator <configuration-settings.rst#generator>`__ and `Evaluation <configuration-settings.rst#evaluation>`__ (``task-import``).
 
 Rounds and tasks
 ----------------
 
-- Every job is a task job. The training service refuses to start without ``objective`` and the rollout parameter of its backend: ``rollout`` on Tinker, ``harbor`` on Slime (`Task jobs on Slime <configuration-training.rst#task-jobs-on-slime>`__).
-- With ``rounds`` 0, the recipe trains only the train tasks that earlier generations saved.
-- A source session is a report whose inference records all carry ``source-tag``. The generator service accepts at most 512 KiB of JSON for the records and files of one Designer request. So keep ``source-records-per-round`` small for long sessions.
+- Every job trains tasks. Startup requires ``objective`` and the backend's rollout parameters: ``rollout`` for Tinker or ``harbor`` for `Slime <configuration-training.rst#task-jobs-on-slime>`__.
+- With ``rounds: 0``, the recipe trains only tasks saved by earlier generations.
+- A source session is a report whose inference records all carry ``source-tag``. Each Designer request accepts at most 512 KiB of records and files as JSON. Reduce ``source-records-per-round`` for long sessions.
 - Set ``eval-fraction`` and ``split-seed`` in ``pipeline.record2sample.config``, not in the generator's ``config``.
-- Reef calls the generator's ``from_config(config, *, scenario, environ, state)`` once for each scenario (`The contract <../developer-guide/task-generators.rst#the-contract>`__).
+- For a custom generator, see `the generator contract <../developer-guide/task-generators.rst#the-contract>`__.
 
 The training pool
 -----------------
 
-With ``pool-capacity`` above 0, the train tasks form a training pool.
+Set ``pool-capacity`` above 0 to reuse generated training tasks:
 
-- When a task's job ends, the task waits for a job again, after the tasks that already wait.
-- Reef checks the capacity only when a round starts, so the pool can exceed it by the train tasks of one generation.
+- After a job ends, its tasks return to the end of the queue.
+- Capacity is checked at round start. The pool can exceed it by one generation's training tasks.
 - Imported train tasks still train once.
-- When you add ``pool-capacity`` to a scenario whose train tasks trained once, they join the pool.
+- When you enable the pool, previously trained tasks join it.
 - The status shows the pool under ``training_pool``: ``capacity``, ``active``, ``retired``, ``reviews`` and ``last_review_retired``.
 
-After every ``review-interval`` task jobs, a review reads the last ``review-window`` rewards of each active task. A failed task job counts too. The pass rate is the mean of those rewards. A task with fewer rewards stays. The review retires a task for the first of these reasons that applies:
+Every ``review-interval`` jobs, including failed jobs, Reef reviews each active task's last ``review-window`` rewards.
+Tasks with fewer rewards stay active. The pass rate is the mean reward.
+The first matching condition retires a task:
 
 - ``below_band``: the pass rate is below ``review-band-low``.
 - ``above_band``: the pass rate is above ``review-band-high``.
 - ``no_reward_spread``: the population standard deviation of the rewards is below ``review-min-reward-std``.
 
-A pass rate equal to a bound keeps the task. The review reads the rewards that training recorded, so they can be one pool cycle old.
+Equality with a pass-rate bound does not retire a task. Recorded rewards can be one pool cycle old.
 
 Exceptions:
 
-- When the trainer starts a job before the stage reads the failure of the previous task job, the tasks of the new job also get a use without rewards. Their rewards in that job are not kept. This also holds with ``pool-capacity`` 0.
+- If a job starts before the stage reads the previous job's failure, the new job also counts as a use without rewards. Its rewards are discarded. This also applies with ``pool-capacity: 0``.
 - When a new training start cancels a job, its tasks return to the pool only when a later job ends.
 
 Rollout job parameters
 ----------------------
 
-Keys of ``recipe.config.job-parameters``. ``harbor`` takes the keys of ``rollout`` except ``rollouts_per_task``. Both accept only underscores.
+Set these keys under ``recipe.config.job-parameters``.
+``harbor`` accepts the same keys as ``rollout``, except ``rollouts_per_task``. Both use underscores only.
 
 .. container:: config
 
    ``objective``
-       The method that trains the job: a registered name or a ``package.module:Objective`` reference. Required: the recipe names none.
+       Required objective: a registered name or ``package.module:Objective`` reference. The recipe supplies no default.
 
    ``rollout.rollouts_per_task``
-       The training rollouts of each task, at least 2. Required on Tinker; on Slime, ``training.options.n-samples-per-prompt`` gives the count.
+       Rollouts per task, at least 2. Required on Tinker. Slime uses ``training.options.n-samples-per-prompt`` instead.
 
    ``rollout.agent`` : terminus-2
        The Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must be text chat: system, user and assistant text messages, no tools.
@@ -90,16 +94,16 @@ Keys of ``recipe.config.job-parameters``. ``harbor`` takes the keys of ``rollout
        The Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``.
 
    ``rollout.agent_host``
-       The host at which an agent inside the sandbox reaches the host that runs the rollouts. Unset for an agent on that host.
+       Address through which a sandboxed agent reaches the rollout host. Omit for an agent running on that host.
 
    ``rollout.concurrency`` : 2
-       The rollouts in flight, at least 1.
+       Maximum concurrent rollouts. Must be at least 1.
 
    ``rollout.verifier_timeout_reward`` : 0.0
        The reward of a rollout whose verifier timed out. ``null`` leaves the rollout unscored.
 
    ``rollout.scaffold_tolerance`` : 8
-       The tokens at the end of a prompt that the next prompt's history may drop, such as a thinking template's scaffold. The sample keeps them.
+       Maximum trailing prompt tokens that the next prompt's history can omit, such as a thinking template. The training sample keeps these tokens.
 
 **Cloud sandboxes.**
 
@@ -130,9 +134,11 @@ On Tinker, a sample alone in its group does not train, and it is in neither ``ro
 The ``generator`` section
 -------------------------
 
-With this section, ``reef serve`` starts the generator service before the HTTP service and publishes its address as ``${endpoints.generator}``. It runs under the interpreter of the Reef service. ``execution.generator`` selects its executor (`Settings reference <configuration-settings.rst#executors>`__).
+This section starts the generator before the HTTP service and exposes its address as ``${endpoints.generator}``.
+The generator uses Reef's Python interpreter. Select its executor with ``execution.generator`` (`Executors <configuration-settings.rst#executors>`__).
 
-The generator's host needs the ``harbor`` command and the environment that ``generator.environment`` selects. On Tinker, the training component runs the training rollouts itself, so its host needs the Harbor package and the environment of ``rollout.environment`` too.
+The generator host needs ``harbor`` and the selected ``generator.environment``.
+For Tinker, the training host also needs Harbor and the selected ``rollout.environment``.
 
 .. list-table::
    :header-rows: 1
@@ -148,7 +154,13 @@ The generator's host needs the ``harbor`` command and the environment that ``gen
 
 With ``e2b``, a check or a rollout starts only the task's image, unless ``REEF_E2B_COMPOSE=aenv`` also starts its Compose services (`Tasks with Compose services on AgentENV <../developer-guide/sandboxes.rst#tasks-with-compose-services-on-agentenv>`__).
 
-The generator reads the resolved deployment: the Reef address from ``reef.host`` and ``reef.port``, the token from ``reef.token``, else from the first entry of ``reef.tokens``, and the served model from ``inference.model-path`` or ``inference.upstream-model``. Without ``reef serve``, this command runs it from the same file:
+The generator reads its connection settings from the deployment config:
+
+- Address: ``reef.host`` and ``reef.port``.
+- Token: ``reef.token``, or the first entry of ``reef.tokens``.
+- Model: ``inference.model-path`` or ``inference.upstream-model``.
+
+To run the generator separately:
 
 .. code:: bash
 

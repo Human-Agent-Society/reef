@@ -1,61 +1,47 @@
 OPD: learn from a separate teacher on your own responses
 ========================================================
 
-On-policy distillation lets a frozen teacher score the tokens the student
-actually generated. Reef trains the student's weights on that signal and
-publishes them before the next job's responses are sampled. The method follows
-`Thinking Machines Lab's write-up
+Use on-policy distillation (OPD) to train a student on its own responses,
+scored by a frozen teacher. It requires GPUs and the Slime backend.
+The method follows `Thinking Machines Lab's write-up
 <https://thinkingmachines.ai/blog/on-policy-distillation/>`__.
 
-+-------------+------------------------------------------------------------+
-| Evolves     | model weights                                              |
-+-------------+------------------------------------------------------------+
-| Signal      | one report with an empty ``teacher_context`` per response  |
-+-------------+------------------------------------------------------------+
-| Loss family | ``opd``                                                    |
-+-------------+------------------------------------------------------------+
-| Package     | ``recipes/opd/``                                           |
-+-------------+------------------------------------------------------------+
-| Pipeline    | reported feedback, singleton                               |
-+-------------+------------------------------------------------------------+
-| Needs       | GPUs and the Slime training backend                        |
-+-------------+------------------------------------------------------------+
-| Example     | ``recipes/opd/examples/math/``                             |
-+-------------+------------------------------------------------------------+
+Run the example
+---------------
+
+The `math example <../../../recipes/opd/examples/math/README.md>`__ trains
+an OpenThoughts3-fine-tuned Qwen3-8B-Base student with a Qwen3-32B teacher.
+It requires the Slime GPU image and eight 80 GB GPUs.
+
+Follow the example's setup commands to download the pinned models, copy the
+teacher's chat template, and prepare the datasets. Then run:
+
+.. code:: bash
+
+   export OPD_MODEL_PATH=/work/models/Qwen3-8B-Base-SFT
+   export OPD_TEACHER_PATH=/work/models/Qwen3-32B
+   export OPD_RUN_DIR=/work/opd
+   recipes/opd/examples/math/run.sh
+
+The driver collects one job's responses from a single snapshot, submits their
+reports, and waits for one committed update. Results go to
+``$OPD_RUN_DIR/results``. The README gives the AIME'24 protocol and results.
 
 How it works
 ------------
 
-.. container:: flow
+1. Sample a job's responses through Reef.
+2. Report each inference receipt with an empty ``teacher_context``.
+3. Score the student's tokens with the frozen teacher.
+4. Train the student, publish its weights, and then sample the next job.
 
-   Sample
-       the student answers prompts through Reef
+Teacher and student receive the same token sequence. Match the training
+component's `chat template arguments
+<../../reference/configuration-inference.rst#chat-template-arguments>`__
+to serving, including its thinking mode.
 
-   Report
-       submit one empty teacher-context report per inference receipt
-
-   Teacher
-       score the student's rendered prompt and response ids with frozen weights
-
-   **Train**
-       minimize sampled-token reverse KL with one optimizer update
-
-   Publish
-       serve the updated student weights
-
-   :Loop: wait for publication before generating the next job's responses
-
-Teacher and student see identical token sequences. The record-to-sample stage,
-``OPDSamples``, makes one sample from each report. The training component
-renders the student's sequence with the model's chat template and gives the
-teacher that same sequence. Give the component the serving engine's chat
-template arguments (`Chat template arguments
-<../../reference/configuration-inference.rst#chat-template-arguments>`__), so that the
-rendered sequence keeps the thinking switches of serving.
-
-The stage is on-policy: a response of an artifact that no longer serves does
-not train. Wait for each published update before you sample the next job's
-responses.
+OPD is on-policy. A response from an artifact that no longer serves does
+not train. Wait for publication before generating the next job's responses.
 
 Report contract
 ---------------
@@ -74,9 +60,7 @@ enter the loss.
 Configuration
 -------------
 
-The stage settings go in the deployment's top-level ``pipeline`` section.
-``job_samples`` is the responses of one job, and Slime's
-``--global-batch-size`` is the responses of one optimizer step:
+Set ``job_samples`` to the optimizer batch size for one update per job:
 
 .. code:: yaml
 
@@ -96,13 +80,14 @@ The stage settings go in the deployment's top-level ``pipeline`` section.
 .. container:: config
 
    ``pipeline.sample2job.config.job_samples`` : required
-       responses in one job. Set it to ``training.config.global_batch_size`` so that one job is one step.
+       Responses per job. Match ``training.config.global_batch_size``.
 
    ``training.config.global_batch_size``
-       responses in one optimizer step. Sample this many responses before you wait for publication, so that one job is one step.
+       Responses per optimizer step. Collect this many before waiting for publication.
 
    ``pipeline.record2sample.config.max_teacher_tokens`` : 0
-       maximum rendered sequence length; the training component leaves out a longer sample and counts it in ``unrenderable_samples``. 0 disables the check.
+       Maximum rendered sequence length. Longer samples are excluded and counted
+       in ``unrenderable_samples``. 0 disables the limit.
 
 The Slime options belong in ``training.options``:
 
@@ -142,12 +127,10 @@ gradient; the reported divergence remains the unclipped estimate. It requires
 ``opd-divergence: reverse``, a positive ``opd-top-k``, and
 ``opd-top-k-distribution: renormalized``.
 
-The separate checkpoint is swapped into the actor's architecture for the
-teacher pass, so teacher and student must share the architecture, parallel
-layout and token ids; a larger model with only the same tokenizer runs on a
-teacher engine instead. The teacher copy takes additional host memory and
-reuses the actor's GPUs without an optimizer update. In LoRA mode the
-student's adapter is cleared while the teacher's weights are loaded.
+A teacher checkpoint must share the student's architecture, parallel layout,
+and token IDs. It uses extra host memory and reuses the actor's GPUs.
+In LoRA mode, the teacher pass clears the student's adapter.
+Use a separate teacher engine when only the token IDs match.
 
 Teacher engine
 --------------
@@ -185,10 +168,8 @@ deployment's ``teacher`` section declares it and replaces
    ``teacher.options``
        native SGLang options.
 
-Before each optimizer step, Slime sends every rendered prompt and response to
-the engine and stores the teacher's log-probability of each sampled token, so
-the loss stays the sampled-token reverse KL. The engine path has these
-requirements:
+Before training, Slime scores every rendered prompt and response on the
+teacher engine. This keeps the sampled-token reverse-KL loss. Requirements:
 
 - Rollout temperature 1, because SGLang's input log-probs are not tempered.
 - The teacher-selected top-K representation.
@@ -198,12 +179,3 @@ requirements:
 A scoring failure fails the step before it starts, so no partially scored job
 trains. ``perf/distill_teacher_time`` reports the scoring time of each step in
 seconds.
-
-Run the example
----------------
-
-The `math example <../../../recipes/opd/examples/math/README.md>`__ distils
-Qwen3-32B into a Qwen3-8B-Base student fine-tuned on OpenThoughts3 math
-through the teacher engine and evaluates on AIME'24, the model pair of the
-original write-up. The page documents the protocol, the eight-GPU
-configuration and the results.

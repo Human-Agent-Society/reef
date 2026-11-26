@@ -1,9 +1,9 @@
 Codebase structure
 ==================
 
-Use this page to find where a change belongs. Read that package's
-``__init__.py`` docstring for its contracts, then extend the nearby code and tests.
-For setup and checks, see `Development <development.rst>`__.
+Use the four layers below to find the package that owns your change.
+Read its ``__init__.py`` docstring for the package contract.
+See `Development <development.rst>`__ for setup and checks.
 
 Layers
 ------
@@ -58,9 +58,8 @@ Control layer
 - ``operations/`` handles client operations, such as importing artifacts or
   starting evaluations, without HTTP request objects.
 
-For example, a harness import route reads the scenario header and passes the
-scenario name to an operation. A background sync worker passes the same name
-directly. Neither caller needs to turn its work into a synthetic HTTP request.
+For example, both a harness import route and a sync worker pass the scenario
+name to the same control operation. Only the route reads HTTP headers.
 
 Use ``tests/control/`` for scenario behavior. Keep HTTP-specific assertions in
 ``tests/api/``. Control imports neither the entry layer nor ``aiohttp``.
@@ -100,11 +99,10 @@ Keep concrete engines and training frameworks inside their integration
 packages. Training and inference do not import each other; shared values go
 in ``core``.
 
-``TrainingPipeline`` stays in ``reef/train/pipeline.py``: its two stages share
-sample storage and state under the trainer's lock. Splitting that public
-interface needs a separate design. The generated-task recipe and
-``TaskGenerator`` stay in ``reef/recipe/generated_tasks/`` because
-``recipes/`` is not included in the installed wheel.
+``TrainingPipeline`` in ``reef/train/pipeline.py`` connects the two stages.
+They share sample storage and state under the trainer's lock.
+The wheel includes the generated-task recipe and ``TaskGenerator`` in
+``reef/recipe/generated_tasks/``.
 
 Foundation layer
 ----------------

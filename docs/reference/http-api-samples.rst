@@ -1,12 +1,14 @@
 HTTP API: samples
 =================
 
-List the training samples of a scenario, read which samples the next job trains, and read the tasks of the samples service that make samples from records.
+List training samples, choose samples for a job, and inspect record-to-sample processing.
 
 Choose the samples that train
 -----------------------------
 
-Every training sample of a scenario is a data item that it uses: an uploaded trajectory, an imported task, or a trajectory or task that a trainer's stages made. ``GET /reef/scenarios/{scenario}/samples`` lists them in the order that their uses began, at most ``limit`` (default and maximum 1000) after the sequence ``after`` (default 0):
+Samples are data items assigned to the scenario: uploaded trajectories, imported tasks, or trajectories and tasks generated from records.
+
+``GET /reef/scenarios/{scenario}/samples`` lists samples in assignment order. ``after`` defaults to 0; ``limit`` defaults to 1000, also the maximum.
 
 .. code:: json
 
@@ -35,14 +37,14 @@ In ``manual``, the ``samples`` of ``POST /reef/train`` name the samples that the
           "samples": ["trajectory-0001", "report-17:0"]}'
 
 - ``samples`` is one or more distinct sample IDs, of one kind: trajectories or tasks, not both. The request body limit of 64 MiB bounds the list.
-- Reef returns 400, and queues nothing, for an ID that the store does not hold, or a sample that no trainer can train (an eval or an imported task, an upload that its recipe does not take, another trainer's sample).
+- Unknown or untrainable samples return 400 without queuing a request. This includes eval tasks, unsupported imported tasks or uploads, and another trainer's samples.
 - A sample that trained before trains again when the request names it. Staleness does not apply.
 - A sample that leaves the scenario before the job starts is left out of the job.
 
 Sample processing tasks
 -----------------------
 
-``GET /reef/scenarios/{scenario}/sample-processing`` reads the samples queue through the data service, newest task first. The scenario must exist. The read starts no processing. The query parameters are optional:
+``GET /reef/scenarios/{scenario}/sample-processing`` lists processing tasks newest first through the data service. The scenario must exist. Reading starts no work. Optional queries:
 
 - ``state``: ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``.
 - ``before``: a positive integer. It excludes creation sequences at or above it.
@@ -69,7 +71,9 @@ Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at`
 - ``triggers`` lists why the task ran, oldest first. Each entry has ``name`` and ``at``, the time of the first request.
 - ``progress`` holds the counts so far of the attempt that runs now: ``attempt``, ``records_read``, ``samples_created`` and ``at``. It is null for a task that does not run.
 
-A trigger name is ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``. Only ``records`` and ``data`` bring new records. The others let a stage make samples without a new record. ``background`` comes from a background job of a stage that ended, or from a fallback look while such jobs run. The fallback waits 1 second, then twice as long after each look that changed nothing, up to 300 seconds.
+Triggers are ``records``, ``data``, ``commit``, ``reload``, ``background`` or ``due``. Only ``records`` and ``data`` supply new records. Other triggers let stages create samples without new records.
+
+``background`` means a stage's background job ended, or Reef polled a running job. Polling starts after 1 second. Each unchanged poll doubles the wait, up to 300 seconds.
 
 A sample that a task stored has the item metadata ``stored_by_task`` and ``read_by_task``. A data query with ``group_key`` set to one of them finds the samples of one task.
 
@@ -82,7 +86,13 @@ Control removes ended tasks after ``storage.work_retention_s`` (seven days by de
 - One attempt keeps at most 2,000 lines of at most 4,096 characters. The line after the last one says that the log was cut.
 - The log goes with its task when the retention deletes the task.
 
-Optional query parameters are ``attempt`` (1 to the task's ``attempt_count``; the last attempt by default), ``after`` (-1 or more, -1 by default; the page holds lines with a larger number) and ``limit`` (1 to 1000, 500 by default). The response has ``task_id``, ``attempt``, ``attempt_count``, ``running``, ``lines`` and ``next``:
+Optional queries:
+
+- ``attempt``: 1 through ``attempt_count``, defaulting to the last attempt.
+- ``after``: minimum -1, default -1. Returns lines with higher numbers.
+- ``limit``: 1 to 1000, default 500.
+
+The response has ``task_id``, ``attempt``, ``attempt_count``, ``running``, ``lines`` and ``next``:
 
 - ``attempt`` is null for a task that no worker took.
 - ``running`` is true while the chosen attempt runs, so more lines can come.

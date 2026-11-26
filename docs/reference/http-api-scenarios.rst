@@ -1,7 +1,7 @@
 HTTP API: scenarios and their settings
 ======================================
 
-A scenario isolates the records, trainer, and snapshot chain for one workload. Create it with ``POST /reef/scenarios`` before you send inference requests to it:
+A scenario isolates one workload's records, trainer and snapshot chain. Create it with ``POST /reef/scenarios`` before sending inference requests:
 
 - An inference request never creates a scenario: an unknown scenario answers 404.
 - The first report or imported record with a new ``x-reef-scenario`` creates the scenario. A harness install without ``x-reef-scenario`` creates one with a generated name. With ``reef.allow_implicit_scenario_creation: false``, these requests return 404 for an unknown scenario instead.
@@ -32,9 +32,11 @@ Create a scenario
 
 The starting artifacts are the initial active selections and training starts. Their artifact rows have ``operation: creation``, and ``source`` names the selected item or the default configuration.
 
-With ``artifact_id``, Reef reads and checks the item's files as ``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}`` does (`Import an artifact <http-api-artifacts.rst#import-an-artifact>`__), by reference or as a copy. Each other component uses its default start. When Reef cannot read the item, or the check refuses it, Reef registers no scenario and answers with the status of the refusal, such as 400 for a directory without the component's layout or 404 for an item that the owner does not store.
+With ``artifact_id``, Reef reads and validates the item's files using the `artifact import <http-api-artifacts.rst#import-an-artifact>`__ rules. Other components use their default starts. Import failures register no scenario and return the import's error. Examples include 400 for invalid layouts and 404 for items absent from the owner's store.
 
-The answer is ``{scenario, owner, components}``. ``components`` maps each component name to its selected ``artifact_id``. A scenario with one component also returns that value as ``artifact_id``. A new scenario returns 201. An existing scenario returns 200 with its current selections and ignores the requested ``artifact_id`` and ``component``.
+The response is ``{scenario, owner, components}``. ``components`` maps component names to selected artifact IDs. Single-component scenarios also return ``artifact_id``.
+
+New scenarios return 201. Existing scenarios return 200 with current selections, ignoring the requested ``artifact_id`` and ``component``.
 
 .. code:: bash
 
@@ -55,7 +57,9 @@ Scenario routes
 Deleting a scenario
 -------------------
 
-``DELETE /reef/scenarios/{scenario}`` renames the scenario's ref in the artifact repository into ``refs/reef/archived/`` and returns ``{"scenario", "archived"}``, where ``archived`` names the archived ref. Only a local artifact repository can be archived; a remote one answers 501 and changes nothing. From then on the scenario does not exist:
+``DELETE /reef/scenarios/{scenario}`` archives the repository ref under ``refs/reef/archived/``. It returns ``{"scenario", "archived"}``, where ``archived`` names that ref. Remote artifact repositories return 501 without changes; only local repositories support archiving.
+
+After deletion:
 
 - A read of the scenario and a second delete answer 404.
 - A create with the ID, and a record that would create the scenario implicitly, answer 409: a scenario ID is never used again.
@@ -63,7 +67,7 @@ Deleting a scenario
 - A local step in flight for the scenario ends without a commit.
 - The training service runs no job of the scenario. When it takes such a job, or stores for one, it cancels the job and discards what the job stored.
 
-Control then removes the scenario's state in the background, at once:
+Control immediately starts background cleanup:
 
 - It cancels the scenario's training jobs, discards its stored content, and moves its record store and commit log under ``<agent_record_dir>/archived/``. The training service moves the recipe's own directories (a harness scenario's history and step records) under an ``archived/`` sibling; this waits while no training service runs.
 - A sample selection that runs past the delete writes no sample.
@@ -71,7 +75,7 @@ Control then removes the scenario's state in the background, at once:
 - Every snapshot that the scenario published stays reachable under the archived ref.
 - On a runtime that serves per-scenario adapters, the scenario's adapter stays resident in the serving engines until the adapter residency evicts it.
 
-When a cleanup step fails, for example because the artifact store does not answer, the scenario stays deleted. Control tries again an hour later, and after a restart.
+Cleanup failures leave the scenario deleted. Control retries after an hour and after restarts.
 
 Scenario updates
 ----------------
@@ -85,7 +89,7 @@ Scenario updates
 - ``served``: the artifacts that the scenario serves of one component, each with its weight (`Set what a scenario serves <http-api-serving.rst#set-what-a-scenario-serves>`__). ``component`` names that component, and is valid only with ``served``.
 - ``record2sample_config``: the scenario's record-to-sample config keys (`Record-to-sample config`_).
 
-The response holds the scenario name and each setting that the request changed. An unknown scenario returns 404 without implicit creation, and an invalid payload returns 400. A reload and a restart keep the settings.
+The response includes the scenario name and changed settings. Unknown scenarios return 404 without implicit creation; invalid payloads return 400. Settings survive reloads and restarts.
 
 **Training mode.** The values are ``auto`` and ``manual``. ``auto`` starts a job whenever ``job_samples`` samples wait. ``manual`` starts one only for a request, on the samples that it names (`Manual training <http-api-training.rst#manual-training>`__).
 
@@ -102,7 +106,7 @@ HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 
 A Reef process runs at most one scenario that trains full weights, so preparation, remote execution, and commit never interleave. It may run any number of scenarios that produce no updates or that update text artifacts in process. Record acceptance never waits for artifact evolution.
 
-**Activation.** The ``activation`` setting selects the rule that decides whether Reef activates each new artifact of this scenario. It replaces the deployment's `activation section <configuration-recipe.rst#the-activation-section>`__ for this scenario. ``module`` names one of the built-in rules:
+**Activation.** ``activation`` overrides the deployment's `activation rule <configuration-recipe.rst#the-activation-section>`__ for this scenario. ``module`` selects a built-in rule:
 
 .. code:: json
 
@@ -116,19 +120,19 @@ These rules apply to the setting:
 
 - The response holds the stored rule. Send ``"activation": null`` to follow the deployment's rule again.
 - The setting names only built-in rules. Reef answers 400 for a ``package.module:ClassName`` rule. Set such a rule in the deployment's ``activation`` section.
-- The ``evaluated`` rule needs ``artifact_evaluation``. Reef checks the two settings together, and stores both or neither. It answers 400 when, after the request, the rule that applies is ``evaluated`` and the scenario has no ``artifact_evaluation``. This includes a request that clears ``artifact_evaluation`` under ``evaluated``.
-- A new rule applies to the artifacts that training makes after the change. It never activates an existing artifact. Under ``evaluated``, Reef activates an artifact when an evaluation of it finishes after the change with a ``mean_score`` of at least ``min_mean_score``.
+- ``evaluated`` requires ``artifact_evaluation``. Reef validates both settings together and stores both or neither. Missing or cleared evaluation settings under ``evaluated`` return 400.
+- Changing the rule alone activates nothing. It applies to later training outputs. Under ``evaluated``, evaluations finishing after the change can activate artifacts whose ``mean_score`` reaches ``min_mean_score``.
 
 Serving config
 --------------
 
-The ``serving_config`` setting changes how the scenario is served while it serves, without a restart or an activation. It maps a component name to the fields that the scenario sets for that component:
+``serving_config`` changes serving settings without restarting or activating artifacts. It maps component names to overrides:
 
 .. code:: json
 
    {"serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}}}
 
-Reef merges the request into the stored config field by field. ``null`` removes a field, so the field takes the deployment's value again. A field that the request leaves out keeps its stored value. The response holds the stored ``serving_config`` and the ``effective_serving_config`` (`Read the settings`_).
+Reef merges fields into the stored config. ``null`` removes an override, restoring the deployment's value. Omitted fields keep their stored values. The response includes ``serving_config`` and ``effective_serving_config`` (`Read the settings`_).
 
 Only the component that the inference runtime serves has serving fields. The runtime and its request handler define the fields and check their values:
 
@@ -136,12 +140,12 @@ Only the component that the inference runtime serves has serving fields. The run
 - Reef answers 400 and stores nothing for a field that they do not have, for a value that a field does not take, or for another component.
 - A field that takes effect only when an engine starts, such as a GPU type, stays in the deployment configuration.
 
-Inference applies a change within a few seconds: the request fields to each later request, and the runtime's engine fields to the engine that serves the scenario and to each engine that starts for it later. Reef ignores, with a warning, a stored field that the deployment no longer accepts. The scenario then serves with the deployment's values until a person changes the config.
+Inference applies changes within seconds. Request fields affect subsequent requests; engine fields affect current and future engines. Reef warns about stored fields the deployment no longer accepts and ignores them. Those fields use deployment defaults until updated.
 
 Record-to-sample config
 -----------------------
 
-The ``record2sample_config`` setting gives one scenario its own config for the record-to-sample stage of each trainer. It maps a component name to config keys. Each key replaces the same key of the deployment's `pipeline.record2sample.config <configuration-recipe.rst#the-pipeline-section>`__ for that component's trainer. The stage class stays the deployment's:
+``record2sample_config`` overrides each trainer's record-to-sample configuration by component name. Keys replace the deployment's `pipeline.record2sample.config <configuration-recipe.rst#the-pipeline-section>`__ values. The stage class stays unchanged:
 
 .. code:: json
 
@@ -149,7 +153,7 @@ The ``record2sample_config`` setting gives one scenario its own config for the r
 
 The request replaces the stored mapping as a whole. Send ``{}`` to use the deployment's config again. The response holds the stored ``record2sample_config``.
 
-Reef applies a change by loading the scenario again, as a restart does: each trainer builds its stage with the new config and reads the records after its committed progress again. A samples service in another process loads the scenario again before its next selection. Reef answers 400, and keeps the stored setting and the loaded scenario, when the mapping names a component that has no trainer, or when a stage refuses its config.
+Reef reloads the scenario to rebuild stages and replay records after committed progress. Separate samples services reload before their next selection. Components without trainers or rejected stage configurations return 400, preserving the stored setting and loaded scenario.
 
 Read the settings
 -----------------

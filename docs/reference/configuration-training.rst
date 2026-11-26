@@ -1,19 +1,23 @@
 Slime training options and jobs
 ===============================
 
-How the Slime backend takes its options, how to train without an inference engine, and the jobs that Slime runs on its own rollout engines. `Settings reference <configuration-settings.rst#training>`__ lists every key of the ``training`` and ``teacher`` sections. `Train with Tinker <../user-guide/tinker.rst>`__ describes the Tinker backends, and `Evolve your model <../user-guide/evolve-your-model.rst>`__ describes how to size a stack.
+Configure Slime training, including deployments without inference and jobs that generate their own rollouts.
+For backend selection and GPU sizing, see `Evolve your model <../user-guide/evolve-your-model.rst>`__.
+For Tinker, see `Train with Tinker <../user-guide/tinker.rst>`__.
 
 Slime's training options
 ------------------------
 
-``training.options`` holds Slime's native flags without the leading ``--`` (`Native backend options <configuration-inference.rst#native-backend-options>`__). The training component parses them once at startup, so a malformed option fails before the first job. A configuration error that only Slime's workers detect fails the first job.
+Put Slime's native flags under ``training.options``, without the leading ``--``.
+See `Native backend options <configuration-inference.rst#native-backend-options>`__ for value syntax.
+Malformed options fail at startup. Errors that only Slime's workers can detect fail the first job.
 
 Reef reads these options itself:
 
 .. container:: config
 
    ``training.options.global-batch-size``
-       Required. The samples of one optimizer step. Reef refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
+       Required number of samples per optimizer step. Set it even when ``num-steps-per-rollout`` could derive it.
 
    ``training.options.hf-checkpoint`` : ``inference.model-path``
        The model that Slime trains. Reef sets it; an explicit value must agree with ``inference.model-path``.
@@ -21,15 +25,17 @@ Reef reads these options itself:
    ``training.options.actor-num-nodes``, ``training.options.actor-num-gpus-per-node``
        The training GPUs. ``training.options.num-gpus-per-node`` gives the physical size of a node.
 
-- Reef fills Slime's architecture flags, such as layer counts and hidden sizes, from the model's Hugging Face config. An explicit flag wins.
-- Slime's engine and placement options (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*``) configure the rollout engines of Slime's own serving session (`Task jobs on Slime`_). They never configure the serving engines, which take ``inference.options``.
+- Reef reads architecture flags from the model's Hugging Face config. Explicit flags take priority.
+- ``rollout-num-gpus``, ``colocate``, ``sglang-*`` and ``router-*`` configure Slime's rollout engines (`Task jobs on Slime`_). Configure Reef's serving engines with ``inference.options``.
 - With multi-node training, put the checkpoint directory on storage that the host of the training service can read.
 - `Set the checkpoint cadence <../user-guide/operate.rst#set-the-checkpoint-cadence>`__ describes the ``reef-checkpoint-*`` options.
 
 Train without an inference engine
 ---------------------------------
 
-``inference.backend: none`` runs no inference engine. Use it for supervised fine-tuning on data that does not come from the served model: uploaded trajectory items (``POST /reef/namespaces/{owner}/data``) or imported records (``POST /reef/records``). The trainer takes every GPU that ``training.options.actor-*`` names, and every inference route answers 404.
+Set ``inference.backend: none`` for supervised fine-tuning on uploaded trajectories or imported records.
+Upload trajectories with ``POST /reef/namespaces/{owner}/data`` or import records with ``POST /reef/records``.
+The trainer uses the GPUs named by ``training.options.actor-*``. Inference routes return 404.
 
 .. code:: yaml
 
@@ -49,12 +55,18 @@ Train without an inference engine
        config:
          job-samples: 32
 
-``reef serve`` refuses the settings that configure an engine or call the model: ``inference.serving`` other than ``none``, ``inference.num-gpus`` other than 0, ``inference.tensor-parallel-size``, ``inference.options``, ``inference.url``, ``inference.remote``, ``inference.handler-factory``, ``inference.handler-config``, ``teacher.model-path``, a ``generator`` section and a composite recipe.
+With this backend, ``reef serve`` rejects:
+
+- ``inference.serving`` other than ``none`` or ``inference.num-gpus`` other than 0;
+- ``inference.tensor-parallel-size``, ``inference.options``, ``inference.url`` or ``inference.remote``;
+- ``inference.handler-factory`` or ``inference.handler-config``;
+- ``teacher.model-path``, a ``generator`` section or a composite recipe.
 
 Task jobs on Slime
 ------------------
 
-A task job trains on Harbor tasks. Slime rolls the tasks out on its own rollout engines, which Reef's serving never calls (`Training backends <../developer-guide/training-backends.rst>`__). The job runs as a dataset job (`Dataset jobs on Slime`_) whose prompts are the tasks and whose generate step is a Harbor rollout:
+A task job trains on Harbor tasks through Slime's rollout engines.
+It is a `dataset job <#dataset-jobs-on-slime>`__ with tasks as prompts and Harbor as the rollout generator:
 
 - ``n-samples-per-prompt`` gives the rollouts of each task, which form one prompt group.
 - Each rollout runs the agent in the task's Harbor environment, and the agent's model calls reach the rollout engines.
@@ -86,16 +98,16 @@ The Slime options and the job parameters of a task job:
 
 Rules of a task job:
 
-- **Engine GPUs.** ``rollout-num-gpus`` gives the rollout engines GPUs of their own. ``colocate`` puts them on the training GPUs. A task job whose options give the engines no GPUs fails, and a LoRA actor cannot have rollout engines.
-- **Loss family.** The recipe's default objective sets the workers' loss family. A deployment that runs task jobs therefore starts with the ``slime`` family and refuses jobs of trajectories. The built-in objective of that family is ``slime_dataset``.
-- **Rollout count.** The job runs ``ceil(tasks / rollout-batch-size)`` Slime rollouts, so each task runs at least once. The last batch wraps to the first tasks when the tasks do not fill it. To train the tasks again, submit another job.
+- **Engine GPUs.** Set ``rollout-num-gpus`` for separate GPUs, or ``colocate`` to share training GPUs. Jobs fail without rollout GPUs. LoRA actors cannot have rollout engines.
+- **Loss family.** The recipe's default objective must select the ``slime`` family, which includes ``slime_dataset``. This deployment rejects trajectory jobs.
+- **Rollout count.** Each job runs ``ceil(tasks / rollout-batch-size)`` Slime rollouts. The last batch repeats initial tasks to fill the batch. Submit another job to repeat training.
 - **Checkpoints.** ``save_interval`` counts Slime rollouts.
-- **Model calls.** The engines answer OpenAI text chat: system, user and assistant text messages, no tools. Each call samples with Slime's ``rollout-temperature``, ``rollout-top-p`` and ``rollout-top-k``, whatever the agent asks, and ``rollout-max-response-len`` bounds each response.
-- **Failed rollouts.** When no group of a Slime rollout can train, the job fails before the workers train it, with the error of the first rollout.
-- **Score centering.** Slime's ``use-score-centering`` works: each sampled token carries the engines' top ``score-centering-top-k`` log probabilities.
-- **Where rollouts run.** The rollouts run in a Ray actor of Slime's serving session. Its node needs the ``harbor`` package and the Harbor environment, and ``agent_host`` names that node. The actor gets ``E2B_API_KEY``, ``E2B_API_URL``, ``E2B_SANDBOX_URL``, ``E2B_DOMAIN``, ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` from the environment of the training service.
+- **Model calls.** Engines accept OpenAI text chat with system, user and assistant messages. Tools are unsupported. Slime's ``rollout-temperature``, ``rollout-top-p`` and ``rollout-top-k`` override agent values. ``rollout-max-response-len`` limits each response.
+- **Failed rollouts.** If a Slime rollout has no trainable group, the job fails before training and reports the first rollout error.
+- **Score centering.** ``use-score-centering`` records the top ``score-centering-top-k`` log probabilities for each sampled token.
+- **Host.** Rollouts run in Slime's Ray actor. Its node needs ``harbor`` and the selected Harbor environment; ``agent_host`` identifies that node. The actor inherits ``E2B_API_KEY``, ``E2B_API_URL``, ``E2B_SANDBOX_URL``, ``E2B_DOMAIN``, ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` from the training service.
 
-The training component refuses a task job, when it is submitted, in these cases:
+The training component rejects a submitted task job when:
 
 - The loss family of the deployment or of the objective is not ``slime``.
 - The job sets ``learning_rate_schedule`` or ``scheduling``. Slime's options set the learning rate and the optimizer steps.
@@ -105,9 +117,12 @@ The training component refuses a task job, when it is submitted, in these cases:
 Dataset jobs on Slime
 ---------------------
 
-A dataset job trains a prompt dataset the way Slime trains on its own: Slime rolls the prompts out on its rollout engines, scores them with its reward model, computes the advantages and trains its loss. Reef records each saved rollout as a candidate.
+A dataset job generates responses, scores them with Slime's reward model, computes advantages and trains the loss.
+Each saved checkpoint becomes a candidate artifact.
 
-The deployment selects the built-in recipe ``reef.recipe.dataset:DatasetRecipe`` with ``recipe.config.training-mode: manual``. Its loss family, ``slime``, refuses every other job except a task job. Each training request (``POST /reef/train``) whose ``parameters`` hold ``dataset`` is one job:
+Select ``reef.recipe.dataset:DatasetRecipe`` with ``recipe.config.training-mode: manual``.
+Its ``slime`` loss family accepts only dataset and task jobs.
+Submit each job with ``POST /reef/train`` and a ``parameters.dataset`` object:
 
 .. code:: json
 
@@ -126,5 +141,5 @@ The deployment selects the built-in recipe ``reef.recipe.dataset:DatasetRecipe``
        The rollouts between two checkpoints.
 
 - The recipe's ``job-parameters`` can set a default ``dataset``. Slime's own options in ``training.options`` configure the rest, for example ``input-key``, ``apply-chat-template`` and ``rollout-batch-size``.
-- A rollout function, a reward model (``custom-rm-path`` or ``rm-type``) and a hook on the rollout data (``rollout-data-postprocess-path``) are Slime's plugins and run in Slime's processes.
+- Slime runs its plugins: the rollout function, reward model (``custom-rm-path`` or ``rm-type``), and rollout hook (``rollout-data-postprocess-path``).
 - Reef sets ``data-source-path`` itself, so it refuses the option. It also refuses ``disable-compute-advantages-and-returns``.

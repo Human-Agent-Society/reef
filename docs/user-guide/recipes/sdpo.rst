@@ -1,82 +1,50 @@
 SDPO: learn from your own correct attempts
 ==========================================
 
-Self-Distillation Policy Optimization (`arXiv:2601.20802
-<https://arxiv.org/abs/2601.20802>`__) samples a question several times and
-turns the attempts that succeed into teachers for the others. The teacher is
-the model itself reading the question with a correct attempt appended. The
-student reads the question alone. The loss pulls the student's next-token
-distributions toward the teacher's on the student's own attempt. The paper
-reports that SDPO reaches GRPO's accuracy with fewer samples.
+Use Self-Distillation Policy Optimization
+(`SDPO <https://arxiv.org/abs/2601.20802>`__) when a task has a score for each
+attempt. Successful sibling attempts become demonstrations for the others.
+The student trains on its own response tokens. Reef requires Slime and GPUs.
 
-+-------------+------------------------------------------------------------+
-| Evolves     | model weights                                              |
-+-------------+------------------------------------------------------------+
-| Signal      | one report per attempt with its score and its place in the |
-|             | sampling grid                                              |
-+-------------+------------------------------------------------------------+
-| Loss family | ``sdpo``                                                   |
-+-------------+------------------------------------------------------------+
-| Package     | ``recipes/sdpo/``                                          |
-+-------------+------------------------------------------------------------+
-| Pipeline    | reported feedback, one job per sampling grid               |
-+-------------+------------------------------------------------------------+
-| Needs       | GPUs and the Slime training backend                        |
-+-------------+------------------------------------------------------------+
-| Example     | `SDPO on SciKnowEval Chemistry                             |
-|             | <../../../recipes/sdpo/examples/sciknoweval/README.md>`__  |
-+-------------+------------------------------------------------------------+
+Run the example
+---------------
+
+The `SciKnowEval example
+<../../../recipes/sdpo/examples/sciknoweval/README.md>`__ trains Qwen3-8B
+on Chemistry. Use the Slime training environment with eight GPUs:
+four for training and four for serving.
+
+.. code:: bash
+
+   cd recipes/sdpo/examples/sciknoweval
+   hf download Qwen/Qwen3-8B --local-dir ~/models/Qwen3-8B
+   ./run.sh
+
+Each step samples 32 questions eight times. The example evaluates the test
+split every five steps; its README records the protocol.
 
 How it works
 ------------
 
-The harness samples each question several times through Reef and scores
-every attempt. It reports each attempt with its score and its place in the
-grid. The recipe waits for the whole grid and trains on it in one step.
+1. Sample several attempts for each question through Reef.
+2. Report every attempt's score and position in the sampling grid.
+3. Wait for the complete grid, then train and publish the updated weights.
+4. Sample the next grid from the new artifact.
 
-.. container:: flow
+Each attempt uses the first correct sibling as its demonstration by default.
+Without a correct sibling, it keeps the plain request and has weight 0.
+It remains in the step's mean but supplies no target.
+Reef drops grids that mix policy versions. Responses from an artifact that
+no longer serves do not train.
 
-   Rollout
-       several attempts at each question
+The default loss is Jensen-Shannon divergence over the student's top 100
+tokens, plus a bucket for the remaining vocabulary. The teacher moves 5%
+toward the policy after each step. Use zero dropout for the student-selected
+token representation.
 
-   Report
-       each attempt's score and grid position against its receipt
-
-   **Step**
-       distil the teacher that read a correct sibling onto each attempt
-
-   Version
-       publish the updated weights to the engine
-
-   :Loop: the next grid is sampled from the updated weights
-
-SDPO has two pipeline stages
-(`Training pipeline <../../developer-guide/write-a-recipe.rst>`__).
-``SDPOSamples`` groups the reports of one grid and makes one sample from each
-report. ``SDPOJobData`` makes one job's data of one complete grid.
-
-- **Teacher request.** The teacher reads the question with the first correct
-  attempt by another rollout appended. An attempt whose question no other
-  rollout got right keeps the plain request and a sample weight of 0: it
-  stays in the step's mean and has no target.
-- **Mixed grids.** Reef drops a grid whose attempts came from different
-  policy versions and lists it in the pipeline's status.
-- **Rendering.** The training component renders the teacher sequence with
-  the model's chat template: the teacher prompt, cut to
-  ``max_teacher_prompt_tokens``, then the attempt's response tokens. It
-  leaves out a sample whose teacher sequence is longer than
-  ``max_teacher_tokens`` and counts it in the job metric
-  ``unrenderable_samples``.
-- **Loss.** The ``sdpo`` loss family builds on the Slime backend's
-  distillation base (`Loss families <../../developer-guide/loss-families.rst>`__)
-  with the reference implementation's defaults. The teacher is a copy of the
-  weights that moves 5% toward the policy after every step. The loss is the
-  Jensen-Shannon divergence over the student's top 100 tokens plus one bucket
-  for the rest of the vocabulary. The student picks those tokens in one
-  forward pass before the step, so the trainer needs zero dropout. Each
-  token's loss is weighted by the capped ratio between the policy and the
-  old-policy log-probs, which the actor computes with the weights of the
-  job's start.
+Reef cuts the teacher prompt to ``max_teacher_prompt_tokens`` before adding
+the student's response. Samples above ``max_teacher_tokens`` do not train;
+``unrenderable_samples`` counts the exclusions.
 
 The report contract
 -------------------
@@ -96,11 +64,8 @@ example leaves it empty.
 Configuration
 -------------
 
-The deployment's top-level ``pipeline`` section configures the two stages.
-``record2sample`` (``SDPOSamples``) sets the grid and the teacher's windows.
-``sample2job`` (``SDPOJobData``) sets the job size and what the teacher
-reads; it reads the grid from ``SDPOSamples``. The stage is on-policy: a
-sample of an artifact that no longer serves does not train.
+Set the grid and teacher limits under ``record2sample``. Set demonstration
+selection and job size under ``sample2job``:
 
 .. code:: yaml
 
@@ -134,13 +99,14 @@ sample of an artifact that no longer serves does not train.
        the rendered teacher prompt is cut to this many tokens.
 
    ``pipeline.record2sample.config.max_teacher_tokens`` : 18432
-       a sample with a longer teacher sequence does not train. Set it to the trainer's window. Must be at least ``max_teacher_prompt_tokens``.
+       Maximum teacher sequence length. Must be at least
+       ``max_teacher_prompt_tokens`` and fit the trainer's context window.
 
    ``training.options.apply-chat-template-kwargs`` : none
-       the chat template arguments, as a JSON object, with which the component renders each sample. Set them as the engine samples, for example ``'{"enable_thinking": false}'``.
+       JSON chat template arguments. Match serving, including thinking mode.
 
    ``pipeline.sample2job.config.job_samples`` : required
-       the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
+       Minimum samples per job. Set it to the complete grid size.
 
    ``pipeline.sample2job.config.success_reward_threshold`` : 0.5
        an attempt at or above this score is correct.
@@ -157,18 +123,15 @@ sample of an artifact that no longer serves does not train.
    ``pipeline.sample2job.config.environment_feedback_only_without_solution`` : true
        use the feedback only when no correct sibling exists.
 
-``SDPOSamples`` also takes the sample assembly's keys
-(``accept_multi_turn_policy_samples``, ``realign_threshold`` and
-``scaffold_tolerance``). Reef checks each stage's config when it loads the
-recipe. A stage key under ``recipe.config`` fails the deployment, and the
-error names the key's place in ``pipeline``.
+The record stage also accepts ``accept_multi_turn_policy_samples``,
+``realign_threshold``, and ``scaffold_tolerance``. Put stage settings under
+``pipeline``; placing them in ``recipe.config`` stops startup.
 
-One job's data is one grid. To train one optimizer step per grid, set
-``job_samples`` and Slime's ``--global-batch-size`` to
-``groups_per_step x rollouts_per_group``, as the example does. With a larger
-``job_samples``, the scenario's pipeline fails to build. Leave
-``pipeline.sample2job.config.buffer_size`` at its default, ``job_samples``: a
-larger value can put two grids in one job's data.
+One job contains one grid. Set ``job_samples`` and Slime's
+``--global-batch-size`` to ``groups_per_step x rollouts_per_group`` for one
+update per grid. A larger ``job_samples`` fails pipeline construction.
+Keep ``buffer_size`` at its default, ``job_samples``; a larger value can
+combine two grids and fail job preparation.
 
 Slime takes ``--loss-type custom_loss`` and
 ``--disable-compute-advantages-and-returns``, and refuses
@@ -180,7 +143,8 @@ Slime takes ``--loss-type custom_loss`` and
        ``self`` is the model itself. ``separate`` is another checkpoint set by ``--sdpo-teacher-checkpoint``.
 
    ``--sdpo-divergence`` : jsd
-       ``forward``, ``reverse`` or ``jsd``. ``--sdpo-jsd-beta`` is the teacher's weight in the mixture and defaults to 0.5.
+       ``forward``, ``reverse``, or ``jsd``. ``--sdpo-jsd-beta`` sets the
+       teacher's mixture weight; default 0.5.
 
    ``--sdpo-top-k`` : 100
        tokens per position the divergence is computed on. 0 keeps the whole distribution.
@@ -192,7 +156,8 @@ Slime takes ``--loss-type custom_loss`` and
        ``tail`` keeps the rest of the vocabulary as one bucket. ``renormalized`` conditions on the picked tokens.
 
    ``--sdpo-teacher-update-rate`` : 0.05
-       fraction of the policy mixed into the teacher after every step. 0 freezes the initial weights.
+       Fraction of policy weights mixed into the teacher after each step.
+       0 freezes the initial weights.
 
    ``--sdpo-importance-sampling-level`` : token
        ``token`` weights each token by its own ratio. ``sequence`` averages the ratio over the response.
@@ -207,30 +172,15 @@ The default JSD over top-K plus a tail bucket does not support `score
 centering <../../developer-guide/loss-families.rst#score-centering>`__; only
 the sampled reverse-KL mode does.
 
-Run the example
----------------
-
-The `example <../../../recipes/sdpo/examples/sciknoweval>`__ trains Qwen3-8B
-on the Chemistry split of SciKnowEval on eight GPUs: four for the actor and
-four for the serving engines. Each step samples 32
-questions eight times and the test split is scored every five steps. The
-example's README describes the protocol.
-
-.. code:: bash
-
-   cd recipes/sdpo/examples/sciknoweval
-   hf download Qwen/Qwen3-8B --local-dir ~/models/Qwen3-8B
-   ./run.sh
-
 Results
 -------
 
 .. image:: ../../assets/sdpo/learning-curve.png
-   :alt: Test avg@8 against optimizer steps
+   :alt: Test avg@8 accuracy against optimizer steps
 
-One run of 100 steps. Test accuracy goes from 41.2% to 74.4% at step 75 and
-ends at 71.7%. The rollouts stay diverse and a question seen a second time is
-answered no better than the rest of the grid.
+In one 100-step run, test avg@8 rose from 41.2% to 74.4% at step 75,
+then ended at 71.7%. This is mean accuracy across eight attempts, not pass@8.
+The run does not estimate variance across seeds.
 
 Related guides
 --------------

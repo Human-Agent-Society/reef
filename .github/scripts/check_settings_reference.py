@@ -106,7 +106,7 @@ SECTIONS = (
     Section(
         "Service",
         ("reef", "harness"),
-        "The HTTP service, its tokens and its scenario limits.",
+        "HTTP services, authentication and scenario limits.",
         (
             Table(
                 "reef.routing-deployment",
@@ -123,7 +123,7 @@ SECTIONS = (
     Section(
         "Storage",
         ("storage", "data"),
-        "The stores of a deployment. A backend key takes a built-in name, or a plugin with ``module`` and ``config``.",
+        "Deployment storage. Select a built-in backend name or a plugin with ``module`` and ``config``.",
         (
             Table("storage.artifact-backend.config", GitLFSSettings, "With ``module: git_lfs``."),
             Table("storage.record-backend.config", PostgresStorageSettings, "With ``module: postgres``."),
@@ -138,7 +138,7 @@ SECTIONS = (
     Section(
         "Inference",
         ("inference",),
-        "The model or provider that answers requests, and the serving engines of a weight-training deployment.",
+        "Request providers and engines that serve trained weights.",
         (
             Table(
                 "inference.remote",
@@ -150,7 +150,7 @@ SECTIONS = (
     Section(
         "Training",
         ("training", "teacher"),
-        "The training backend of a weight-training deployment, and the teacher engine.",
+        "Training backend and teacher engine.",
         (
             Table(
                 "training.options",
@@ -170,7 +170,7 @@ SECTIONS = (
     Section(
         "Recipe",
         ("recipe", "activation", "pipeline"),
-        "The recipe of the deployment, the rule that decides which artifacts serve, and the pipeline stages.",
+        "Recipe selection, artifact activation and pipeline stages.",
         (
             Table("recipe.config", WeightTrainingRecipe, "Every recipe has ``training-mode``."),
             Table("recipe.runtime", InferenceProxySettings, "With ``recipe.runtime.type: inference_proxy``."),
@@ -209,21 +209,24 @@ SECTIONS = (
     Section(
         "Evaluation",
         ("evaluation", "task-import"),
-        "The evaluation service, and the Harbor tasks that each scenario imports.",
+        "Evaluation service and Harbor task imports.",
     ),
     Section(
         "Generator",
         ("generator",),
-        "The generator service, which writes and checks Harbor tasks and runs their rollouts.",
+        "Service that writes, checks and runs Harbor tasks.",
         (Table("generator", GeneratorSettings),),
     ),
     Section(
         "Executors",
         (),
-        "``execution.<role>`` selects how Reef starts the workers of a role: ``training`` (Slime's training "
-        "workers), ``rollout`` (the serving engines), ``generator`` (the generator service) or ``evolution`` "
-        "(harness evaluation workers). A selector is a backend (a built-in name or ``package.module:ClassName``), "
-        "the name of a profile under ``executors``, or an object with these keys. A profile takes the same keys.",
+        "``execution.<role>`` selects a worker executor:\n\n"
+        "- ``training``: Slime training workers.\n"
+        "- ``rollout``: serving engines.\n"
+        "- ``generator``: generator service.\n"
+        "- ``evolution``: harness evaluation workers.\n\n"
+        "Select a backend name, ``package.module:ClassName``, a profile under ``executors``, or an object "
+        "with the keys below. Profiles accept the same keys.",
         (
             Table("execution.<role>", ExecutorSettings),
             Table("execution.<role>.resources", WorkerResources),
@@ -381,14 +384,15 @@ def render() -> str:
         "Settings reference",
         "==================",
         "",
-        "Every setting of a deployment config, with its type, its default and what it does. Each key is also a "
-        "command-line flag of ``reef serve`` with the same path, such as ``--inference.model-path``. "
-        "`Configure a deployment <configuration.rst>`__ gives the layout of the file and the value rules.",
+        "Deployment settings, types and defaults. Use each path as a ``reef serve`` flag, "
+        "such as ``--inference.model-path``. See `Configure a deployment <configuration.rst>`__ "
+        "for file layout and value syntax.",
         "",
-        "A key can use hyphens or underscores, except where a table says otherwise. ``unset`` is a key without "
-        "a value: Reef then uses the behavior that the description gives. An ``object`` holds keys that another "
-        "table lists, or the options of a backend. A ``plugin`` is a built-in name, a "
-        "``package.module:ClassName`` reference, or an object with ``module`` and ``config``.",
+        "Keys accept hyphens or underscores unless stated otherwise.",
+        "",
+        "- ``unset``: no value supplied. The description explains the resulting behavior.",
+        "- ``object``: nested keys or backend options.",
+        "- ``plugin``: a built-in name, ``package.module:ClassName``, or an object with ``module`` and ``config``.",
         "",
     ]
     for section in SECTIONS:

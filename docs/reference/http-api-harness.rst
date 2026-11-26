@@ -1,11 +1,9 @@
 HTTP API: harness trees and pages
 =================================
 
-Pull the harness tree of a scenario, commit a person's harness files, and open the page of a step or of a request.
+Pull harness trees, sync local files, and inspect training steps or requests.
 
-A weight-training scenario needs no client action: keep calling the same inference endpoint, and it serves the active selection.
-
-For a scenario whose artifact is the harness tree, the client pulls. It fetches the tree of the active selection with ``GET /reef/harness``, writes the files where its agent reads them, binds the agent's model to this Reef, and runs the agent on that snapshot. It then reports against the receipts of that snapshot. ``reef-client harness`` is that client (see `Use a published tree <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
+For harness artifacts, clients fetch the active tree through ``GET /reef/harness``, install its files, and bind the agent's model to Reef. They run that snapshot and report feedback using its inference receipts. ``reef-client harness`` provides this workflow (`Use a published tree <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
 
 In the split layout, the harness service answers ``GET /reef/harness``, ``POST /reef/harness/import``, ``GET /reef/harness/artifacts`` and ``GET /reef/harness/adapters``. Control answers the other harness routes (`Run the services in separate processes <../user-guide/split-services.rst>`__).
 
@@ -45,11 +43,11 @@ Harness artifacts
 
 The manifest and catalog reads take ``x-reef-scenario`` and never create a scenario. An unknown scenario or one without a harness tree answers HTTP 404.
 
-``?form=`` chooses what ``files`` holds, path to text. Another value returns 400:
+``?form=`` selects the ``files`` mapping, from paths to text. Unsupported values return 400:
 
 - ``rendered`` (the default): the snapshot rendered for the scenario's adapter. These are the paths that the agent reads, with the adapter's enforced config defaults merged in (see `Rendering <../developer-guide/harness-adapters.rst#rendering>`__).
 - ``source``: the source tree that the snapshot stores. These are the tree paths that the adapter's parts take, the ones that a patch names (see `Tree parts <../developer-guide/harness-adapters.rst#tree-parts>`__).
-- ``client``: the snapshot as a layer over a person's own configuration, for an install at ``root``, bound to ``<service_url>/reef/scenarios/<scenario>``. Both query parameters are required: ``service_url`` is the address at which the client reaches Reef, and ``root`` is the directory in which the client installs the files. An adapter without a ``layer`` returns 400. The binding asks for the served model, and its key is the literal ``REEF_TOKEN_PLACEHOLDER``, which the client replaces with its own token. This form adds:
+- ``client``: an install over local configuration at ``root``, bound to ``<service_url>/reef/scenarios/<scenario>``. Both queries are required: ``service_url`` is Reef's client-accessible address; ``root`` is the install directory. An adapter without a ``layer`` returns 400. The binding selects the served model and uses ``REEF_TOKEN_PLACEHOLDER``. Replace that placeholder with the client's token. This form adds:
 
   - ``run``: the command that runs the agent on the files (``binary``, ``args`` and ``env``; ``env`` may hold the placeholder too);
   - ``register`` and ``unregister``: the agent's own commands that record the install and remove it, each a list of argument lists, empty for most agents;
@@ -60,14 +58,14 @@ In the ``rendered`` and ``source`` forms, a config file may hold ``{root}``: wri
 
 A new scenario's starting artifact holds ``evolution.seed``, so a client can pull before any step publishes. A recipe whose seed is empty returns 404 until a step publishes a tree. Use ``?artifact_id=`` to request a specific harness artifact, in any form. An unknown or unrestorable artifact returns 404.
 
-``requires`` describes what the harness needs where it runs. It merges the ``training_request.requires`` items from the artifact's training history by name, with the newest definition winning. A later request that adds no items does not remove earlier requirements. One request's cap of 8 does not bound the combined list. Reef runs no check: the client checks each item before it runs the artifact. `Requirements of a change <http-api-training.rst#requirements-of-a-change>`__ gives the shape.
+``requires`` merges requirements from the artifact's training history by name. The newest definition wins; requests without requirements remove nothing. The combined list can exceed the per-request limit of 8. Clients check requirements before running the artifact; Reef runs no checks. See `Requirements of a change <http-api-training.rst#requirements-of-a-change>`__ for fields.
 
 Catalog and manifest reads do not wait for an evolve step's method or evaluation runs: they serve the existing artifacts while a candidate is prepared. A manifest's artifact and evaluation metrics always come from the same artifact.
 
 Importing a harness
 -------------------
 
-``POST /reef/harness/import`` commits the harness files of a person's agent as a sync, with ``x-reef-scenario``. A sync is a commit operation of its own: the merged tree becomes a new artifact, and the operation selects it for serving and as the harness trainer's start.
+``POST /reef/harness/import`` syncs local harness files to the scenario named by ``x-reef-scenario``. The merged tree becomes a new artifact, active for serving and selected as the harness trainer's start.
 
 .. code:: bash
 
@@ -77,10 +75,10 @@ Importing a harness
           "base_artifact_id": "artifact-12"}' \
      "$REEF_URL/reef/harness/import"
 
-- ``files`` maps each file's render path (``roots`` and ``files`` of ``GET /reef/harness/adapters``) to its text: every harness file of the install, changed or not. Reef maps each file back to the tree path of the part that renders there. A path that no part renders to is ignored and listed in ``ignored``. A file of the base that ``files`` lacks is one the person removed. Config files are not read: the model binding owns them.
+- ``files`` maps render paths to text. Include all installed harness files, including unchanged files. See ``roots`` and ``files`` from ``GET /reef/harness/adapters``. Reef maps paths back to tree parts and lists unrecognized paths in ``ignored``. Missing base files count as deletions. Model-binding config files are ignored.
 - ``base_artifact_id`` is required: the artifact the client installed.
 - The head here is the active selection, not the training start: a sync serves its result at once, so it never carries a kept tree that the activation rule left inactive.
-- Reef puts the client's changes since the base on the head, file by file. A file that only the client changed takes the client's text; a file that only the head changed keeps the head's. A file that both changed merges as its part's ``merge`` says: ``lines`` keeps each side's changed lines, and ``file`` keeps neither. What cannot merge is HTTP 409, which names the file at its render path. An empty file counts as no file. The answer's ``merged`` is true when the head had moved on from the base.
+- Reef merges client changes since the base into the active tree. Changes made by only one side are kept. For files both sides changed, the part's ``merge`` policy applies: ``lines`` combines changed lines; ``file`` rejects conflicting versions. Unmergeable files return 409 with their render paths. Empty files count as absent. ``merged`` is true when the active tree advanced beyond the base.
 - The merged tree must pass the adapter's validation, as a method's candidate does; a problem is HTTP 400 naming it. Reef does not evaluate the tree.
 - A sync that changes nothing answers ``changed: false`` and commits nothing. Otherwise the commit's operation is ``sync``, and its metrics carry ``sync`` (with ``base_artifact_id``), ``patch`` and ``patch_parts``. The snapshot serves at once, without the activation rule.
 - A sync while a step holds job data is HTTP 409; send it again when the step ends. So is a sync that another commit overtook.
@@ -88,7 +86,7 @@ Importing a harness
 Harness requests
 ----------------
 
-A client submits a person's request for a harness change through ``POST /reef/train`` (`Manual training <http-api-training.rst#manual-training>`__), with ``text``, ``session`` and the ``artifact_id`` that it runs. The scenario must be in ``manual`` mode; a scenario in ``auto`` refuses the request, and the client shows that error and leaves the mode switch to the person. A request needs no inference receipts.
+Submit harness changes through ``POST /reef/train`` with ``text``, ``session`` and the currently used ``artifact_id``. Requests work in both ``auto`` and ``manual`` modes and need no inference receipts. See `Manual training <http-api-training.rst#manual-training>`__.
 
 The trainer runs the method's step on the request, then evaluates and publishes under the same policy as automatic evolution. The snapshot catalog shows the commit metrics ``training_request``, ``method_summary`` and ``method_notes``.
 
@@ -106,7 +104,7 @@ The deployment's activation rule can leave a new tree inactive. An example is a 
 Version page
 ------------
 
-``GET /reef/harness/artifacts/{step}/page`` answers one self-contained HTML page (``text/html``) for one catalog row. ``step`` is the row's position in ``GET /reef/harness/artifacts``, oldest first, with the creation row as 0. A rejected step creates no artifact, so the step number identifies the page independently of its artifact.
+``GET /reef/harness/artifacts/{step}/page`` returns a self-contained HTML page (``text/html``) for one catalog row. ``step`` is its index in ``GET /reef/harness/artifacts``, oldest first, starting at 0 for creation. Rejected steps have pages even though they create no artifact.
 
 The page shows:
 
@@ -144,7 +142,7 @@ This route reads the headers alone; a ``?key=`` is HTTP 401. An unknown id is HT
 Page links
 ----------
 
-A browser sends no header, so the two pages also take the scenario and a credential as query parameters, ``?scenario=<name>&key=<page key>``; a header wins when present. Clients never build these links: ``POST /reef/train`` answers ``page_path`` for the request page, and ``GET /reef/harness/artifacts`` one per row for its step's page. A client prints its service URL followed by that path.
+For browser links, both pages accept ``?scenario=<name>&key=<page key>``. Headers take precedence. Use the returned ``page_path`` from ``POST /reef/train`` or each ``GET /reef/harness/artifacts`` row. Append it to the service URL:
 
 .. code:: text
 

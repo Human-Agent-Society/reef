@@ -1,7 +1,7 @@
 HTTP API: data items
 ====================
 
-Read, change, delete and download the data items that scenarios train on, and learn which items Reef makes itself. To add items, see `Create and transfer data items <http-api-data-upload.rst>`__. To group them, see `Benchmarks, collections and trajectory sets <http-api-data-sets.rst>`__.
+Read, update, delete and download data items. See `Create and transfer data items <http-api-data-upload.rst>`__ for uploads and `Benchmarks, collections and trajectory sets <http-api-data-sets.rst>`__ for grouping.
 
 A deployment keeps its data items in one data store. An item is content and metadata:
 
@@ -16,9 +16,11 @@ A deployment keeps its data items in one data store. An item is content and meta
 
   ``kind``, ``owner``, ``origin`` and ``evaluation_id`` never change.
 
-Each item belongs to one owner, which the route paths name: ``/reef/namespaces/{owner}/data``. A scenario's owner is the scenario's name, or the ``owner`` that ``POST /reef/scenarios`` gave when it created the scenario. A scenario uses only the items of its owner, and Reef refuses an item that names a scenario of another owner. A scenario can also use a task through a benchmark that it holds, and a trajectory through a trajectory set, with no mark on the item (`The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__).
+Each item belongs to one owner: ``/reef/namespaces/{owner}/data``. A scenario's owner defaults to its name; ``POST /reef/scenarios`` can set another owner. Reef rejects items assigned to scenarios with a different owner.
 
-The data service answers the data routes. A one-process ``reef serve`` includes it. When the services run in separate processes, send the data routes to the data service: control does not answer them (`Run the services in separate processes <../user-guide/split-services.rst>`__).
+A scenario can use tasks through held benchmarks and trajectories through held trajectory sets, without changing item metadata. See `The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__.
+
+Send these routes to the data service. A single-process ``reef serve`` includes it. In a `split deployment <../user-guide/split-services.rst>`__, control does not serve data routes.
 
 Training reads the items that a scenario uses from the data store:
 
@@ -29,7 +31,7 @@ Training reads the items that a scenario uses from the data store:
 
 For the recipe side, see `Uploaded trajectories <../developer-guide/recipe-control-service.rst#uploaded-trajectories>`__.
 
-After a write adds items to a scenario or removes them, the data service asks control to sync each scenario that the write touched, and waits up to 30 seconds. Each create, update and delete response has ``synced``: true when every sync ended, false when one still waits. A waiting sync runs when control takes it, or when the scenario loads.
+After adding or removing scenario items, data asks control to sync each affected scenario and waits up to 30 seconds. Create, update and delete responses include ``synced``: true when all syncs finished, false when any remain pending. Pending syncs run when control takes them or the scenario loads.
 
 An unknown item ID returns 404. A deployment without a data store returns 503.
 
@@ -42,7 +44,7 @@ Reef makes a record item from each inference call and report of a scenario. A tr
 - Its content is ``{"agent_record_id", "request_type", "payload", "created_at", "references", "artifact_id"}``: the record as the scenario stores it.
 - Its metadata is ``{"kind": "record", "scenarios": {"<scenario>": "train"}, "origin": {"scenario", "artifact_id"}}``. ``artifact_id`` names the artifact that answered the call, or is null when the record names none.
 
-An item can arrive a short time after its record. When a scenario with older records first loads after an upgrade, the data service makes their items in pages while the scenario serves.
+Items can appear shortly after their records. After an upgrade, data creates items for older records in the background while the scenario serves.
 
 The scenario that made a record trains on its own record store, and always uses its item: a patch that removes it returns 400. To train another scenario of the same owner on a record, add that scenario to the item's ``scenarios``:
 
@@ -63,7 +65,7 @@ Reef also keeps each model call of an evaluation rollout as a record item of the
 - Its content is an inference record. The payload is the request body plus ``response``, the response body or null. ``created_at`` is the start of the call.
 - Its metadata is ``{"kind": "record", "scenarios": {}, "evaluation_id", "origin": {"scenario", "artifact_id", "source": "evaluation", "evaluation"}}``. ``artifact_id`` names the evaluated artifact. ``evaluation`` holds the ``evaluation_id`` and the call's summary: ``task_index``, ``repeat``, ``attempt``, ``index``, ``path``, ``status``, ``started_at``, ``duration_s``, ``prompt_tokens``, ``completion_tokens``, ``finish_reason``, ``tool_calls``, ``caller`` and ``label`` (`Model calls of a rollout <http-api-evaluation-calls.rst#model-calls-of-a-rollout>`__). A call without ``caller`` is a call of the agent, and has no ``label``.
 
-An evaluation call is the data of no scenario:
+Evaluation calls cannot become training data:
 
 - A patch that adds a scenario to its ``scenarios`` returns 400.
 - The scenario's records route does not list it. To read the calls of one evaluation, query the data with ``kind=record``, ``group_key=evaluation_id`` and the evaluation's ID as ``group_value``.
@@ -74,7 +76,7 @@ A trajectory that a verifier wrote is a trajectory item of the scenario's owner.
 Artifact items
 --------------
 
-An owner's artifact items are its artifact library: the artifacts of all of its scenarios, including scenarios in other deployments that share the data store, and artifacts whose files you stored yourself. An artifact item is a reference: the files stay where they are. Its content is ``{source_uri, kind, component}``:
+Artifact items form the owner's artifact library. It includes artifacts from every scenario sharing the data store, plus files you register yourself. Items reference files without moving them. Their content is ``{source_uri, kind, component}``:
 
 - ``source_uri``: the directory of the files, as an import reads it (`Import an artifact <http-api-artifacts.rst#import-an-artifact>`__), or null when there is none.
 - ``kind``: the artifact's kind, such as ``model`` or ``model_adapter``, or null.
@@ -82,7 +84,9 @@ An owner's artifact items are its artifact library: the artifacts of all of its 
 
 The item's ``origin.artifact_id`` identifies a Reef artifact. Older items may include ``content_id``: readers accept it but do not use it as an artifact identity, and new writes discard it. A retry of an older item preserves its original content and digest when every other content field matches.
 
-The data service makes an item for each artifact that a scenario lists (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``. Its ``source_uri`` comes from the artifact backend. A backend that keeps snapshots where other deployments can read them, such as an object store, gives the URI of the snapshot's directory. The built-in ``git_lfs`` backend gives none, so its items have a null ``source_uri``.
+After each commit, data creates an item for every artifact listed by ``GET /reef/scenarios/{scenario}/artifacts``. Its ID is ``<scenario>/<artifact_id>`` and its ``origin`` is ``{scenario, artifact_id}``.
+
+``source_uri`` comes from the artifact backend. Shared backends, such as object stores, provide the snapshot directory's URI. The built-in ``git_lfs`` backend provides none, so its items have a null ``source_uri``.
 
 To add files that you stored, create an item with ``POST /reef/namespaces/{owner}/data``, ``metadata`` ``{"kind": "artifact"}`` and no ``origin``. Its content needs a ``source_uri`` and a null ``component``.
 
@@ -119,12 +123,16 @@ Read, query, update and delete items
 - Each set is ``{"name", "item_count", "first_sequence", "last_sequence", "metadata"}``. ``metadata`` is that of the set's first item.
 - The sets come newest first, by ``first_sequence``. ``before`` and ``limit`` page them as in the groups route.
 - ``scenario`` lists only the sets with an item that the scenario uses, and counts only those items.
-- The listing takes the same time for sets of ten items and of ten thousand.
 - To read the items of one set, list the items with ``benchmark`` or ``trajectory_set``.
 
 **Read one item.** ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its ``content``. A task's ``content`` is null.
 
-**Patch metadata.** ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...], "patch": {...}}``. Reef applies the JSON merge patch (RFC 7386) to the metadata of each item, all or none. A null value removes a key. For example, ``{"scenarios": {"my-agent": null}}`` removes the items from ``my-agent``, and ``{"scenarios": {"my-agent": "eval"}}`` moves tasks to the ``eval`` split. Reef checks the new uses as for a create call. A patch that changes ``kind``, ``owner`` or ``origin`` returns 400. The response is ``{"owner", "items", "synced"}``, without content.
+**Patch metadata.** ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...], "patch": {...}}``. It applies a JSON merge patch (RFC 7386) to all selected items, or none. A null value removes a key:
+
+- ``{"scenarios": {"my-agent": null}}`` removes the items from ``my-agent``.
+- ``{"scenarios": {"my-agent": "eval"}}`` moves tasks to the ``eval`` split.
+
+Reef validates new scenario assignments as for creation. Changing ``kind``, ``owner`` or ``origin`` returns 400. The response is ``{"owner", "items", "synced"}``, without content.
 
 **Delete one item.** ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item and returns ``{"owner", "id", "deleted": true, "synced"}``.
 
@@ -134,18 +142,18 @@ Read, query, update and delete items
 
 **List a scenario's tasks.** ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks": [{"name", "split", "benchmark", "files_digest", "trained"}]}``: the uses of tasks by the scenario, in the order that they began. ``benchmark`` is the held benchmark that gives the use (`The sets that a scenario holds <http-api-data-sets.rst#the-sets-that-a-scenario-holds>`__), or ``null`` for the task's own mark. A task that the scenario uses more than once is listed once for each use. ``trained`` is true once a committed task job of any trainer of the scenario trained the task.
 
-**Reserved IDs.** An item ID can hold ``/``, and two GET routes come before the item routes: ``.../data/<id>/archive`` downloads the item ``<id>``, and ``.../data/imports/<x>`` and ``.../data/exports/<x>`` read a transfer. So GET cannot read an item whose ID ends in ``/archive``, or whose ID is ``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment.
+**Reserved IDs.** Item IDs can contain ``/``, but download and transfer routes take precedence. GET cannot read an item whose ID ends in ``/archive``, or matches ``imports/<x>`` or ``exports/<x>`` with one path segment ``<x>``.
 
 Restore deleted items
 ---------------------
 
-Reef keeps a deleted item of its owner for 30 days, and then purges it. A deleted item is in no listing, set, scenario or read of the routes above. A new item can take its ID.
+Deleted items remain recoverable for 30 days before Reef purges them. They disappear from the routes above, sets and scenarios. New items can reuse their IDs.
 
 - ``GET /reef/namespaces/{owner}/deleted-items?kind=&before=&limit=`` lists the owner's deleted items, newest item first by ``sequence``: ``{"owner", "items", "next"}``. Each item is ``{"id", "sequence", "digest", "metadata", "deleted_at", "purge_at"}``, without content. ``deleted_at`` and ``purge_at`` are seconds since the epoch. ``kind`` keeps one kind of item. ``before`` and ``limit`` page the items as in the item list; ``next`` is the ``before`` of the next page, or null after the last item.
 - ``POST /reef/namespaces/{owner}/deleted-items/restore`` takes ``{"ids": [...]}``, 1 to 1000 IDs, and restores the items, all or none. An item comes back with its ``sequence``, metadata and content, and in its sets. Reef checks its ``scenarios`` as for a create call. Each scenario that uses it again reads it again, also through a held set. The response is ``{"owner", "items", "synced"}``, without content. An ID without a deleted item returns 404. An ID that the owner uses for an item again returns 409.
 - ``DELETE /reef/namespaces/{owner}/deleted-items/{id}`` purges one deleted item for good and returns ``{"owner", "id", "purged": true}``. An ID without a deleted item returns 404.
 
-The archive of a scenario removes it from the ``scenarios`` of the deleted items too. A reader that pages items with ``after`` and is past the ``sequence`` of a restored item does not see it again; a scenario reads it again through its uses.
+Archiving a scenario also removes it from deleted items' ``scenarios``. Pagination with ``after`` does not revisit restored items whose sequence has already passed. Scenarios read restored items through their assignments.
 
 Download an item
 ----------------
