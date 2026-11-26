@@ -324,7 +324,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     An unrecorded rollout (``is_unrecorded``) keeps the bodies of its answered calls as its ``turns`` while
     ``keeps_turns``. Without ``keeps_turns``, its proxy keeps no request body and no answered response body, its
     ``turns`` are empty, and a call counts as answered when it answered 200. ``keeps_turns`` changes nothing for a
-    recorded rollout.
+    recorded rollout. ``streams_calls`` lets a streaming agent's calls stream through its proxy, so the agent gets
+    the upstream's own stream (``CaptureProxy``'s ``streams``); a captured answer then has no training block.
 
     ``builds_templates`` false makes each trial and each environment build of an ``e2b`` runner start only from
     templates that exist (``environment_config``); a runner on another environment refuses it.
@@ -352,6 +353,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         capture_observer: CaptureObserver | None = None,
         keeps_turns: bool = True,
         builds_templates: bool = True,
+        streams_calls: bool = False,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -396,6 +398,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.concurrency = concurrency
         self.capture_observer = capture_observer
         self.builds_templates = builds_templates
+        self.streams_calls = streams_calls
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -514,6 +517,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             is_unrecorded=self.is_unrecorded,
             observer=self.capture_observer,
             keeps_bodies=self.keeps_turns or not self.is_unrecorded,
+            streams=self.streams_calls,
         )
         proxy.start()
         try:

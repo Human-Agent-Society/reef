@@ -22,7 +22,13 @@ from reef.core.snapshot import SnapshotRef
 from reef.evaluation import artifact_endpoint
 from reef.evaluation.artifact_endpoint import CLOSED_ERROR, ArtifactEndpoint, ProviderCooldowns, refusal_limit
 from reef.harness.capture import CaptureProxy
-from reef.inference.interfaces import REQUEST_SESSION_KEY, InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import (
+    REQUEST_SESSION_KEY,
+    InferenceArtifact,
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+)
 
 
 class RefusingHandler(InferenceHandler):
@@ -594,3 +600,135 @@ def test_a_route_wait_keeps_no_handler_alive() -> None:
     assert all(cooldowns.resume_at(healthy, "b") == 0.0 for _ in range(100))
     cooldowns.hold(healthy, "b", time.monotonic() + 600)
     assert list(cooldowns.until) == [(id(healthy), "b")]
+
+
+def sse(*chunks: Mapping[str, Any]) -> list[bytes]:
+    return [f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks] + [b"data: [DONE]\n\n"]
+
+
+#: A reasoning model's stream as vLLM sends it: the reasoning under ``reasoning``, then a tool call.
+ENGINE_STREAM = sse(
+    {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "m",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning": "add "}, "finish_reason": None}],
+    },
+    {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "m",
+        "choices": [{"index": 0, "delta": {"reasoning": "them"}, "finish_reason": None}],
+    },
+    {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "m",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "add", "arguments": "{}"},
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    },
+)
+
+
+class StreamingHandler(ScriptedHandler):
+    """``ScriptedHandler`` whose streaming tries meet the outcomes too: an error that the stream raises when it opens,
+    or a list of chunks that the open stream sends. ``closed`` counts the streams that Reef closed."""
+
+    def __init__(self, *outcomes: list[bytes] | BaseException) -> None:
+        super().__init__(*outcomes)  # type: ignore[arg-type]
+        self.closed = 0
+
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
+        self.payloads.append(payload)
+        outcome = self.outcomes[min(len(self.payloads) - 1, len(self.outcomes) - 1)]
+        if isinstance(outcome, BaseException):
+            raise outcome
+
+        async def chunks():
+            for chunk in outcome:
+                yield chunk
+
+        async def close() -> None:
+            self.closed += 1
+
+        return InferenceStream(status=200, headers={"Content-Type": "text/event-stream"}, chunks=chunks(), close=close)
+
+
+def streamed(proxy: CaptureProxy) -> bytes:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{proxy.port}/v1/chat/completions",
+        data=json.dumps({**CHAT, "stream": True}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.read()
+
+
+@pytest.mark.unit
+def test_a_streaming_proxy_gives_the_agent_the_engines_own_stream_and_captures_every_field(short_waits) -> None:
+    runtime = Runtime(any_artifact=True)
+    runtime.handler = handler = StreamingHandler(rate_limited(), ENGINE_STREAM)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True, streams=True)
+        proxy.start()
+        try:
+            stream = streamed(proxy)
+            turns = proxy.drain()
+        finally:
+            proxy.stop()
+    # The call streamed, and a rate limit's refusal before the stream opened sent it again.
+    assert [payload.get("stream") for payload in handler.payloads] == [True, True]
+    assert stream == b"".join(ENGINE_STREAM), "the agent got the engine's bytes unchanged"
+    assert handler.closed == 1 and runtime.inference_admission_status["active"] == 0
+    assert [turn["status"] for turn in turns] == [200]
+    assert turns[0]["response"]["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "",
+        "reasoning": "add them",
+        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "add", "arguments": "{}"}}],
+    }
+
+
+@pytest.mark.unit
+def test_a_streaming_call_to_a_handler_without_a_stream_of_its_own_gets_its_answer() -> None:
+    runtime, _ = scripted(
+        {
+            **REPLY,
+            "choices": [
+                {
+                    **REPLY["choices"][0],
+                    "message": {"role": "assistant", "content": "five", "reasoning_content": "2 and 3"},
+                }
+            ],
+        }
+    )
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True, streams=True)
+        proxy.start()
+        try:
+            stream = streamed(proxy).decode()
+        finally:
+            proxy.stop()
+    # The endpoint gave the handler's JSON answer as one piece, and the proxy made the agent's stream from it.
+    assert '"reasoning_content": "2 and 3"' in stream and '"content": "five"' in stream
+    assert stream.count("[DONE]") == 1 and runtime.inference_admission_status["active"] == 0
