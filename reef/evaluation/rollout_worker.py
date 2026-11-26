@@ -1041,6 +1041,12 @@ class EvaluationRolloutWorker(QueueWorker):
             # The trial directory is under ``work``, so read it before the block removes it.
             trial = trial_directory(result.trial_uri)
             self.keep_verifier_output(rollout, attempt, trial)
+            # A trial that the sandbox service refused for want of capacity waits in the queue for capacity and runs
+            # again, and the attempt does not count. That holds also after the agent called the model: a separate
+            # verifier that found no sandbox gave no score of the candidate. A sandbox request that the service
+            # refused as invalid fails the same way again, so the rollout fails for good, with the service's reason
+            # and no score.
+            exception_type = trial_exception_type(result.trial_uri)
             self.observe_trial(
                 rollout,
                 EvaluationTrial(
@@ -1052,14 +1058,9 @@ class EvaluationRolloutWorker(QueueWorker):
                     attempt,
                     trial,
                     result.error,
+                    deferred=exception_type in SANDBOX_CAPACITY_ERRORS,
                 ),
             )
-            # A trial that the sandbox service refused for want of capacity waits in the queue for capacity and runs
-            # again, and the attempt does not count. That holds also after the agent called the model: a separate
-            # verifier that found no sandbox gave no score of the candidate. A sandbox request that the service
-            # refused as invalid fails the same way again, so the rollout fails for good, with the service's reason
-            # and no score.
-            exception_type = trial_exception_type(result.trial_uri)
             if exception_type in SANDBOX_CAPACITY_ERRORS:
                 raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
             if exception_type in SANDBOX_REQUEST_ERRORS:
