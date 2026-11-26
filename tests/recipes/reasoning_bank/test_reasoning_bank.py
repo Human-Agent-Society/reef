@@ -18,7 +18,7 @@ from tests.support.harness_methods import QueueChat
 from tests.support.trajectories import recorded_trajectory
 
 from recipes.reasoning_bank import ReasoningBank
-from recipes.reasoning_bank.method import FOCUS
+from recipes.reasoning_bank.method import FOCUS, slug_of
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.harness.adapters import get_adapter
@@ -155,6 +155,27 @@ def test_the_bank_carries_over_a_reused_title_replaces_its_item_and_the_oldest_l
         "skills/rb-beta/SKILL.md",
         "skills/rb-gamma/SKILL.md",
     ]
+
+
+def test_titles_with_other_words_keep_their_own_items_when_the_ascii_slug_would_drop_words(tmp_path: Path) -> None:
+    long_title = "When pip cannot reach the package index behind the office proxy, use the mirror"
+    titles = (
+        "pytest 失败时先读日志",  # "When pytest fails, read the log first"
+        "运行 pytest 前先装依赖",  # "Install the dependencies before you run pytest"
+        long_title,
+        long_title.replace("use the mirror", "set the trusted host"),
+    )
+    workspace, result = run_step(
+        tmp_path, QueueChat(), QueueChat(extracted(*titles)), [recorded_call("i1", "t", 1.0)], max_items_per_trace=4
+    )
+    slugs = [item["slug"] for item in bank_of(workspace)]
+    assert [item["title"] for item in bank_of(workspace)] == list(titles)
+    assert len(set(slugs)) == 4 and result.notes["replaced"] == []
+    assert slugs[0].startswith("pytest-") and slugs[2].startswith("when-pip-cannot-reach-the-package-index-")
+    assert validate_tree(workspace.tree(), PI).passed
+    # A title that differs only in case, accents or punctuation still names the same item.
+    assert slug_of("Écrire le test d'abord") == slug_of("ecrire le test, d'abord!") == "ecrire-le-test-d-abord"
+    assert slug_of("PYTEST 失败时先读日志。") == slugs[0]
 
 
 def test_a_reply_that_is_not_the_asked_json_skips_its_run_and_an_item_with_a_credential_stays_out(

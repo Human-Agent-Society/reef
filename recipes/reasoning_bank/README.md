@@ -22,9 +22,11 @@ failure. Reef serves each item as an Agent Skill, so the agent opens the items t
    ([prompts/extract.md](prompts/extract.md) with [prompts/success.md](prompts/success.md) or
    [prompts/failure.md](prompts/failure.md)). It returns at most `max_items_per_trace` items, each with a title,
    a one-sentence description and content. It also sees the titles that the bank holds.
-4. **Update the bank.** An item's slug is its title in lowercase ASCII words joined by hyphens. An item with a new
-   slug joins the bank, and an item with a slug that the bank holds replaces that item. Past `max_items` items,
-   the oldest items leave the bank.
+4. **Update the bank.** An item's slug is its title in lowercase ASCII words joined by hyphens. That form can drop
+   words, for example the Chinese words of a title, and it can be longer than 61 characters. In both cases, the
+   slug ends with the start of a SHA-256 digest of the title's words. So titles with different words get different
+   slugs. An item with a new slug joins the bank, and an item with a slug that the bank holds replaces that item.
+   Past `max_items` items, the oldest items leave the bank.
 5. **Write the tree.** The job writes one skill per item and removes every other `skills/rb-*` skill. The other
    files of the tree do not change. The job checks the new tree with `services.check`. When the check fails, neither
    the tree nor the bank changes.
