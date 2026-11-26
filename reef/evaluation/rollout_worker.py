@@ -31,6 +31,7 @@ import math
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Iterator, Mapping
@@ -94,6 +95,8 @@ LEASE_CHECK_S = 1.0
 ON_STOP_CHOICES = ("requeue", "finish")
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
+#: The variable of a tree harness's ``env`` that caps the agent's wall-clock time, in seconds.
+AGENT_TIMEOUT_ENV = "REEF_AGENT_TIMEOUT_SECONDS"
 #: The directory of a trial's verifier directory where the verifier writes its own model calls and trajectories: the
 #: task's ``/logs/verifier/judge/``, which Harbor downloads with the verifier directory (RFC #1293).
 VERIFIER_JUDGE_DIR = Path("verifier") / "judge"
@@ -136,14 +139,45 @@ def agent_harness(agent: Mapping[str, object]) -> PolicyHarness:
     return PolicyHarness(name)
 
 
+def agent_timeout_seconds(env: Mapping[str, str]) -> float | None:
+    """Return the positive finite wall-clock timeout in seconds from ``AGENT_TIMEOUT_ENV`` in ``env``, or None when
+    unset. Raise ``ValueError`` for any other value."""
+    raw = env.get(AGENT_TIMEOUT_ENV)
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{AGENT_TIMEOUT_ENV} must be a positive number of seconds, not {raw!r}") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(f"{AGENT_TIMEOUT_ENV} must be a positive number of seconds, not {raw!r}")
+    return seconds
+
+
+def task_agent_timeout_seconds(task_directory: Path) -> float | None:
+    """Return the positive finite ``[agent].timeout_sec`` from ``task_directory/task.toml``, or None when absent."""
+    task_file = task_directory / "task.toml"
+    if not task_file.is_file():
+        return None
+    task = tomllib.loads(task_file.read_text(encoding="utf-8"))
+    agent = task.get("agent")
+    timeout = agent.get("timeout_sec") if isinstance(agent, Mapping) else None
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        return None
+    value = float(timeout)
+    return value if math.isfinite(value) and value > 0 else None
+
+
 @dataclass(frozen=True)
 class TreeHarness:
     """A harness tree that a rollout runs, read from an artifact item.
 
     Values: ``adapter`` is the name of an adapter, ``api`` the API dialect of the model calls, and ``files`` maps
     each path of the tree to its text. ``env`` maps the name of each variable that the agent's commands get to its
-    value; its token limits, when it sets them, are positive integers (``token_limits``). Purpose: control reads it
-    once when it accepts an evaluation, so that each rollout runs the same tree; a worker runs it.
+    value; its token limits, when it sets them, are positive integers (``token_limits``), and
+    ``REEF_AGENT_TIMEOUT_SECONDS``, when set, is a positive finite number of seconds (``agent_timeout_seconds``).
+    Purpose: control reads it once when it accepts an evaluation, so that each rollout runs the same tree; a worker
+    runs it.
     """
 
     adapter: str
@@ -161,25 +195,42 @@ class TreeHarness:
         ):
             raise TypeError("env maps non-empty variable names to text")
         token_limits(self.env)
+        agent_timeout_seconds(self.env)
 
     def policy_harness(self) -> PolicyHarness:
         """The harness side of the policy: the adapter, with the tree rendered with no model binding."""
         return PolicyHarness(self.adapter, render_tree(HarnessTree(self.files), get_adapter(self.adapter)))
 
-    def agent(self, directory: Path, *, bridge: bool = False) -> Mapping[str, object]:
+    def agent(
+        self, directory: Path, *, bridge: bool = False, task_directory: Path | None = None
+    ) -> Mapping[str, object]:
         """The Harbor agent configuration that runs the tree, with its files under ``directory``. ``bridge``
-        bridges the task container's loopback to the rollout's capture proxy (``tree_agent``)."""
+        bridges the task container's loopback to the rollout's capture proxy (``tree_agent``). When ``env`` sets
+        ``REEF_AGENT_TIMEOUT_SECONDS``, the cap overrides an unbounded task timeout or caps ``[agent].timeout_sec``
+        in ``task_directory/task.toml``, propagating to Harbor's ``override_timeout_sec``, the command timeout and
+        cloud sandbox lifetime."""
         tree_dir = directory / "tree"
         HarnessTree(self.files).write(tree_dir)
-        return tree_agent(
+        cap = agent_timeout_seconds(self.env)
+        if cap is None:
+            command_timeout = TREE_AGENT_TIMEOUT_S
+            override_timeout: float | None = None
+        else:
+            task_timeout = None if task_directory is None else task_agent_timeout_seconds(task_directory)
+            override_timeout = cap if task_timeout is None else min(task_timeout, cap)
+            command_timeout = float(math.ceil(override_timeout))
+        config = tree_agent(
             get_adapter(self.adapter),
             api=self.api,
             tree_dir=tree_dir,
             files_dir=directory / "rendered",
-            timeout=TREE_AGENT_TIMEOUT_S,
+            timeout=command_timeout,
             bridge=bridge,
             env=self.env,
         )
+        if override_timeout is not None:
+            return {**config, "override_timeout_sec": override_timeout}
+        return config
 
     def to_json(self) -> dict[str, JsonValue]:
         value: dict[str, JsonValue] = {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
@@ -1012,7 +1063,11 @@ class EvaluationRolloutWorker(QueueWorker):
                 model_adapter=rollout.model.adapter,
                 token=endpoint.token,
                 work_dir=Path(work),
-                agent=rollout.tree.agent(Path(work), bridge=bridged) if rollout.tree is not None else rollout.agent,
+                agent=(
+                    rollout.tree.agent(Path(work), bridge=bridged, task_directory=task_directory)
+                    if rollout.tree is not None
+                    else rollout.agent
+                ),
                 # A tree's agent on Docker runs in the task's container, which reaches the capture proxy at this address.
                 agent_host=None if rollout.tree is None or bridged else self.agent_host,
                 environment=rollout.environment,
@@ -1220,6 +1275,7 @@ class TaskTemplateWorker(QueueWorker):
 
 
 __all__ = [
+    "AGENT_TIMEOUT_ENV",
     "EVALUATIONS_QUEUE",
     "EVALUATION_ROLLOUT_KIND",
     "MAX_VERIFIER_BYTES",
@@ -1238,6 +1294,7 @@ __all__ = [
     "TaskTemplateWorker",
     "TreeHarness",
     "agent_harness",
+    "agent_timeout_seconds",
     "check_finish_timeout",
     "evaluation_call",
     "harbor_agent",
