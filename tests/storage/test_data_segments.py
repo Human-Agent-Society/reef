@@ -6,7 +6,7 @@ import json
 from contextlib import closing
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from tests.support.conversations import conversation
 
 from reef.api.assembly import build_dispatcher
@@ -126,6 +126,27 @@ def test_small_new_trajectory_items_wait_in_the_database_for_one_segment(open_st
         assert waiting_rows(store) == (0, 0) and len(segment_files(tmp_path)) == 2
 
 
+def test_a_failed_revision_releases_only_its_unpublished_segments(open_store, monkeypatch, tmp_path):
+    old, new = trajectory("old", "first"), trajectory("new", "second")
+    with closing(open_store()) as store:
+        store.create("acme", [old])
+        committed = segment_files(tmp_path)
+
+        def interrupted():
+            yield new
+            assert len(segment_files(tmp_path)) == 2
+            assert [item.item_id for item in store.query("acme")] == ["old"]
+            raise RuntimeError("source interrupted")
+
+        with pytest.raises(RuntimeError, match="source interrupted"):
+            store.replace_trajectories("acme", interrupted(), ["old"])
+        monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+        store.maintain()
+        assert segment_files(tmp_path) == committed
+        assert store.read("acme", "old").content == old.content
+        assert store.read("acme", "new") is None
+
+
 def test_a_read_of_many_items_reads_their_segment_lines_together(open_store, monkeypatch):
     with closing(open_store()) as store:
         created = [trajectory(f"t{number}", str(number)) for number in range(5)]
@@ -164,6 +185,30 @@ def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_
         monkeypatch.setattr(SegmentPartition, "read_text", read_text)
         assert store.read("acme", "coding/call-4").content == later[0].content
         assert store.record_links("acme", ["coding/call-4"])["coding/call-4"].parent == "coding/call-3"
+
+
+def test_maintain_reads_the_waiting_content_of_postgres_a_few_rows_at_a_time(postgres_config, monkeypatch, tmp_path):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    items = calls(1, 2, 3)
+    with closing(PostgresDataStore(url, task_files, schema=schema)) as store:
+        store.create("acme", items)
+    monkeypatch.setattr(sql_data, "PACK_BYTES", 1)
+    segments = LocalSegmentStore(tmp_path / "segments")
+    with closing(PostgresDataStore(url, task_files, schema=schema, segments=segments)) as store:
+        content_cursors = []
+
+        @event.listens_for(store.engine, "before_cursor_execute")
+        def keep_cursor(connection, cursor, statement, parameters, context, executemany):
+            if statement.startswith("SELECT") and "call_json" in statement:
+                content_cursors.append(type(cursor).__name__)
+
+        store.maintain()
+        # A client-side cursor holds every waiting row of the owner at once, which can be many segments.
+        assert content_cursors and set(content_cursors) == {"ServerCursor"}
+        assert waiting_rows(store) == (0, 0)
+        assert [item.content for item in store.query("acme")] == [item.content for item in items]
+    task_files.close()
 
 
 def test_maintain_merges_the_segments_of_small_writes_and_reads_stay_exact(open_store, monkeypatch, tmp_path):

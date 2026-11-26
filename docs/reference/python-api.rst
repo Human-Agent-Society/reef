@@ -1,74 +1,32 @@
 Python API for custom learning methods
 ======================================
 
-The Python API is the set of extension points that a learning method, a storage plugin or a serving integration implements. This page says which page holds each contract.
+Use ``reef_client.ReefClient`` to send requests and report feedback. The `quickstart <../getting-started/quickstart.rst>`__ shows a complete example.
 
-Reef owns everything around the extension points: it accepts and replays records, holds a job's data until it is acknowledged, commits algorithm state, submits training jobs, and publishes the saved checkpoints. `Write a recipe <../developer-guide/write-a-recipe.rst>`__ is the executable tutorial. These pages give the signatures, defaults and errors.
+Use the interfaces below to extend Reef itself. Inherit the documented abstract base class for each capability.
+Its docstrings define the methods and their contracts. Other internal classes can change.
 
-What to implement
------------------
+Learning methods
+----------------
 
-Start with a recipe and add only what the method needs.
+- `Recipe <../developer-guide/write-a-recipe.rst>`__ selects the pipeline and components for a scenario.
+- `Record2Sample <../developer-guide/recipe-samples-service.rst>`__ selects records and makes samples.
+  `Sample2Job <../developer-guide/recipe-control-service.rst>`__ groups samples into a training job.
+- A `training objective <../developer-guide/recipe-training-service.rst>`__ prepares the training signal.
+  A `loss family <../developer-guide/loss-families.rst>`__ computes the loss.
+- A harness `Method <../developer-guide/write-a-harness-method.rst>`__ writes a candidate tree in the job workspace.
+- `ComponentSpec <../developer-guide/components.rst>`__ declares a component in a scenario snapshot.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 40 30
+Integrations and plugins
+------------------------
 
-   * - Need
-     - Contract
-     - Required for
-   * - configure deployment behavior
-     - `Recipe <python-api-recipe.rst#recipe>`__, with its live objects and configuration
-     - every deployment
-   * - validate feedback at ingress
-     - `Report <python-api-recipe.rst#report>`__
-     - methods whose signal arrives in reports
-   * - decide which artifacts serve
-     - `Activation rule <python-api-recipe.rst#activation-rule>`__
-     - optional, any recipe
-   * - turn records into typed job data
-     - `Pipeline stages <python-api-pipeline.rst>`__, with the report and judging engines and task generators
-     - every method producing updates
-   * - carry data to the backend
-     - `Job data <python-api-job-data.rst>`__, with trajectory samples, task samples and chat rendering
-     - every method producing updates; subclass only for a new shape
-   * - turn job data into a signal
-     - `Training objective <python-api-training.rst#training-objective>`__, with step scheduling and job parameters
-     - weight-training methods
-   * - evolve a harness tree and score a task run
-     - `Harness method <python-api-harness.rst#harness-method>`__
-     - harness-evolution methods
-   * - evaluate a produced candidate
-     - `Candidate evaluation <python-api-harness.rst#candidate-evaluation>`__
-     - optional, any recipe
-   * - declare a new snapshot component
-     - `Scenario components <python-api-artifacts.rst#scenario-components>`__
-     - only a new evolution medium
-   * - a new tensor objective
-     - `Loss family <../developer-guide/loss-families.rst>`__
-     - rarely
+Select plugins by built-in name or ``package.module:ClassName``.
 
-Integrations and storage plugins implement these contracts:
+- ``training.backend`` selects a `TrainingDeployment <../developer-guide/training-backends.rst>`__. Its ``TrainingComponent`` runs jobs.
+- `InferenceRuntime <../developer-guide/serving-runtimes.rst>`__ binds artifacts to serving endpoints.
+- `Executor <../developer-guide/executors.rst>`__ starts workers. Configure the executor for each role under ``execution``.
+- `TaskGenerator <../developer-guide/task-generators.rst>`__ builds tasks from agent activity.
+- `Harness adapters <../developer-guide/harness-adapters.rst>`__ use descriptor files to define how agents install and run a harness.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Need
-     - Contract
-   * - run training jobs on a new backend
-     - `Training jobs and components <python-api-training.rst#training-jobs-and-components>`__, the job loop, and the `Tinker integration <python-api-training.rst#tinker-integration>`__
-   * - serve published weights
-     - `Inference <python-api-inference.rst>`__: runtimes, handlers, backends and the saved-weight runtimes
-   * - embed the service in an application
-     - `Embed the service <python-api-recipe.rst#embed-the-service>`__
-   * - store commits, settings and records
-     - `Scenario and record stores <python-api-scenario-stores.rst>`__
-   * - store tasks, task files, data items and segments
-     - `Task and data stores <python-api-data-stores.rst>`__
-   * - store or import artifacts
-     - `Artifacts <python-api-artifacts.rst>`__: artifact backends, imports and base roots
-
-Method code must depend only on what these pages document. Anything else under ``reef.`` is an implementation detail and can change.
-
-Every extension contract is an abstract base class. Inherit it explicitly and implement each abstract member. Reef rejects an object that only has methods of the same names. Optional capabilities are separate base classes: inherit only those that the implementation supports.
+For other integration points, see `storage backends <../user-guide/storage.rst>`__ and
+`deployment settings <configuration-settings.rst>`__.

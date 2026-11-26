@@ -27,7 +27,7 @@ import time
 import uuid
 from abc import abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from itertools import batched
 from pathlib import Path
@@ -102,6 +102,7 @@ from reef.storage.data.store import (
     check_filters,
     check_groups,
     check_hold,
+    check_item_id,
     check_owner,
     check_query,
     check_sets,
@@ -132,6 +133,8 @@ from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, valid
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
 PACK_BYTES = 64 * 2**20
+#: The rows that ``pack`` reads from the database at a time.
+PACK_READ_ROWS = 16
 #: The content bytes of the new trajectory items of one ``create`` call from which the call writes them as a segment.
 CREATE_SEGMENT_BYTES = 2**20
 #: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
@@ -148,6 +151,21 @@ VERSION_TABLE = "data_schema_version"
 #: The name of the lock that serializes the writes of the holds of an owner and of the benchmarks of its items. No
 #: scenario has this name.
 HOLDS_LOCK = "\x00benchmark-holds"
+
+
+def trajectory_batches[T](values: Iterable[tuple[T, int]]) -> Iterator[list[T]]:
+    """Yield a batch when it reaches the byte or item limit. Keep each trajectory in one batch."""
+    batch: list[T] = []
+    size = 0
+    for value, length in values:
+        batch.append(value)
+        size += length
+        if size >= CREATE_SEGMENT_BYTES or len(batch) >= GROUP_COMMIT_ITEMS:
+            yield batch
+            batch = []
+            size = 0
+    if batch:
+        yield batch
 
 
 def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
@@ -1064,10 +1082,11 @@ class SQLDataStore(DataStore):
         self.lock_scenarios(connection, owner, scenarios_of(values) | holding)
         return holds
 
-    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
+    def prepare_create(self, owner: str, items: Sequence[NewItem], generation: str | None) -> PendingCreate:
+        """Validate a create and prepare its rows and segments before taking the transaction's write locks."""
         prepared = prepared_items(owner, items, self.task_files)
         if not prepared:
-            return ()
+            return PendingCreate(prepared, {}, {}, None)
         origin = generation_origin(prepared, generation)
         item_ids = [entry[0].item_id for entry in prepared]
         places: dict[str, SegmentLine] = {}
@@ -1125,8 +1144,13 @@ class SQLDataStore(DataStore):
                 "segment_offset": None if place is None else place.offset,
                 "segment_length": None if place is None else place.length,
             }
-        pending = PendingCreate(prepared, values, calls, None if origin is None else (origin, str(generation)))
-        group = (owner, frozenset(scenarios_of(metadata for _, metadata, _ in prepared)))
+        return PendingCreate(prepared, values, calls, None if origin is None else (origin, str(generation)))
+
+    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
+        pending = self.prepare_create(owner, items, generation)
+        if not pending.prepared:
+            return ()
+        group = (owner, frozenset(scenarios_of(metadata for _, metadata, _ in pending.prepared)))
         with self.group_lock:
             pending.lead = group not in self.waiting
             self.waiting.setdefault(group, []).append(pending)
@@ -1139,6 +1163,52 @@ class SQLDataStore(DataStore):
         if pending.outcome is None:
             raise ReefError("the transaction of this create stopped before it wrote the items")
         return pending.outcome
+
+    def replace_trajectories(self, owner: str, items: Iterable[NewItem], previous_ids: Sequence[str]) -> None:
+        """Prepare each trajectory without locking readers or retaining the other documents. Write the prepared
+        rows and remove the previous items in one transaction. Segment files from an interrupted preparation are
+        reclaimed by the store's ordinary unused-segment cleanup."""
+        check_owner(owner)
+        old = {check_item_id(item_id) for item_id in previous_ids}
+        seen: set[str] = set()
+
+        def input_sizes() -> Iterator[tuple[NewItem, int]]:
+            for item in items:
+                if item.metadata.get("kind") != "trajectory" or not isinstance(item.content, Mapping):
+                    raise ValueError("a replacement must contain only trajectories")
+                if item.item_id in old or item.item_id in seen:
+                    raise ValueError("the new trajectory IDs must be unique and disjoint from the previous IDs")
+                seen.add(item.item_id)
+                yield item, len(canonical_json(item.content).encode("utf-8"))
+
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as staged:
+            for batch in trajectory_batches(input_sizes()):
+                pending = self.prepare_create(owner, batch, None)
+                for row in pending.values.values():
+                    staged.write(canonical_json(row) + "\n")
+            staged.seek(0)
+            with self.transaction() as connection:
+                for lines in trajectory_batches((line, len(line.encode("utf-8"))) for line in staged):
+                    prepared = []
+                    values = {}
+                    for line in lines:
+                        row = json.loads(line)
+                        item_id = row["item_id"]
+                        metadata = json.loads(row["metadata_json"])
+                        # The prepared row owns the inline content or the immutable segment reference.
+                        prepared.append((NewItem(item_id, {}, metadata), metadata, row["digest"]))
+                        values[item_id] = row
+                    pending = PendingCreate(prepared, values, {}, None)
+                    self.write_creates(owner, [pending], nullcontext(connection))
+                for item_id in sorted(old):
+                    kind = connection.scalar(
+                        select(self.items_table.c.kind).where(
+                            self.items_table.c.owner == owner, self.items_table.c.item_id == item_id
+                        )
+                    )
+                    if kind is not None and kind != "trajectory":
+                        raise ValueError("the previous revision contains a non-trajectory item")
+                    self.delete_item(owner, item_id, nullcontext(connection))
 
     def commit_group(self, group: tuple[str, frozenset[str]]) -> None:
         """Write the first waiting creates of ``group``, up to ``GROUP_COMMIT_ITEMS`` items, in one transaction, and
@@ -1180,6 +1250,11 @@ class SQLDataStore(DataStore):
 
         An ID in two creates gets the row of the first; another digest in the later one is an ``ItemConflictError``.
         """
+        return self.write_creates(owner, batch, self.transaction())
+
+    def write_creates(
+        self, owner: str, batch: Sequence[PendingCreate], transaction: AbstractContextManager[Connection]
+    ) -> list[tuple[StoredItem, ...]]:
         prepared = [entry for pending in batch for entry in pending.prepared]
         values: dict[str, dict[str, Any]] = {}
         calls: dict[str, NewNode] = {}
@@ -1190,7 +1265,7 @@ class SQLDataStore(DataStore):
                 first.setdefault(item_id, pending)
             for item_id, call in pending.calls.items():
                 calls.setdefault(item_id, call)
-        with self.transaction() as connection:
+        with transaction as connection:
             holds = self.lock_uses(connection, owner, [metadata for _, metadata, _ in prepared])
             # The archive ends a generation under the same lock, so no write of an ended generation commits.
             checked = {pending.generation for pending in batch if pending.generation is not None}
@@ -1997,9 +2072,12 @@ class SQLDataStore(DataStore):
             connection.execute(insert(uses), begun)
 
     def delete(self, owner: str, item_id: str) -> bool:
+        return self.delete_item(owner, item_id, self.transaction())
+
+    def delete_item(self, owner: str, item_id: str, transaction: AbstractContextManager[Connection]) -> bool:
         check_owner(owner)
         items, deleted = self.items_table, self.deleted_table
-        with self.transaction() as connection:
+        with transaction as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
             if row is None:
                 return False
@@ -2172,28 +2250,28 @@ class SQLDataStore(DataStore):
             )
             condition = and_(table.c.owner == owner, waiting)
             while True:
-                rows: list[RowMapping] = []
+                keys: list[int] = []
+                lines: list[str] = []
                 total = 0
                 with self.transaction() as connection:
                     if (connection.scalar(select(func.sum(size)).where(condition)) or 0) < PACK_BYTES:
                         break
+                    # The query selects all the waiting content of the owner, which can fill many segments. The
+                    # rows come ``PACK_READ_ROWS`` at a time, so the process holds the content of one segment only.
                     result = connection.execute(
-                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key)
+                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key),
+                        execution_options={"yield_per": PACK_READ_ROWS},
                     ).mappings()
                     for row in result:
-                        rows.append(row)
+                        keys.append(row["key"])
+                        if is_items:
+                            lines.append(row["content_json"])
+                        else:
+                            lines.append(node_line(row["entries_json"], row["shape_json"], row["call_json"]))
                         total += int(row["size"])
                         if total >= PACK_BYTES:
                             break
                     result.close()
-                lines = [
-                    (
-                        row["content_json"]
-                        if is_items
-                        else node_line(row["entries_json"], row["shape_json"], row["call_json"])
-                    )
-                    for row in rows
-                ]
                 places = self.write_segment(partition, lines)
                 cleared = (
                     {"content_json": None}
@@ -2210,15 +2288,15 @@ class SQLDataStore(DataStore):
                         ),
                         [
                             {
-                                "row_key": row["key"],
+                                "row_key": row_key,
                                 "new_segment_id": place.segment_id,
                                 "new_segment_offset": place.offset,
                                 "new_segment_length": place.length,
                             }
-                            for row, place in zip(rows, places, strict=True)
+                            for row_key, place in zip(keys, places, strict=True)
                         ],
                     )
-                moved += len(rows)
+                moved += len(keys)
         return moved
 
     def small_segment_items(self) -> tuple[ColumnElement[bool], ColumnElement[bool]]:

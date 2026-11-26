@@ -21,6 +21,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 import secrets
 import shlex
 import shutil
@@ -62,8 +63,13 @@ from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write
 from reef.harness.tasks.trajectory import reader_for
 from reef.harness.tree import HarnessTree, render_tree
 
+logger = logging.getLogger(__name__)
+
 #: Where the rendered tree goes in the task's container: the run root of ``run.task``.
 CONTAINER_ROOT = "/reef-run"
+#: Where the instruction of an agent that reads its task from stdin waits in the task's container, outside the run
+#: root, for the time of its command.
+CONTAINER_INSTRUCTION = "/tmp/reef-instruction.md"
 #: The directory under the agent's log directory that receives the agent's session files.
 SESSIONS_DIR = "sessions"
 #: The ATIF document of the run under the agent's log directory, and the pattern of it and its continuations.
@@ -126,7 +132,9 @@ class AdapterAgent(BaseInstalledAgent):
     ``install_kind`` its channel: ``npm``, ``uv`` for uv itself, or ``git``
     for a checkout of ``repository`` at ``ref``, installed editable into a venv;
     ``binary`` is the command the package installs; ``argv`` is the adapter's
-    ``run.task`` argument template, with ``{task}`` slots; ``env`` is the
+    ``run.task`` argument template, with ``{task}`` slots; ``task_on_stdin``
+    leaves the ``{task}`` tokens out and hands the agent the instruction
+    through stdin instead; ``env`` is the
     run environment, already pointed at ``CONTAINER_ROOT``;
     ``writable_paths`` are directories under the root that the agent writes;
     ``sessions`` is the session directory under the root; ``files_dir`` is a
@@ -165,6 +173,7 @@ class AdapterAgent(BaseInstalledAgent):
         ref: str = "",
         task_skills: str | None = None,
         bridge_port: int | None = None,
+        task_on_stdin: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, version=version, **kwargs)
@@ -181,6 +190,7 @@ class AdapterAgent(BaseInstalledAgent):
         self.package = package
         self.binary = binary
         self.argv = tuple(argv)
+        self.task_on_stdin = task_on_stdin
         self.env = dict(env)
         self.writable_paths = tuple(writable_paths)
         self.sessions = sessions
@@ -295,8 +305,18 @@ class AdapterAgent(BaseInstalledAgent):
         await environment.upload_dir(self.files_dir, CONTAINER_ROOT)
         # The agent may run as a user other than root, and it writes its sessions under the root.
         await self.exec_as_root(environment, command=f"chmod -R a+rwX {CONTAINER_ROOT}")
+        stdin = "/dev/null"
+        argv = self.argv
+        if self.task_on_stdin:
+            # Linux refuses an argument over 128 KiB, and the command is one argument of the container's shell.
+            with tempfile.TemporaryDirectory(prefix="reef-instruction-") as staging:
+                staged = Path(staging) / "instruction.md"
+                staged.write_text(instruction, encoding="utf-8")
+                await environment.upload_file(staged, CONTAINER_INSTRUCTION)
+            await self.exec_as_root(environment, command=f"chmod a+r {CONTAINER_INSTRUCTION}")
+            stdin, argv = CONTAINER_INSTRUCTION, tuple(token for token in argv if token != "{task}")
         arguments = " ".join(
-            shlex.quote(token.replace("{root}", CONTAINER_ROOT).replace("{task}", instruction)) for token in self.argv
+            shlex.quote(token.replace("{root}", CONTAINER_ROOT).replace("{task}", instruction)) for token in argv
         )
         assignments = " ".join(shlex.quote(f"{name}={value}") for name, value in self.env.items())
         # The agent resolves from the user's own home before the run environment moves HOME to the root. uv keeps
@@ -310,9 +330,11 @@ class AdapterAgent(BaseInstalledAgent):
             )
         else:
             find_agent = f'{NPM_AGENT_PATH} && agent="$(command -v {shlex.quote(self.binary)})"'
-        command = f'{find_agent} && env {assignments} "$agent" {arguments} </dev/null'
+        command = f'{find_agent} && env {assignments} "$agent" {arguments} <{stdin}'
         async with self.bridged(environment):
             result = await environment.exec(command=command, timeout_sec=int(self.timeout_s))
+        if self.task_on_stdin:
+            await self.exec_as_root(environment, command=f"rm -f {CONTAINER_INSTRUCTION}")
         (self.logs_dir / COMMAND_FILE).write_text(
             json.dumps({"exit_code": result.return_code, "stdout": result.stdout or "", "stderr": result.stderr or ""})
             + "\n",
@@ -333,7 +355,9 @@ class AdapterAgent(BaseInstalledAgent):
         Reef's sandbox relay answers that port in the container and holds each call. ``BRIDGE_POLLERS`` loops here
         take the calls through Harbor's exec, with ``bridge_client``, answer each from this host's port, and give the
         answer back in the next exchange. One loop waits for the first call. The others start when it gets a call or
-        fails. Exec works in every Harbor environment. Raise ``ProgramLaunchError`` when the relay does not answer.
+        fails. The relay gives a call out again when its answer does not come in time, so the loops share the IDs of
+        the calls that they took, and each call is answered once. Exec works in every Harbor environment. Raise
+        ``ProgramLaunchError`` when the relay does not answer.
         """
         if self.bridge_port is None:
             yield
@@ -363,8 +387,11 @@ class AdapterAgent(BaseInstalledAgent):
         async with aiohttp.ClientSession(auto_decompress=False) as local:
             # An idle exchange uses a Python process in the agent's container.
             concurrent_polls = asyncio.Event()
+            taken: set[str] = set()
             pollers = [
-                asyncio.create_task(self.relay_calls(environment, client, local, concurrent_polls, primary=index == 0))
+                asyncio.create_task(
+                    self.relay_calls(environment, client, local, concurrent_polls, taken, primary=index == 0)
+                )
                 for index in range(BRIDGE_POLLERS)
             ]
             pollers[0].add_done_callback(lambda _: concurrent_polls.set())
@@ -381,31 +408,51 @@ class AdapterAgent(BaseInstalledAgent):
         client: str,
         local: aiohttp.ClientSession,
         concurrent_polls: asyncio.Event,
+        taken: set[str],
         *,
         primary: bool,
     ) -> None:
         """Answer the relay's calls one at a time, until cancelled: each exchange gives the last answer back and
-        takes the next call. A failed exchange runs again with the same answer, which the relay takes once."""
+        takes the next call. A failed exchange runs again with the same answer, which the relay takes once. An
+        exchange fails when its command exits with an error, when the environment raises, or when its output is not
+        a call; the loop then goes on. ``taken`` holds the IDs of the calls that the bridge's loops took: a call that
+        the relay gives out again is answered only once."""
         if not primary:
             await concurrent_polls.wait()
         reply = ""
         while True:
-            result = await environment.exec(command=f"{client} {reply}".rstrip(), timeout_sec=120)
-            if result.return_code != 0:
+            try:
+                result = await environment.exec(command=f"{client} {reply}".rstrip(), timeout_sec=120)
+                request = (
+                    json.loads(result.stdout) if result.return_code == 0 and (result.stdout or "").strip() else {}
+                )
+            except Exception as error:
+                # The sandbox service can fail one exchange; the relay gives out a call that it lost again.
+                logger.warning("a bridge exchange failed: %s", error)
+                result = None
+            if result is None or result.return_code != 0:
                 concurrent_polls.set()
                 await asyncio.sleep(1)
                 continue
             reply = ""
-            if not (result.stdout or "").strip():
+            if not request:
                 continue
             concurrent_polls.set()
-            request = json.loads(result.stdout)
+            if request["id"] in taken:
+                continue
+            taken.add(request["id"])
             piece = await self.answer(local, request)
             path = f"{RELAY_DIR}/replies/{request['id']}.json"
             with tempfile.TemporaryDirectory(prefix="reef-relay-") as staging:
                 staged = Path(staging) / "piece.json"
                 staged.write_text(json.dumps(piece), encoding="utf-8")
-                await environment.upload_file(staged, path)
+                while True:
+                    try:
+                        await environment.upload_file(staged, path)
+                        break
+                    except Exception as error:
+                        logger.warning("could not upload a bridge answer: %s", error)
+                        await asyncio.sleep(1)
             reply = f"{request['id']} {path}"
 
     async def answer(self, local: aiohttp.ClientSession, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -571,6 +618,7 @@ def adapter_agent_kwargs(
         "files_dir": str(files_dir),
         "timeout_s": timeout,
         "task_skills": descriptor.task_skills_path,
+        "task_on_stdin": descriptor.task_on_stdin,
     }
 
 

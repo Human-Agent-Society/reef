@@ -495,7 +495,7 @@ class LoadedDeployment:
     name, or None. ``services`` are the deployment's services (``validate_services``). ``source`` names the configuration
     for the startup log.
 
-    Purpose: ``load_deployment`` makes it for both ``reef serve`` and ``reef serve --component``, so that one
+    Purpose: ``load_deployment`` makes it for both ``reef serve`` and ``reef serve --service``, so that one
     service reads and checks the configuration as the whole deployment does.
     """
 
@@ -520,8 +520,8 @@ def load_deployment(config_path: str | None, overrides: dict[str, str] | None) -
     )
 
 
-def run_component(config_path: str | None, overrides: dict[str, str] | None, component: str) -> int:
-    """Run the one service ``component`` of the deployment in this process, until a signal stops it.
+def run_one_service(config_path: str | None, overrides: dict[str, str] | None, service: str) -> int:
+    """Run the one service ``service`` of the deployment in this process, until a signal stops it.
 
     The process starts no other child: the inference engines, the other services and the shared store run on
     their own. It reads and checks the configuration as ``reef serve`` does (``load_deployment``).
@@ -535,9 +535,9 @@ def run_component(config_path: str | None, overrides: dict[str, str] | None, com
 
     from reef.api.services import build_service_app
 
-    log_status(f"service: {component}")
+    log_status(f"service: {service}")
     try:
-        app = build_service_app(component, settings)
+        app = build_service_app(service, settings)
     except (RecipeConfigError, RuntimeConfigError):
         raise
     except ValueError as exc:
@@ -575,7 +575,7 @@ def _run_orchestrator(
     if config_value(config, "reef", "routing_manifest"):
         settings = service_config_from_mapping(config)
         if settings.routing_deployment.lifecycle != "managed":
-            raise DeployConfigError("external routing runs only with reef serve --component inference")
+            raise DeployConfigError("external routing runs only with reef serve --service inference")
         if any(service_executor_selection(config, service).settings.backend != "uni" for service in services):
             raise DeployConfigError("managed routing requires uni execution for every native service")
         if len(services) != 1 or services[0]["name"] != "reef":
@@ -766,8 +766,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model_defaults[key] = value
             overrides = model_defaults
         config_path = _resolve_config(args.config)
-        if args.component is not None and not args.print_config:
-            exit_code = run_component(config_path, overrides, args.component)
+        if args.service is not None and not args.print_config:
+            exit_code = run_one_service(config_path, overrides, args.service)
         else:
             exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:

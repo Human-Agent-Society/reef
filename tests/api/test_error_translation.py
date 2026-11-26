@@ -66,6 +66,7 @@ def test_domain_errors_translate_to_their_status(error: Exception, status: int) 
     [
         (400, 400),
         (401, 401),
+        (402, 402),
         (403, 403),
         (404, 404),
         (408, 408),
@@ -89,6 +90,22 @@ def test_upstream_statuses_relay_or_become_a_bad_gateway(upstream_status: int, s
     assert translated is not None
     assert translated.status == status
     assert str(error) in translated.text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("upstream_status", [402, 429])
+@pytest.mark.parametrize(("wait_seconds", "retry_after"), [(None, None), (0.0, "0"), (2.2, "3")])
+def test_an_upstream_refusal_keeps_its_retry_after_wait(
+    upstream_status: int, wait_seconds: float | None, retry_after: str | None
+) -> None:
+    error = UpstreamStatusError("slow down", status=upstream_status, retry_after_seconds=wait_seconds)
+
+    translated = translate_error(error)
+
+    assert translated is not None
+    assert translated.status == upstream_status
+    # Whole seconds, rounded up, so the caller never tries before the upstream's wait ends.
+    assert translated.headers.get("Retry-After") == retry_after
 
 
 @pytest.mark.unit

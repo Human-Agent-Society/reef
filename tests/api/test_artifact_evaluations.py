@@ -10,6 +10,7 @@ import logging
 import math
 import tarfile
 import time
+import urllib.error
 import urllib.request
 import uuid
 import weakref
@@ -41,13 +42,14 @@ from reef.control.operations.artifact_evaluations import (
     NewArtifacts,
     StoredCalls,
     attempt_trajectories,
+    iter_attempt_trajectories,
     rollout_work,
 )
 from reef.control.operations.data import DataAccess
 from reef.control.scenario.live_objects import LiveObjects
 from reef.control.scenario.snapshots import ScenarioSnapshots
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, UpstreamLimit, UpstreamStatusError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -73,6 +75,7 @@ from reef.evaluation.rollout_worker import (
     template_item_id,
 )
 from reef.evaluation.task_templates import TaskTemplateBuilder
+from reef.execution.sandbox.task_environment import HARBOR_MODAL_ENVIRONMENT
 from reef.harness.adapters import get_adapter
 from reef.harness.harbor.agent import TreeAgent
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
@@ -120,6 +123,7 @@ class ArtifactRuntime(InferenceRuntime):
         #: The scenario of each served artifact, and each serving config that inference applied.
         self.serve_scenarios: list[str] = []
         self.applied: list[str] = []
+        self.serve_configs: list[dict] = []
         self.serve_error: str | None = None
         self.any_artifact = any_artifact
 
@@ -144,8 +148,9 @@ class ArtifactRuntime(InferenceRuntime):
     def apply_serving_config(self, scenario, override):
         self.applied.append(scenario)
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
+    def serve_artifact(self, artifact: Artifact, *, scenario: str, serving_config) -> ServedArtifact:
         self.served.append(artifact.artifact_id)
+        self.serve_configs.append(dict(serving_config))
         self.serve_scenarios.append(scenario)
         if self.serve_error is not None:
             raise ValueError(self.serve_error)
@@ -464,9 +469,10 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
+            newest = dispatcher.coordination.served_models.current_request("s").payload.get("serving_config", {})
             assert (
-                runtime.serve_scenarios == ["s"] * 10 and runtime.applied.count("s") >= 10
-            ), "inference serves the candidate with the scenario's serving config"
+                runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10
+            ), "inference serves the candidate with the config of the scenario's newest request"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",
@@ -780,6 +786,51 @@ def test_filtered_rollout_pages_keep_numeric_repeat_order(tmp_path: Path) -> Non
                     for item in taken:
                         assert item is not None
                         queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox stopped", retryable=False)
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_rollout_view_counts_the_attempts_that_waited_for_sandbox_capacity_or_a_stopped_worker(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            harness = {"name": "terminus-2"}
+            request = ArtifactEvaluationRequest(
+                artifact_id, "weights", harness=harness, task_names=("add",), rollouts_per_task=2
+            )
+            for repeat in (0, 1):
+                rollout = EvaluationRollout(
+                    "s", "e", artifact_id, "weights", 0, "add", repeat, PolicyModel("m"), harness, "docker", {}
+                )
+                queue.append(rollout_work(rollout))
+            with dispatcher.locked_scenario("s") as current:
+                current.store.evaluations.create(
+                    evaluation_id="e", owner="test", request=request, created_at=time.time()
+                )
+            # Repeat 0 finds no sandbox capacity twice and then loses its worker; repeat 1 runs once.
+            for deferred in (True, True, False):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                assert item is not None and item.payload["repeat"] == 0
+                error = "waiting for sandbox capacity: no node has 12 vCPUs free" if deferred else "the worker stopped"
+                # The last give-back keeps repeat 0 out of the queue, so the next take gets repeat 1.
+                later = None if deferred else time.time() + 3600
+                queue.give_back(EVALUATIONS_QUEUE, item.id, "w", error=error, deferred=deferred, available_at=later)
+            other = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            assert other is not None and other.payload["repeat"] == 1
+            response = await client.get("/reef/scenarios/s/evaluations/e/rollouts?calls=false", headers=AUTH)
+            assert response.status == 200, await response.text()
+            counts = [
+                (row["repeat"], row["attempt_count"], row["stopped_attempt_count"], row["deferred_attempt_count"])
+                for row in (await response.json())["rollouts"]
+            ]
+            # attempt_count minus stopped_attempt_count is the attempts that count: none for repeat 0.
+            assert counts == [(0, 3, 3, 2), (1, 1, 0, 0)]
 
     asyncio.run(run())
 
@@ -2018,6 +2069,101 @@ def test_after_a_failure_stop_a_retry_runs_the_failed_rollouts_and_a_resume_the_
     asyncio.run(run())
 
 
+@pytest.mark.integration
+def test_max_failed_fraction_stops_an_evaluation_when_402_refusals_are_followed_by_auxiliary_calls(
+    tmp_path: Path,
+) -> None:
+    class RefusingToolsHandler(ArtifactHandler):
+        """An ``ArtifactHandler`` that refuses tool-bearing chat calls with HTTP 402 and answers tool-less calls.
+
+        Values: inherits ``artifact_ids: list[str]`` and ``models: list[str]`` from ``ArtifactHandler`` (both initially
+        empty). Invariant: only answered (tool-less) calls are recorded in ``artifact_ids`` and ``models``; refused
+        calls raise before ``super().inference`` runs.
+
+        Purpose: used by this circuit-breaker test to model a provider that rejects main-loop calls with payment
+        refusals while answering auxiliary title calls. ``inference(artifact, path, payload)`` raises
+        ``UpstreamStatusError(..., status=402, limit=UpstreamLimit.PAYMENT)`` iff ``bool(payload.get("tools"))`` is
+        True, and otherwise delegates to ``ArtifactHandler.inference`` to record the call and return a 200 reply.
+        """
+
+        async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if payload.get("tools"):
+                raise UpstreamStatusError("insufficient credits", status=402, limit=UpstreamLimit.PAYMENT)
+            return await super().inference(artifact, path, payload)
+
+    class RefusedThenTitleLab(TaskLab):
+        """A test ``TaskLab`` that sends a refused tool-bearing call followed by a tool-less call and exits cleanly.
+
+        Values: ``runs`` is a non-negative int (initially 0) counting how many times ``run`` was invoked.
+
+        Purpose: used by this circuit-breaker test to reproduce a harness (such as OpenCode) whose main-loop call hits
+        HTTP 402 and whose trailing title call returns 200 before the trial finishes without an error. ``run`` requires
+        ``agent["kwargs"]["api_base"]`` as a base URL string, increments ``runs``, posts two ``/chat/completions``
+        requests (the first with a non-empty ``tools`` list, the second without ``tools``) while suppressing
+        ``urllib.error.HTTPError``, and always returns ``RolloutRow(rewards={"reward": 0.0}, error=None)``.
+        ``build_environment`` starts no sandbox and returns ``""``.
+        """
+
+        def __init__(self) -> None:
+            self.runs = 0
+
+        async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+            self.runs += 1
+            api_base = agent["kwargs"]["api_base"]
+            payloads = [
+                {
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "solve"}],
+                    "tools": [{"type": "function", "function": {"name": "bash"}}],
+                },
+                {"model": "m", "messages": [{"role": "user", "content": "title"}]},
+            ]
+            for payload in payloads:
+                request = urllib.request.Request(
+                    f"{api_base}/chat/completions",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with contextlib.suppress(urllib.error.HTTPError):
+                    await asyncio.to_thread(lambda req=request: urllib.request.urlopen(req, timeout=10).read())
+            return RolloutRow(rewards={"reward": 0.0}, error=None)
+
+        async def build_environment(self, task_path, *, overrides) -> str:
+            return ""
+
+    runtime = ArtifactRuntime()
+    runtime.handler = RefusingToolsHandler()
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=runtime))
+    lab = RefusedThenTitleLab()
+
+    async def run() -> None:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_concurrent_rollouts": 1,
+                "max_failed_fraction": 0.5,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            answer = await finished(client, accepted["evaluation_id"])
+            assert answer["state"] == "failed"
+            assert answer["error"] == "too many rollouts failed: 10 of 10 ended (100%), over the limit of 50%"
+            assert (
+                answer["progress"]["total"],
+                answer["progress"]["ended"],
+                answer["progress"]["scored"],
+                answer["progress"]["failed"],
+                answer["progress"]["cancelled"],
+            ) == (12, 10, 0, 10, 0)
+            assert lab.runs == 10
+
+    asyncio.run(run())
+
+
 def chat_call(attempt: int, index: int, messages: list[dict[str, str]], reply: str, status: int = 200):
     """A kept chat call of rollout (2, 0) that sent ``messages`` and got ``reply``, or an error when not 200."""
     response = (
@@ -2232,6 +2378,132 @@ def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_with
     assert first["extra"]["reef"]["reward"] == second["extra"]["reef"]["reward"] == 0.5
 
 
+@pytest.mark.unit
+def test_auxiliary_title_generation_gets_no_reward_while_toolless_subagents_keep_reward() -> None:
+    """Single-turn auxiliary title-generation conversations without tools receive ``scored=False`` and no reward,
+    while both tool-bearing conversations and required tool-less subagent conversations (such as a native ``writer``
+    role) keep ``scored=True`` and the parent rollout's reward."""
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 1.0},
+    )
+    tool_spec = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+    title_call = chat_call(
+        1,
+        0,
+        [
+            {"role": "system", "content": "You are a title generator. You output ONLY a thread title."},
+            {"role": "user", "content": "Generate a title for this conversation:\nsolve add"},
+        ],
+        "Solve add task",
+    )
+    title_user_only_base = chat_call(
+        1,
+        1,
+        [{"role": "user", "content": "Generate a title for this conversation:\nwrite tests"}],
+        "Write tests",
+    )
+    title_user_only = replace(title_user_only_base, request={**(title_user_only_base.request or {}), "tools": []})
+    writer_subagent_base = chat_call(
+        1,
+        2,
+        [
+            {"role": "system", "content": "You are the writer. Return only the final number."},
+            {"role": "user", "content": "verified: the count is 9592"},
+        ],
+        "9592",
+    )
+    writer_subagent = replace(writer_subagent_base, request={**(writer_subagent_base.request or {}), "tools": []})
+    main_base = chat_call(1, 3, [{"role": "user", "content": "solve add"}], "running tests")
+    main_call = replace(main_base, request={**(main_base.request or {}), "tools": tool_spec})
+
+    title_traj, title_user_traj, writer_traj, main_traj = attempt_trajectories(
+        "s", "e1", item, [title_call, title_user_only, writer_subagent, main_call]
+    )
+    assert title_traj["extra"]["reef"]["reward"] is None
+    assert title_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert title_user_traj["extra"]["reef"]["reward"] is None
+    assert title_user_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert writer_traj["extra"]["reef"]["reward"] == 1.0
+    assert writer_traj["extra"]["reef"]["evaluation"]["scored"] is True
+    assert main_traj["extra"]["reef"]["reward"] == 1.0
+    assert main_traj["extra"]["reef"]["evaluation"]["scored"] is True
+
+
+@pytest.mark.unit
+def test_single_conversation_without_tools_still_carries_the_rollout_reward() -> None:
+    """A text-only benchmark rollout without tool definitions keeps scored=True and the rollout reward."""
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "coser", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.8},
+    )
+    first = [{"role": "user", "content": "Act out the scene."}]
+    second = [*first, {"role": "assistant", "content": "Line one."}, {"role": "user", "content": "Continue."}]
+    calls = [chat_call(1, 0, first, "Line one."), chat_call(1, 1, second, "Line two.")]
+
+    (trajectory,) = attempt_trajectories("s", "e1", item, calls)
+    assert trajectory["extra"]["reef"]["reward"] == 0.8
+    assert trajectory["extra"]["reef"]["evaluation"]["scored"] is True
+
+
+@pytest.mark.unit
+def test_streaming_releases_finished_conversations_and_preserves_shared_branches() -> None:
+    rollout = EvaluationRollout("s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {}, "docker", {})
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.5},
+    )
+    question = [{"role": "user", "content": "question"}]
+    shared = [*question, {"role": "assistant", "content": "shared reply"}]
+    calls = [
+        chat_call(1, 0, question, "shared reply"),
+        chat_call(1, 1, [*shared, {"role": "user", "content": "left"}], "answer left"),
+        chat_call(1, 2, [*shared, {"role": "user", "content": "right"}], "answer right"),
+        *(chat_call(1, i, [{"role": "user", "content": f"unrelated {i}"}], "answer") for i in range(3, 70)),
+    ]
+    counted = CountedCalls(calls)
+    documents = iter_attempt_trajectories("s", "e1", item, counted)
+    left, right = next(documents), next(documents)
+    assert [s["message"] for s in left["steps"]] == ["question", "shared reply", "left", "answer left"]
+    assert [s["message"] for s in right["steps"]] == ["question", "shared reply", "right", "answer right"]
+    assert [r["agent_record_id"] for r in left["extra"]["reef"]["records"]] == ["e1:2:0:1:1"]
+    assert [r["agent_record_id"] for r in right["extra"]["reef"]["records"]] == ["e1:2:0:1:0", "e1:2:0:1:2"]
+    for ordinal, doc in enumerate(documents, start=2):
+        assert doc["extra"]["reef"]["evaluation"]["conversation"] == ordinal
+        assert doc["extra"]["reef"]["reward"] == 0.5
+    assert counted.most <= 4
+
+
 class TreeCallingLab(TaskLab):
     """Builds the agent as Harbor does, keeps what it rendered, and calls the model with the rendered binding."""
 
@@ -2359,7 +2631,11 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
             assert answer["state"] == "finished", answer
 
     asyncio.run(run())
-    assert lab.overrides["environment"] == {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}
+    assert lab.overrides["environment"] == {
+        "type": "modal",
+        "import_path": HARBOR_MODAL_ENVIRONMENT,
+        "kwargs": {"sandbox_timeout_secs": 7200},
+    }
     assert lab.agent is not None and lab.agent.bridge_port is not None
     assert f"http://127.0.0.1:{lab.agent.bridge_port}" in "".join(lab.rendered.values())
 

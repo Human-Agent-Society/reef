@@ -183,7 +183,8 @@ class CommitHistoryScenarioStore(ScenarioStore):
 
     @property
     def commit_history(self) -> CommitHistory:
-        """The commit history, for callers of the concrete storage adapters."""
+        """The commit history, for callers of the concrete storage adapters. A direct ``append`` skips the checks of
+        ``append_commit``: the scenario and the expected commit number."""
         with self._lock:
             self._ensure_open()
             return self._commit_history

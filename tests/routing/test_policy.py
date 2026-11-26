@@ -37,9 +37,9 @@ from tests.routing.routing_fakes import (
 )
 
 import reef.routing.manifest as routing_module
-from reef.api.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPublication, create_app
+from reef.api.app import CONTROL_APPLICATION, REQUEST_HANDLING_KEY, RoutingPublication, create_app
 from reef.api.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.settings import ServiceSettings
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.routing.deployment_controller import (
@@ -1260,7 +1260,7 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
                     # The call admitted under the old policy used the old endpoint; JSON and SSE after it, the new.
                     assert len(received) == 1 and [payload.get("stream", False) for payload in moved] == [False, True]
                     # The old policy's adapter and handlers are unchanged, for any request that still holds them.
-                    assert old.handlers["teacher"] is not app[REQUEST_SERVICE_KEY].routing.handlers["teacher"]
+                    assert old.handlers["teacher"] is not app[REQUEST_HANDLING_KEY].routing.handlers["teacher"]
             finally:
                 dispatcher.close()
 
@@ -1291,7 +1291,7 @@ def test_a_published_catalog_gets_new_handlers_with_the_startup_credentials_and_
     environment["LATE_KEY"] = "late-secret"
     built.clear()
     with contextlib.closing(routing_dispatcher(tmp_path)) as dispatcher:
-        publication = RoutingPublication(RequestService(dispatcher, routing=old))
+        publication = RoutingPublication(RequestHandling(dispatcher, routing=old))
         moved = write_source(tmp_path / "moved.json", url="http://127.0.0.1:12", api_key_env="SPARE_KEY")
         publication.publish(str(moved), RoutingSnapshot.load(moved).version, "5" * 64)
         published = publication.current()

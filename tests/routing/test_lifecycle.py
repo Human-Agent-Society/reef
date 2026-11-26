@@ -53,7 +53,7 @@ from reef.api.lifecycle import (
     register_admission,
     serve_managed,
 )
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
 from reef.api.settings import ServiceSettings
 from reef.core import AgentRecord
@@ -562,7 +562,7 @@ def test_cancelled_scenario_initialization_remains_in_finalization(
 
     async def run() -> None:
         writes = PendingWrites()
-        service = RequestService(dispatcher, writes=writes)
+        service = RequestHandling(dispatcher, writes=writes)
         task = asyncio.create_task(service.routed.scenario({"x-reef-scenario": "coding"}, decision))
         await asyncio.to_thread(started.wait, 5)
         try:

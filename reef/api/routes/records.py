@@ -6,7 +6,7 @@ from urllib.parse import quote
 from aiohttp import web
 
 from reef.api.auth import page_query
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routes.payload import read_object
 from reef.core.records_types import RequestType
 
@@ -15,10 +15,10 @@ from reef.core.records_types import RequestType
 MAX_RECORD_IMPORT_BYTES = 10 * 1024 * 1024
 
 
-def register_record_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_record_routes(app: web.Application, *, request_handling: RequestHandling) -> None:
     async def import_record(request: web.Request) -> web.Response:
         body = await read_object(request.clone(client_max_size=MAX_RECORD_IMPORT_BYTES))
-        item = await asyncio.to_thread(request_service.import_record, request.headers, body)
+        item = await asyncio.to_thread(request_handling.import_record, request.headers, body)
         return web.json_response(
             {
                 "agent_record_id": item.agent_record_id,
@@ -29,7 +29,7 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
 
     async def import_records(request: web.Request) -> web.Response:
         body = await read_object(request.clone(client_max_size=MAX_RECORD_IMPORT_BYTES))
-        items = await asyncio.to_thread(request_service.import_records, request.headers, body)
+        items = await asyncio.to_thread(request_handling.import_records, request.headers, body)
         return web.json_response(
             {
                 "records": [
@@ -54,9 +54,9 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
                 agent_record_id = payload.pop("agent_record_id")
                 if not isinstance(agent_record_id, str) or not agent_record_id.strip():
                     raise ValueError("agent_record_id must be a non-empty string")
-            item = await request_service.persist(
+            item = await request_handling.persist(
                 asyncio.to_thread(
-                    request_service.accept,
+                    request_handling.accept,
                     request.headers,
                     payload,
                     request_type=request_type,
@@ -74,7 +74,7 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
         return accept
 
     async def accept_request(request: web.Request) -> web.Response:
-        """Queue a training request (``RequestService.accept_request``); it is not a record."""
+        """Queue a training request (``RequestHandling.accept_request``); it is not a record."""
         payload = await read_object(request)
         request_id = None
         if isinstance(payload, dict) and "agent_record_id" in payload:
@@ -83,7 +83,7 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
             if not isinstance(request_id, str) or not request_id.strip():
                 raise ValueError("agent_record_id must be a non-empty string")
         scenario, accepted_id = await asyncio.to_thread(
-            request_service.accept_request, request.headers, payload, request_id=request_id
+            request_handling.accept_request, request.headers, payload, request_id=request_id
         )
         # A training request has a page; its link carries a page key in place of the token.
         page = f"/reef/harness/requests/{quote(accepted_id, safe='')}/page?{page_query(request, scenario)}"

@@ -350,7 +350,7 @@ serial run when you diagnose a failure.
 
 The full suite needs training dependencies even for collection. Some tests
 skip unavailable optional runtimes; others import Slime and torch directly.
-Use the [testing guide](docs/contributing/testing.rst) and
+Use the [development checks](docs/contributing/development.rst#checks) and
 [CI configuration](.github/workflows/ci.yml) to reproduce the needed environment.
 CI uses `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` for
 Git LFS test isolation. Record skipped or unavailable checks honestly.
@@ -366,7 +366,7 @@ keep unrelated working-tree changes intact.
 ## Area-specific guides and documentation
 
 - Before adding a component, read
-  [adding-components.rst](docs/contributing/adding-components.rst).
+  [Extending Reef](docs/contributing/codebase-structure.rst#extending-reef).
 - For recipes and examples, read [recipes/AGENTS.md](recipes/AGENTS.md) and the
   method's README. Keep examples self-contained.
 - For harness adapters, read
@@ -380,5 +380,11 @@ keep unrelated working-tree changes intact.
   `.venv/bin/python .github/scripts/check_readme_i18n.py --write`, then
   `.venv/bin/python .github/scripts/check_readme_i18n.py`, and include the
   updated `README.i18n.yaml` with the change.
+- The settings reference, `docs/reference/configuration-settings.rst`, is
+  generated from the settings that the code declares; do not edit it by hand.
+  Give each new setting a `help` text: it is the setting's description. After
+  you add or change a setting, run
+  `.venv/bin/python .github/scripts/check_settings_reference.py --write` and
+  include the updated page with the change.
 - Update affected API, configuration, and user documentation alongside code.
   Keep this guide concise and link detailed rules to their owning documents.

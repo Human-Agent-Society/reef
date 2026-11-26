@@ -18,7 +18,11 @@ from reef_client.serve import CapturedTurn
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT, environment_config
+from reef.execution.sandbox.task_environment import (
+    HARBOR_E2B_ENVIRONMENT,
+    HARBOR_MODAL_ENVIRONMENT,
+    environment_config,
+)
 from reef.harness.capture import CaptureObserver, TaggedStore
 from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
@@ -38,8 +42,12 @@ from reef.harness.harbor.rollouts import (
 #: The Harbor environment config of an ``e2b`` trial of a task with no agent time limit: no lifetime, so the sandbox
 #: keeps Harbor's default.
 E2B_CONFIG = {"type": "e2b", "import_path": HARBOR_E2B_ENVIRONMENT}
-#: The same for a ``modal`` trial: a lifetime of two hours.
-MODAL_CONFIG = {"type": "modal", "kwargs": {"sandbox_timeout_secs": 2 * 60 * 60}}
+#: The same for a ``modal`` trial: Reef's class, and a lifetime of two hours.
+MODAL_CONFIG = {
+    "type": "modal",
+    "import_path": HARBOR_MODAL_ENVIRONMENT,
+    "kwargs": {"sandbox_timeout_secs": 2 * 60 * 60},
+}
 
 
 class StandInReef:
@@ -442,9 +450,9 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
 @pytest.mark.parametrize(
     ("environment", "has_compose", "gpu_count", "config"),
     [
-        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True, "sandbox_timeout_secs": 7200}}),
-        ("modal", False, 0, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
-        ("modal", True, 1, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("modal", True, 0, {**MODAL_CONFIG, "kwargs": {"modal_vm_runtime": True, "sandbox_timeout_secs": 7200}}),
+        ("modal", False, 0, MODAL_CONFIG),
+        ("modal", True, 1, MODAL_CONFIG),
         ("e2b", True, 0, E2B_CONFIG),
     ],
     ids=["modal-compose", "modal-dockerfile", "modal-compose-gpu", "e2b-compose"],

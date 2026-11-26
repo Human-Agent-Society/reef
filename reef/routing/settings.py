@@ -27,33 +27,82 @@ class RoutingDeploymentSettings:
     len - 1)]``, so the last delay repeats. These settings apply only when ``reef.routing_manifest`` is set;
     ``require_identity`` then returns ``deployment_id`` or refuses a deployment without one.
     With ``managed``, ``reef serve`` runs the container and reads every setting. With ``external``, another system
-    runs the router beside ``reef serve --component inference``, and only the port, preview and finalization
+    runs the router beside ``reef serve --service inference``, and only the port, preview and finalization
     settings apply. ``image_build_timeout_seconds`` bounds only a managed startup's build of the router image;
     it is not part of the rendered configuration.
     """
 
     lifecycle: str = config_option(
-        "managed", help="Who runs the router: managed (reef serve) or external (beside --component inference)."
+        "managed",
+        help=(
+            "Who runs the router: managed (reef serve) or external (beside --service inference). "
+            "With external, only sr-management-port, selection-timeout-seconds, "
+            "preview-max-concurrency and finalization-timeout-seconds apply."
+        ),
     )
-    deployment_id: str | None = config_option(None, help="Stable local deployment identifier.")
-    restart_policy: str = config_option("fail_stop", help="Failure policy: fail_stop or bounded.")
-    max_restarts: int = config_option(2, help="Recovery attempts allowed during this explicit deployment.")
+    deployment_id: str | None = config_option(
+        None,
+        help=(
+            "Stable local deployment identifier, required by a managed deployment. Use 1 to 48 lowercase "
+            "letters, digits or hyphens, starting with a letter or digit."
+        ),
+    )
+    restart_policy: str = config_option(
+        "fail_stop",
+        help=(
+            "Failure policy: fail_stop or bounded. With bounded, Reef recreates a failed router container"
+            " up to max-restarts times."
+        ),
+    )
+    max_restarts: int = config_option(
+        2,
+        help=(
+            "Recovery attempts allowed during this explicit deployment, at least 1 with a bounded restart"
+            " policy. A failed attempt counts, and the count never resets."
+        ),
+    )
     restart_backoff_seconds: tuple[float, ...] = (1.0, 2.0)
-    ready_timeout_seconds: float = config_option(120.0, help="Complete routing readiness deadline in seconds.")
-    drain_timeout_seconds: float = config_option(30.0, help="Seconds allowed for accepted requests to drain.")
-    finalization_timeout_seconds: float = config_option(5.0, help="Seconds allowed for pending record writes.")
+    ready_timeout_seconds: float = config_option(
+        120.0, help="Seconds allowed for the router to become ready at startup, at recovery and after a policy update."
+    )
+    drain_timeout_seconds: float = config_option(
+        30.0,
+        help=(
+            "Seconds allowed for accepted requests to drain at a stop. A policy update also waits this "
+            "long for requests that still select."
+        ),
+    )
+    finalization_timeout_seconds: float = config_option(
+        5.0,
+        help=(
+            "Seconds allowed for pending record writes after drain-timeout-seconds ends and Reef cancels "
+            "the remaining requests."
+        ),
+    )
     container_stop_timeout_seconds: float = config_option(10.0, help="Container stop command deadline in seconds.")
     image_build_timeout_seconds: float = config_option(
         3600.0, help="Seconds a managed startup may spend building the Semantic Router image it has not cached."
     )
     sr_management_port: int = config_option(
-        50053, help="Host loopback port of the router's authenticated HTTP API (preview and configuration)."
+        50053,
+        help=(
+            "Host loopback port of the router's authenticated HTTP API (preview and configuration). "
+            "Must differ from reef.port."
+        ),
     )
     selection_timeout_seconds: int = config_option(
-        10, help="Whole seconds the router may spend selecting for one request (its preview worker deadline)."
+        10,
+        help=(
+            "Whole seconds, from 1 to 300, that the router may spend selecting for one request (its "
+            "preview worker deadline)."
+        ),
     )
     preview_max_concurrency: int = config_option(
-        32, help="Router preview workers; more concurrent selections are refused with 429. Changes need a restart."
+        32,
+        help=(
+            "Router preview workers, from 1 to 4096; more concurrent selections are refused with 429."
+            " Changes need a restart."
+        ),
     )
     sr_cpus: float = config_option(4.0, help="Semantic Router container CPU limit.")
     sr_memory_bytes: int = config_option(4 * 1024**3, help="Semantic Router container memory limit in bytes.")

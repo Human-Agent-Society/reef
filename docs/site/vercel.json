@@ -319,6 +319,156 @@
       "source": "/docs/glossary/",
       "destination": "/docs/reference/glossary/",
       "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-recipe",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-recipe/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-pipeline",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-pipeline/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-job-data",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-job-data/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-training",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-training/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-harness",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-harness/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-inference",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-inference/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-scenario-stores",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-scenario-stores/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-data-stores",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-data-stores/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-artifacts",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/python-api-artifacts/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/contributing/architecture",
+      "destination": "/docs/contributing/codebase-structure",
+      "permanent": true
+    },
+    {
+      "source": "/docs/contributing/architecture/",
+      "destination": "/docs/contributing/codebase-structure/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/contributing/adding-components",
+      "destination": "/docs/contributing/codebase-structure#extending-reef",
+      "permanent": true
+    },
+    {
+      "source": "/docs/contributing/adding-components/",
+      "destination": "/docs/contributing/codebase-structure/#extending-reef",
+      "permanent": true
+    },
+    {
+      "source": "/docs/contributing/testing",
+      "destination": "/docs/contributing/development#checks",
+      "permanent": true
+    },
+    {
+      "source": "/docs/contributing/testing/",
+      "destination": "/docs/contributing/development/#checks",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-files",
+      "destination": "/docs/reference/configuration",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-files/",
+      "destination": "/docs/reference/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-service",
+      "destination": "/docs/reference/configuration-settings",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-service/",
+      "destination": "/docs/reference/configuration-settings/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-execution",
+      "destination": "/docs/reference/configuration-settings",
+      "permanent": true
+    },
+    {
+      "source": "/docs/reference/configuration-execution/",
+      "destination": "/docs/reference/configuration-settings/",
+      "permanent": true
     }
   ]
 }

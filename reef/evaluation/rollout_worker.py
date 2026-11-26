@@ -40,9 +40,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from reef_client.serve import CapturedTurn
+from reef_client.serve import CapturedTurn, has_tools
 
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, UpstreamLimit
 from reef.core.evaluation import (
     EvaluationCall,
     EvaluationCallSummary,
@@ -55,14 +55,15 @@ from reef.core.evaluation import (
 from reef.core.job_data import FILES_DIGEST_PATTERN
 from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
-from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts, ProviderCooldowns, refusal_limit
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
+from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SANDBOX_REQUEST_ERRORS
+from reef.execution.workers import ItemDeferredError, ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
-from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner, trial_exception_type
 from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.coordination.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
@@ -93,6 +94,8 @@ LEASE_CHECK_S = 1.0
 ON_STOP_CHOICES = ("requeue", "finish")
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
+#: The variable of a tree harness's ``env`` that caps the agent's wall-clock time, in seconds.
+AGENT_TIMEOUT_ENV = "REEF_AGENT_TIMEOUT_SECONDS"
 #: The directory of a trial's verifier directory where the verifier writes its own model calls and trajectories: the
 #: task's ``/logs/verifier/judge/``, which Harbor downloads with the verifier directory (RFC #1293).
 VERIFIER_JUDGE_DIR = Path("verifier") / "judge"
@@ -106,6 +109,9 @@ MAX_VERIFIER_REWARDS = 64
 MAX_VERIFIER_CALLS = 2000
 #: The most bytes of verifier files that Reef reads for one attempt.
 MAX_VERIFIER_BYTES = 32 * 1024 * 1024
+#: The share of a rollout's model-call time that failed calls of the inference service may take before the rollout
+#: has no score: below it, the agent lost little time to the failures, and its score still judges the model.
+SERVICE_FAILURE_SHARE = 0.05
 
 
 def harbor_agent(harness: Mapping[str, Any] | None) -> Mapping[str, object]:
@@ -132,14 +138,45 @@ def agent_harness(agent: Mapping[str, object]) -> PolicyHarness:
     return PolicyHarness(name)
 
 
+def agent_timeout_seconds(env: Mapping[str, str]) -> float | None:
+    """Return the positive finite wall-clock timeout in seconds from ``AGENT_TIMEOUT_ENV`` in ``env``, or None when
+    unset. Raise ``ValueError`` for any other value."""
+    raw = env.get(AGENT_TIMEOUT_ENV)
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{AGENT_TIMEOUT_ENV} must be a positive number of seconds, not {raw!r}") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(f"{AGENT_TIMEOUT_ENV} must be a positive number of seconds, not {raw!r}")
+    return seconds
+
+
+def task_agent_timeout_seconds(task_directory: Path) -> float | None:
+    """Return the positive finite ``[agent].timeout_sec`` parsed by Harbor from ``task_directory/task.toml``, or None
+    when the file or timeout is absent."""
+    task_file = task_directory / "task.toml"
+    if not task_file.is_file():
+        return None
+    from harbor.models.task.config import TaskConfig
+
+    timeout = TaskConfig.model_validate_toml(task_file.read_text(encoding="utf-8")).agent.timeout_sec
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
+        return None
+    return float(timeout)
+
+
 @dataclass(frozen=True)
 class TreeHarness:
     """A harness tree that a rollout runs, read from an artifact item.
 
     Values: ``adapter`` is the name of an adapter, ``api`` the API dialect of the model calls, and ``files`` maps
     each path of the tree to its text. ``env`` maps the name of each variable that the agent's commands get to its
-    value; its token limits, when it sets them, are positive integers (``token_limits``). Purpose: control reads it
-    once when it accepts an evaluation, so that each rollout runs the same tree; a worker runs it.
+    value; its token limits, when it sets them, are positive integers (``token_limits``), and
+    ``REEF_AGENT_TIMEOUT_SECONDS``, when set, is a positive finite number of seconds (``agent_timeout_seconds``).
+    Purpose: control reads it once when it accepts an evaluation, so that each rollout runs the same tree; a worker
+    runs it.
     """
 
     adapter: str
@@ -157,25 +194,42 @@ class TreeHarness:
         ):
             raise TypeError("env maps non-empty variable names to text")
         token_limits(self.env)
+        agent_timeout_seconds(self.env)
 
     def policy_harness(self) -> PolicyHarness:
         """The harness side of the policy: the adapter, with the tree rendered with no model binding."""
         return PolicyHarness(self.adapter, render_tree(HarnessTree(self.files), get_adapter(self.adapter)))
 
-    def agent(self, directory: Path, *, bridge: bool = False) -> Mapping[str, object]:
+    def agent(
+        self, directory: Path, *, bridge: bool = False, task_directory: Path | None = None
+    ) -> Mapping[str, object]:
         """The Harbor agent configuration that runs the tree, with its files under ``directory``. ``bridge``
-        bridges the task container's loopback to the rollout's capture proxy (``tree_agent``)."""
+        bridges the task container's loopback to the rollout's capture proxy (``tree_agent``). When ``env`` sets
+        ``REEF_AGENT_TIMEOUT_SECONDS``, the cap overrides an unbounded task timeout or caps ``[agent].timeout_sec``
+        in ``task_directory/task.toml``, propagating to Harbor's ``override_timeout_sec``, the command timeout and
+        cloud sandbox lifetime."""
         tree_dir = directory / "tree"
         HarnessTree(self.files).write(tree_dir)
-        return tree_agent(
+        cap = agent_timeout_seconds(self.env)
+        if cap is None:
+            command_timeout = TREE_AGENT_TIMEOUT_S
+            override_timeout: float | None = None
+        else:
+            task_timeout = None if task_directory is None else task_agent_timeout_seconds(task_directory)
+            override_timeout = cap if task_timeout is None else min(task_timeout, cap)
+            command_timeout = float(math.ceil(override_timeout))
+        config = tree_agent(
             get_adapter(self.adapter),
             api=self.api,
             tree_dir=tree_dir,
             files_dir=directory / "rendered",
-            timeout=TREE_AGENT_TIMEOUT_S,
+            timeout=command_timeout,
             bridge=bridge,
             env=self.env,
         )
+        if override_timeout is not None:
+            return {**config, "override_timeout_sec": override_timeout}
+        return config
 
     def to_json(self) -> dict[str, JsonValue]:
         value: dict[str, JsonValue] = {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
@@ -386,12 +440,13 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     """The candidate's model, on loopback in the process of the evaluation worker: an ``ArtifactEndpoint`` that
     sends each call to the engine that inference started, or to its scenario's runtime for an engine with no address.
 
-    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation worker opens it around each
-    rollout.
+    Values: ``artifacts`` finds the candidate of each rollout. ``cooldowns`` holds the rate-limit waits that the
+    endpoints of all its rollouts share. Purpose: the evaluation worker opens it around each rollout.
     """
 
     def __init__(self, artifacts: CandidateArtifacts) -> None:
         self.artifacts = artifacts
+        self.cooldowns = ProviderCooldowns()
 
     def task_directory(self, rollout: EvaluationRollout) -> Path:
         if rollout.task_digest is None:
@@ -421,7 +476,11 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
-        with ArtifactEndpoint(runtime, artifact, served, log_probs=rollout.log_probs) as endpoint:
+        # Each rollout is its own conversation, also when the tasks of an evaluation start with the same messages.
+        session_key = f"evaluation:{rollout.evaluation_id}:{rollout.task_index}:{rollout.repeat}"
+        with ArtifactEndpoint(
+            runtime, artifact, served, log_probs=rollout.log_probs, cooldowns=self.cooldowns, session_key=session_key
+        ) as endpoint:
             yield CandidateEndpoint(endpoint.url, None)
 
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
@@ -483,12 +542,13 @@ def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int
 
     The call started ``turn.duration_s`` seconds before the proxy captured it at ``turn.at``. Its summary fields come
     from the reply of a 200 call (``reply_summary``); a failed call has none, and 0 tool calls. The kept response has
-    no ``training`` block: it holds token IDs for training, which nobody reads in a call log.
+    no ``training`` block: it holds token IDs for training, which nobody reads in a call log. A body that is not a
+    JSON object is kept as None.
     """
+    request = turn.request if isinstance(turn.request, Mapping) else None
+    response = turn.response if isinstance(turn.response, Mapping) else None
     prompt, completion, finish, tool_calls = (
-        reply_summary(turn.path, turn.response)
-        if turn.status == 200 and turn.response is not None
-        else (None, None, None, 0)
+        reply_summary(turn.path, response) if turn.status == 200 and response is not None else (None, None, None, 0)
     )
     summary = EvaluationCallSummary(
         task_index=rollout.task_index,
@@ -504,10 +564,9 @@ def evaluation_call(turn: CapturedTurn, rollout: EvaluationRollout, attempt: int
         finish_reason=finish,
         tool_calls=tool_calls,
     )
-    response = turn.response
     if response is not None and "training" in response:
         response = {key: value for key, value in response.items() if key != "training"}
-    return EvaluationCall(summary, turn.request, response)
+    return EvaluationCall(summary, request, response)
 
 
 def verifier_call(line: str, rollout: EvaluationRollout, attempt: int, index: int) -> EvaluationCall:
@@ -613,13 +672,55 @@ def verifier_rewards(rewards: Mapping[str, float]) -> dict[str, JsonValue] | Non
     return dict(list(kept.items())[:MAX_VERIFIER_REWARDS]) or None
 
 
+@dataclass(frozen=True)
+class ModelCallRefusal:
+    """A model call of a rollout that a provider's limit refused, as its capture shows it.
+
+    Values: ``limit`` is the ``UpstreamLimit`` of the refusal (``refusal_limit``), ``status`` the answer's HTTP status,
+    an int from 400 to 599, and ``retry_after_seconds`` the answer's ``Retry-After``, an int of at least 0, or None.
+    It holds no text of the answer. Purpose: ``RolloutCalls`` makes it for the last captured call, and
+    ``EvaluationRolloutWorker.score`` fails an unscored rollout with its ``reason``.
+    """
+
+    limit: UpstreamLimit
+    status: int
+    retry_after_seconds: int | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.limit, UpstreamLimit):
+            raise TypeError("limit is an UpstreamLimit")
+        if isinstance(self.status, bool) or not isinstance(self.status, int) or not 400 <= self.status < 600:
+            raise ValueError("status is an HTTP error status from 400 to 599")
+        wait = self.retry_after_seconds
+        if wait is not None and (isinstance(wait, bool) or not isinstance(wait, int) or wait < 0):
+            raise ValueError("retry_after_seconds is a number of seconds of at least 0, or None")
+
+    def reason(self) -> str:
+        """The error of a rollout that this refusal left with no score, made from the fields alone."""
+        text = f"the model provider refused the last model call with HTTP {self.status} ({self.limit.value})."
+        if self.retry_after_seconds is not None:
+            text += f" Retry after {self.retry_after_seconds} s."
+        if self.limit is UpstreamLimit.PAYMENT and self.status == 403:
+            text += " Check the provider's spending cap, or wait until it resets, before retrying."
+        elif self.limit is UpstreamLimit.PAYMENT:
+            text += " Check the provider balance or key limit, or reduce the request size before retrying."
+        return text
+
+
 class RolloutCalls(CaptureObserver):
     """Keeps each call of one attempt of an evaluation rollout in the data store, as the call ends.
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
-    the index of the next call. ``answered`` is the number of those calls that answered 200, from 0 to
-    ``next_index``.
+    the index of the next call. ``all_answered`` counts calls that answered 200 and ``all_last_refusal`` holds the
+    ``ModelCallRefusal`` of the call captured last, or None. ``tool_calls_seen`` is True once a call carried a
+    non-empty ``tools`` field (``has_tools``); ``tool_answered`` and ``tool_last_refusal`` track those tool-bearing
+    calls alone. ``answered`` and ``last_refusal`` read the tool-bearing counters when ``tool_calls_seen`` is True,
+    else the all-call counters, so auxiliary calls without tools (such as title generation) neither mask a main-loop
+    refusal nor fail a completed main loop. ``service_failures`` is the number of calls that the inference service
+    failed (an HTTP status of 500 or more), ``service_failure_seconds`` their total duration, and ``last_failed``
+    whether the call captured last was one. ``first_started_at`` and ``last_ended_at`` bound the calls in wall-clock
+    seconds; both are None before the first.
 
     Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
     One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
@@ -631,16 +732,74 @@ class RolloutCalls(CaptureObserver):
         self.rollout = rollout
         self.attempt = attempt
         self.next_index = 0
-        self.answered = 0
+        self.all_answered = 0
+        self.all_last_refusal: ModelCallRefusal | None = None
+        self.tool_calls_seen = False
+        self.tool_answered = 0
+        self.tool_last_refusal: ModelCallRefusal | None = None
+        self.service_failures = 0
+        self.service_failure_seconds = 0.0
+        self.last_failed = False
+        self.first_started_at: float | None = None
+        self.last_ended_at: float | None = None
         self.lock = threading.Lock()
         self.writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-evaluation-calls")
 
+    @property
+    def answered(self) -> int:
+        with self.lock:
+            return self.tool_answered if self.tool_calls_seen else self.all_answered
+
+    @property
+    def last_refusal(self) -> ModelCallRefusal | None:
+        with self.lock:
+            return self.tool_last_refusal if self.tool_calls_seen else self.all_last_refusal
+
     def call_captured(self, turn: CapturedTurn) -> None:
+        # The proxy keeps whatever JSON the endpoint answered; only an object can name a refusal.
+        response = turn.response if isinstance(turn.response, Mapping) else None
+        limit = refusal_limit(turn.status, response)
+        error = response.get("error") if response is not None else None
+        wait = error.get("retry_after_seconds") if isinstance(error, Mapping) else None
+        if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
+            wait = None
+        refusal = None if limit is None else ModelCallRefusal(limit, turn.status, wait)
+        is_tool_call = isinstance(turn.request, dict) and has_tools(turn.request) and bool(turn.request["tools"])
         with self.lock:
             index = self.next_index
             self.next_index += 1
-            self.answered += turn.status == 200
+            self.all_answered += turn.status == 200
+            self.all_last_refusal = refusal
+            if is_tool_call:
+                self.tool_calls_seen = True
+                self.tool_answered += turn.status == 200
+                self.tool_last_refusal = refusal
+            started = turn.at - turn.duration_s
+            self.first_started_at = started if self.first_started_at is None else min(self.first_started_at, started)
+            self.last_ended_at = turn.at if self.last_ended_at is None else max(self.last_ended_at, turn.at)
+            self.last_failed = turn.status >= 500
+            if self.last_failed:
+                self.service_failures += 1
+                self.service_failure_seconds += turn.duration_s
             self.writer.submit(self.keep, evaluation_call(turn, self.rollout, self.attempt, index))
+
+    def service_failure(self) -> str | None:
+        """The error of a rollout whose score would judge the inference service rather than the model, or None.
+
+        That is a rollout whose last model call the service failed, or whose failed calls took at least
+        ``SERVICE_FAILURE_SHARE`` of the time from its first call to the end of its last: the agent stopped on the
+        failure, or it waited out much of its time limit for answers that did not come."""
+        with self.lock:
+            if not self.service_failures or self.first_started_at is None or self.last_ended_at is None:
+                return None
+            span = max(self.last_ended_at - self.first_started_at, 0.0)
+            if not self.last_failed and self.service_failure_seconds < SERVICE_FAILURE_SHARE * span:
+                return None
+            last = ", the last one among them" if self.last_failed else ""
+            return (
+                f"the inference service failed {self.service_failures} of {self.next_index} model calls{last}, which "
+                f"took {self.service_failure_seconds:.0f} s of {span:.0f} s of model calls; the rollout has no score"
+            )
 
     def keep(self, call: EvaluationCall) -> None:
         try:
@@ -714,7 +873,10 @@ class EvaluationRolloutWorker(QueueWorker):
     to the queue, as with ``requeue``; a rollout whose trial has ended keeps its result. A failed rollout is retried: a
     trial fails for reasons outside its input, such as a sandbox that did not start. A rollout of a harness tree whose
     task needs what the tree's agent does not give it (``task_agent_tools``) fails for good, and so does a rollout
-    that requires prepared templates when its task's template item did not finish.
+    that requires prepared templates when its task's template item did not finish, one whose sandbox request the
+    sandbox service refused as invalid, and one that a provider's limit left with no score (``score``). A rollout
+    whose sandbox found no capacity goes back to the queue and waits (``ItemDeferredError``), and the worker goes on
+    with other rollouts.
 
     Purpose: the evaluation service starts one (``start``), lets it begin to stop as soon as the process begins to
     stop (``begin_stop``), and stops it (``stop``).
@@ -816,24 +978,36 @@ class EvaluationRolloutWorker(QueueWorker):
     def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
         """Ask inference to serve the candidate of ``rollout``, wait until it is ready, and return the value that
         reaches it: None for a runtime with no address. Raise ``ReefError`` when inference fails or takes too long, so
-        that the rollout fails and does not score 0."""
+        that the rollout fails and does not score 0.
+
+        The serve items of one candidate run one at a time, in order: the rollouts of an evaluation wait for one start
+        and do not fill each serving slot of inference with the same start. A rollout that stops waiting cancels its
+        item, so that inference does not start the candidate for a rollout that is gone."""
         item_id = f"{SERVE_ARTIFACT_KIND}:{uuid.uuid4().hex}"
         payload: dict[str, JsonValue] = {"selection": dict(rollout.selection), "component": rollout.component}
-        self.queue.append(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
+        serial_key = f"{SERVE_ARTIFACT_KIND}:{rollout.scenario}:{rollout.artifact_id}"
+        self.queue.append(
+            NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload, serial_key=serial_key)
+        )
         deadline = time.monotonic() + SERVE_WAIT_S
-        while time.monotonic() < deadline:
-            if self.rollouts_cancelled.is_set():
-                raise WorkerStoppedError
-            if lease_lost.is_set():
-                raise WorkLeaseLostError("the evaluation worker lost its lease")
-            item = self.queue.read(SERVING_QUEUE, item_id)
-            if item is not None and item.final:
-                if item.state != "finished":
-                    raise ReefError(f"inference could not serve artifact {rollout.artifact_id}: {item.error}")
-                served = cast(Mapping[str, Any], item.result)["served"]
-                return None if served is None else ServedArtifact.from_json(served)
-            time.sleep(SERVE_POLL_S)
-        raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
+        try:
+            while time.monotonic() < deadline:
+                if self.rollouts_cancelled.is_set():
+                    raise WorkerStoppedError
+                if lease_lost.is_set():
+                    raise WorkLeaseLostError("the evaluation worker lost its lease")
+                item = self.queue.read(SERVING_QUEUE, item_id)
+                if item is not None and item.final:
+                    if item.state != "finished":
+                        raise ReefError(f"inference could not serve artifact {rollout.artifact_id}: {item.error}")
+                    served = cast(Mapping[str, Any], item.result)["served"]
+                    return None if served is None else ServedArtifact.from_json(served)
+                time.sleep(SERVE_POLL_S)
+            raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
+        except (WorkerStoppedError, WorkLeaseLostError, ReefError):
+            # A final item stays as it is.
+            self.queue.cancel(SERVING_QUEUE, item_id, "the evaluation rollout stopped waiting for the candidate")
+            raise
 
     def score(
         self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int
@@ -843,7 +1017,17 @@ class EvaluationRolloutWorker(QueueWorker):
         1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``).
 
         A rollout that requires prepared templates runs only when its task's template item finished, and its trial
-        builds no template. Else it fails for good with the template item's error, before its candidate is served."""
+        builds no template. Else it fails for good with the template item's error, before its candidate is served.
+
+        A sandbox capacity refusal raises ``ItemDeferredError``. An invalid sandbox request fails the rollout.
+        Both leave the score unset, even if the agent already called the model.
+
+        When a provider's limit refused the last model call (``RolloutCalls.last_refusal``), or refused a trailing
+        no-tools call on a trial that failed with an error (``RolloutCalls.all_last_refusal``), the rollout fails for
+        good with no score (``ModelCallRefusal.reason``). When a rollout makes tool-bearing calls, auxiliary calls
+        without tools do not mask a main-loop refusal and do not fail a trial that finished with no error. When the
+        inference service failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score,
+        and the rollout is retried as any other failed attempt."""
         if rollout.requires_prepared_templates:
             template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
@@ -878,7 +1062,11 @@ class EvaluationRolloutWorker(QueueWorker):
                 model_adapter=rollout.model.adapter,
                 token=endpoint.token,
                 work_dir=Path(work),
-                agent=rollout.tree.agent(Path(work), bridge=bridged) if rollout.tree is not None else rollout.agent,
+                agent=(
+                    rollout.tree.agent(Path(work), bridge=bridged, task_directory=task_directory)
+                    if rollout.tree is not None
+                    else rollout.agent
+                ),
                 # A tree's agent on Docker runs in the task's container, which reaches the capture proxy at this address.
                 agent_host=None if rollout.tree is None or bridged else self.agent_host,
                 environment=rollout.environment,
@@ -907,6 +1095,12 @@ class EvaluationRolloutWorker(QueueWorker):
             # The trial directory is under ``work``, so read it before the block removes it.
             trial = trial_directory(result.trial_uri)
             self.keep_verifier_output(rollout, attempt, trial)
+            # A trial that the sandbox service refused for want of capacity waits in the queue for capacity and runs
+            # again, and the attempt does not count. That holds also after the agent called the model: a separate
+            # verifier that found no sandbox gave no score of the candidate. A sandbox request that the service
+            # refused as invalid fails the same way again, so the rollout fails for good, with the service's reason
+            # and no score.
+            exception_type = trial_exception_type(result.trial_uri)
             self.observe_trial(
                 rollout,
                 EvaluationTrial(
@@ -918,8 +1112,27 @@ class EvaluationRolloutWorker(QueueWorker):
                     attempt,
                     trial,
                     result.error,
+                    deferred=exception_type in SANDBOX_CAPACITY_ERRORS,
                 ),
             )
+            if exception_type in SANDBOX_CAPACITY_ERRORS:
+                raise ItemDeferredError(f"waiting for sandbox capacity: {result.error}")
+            if exception_type in SANDBOX_REQUEST_ERRORS:
+                raise ItemFailedError(f"the sandbox service refused the sandbox: {result.error}")
+            last_refusal = calls.last_refusal
+            if last_refusal is None and result.error:
+                # A required tool-less agent step (such as a native sub-agent with ``tools: []``) still fails the
+                # trial with ``result.error``; keep its terminal refusal rather than scoring 0.
+                last_refusal = calls.all_last_refusal
+            if last_refusal is not None:
+                # The agent stopped on a provider refusal, so a score, 0 above all, would judge the provider, and a
+                # new sandbox at once would meet the same refusal.
+                raise ItemFailedError(last_refusal.reason())
+            service_failure = calls.service_failure()
+            if service_failure is not None:
+                # The agent stopped on a failed call or lost much of its time to them, so a score, 0 above all, would
+                # judge the service. Another attempt can find the service well again.
+                raise ReefError(service_failure)
             if not calls.answered:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
                 # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
@@ -1061,6 +1274,7 @@ class TaskTemplateWorker(QueueWorker):
 
 
 __all__ = [
+    "AGENT_TIMEOUT_ENV",
     "EVALUATIONS_QUEUE",
     "EVALUATION_ROLLOUT_KIND",
     "MAX_VERIFIER_BYTES",
@@ -1074,10 +1288,12 @@ __all__ = [
     "EvaluationRollout",
     "EvaluationRolloutWorker",
     "LocalCandidateEndpoints",
+    "ModelCallRefusal",
     "RolloutCalls",
     "TaskTemplateWorker",
     "TreeHarness",
     "agent_harness",
+    "agent_timeout_seconds",
     "check_finish_timeout",
     "evaluation_call",
     "harbor_agent",

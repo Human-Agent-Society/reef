@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import StubInferenceRuntime, live_objects
 
-from reef.api.app import RequestService, create_app
+from reef.api.app import RequestHandling, create_app
 from reef.artifact import (
     Artifact,
     ArtifactError,
@@ -131,7 +131,7 @@ async def proxied_client(tmp_path, path: str, upstream) -> AsyncIterator[tuple[T
 
 @pytest.mark.unit
 def test_service_rejects_missing_scenario_and_inference_accept() -> None:
-    service = RequestService(
+    service = RequestHandling(
         build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     )
 
@@ -160,7 +160,7 @@ def test_service_has_no_control_route_and_provider_native_generation_stays_behin
 @pytest.mark.unit
 def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> None:
     dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
-    service = RequestService(dispatcher)
+    service = RequestHandling(dispatcher)
 
     math = service.accept(
         {"x-reef-scenario": "math"},
@@ -199,7 +199,7 @@ def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_st
     dispatcher = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
-    service = RequestService(dispatcher)
+    service = RequestHandling(dispatcher)
     headers = {"x-reef-scenario": "math", "x-reef-release-id": "another-scenarios-release"}
 
     service.accept(headers, {"score": 1.0}, request_type=RequestType.REPORT)
@@ -233,7 +233,7 @@ def test_report_first_request_registers_the_scenarios_root_snapshot(tmp_path) ->
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
 
-    RequestService(dispatcher).accept(
+    RequestHandling(dispatcher).accept(
         {"x-reef-scenario": "math"},
         {"score": 1.0},
         request_type=RequestType.REPORT,

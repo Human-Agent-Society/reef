@@ -45,7 +45,13 @@ class DeploymentSettings:
     ready_timeout: int = field(
         default=30,
         metadata=config_metadata(
-            "Service readiness deadline in seconds.", path=("ready_timeout",), public_path=("reef", "ready_timeout")
+            (
+                "Readiness deadline of the HTTP service in seconds; with Slime or Reef's serving "
+                "engines it is at least training.ready-timeout. When set, it is also the deadline of "
+                "a standalone local engine."
+            ),
+            path=("ready_timeout",),
+            public_path=("reef", "ready_timeout"),
         ),
     )
 

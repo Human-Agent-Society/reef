@@ -9,7 +9,7 @@ from aiohttp import web
 
 from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, SSERelay
 from reef.api.lifecycle import ADMITTED_ROUTING, REQUEST_ACCEPTANCE
-from reef.api.request_service import RequestService
+from reef.api.request_handling import RequestHandling
 from reef.api.routed_inference import RoutedAttempt, RoutedInference
 from reef.api.routes.payload import read_object
 from reef.api.streaming import receipt_sse_events, stream_record
@@ -120,14 +120,14 @@ async def serve_routed_chat(
     return web.json_response(response, headers={RECORD_HEADER: item.agent_record_id})
 
 
-def register_routed_chat(app: web.Application, *, request_service: RequestService) -> None:
+def register_routed_chat(app: web.Application, *, request_handling: RequestHandling) -> None:
     async def chat(request: web.Request) -> web.StreamResponse:
         return await serve_routed_chat(
             request,
             # Before the upload: a managed deployment already captured its adapter when it admitted this request.
-            request.get(ADMITTED_ROUTING, request_service.routing),
-            request_service.routed,
-            for_codex=harness_adapter(request_service.dispatcher.recipe) == "codex",
+            request.get(ADMITTED_ROUTING, request_handling.routing),
+            request_handling.routed,
+            for_codex=harness_adapter(request_handling.dispatcher.recipe) == "codex",
         )
 
     app.router.add_post("/v1/chat/completions", chat)

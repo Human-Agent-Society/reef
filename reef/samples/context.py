@@ -31,6 +31,8 @@ class PipelineContext:
 
     scenario: str
     report_type: type[ReportBase] | None = None
+    #: The scenario's experiment logger. A stage logs finite numeric metrics under its method's namespace
+    #: (``ExperimentLogger.log``); the logger does nothing when tracking is off.
     experiment_logger: ExperimentLogger = field(default_factory=NullExperimentLogger)
     training_mode: str = "auto"
     #: The contract the scenario's ingress admits, when it is wider than ``report_type``: a report it

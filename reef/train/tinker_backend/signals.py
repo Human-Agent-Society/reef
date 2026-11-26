@@ -17,8 +17,10 @@ class TrainingSignal:
     """What a Tinker objective computes from one job's data, before the rows of a Tinker loss are made.
 
     ``action`` is ``train`` or ``skip``. ``next_algorithm_state`` is the objective's state after the job data.
-    ``metrics`` is the objective's telemetry. ``advantages`` has one value per trajectory, or is None for a loss
-    family that reads none. ``TinkerObjective.prepare`` returns the value; ``prepare_tinker_job`` reads it.
+    A ``skip`` job trains nothing and saves no checkpoint, so the component does not keep its
+    ``next_algorithm_state``. ``metrics`` is the objective's telemetry, which the job reports in its metrics.
+    ``advantages`` has one value per trajectory, in the job data's order, or is None for a loss family that
+    reads none. ``TinkerObjective.prepare`` returns the value; ``prepare_tinker_job`` reads it.
     """
 
     action: Literal["train", "skip"]

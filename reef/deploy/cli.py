@@ -260,7 +260,7 @@ def build_serve_parser(
         help="The upstream model; a known provider prefix (ollama, openai) fills the URL and the key.",
     )
     parser.add_argument(
-        "--component",
+        "--service",
         default=None,
         choices=SERVICE_NAMES,
         help=(
@@ -268,6 +268,8 @@ def build_serve_parser(
             "training, evaluation, data or harness. Without it, one process runs all of them."
         ),
     )
+    # The older name of ``--service``. It gives the same value, and the help does not show it.
+    parser.add_argument("--component", dest="service", default=None, choices=SERVICE_NAMES, help=argparse.SUPPRESS)
     parser.add_argument(
         "--print-config",
         action="store_true",

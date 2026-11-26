@@ -53,7 +53,9 @@ class Recipe:
     training component and no store (RFC #1390): the process holds them in
     ``reef.control.scenario.live_objects.LiveObjects``. The scenario factory builds
     the trainers from a recipe's values and those objects
-    (``reef.control.scenario.factory.read_trainer_specs``).
+    (``reef.control.scenario.factory.read_trainer_specs``). Every member is
+    a function of the configuration and its arguments, and a recipe builds no
+    runtime, training component or store.
     """
 
     config_sections: ClassVar[tuple[str, ...]] = ()
@@ -70,13 +72,20 @@ class Recipe:
     deployment wins. A class that only sets other defaults for a base class's sections declares them here."""
 
     name: str = "recipe"
-    training_mode: str = config_field("auto")
+    training_mode: str = config_field(
+        "auto",
+        help=(
+            "auto starts a job when job_samples untrained samples wait; manual starts a job only for a "
+            "POST /reef/train request. A request trains in both modes."
+        ),
+    )
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
     pipeline_stages: PipelineSettings | None = field(default=None, repr=False, compare=False)
     #: The deployment's ``activation`` section: the rule that activates new artifacts; None is ``always``.
     activation: PluginReference | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Check ``training_mode`` and the stage classes. A subclass that defines ``__post_init__`` calls this one."""
         if self.training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
         # The stages' classes fail the deployment here, not the first scenario.
@@ -135,6 +144,7 @@ class Recipe:
         traffic only. Most recipes ignore ``scenario``. The value is a function
         of the recipe's configuration fields alone; the deployment's components are
         ``reef.control.scenario.live_objects.scenario_components``, which adds the facts that live objects know.
+        A recipe that is not a ``CompositeRecipe`` has one trainer, so it declares at most one component.
         """
         return ScenarioComponents()
 

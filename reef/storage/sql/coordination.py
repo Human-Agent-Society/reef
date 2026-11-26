@@ -23,7 +23,7 @@ import time
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -77,6 +77,7 @@ from reef.storage.coordination.served_models import (
 )
 from reef.storage.coordination.store import Coordination, CoordinationResource
 from reef.storage.coordination.work_queue import (
+    DEFERRED_ATTEMPTS,
     FINAL_STATES,
     HELD_STATES,
     WORK_STATES,
@@ -92,6 +93,7 @@ from reef.storage.coordination.work_queue import (
     check_page,
     check_prefix_state_counts,
     clock,
+    is_finite_time,
 )
 from reef.storage.sql.records import batches
 from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
@@ -972,8 +974,9 @@ def item_from_row(row: RowMapping) -> WorkItem:
 class SQLWorkQueue(WorkQueue):
     """Work queues in a coordination database.
 
-    Every change holds the ``WORK_SEQUENCE`` counter row, so the changes of all queues are serialized: two workers
-    that take at once never get the same item. ``take`` selects the oldest item that the worker can take.
+    Every numbered change holds the ``WORK_SEQUENCE`` counter row, so those changes across all queues are serialized:
+    two workers that take at once never get the same item. Lease-only extensions (``extend_lease``) lock only the
+    item row and take no counter. ``take`` selects the oldest item that the worker can take.
     """
 
     def __init__(
@@ -1198,9 +1201,15 @@ class SQLWorkQueue(WorkQueue):
 
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
-        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+        lease_expires_at = moment + self.lease_seconds
+        # A lease extension numbers no change, so it takes no counter. ``held`` locks the item's row (PostgreSQL) or
+        # the database (SQLite), so no other write changes the item between the check and the update.
+        with self.database.connection(write=True) as connection:
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.write_item(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
+            connection.execute(
+                update(self.table).where(*self.key(item.queue, item.id)).values(lease_expires_at=lease_expires_at)
+            )
+            return replace(item, lease_expires_at=lease_expires_at)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
@@ -1259,11 +1268,12 @@ class SQLWorkQueue(WorkQueue):
         *,
         retryable: bool,
         now: float | None = None,
+        attempt: int | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
             again = retryable and self.has_attempts_left(item)
             return self.write_item(
                 connection,
@@ -1277,20 +1287,41 @@ class SQLWorkQueue(WorkQueue):
                 ended_at=None if again else moment,
             )
 
-    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def give_back(
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        *,
+        now: float | None = None,
+        available_at: float | None = None,
+        error: str = "the worker stopped",
+        deferred: bool = False,
+        attempt: int | None = None,
+    ) -> WorkItem:
+        require_text(error, "error")
+        if available_at is not None and not is_finite_time(available_at):
+            raise ValueError("available_at is a finite time or None")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            # The count grows from the stored row in the give-back's own change, so a deferral counts once, and an
+            # attempt that no longer holds the item counts none.
+            metadata = dict(item.metadata)
+            if deferred:
+                metadata[DEFERRED_ATTEMPTS] = item.deferred_attempt_count + 1
             return self.write_item(
                 connection,
                 counter,
                 item,
                 moment,
                 state="queued",
-                error="the worker stopped",
+                error=error,
                 worker_id=None,
                 lease_expires_at=None,
+                available_at=moment if available_at is None else available_at,
                 stopped_attempt_count=item.stopped_attempt_count + 1,
+                metadata_json=canonical_json(metadata),
             )
 
     def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:

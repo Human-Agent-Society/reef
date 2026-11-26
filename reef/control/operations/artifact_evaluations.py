@@ -36,6 +36,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, cast, overload
 
+from reef_client.serve import has_tools
+
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
 from reef.control.dispatcher import Dispatcher
@@ -62,7 +64,7 @@ from reef.core.evaluation import (
 )
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import TrajectoryBuilder
-from reef.core.trajectory_index import TrajectoryIndex
+from reef.core.trajectory_index import RequestValues, TrajectoryIndex
 from reef.core.values import deep_merge
 from reef.evaluation.activation import EvaluatedActivation
 from reef.evaluation.rollout_worker import (
@@ -442,6 +444,56 @@ def call_record(scenario: str, evaluation_id: str, call: EvaluationCall) -> Agen
     return AgentRecord(record_id, scenario, RequestType.INFERENCE, payload, summary.started_at)
 
 
+#: Prompt prefixes that identify an auxiliary title-generation model call.
+TITLE_GENERATOR_SYSTEM_PREFIX = "You are a title generator."
+TITLE_GENERATOR_USER_PREFIX = "Generate a title for this conversation:"
+
+
+def request_has_tools(call: EvaluationCall) -> bool:
+    """Return True when ``call`` sent a non-empty ``tools`` field in its request body."""
+    return isinstance(call.request, dict) and has_tools(call.request) and bool(call.request["tools"])
+
+
+def content_text(content: object) -> str:
+    """Return the joined text of a chat/responses message ``content`` field, or an empty string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray)):
+        parts = [
+            block["text"] for block in content if isinstance(block, Mapping) and isinstance(block.get("text"), str)
+        ]
+        return "\n".join(parts)
+    return ""
+
+
+def is_title_generation_call(call: EvaluationCall) -> bool:
+    """Return True when ``call`` is a tool-less auxiliary title-generation request.
+
+    Checks OpenAI Chat (``messages``), Anthropic Messages (``system`` + ``messages``), and OpenAI Responses
+    (``instructions`` + ``input``) payloads for the standard title-generator system or user prompt prefix.
+    Tool-bearing calls always return False.
+    """
+    if request_has_tools(call) or not isinstance(call.request, Mapping):
+        return False
+    for key in ("system", "instructions"):
+        if content_text(call.request.get(key)).lstrip().startswith(TITLE_GENERATOR_SYSTEM_PREFIX):
+            return True
+    for key in ("messages", "input"):
+        entries = call.request.get(key)
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            role = entry.get("role")
+            text = content_text(entry.get("content")).lstrip()
+            if role in ("system", "developer") and text.startswith(TITLE_GENERATOR_SYSTEM_PREFIX):
+                return True
+            if role == "user" and text.startswith(TITLE_GENERATOR_USER_PREFIX):
+                return True
+    return False
+
+
 def attempt_trajectories(
     scenario: str,
     evaluation_id: str,
@@ -451,65 +503,95 @@ def attempt_trajectories(
     *,
     include_records: bool = True,
 ) -> list[dict[str, Any]]:
-    """The ATIF trajectories of each attempt of the rollout of ``item`` that has a 200 call among ``calls``, in
-    attempt order. ``calls`` are kept calls of ``caller`` of that rollout, in attempt and then index order.
+    """Return one ATIF trajectory per conversation, ordered by attempt and then by the conversation's first call.
 
-    Each 200 call of an attempt is one ``AgentRecord`` (``call_record``). ``TrajectoryIndex`` links the calls of one
-    attempt into conversations, as it links the records of training samples: an agent that plays several roles, each
-    with its own messages, has one conversation for each. ``TrajectoryBuilder`` stitches each conversation, without the
-    calls that a retry replaced; the conversations are in the order of their first calls. With ``include_records``
-    false, a trajectory has no ``extra.reef.records``. The attempt that the rollout's score came from is the last
-    attempt of a finished rollout: each of its agent trajectories has the score's value as its reward, null for a
-    failed score, and every other trajectory has no reward. Each trajectory carries ``extra.reef.evaluation``:
-    ``{evaluation_id, task, task_index, repeat, attempt, caller, conversation, scored}``, where ``conversation``
-    counts from 0 in its attempt.
+    Supply the rollout's calls for one caller in attempt and call-index order. Only HTTP 200 responses contribute.
+    Each conversation excludes calls that a retry replaced. Set ``include_records=False`` to omit ``extra.reef.records``.
 
-    It reads ``calls`` twice, in order: once to link the calls, and once to add each call to its conversation
-    (``TrajectoryBuilder``). It keeps no call between two reads. So with ``StoredCalls`` it holds the bodies of one
-    batch of calls at a time, and the trajectories that it returns.
+    Only the agent trajectories from a finished rollout's final attempt carry its reward, which is null if scoring failed.
+    When that attempt includes another conversation, single-turn auxiliary title-generation conversations without tools
+    receive ``scored=False`` and no reward, while required tool-less roles and subagents keep the rollout reward. Each
+    trajectory's ``extra.reef.evaluation`` identifies the evaluation, task, task index, repeat, attempt, caller,
+    conversation and scoring status. Conversation numbers start at zero within each attempt. Use
+    ``iter_attempt_trajectories`` to read one conversation at a time.
     """
+    return list(
+        iter_attempt_trajectories(scenario, evaluation_id, item, calls, caller, include_records=include_records)
+    )
+
+
+def iter_attempt_trajectories(
+    scenario: str,
+    evaluation_id: str,
+    item: WorkItem,
+    calls: Sequence[EvaluationCall],
+    caller: Caller = "agent",
+    *,
+    include_records: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Yield the trajectories described by ``attempt_trajectories``, assembling one conversation at a time."""
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"]).value if finished else None
     indexes: dict[int, TrajectoryIndex] = {}
     record_ids: dict[int, list[str]] = {}
-    for call in calls:
+    positions: dict[str, int] = {}
+    title_positions: set[int] = set()
+    # Each call resends the messages of the calls before it, so the rollout's calls share their request values.
+    request_values = RequestValues()
+    for position, call in enumerate(calls):
         if call.summary.status != 200:
             continue
         record = call_record(scenario, evaluation_id, call)
-        indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record)
+        indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record, request_values)
         record_ids.setdefault(call.summary.attempt, []).append(record.agent_record_id)
-    # Each conversation of each attempt, by the ID of each of its calls; a call that a retry replaced is in none.
-    builders: dict[tuple[int, int], TrajectoryBuilder] = {}
-    conversation_of: dict[str, tuple[int, int]] = {}
+        positions[record.agent_record_id] = position
+        if is_title_generation_call(call):
+            title_positions.add(position)
+    # The calls are linked: the messages need not stay while the conversations are read.
+    request_values.made.clear()
     for attempt in sorted(record_ids):
-        for conversation, linked in enumerate(indexes[attempt].conversations(record_ids[attempt])):
-            builders[attempt, conversation] = TrajectoryBuilder(include_records)
-            conversation_of.update(dict.fromkeys(linked, (attempt, conversation)))
-    for call in calls:
-        if call.summary.status != 200:
-            continue
-        record = call_record(scenario, evaluation_id, call)
-        place = conversation_of.get(record.agent_record_id)
-        if place is not None:
-            builders[place].add(record)
-    trajectories = []
-    for (attempt, conversation), builder in builders.items():
-        scored = caller == "agent" and finished and attempt == item.attempt_count
-        trajectory = builder.sample(reward=score if scored else None).trajectory
-        evaluation = {
-            "evaluation_id": evaluation_id,
-            "task": rollout.task_name,
-            "task_index": rollout.task_index,
-            "repeat": rollout.repeat,
-            "attempt": attempt,
-            "caller": caller,
-            "conversation": conversation,
-            "scored": scored,
-        }
-        extra = trajectory["extra"]
-        trajectories.append({**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}})
-    return trajectories
+        ids = record_ids[attempt]
+        conversation_of: dict[str, int] = {}
+        groups: list[list[int]] = []
+        # A retry replaces its earlier call. A prefix shared by branches belongs to the last branch, as in the
+        # recorded rollout. The first remaining call of each earlier branch still has its full request history.
+        for conversation, linked in enumerate(indexes[attempt].iter_conversations(ids)):
+            groups.append([])
+            conversation_of.update(dict.fromkeys(linked, conversation))
+        for record_id in ids:
+            group = conversation_of.get(record_id)
+            if group is not None:
+                groups[group].append(positions[record_id])
+        group_is_auxiliary = [
+            len(group_positions) == 1 and group_positions[0] in title_positions for group_positions in groups
+        ]
+        attempt_has_primary = any(not auxiliary for auxiliary in group_is_auxiliary)
+        ordered = (pos for group_positions in groups for pos in group_positions)
+        if isinstance(calls, StoredCalls):
+            # Read originals in bounded batches, even when a rollout has hundreds of single-call conversations.
+            members = iter(replace(calls, items=tuple(calls.items[pos] for pos in ordered)))
+        else:
+            members = (calls[pos] for pos in ordered)
+        for conversation, group_positions in enumerate(groups):
+            builder = TrajectoryBuilder(include_records)
+            for _ in group_positions:
+                builder.add(call_record(scenario, evaluation_id, next(members)))
+            is_auxiliary = attempt_has_primary and group_is_auxiliary[conversation]
+            scored = caller == "agent" and finished and attempt == item.attempt_count and not is_auxiliary
+            trajectory = builder.sample(reward=score if scored else None).trajectory
+            evaluation = {
+                "evaluation_id": evaluation_id,
+                "task": rollout.task_name,
+                "task_index": rollout.task_index,
+                "repeat": rollout.repeat,
+                "attempt": attempt,
+                "caller": caller,
+                "conversation": conversation,
+                "scored": scored,
+            }
+            extra = trajectory["extra"]
+            yield {**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}}
 
 
 def verifier_trajectory(item: StoredItem, rollout: EvaluationRollout) -> dict[str, Any]:
@@ -1672,6 +1754,8 @@ class ArtifactEvaluations:
                 "repeat": rollout.repeat,
                 "state": "waiting" if waits else item.state,
                 "attempt_count": item.attempt_count,
+                "stopped_attempt_count": item.stopped_attempt_count,
+                "deferred_attempt_count": item.deferred_attempt_count,
                 "started_at": item.started_at,
                 "ended_at": None if waits else item.ended_at,
                 "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
@@ -1701,6 +1785,8 @@ class ArtifactEvaluations:
                 "repeat": repeat,
                 "state": "waiting",
                 "attempt_count": 0,
+                "stopped_attempt_count": 0,
+                "deferred_attempt_count": 0,
                 "started_at": None,
                 "ended_at": None,
                 "score": None,
@@ -1874,13 +1960,31 @@ class ArtifactEvaluations:
         every_attempt: bool,
         include_records: bool = True,
     ) -> list[dict[str, Any]]:
-        """The trajectories of the rollout of ``item`` (``attempt_trajectories``): of each attempt when
-        ``every_attempt``, else of its last attempt only, without ``extra.reef.records`` when ``include_records`` is
-        false. It reads the bodies of this one rollout's calls, one call at a time."""
+        """Return the trajectories from ``iter_rollout_trajectories`` as a list."""
+        return list(
+            self.iter_rollout_trajectories(
+                scenario, evaluation_id, item, every_attempt=every_attempt, include_records=include_records
+            )
+        )
+
+    def iter_rollout_trajectories(
+        self,
+        scenario: str,
+        evaluation_id: str,
+        item: WorkItem,
+        *,
+        every_attempt: bool,
+        include_records: bool = True,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield one conversation at a time, in the order defined by ``attempt_trajectories``.
+
+        Set ``every_attempt=True`` to include earlier attempts. Otherwise, read only the last attempt.
+        Set ``include_records=False`` to omit ``extra.reef.records``.
+        """
         rollout = EvaluationRollout.from_item(item)
         attempt = None if every_attempt else item.attempt_count
         calls = self.rollout_calls(scenario, evaluation_id, rollout.task_index, rollout.repeat, attempt=attempt)
-        return attempt_trajectories(scenario, evaluation_id, item, calls, include_records=include_records)
+        return iter_attempt_trajectories(scenario, evaluation_id, item, calls, include_records=include_records)
 
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None."""
