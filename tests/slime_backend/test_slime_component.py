@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import types
 from collections.abc import Mapping
@@ -53,7 +54,12 @@ from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters import startup
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
-from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage, validate_slime_args
+from reef.train.slime_backend.reef_adapters.preflight import (
+    PYTORCH_ALLOCATOR_ENVS,
+    SLIME_EXPANDABLE_SEGMENTS_ENV,
+    prepare_checkpoint_storage,
+    validate_slime_args,
+)
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
     RetentionSettings,
@@ -1089,6 +1095,11 @@ def build_calls(tmp_path, monkeypatch):
         custom_critic_args_hook_path=None,
         megatron_lora_rank=0,
         use_critic=True,
+        # A ppo critic: Slime offloads the trainer and turns off the CPU copy of its buffers.
+        offload_train=True,
+        disable_grad_buffers_cpu_backup=True,
+        disable_param_buffers_cpu_backup=True,
+        train_env_vars={},
         use_wandb=False,
         wandb_key=None,
         megatron_to_hf_mode="raw",
@@ -1158,6 +1169,8 @@ def build_calls(tmp_path, monkeypatch):
         "NCCL_NVLS_ENABLE",
         *startup.TASK_ENVIRONMENT_CREDENTIALS,
         *startup.TASK_ENVIRONMENT_ENDPOINTS,
+        *PYTORCH_ALLOCATOR_ENVS,
+        SLIME_EXPANDABLE_SEGMENTS_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     calls["args"] = args
@@ -1337,6 +1350,60 @@ def test_a_failed_worker_start_closes_the_resources(build_calls) -> None:
     build_calls["group_error"] = True
     with pytest.raises(RuntimeError, match="workers failed to start"):
         start_slime_runner(settings())
+    assert build_calls["events"] == ["start", "close"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("start", [slime_component.SlimeTrainingComponent, start_slime_runner], ids=["serve", "job"])
+@pytest.mark.parametrize(
+    ("environ", "train_env_vars", "refused"),
+    [
+        (
+            {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
+            {},
+            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True in the environment",
+        ),
+        ({"SLIME_ENABLE_EXPANDABLE_SEGMENTS": "1"}, {}, "SLIME_ENABLE_EXPANDABLE_SEGMENTS=1 in the environment"),
+        # Slime's --train-env-vars reach only the workers.
+        (
+            {},
+            {"PYTORCH_ALLOC_CONF": "expandable_segments:True"},
+            "PYTORCH_ALLOC_CONF=expandable_segments:True in --train-env-vars",
+        ),
+    ],
+)
+def test_an_offloaded_trainer_with_expandable_segments_is_refused_before_ray_starts(
+    build_calls, monkeypatch, start, environ, train_env_vars, refused
+) -> None:
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+    build_calls["args"].train_env_vars = train_env_vars
+    with pytest.raises(ValueError, match=re.escape(f"cannot use expandable segments ({refused})")):
+        start(settings())
+    assert build_calls["events"] == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("offload_train", "cpu_copy", "train_env_vars"),
+    [
+        # The workers stay on the GPU, as in the AutoEnvScaling example.
+        (False, False, {}),
+        # Reef's --use-critic offloads a grpo trainer with the CPU copy of its buffers.
+        (True, True, {}),
+        # The workers get --train-env-vars' allocator settings instead of the service's.
+        (True, False, {"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512"}),
+    ],
+)
+def test_a_start_keeps_expandable_segments_that_cannot_zero_the_weights(
+    build_calls, monkeypatch, offload_train, cpu_copy, train_env_vars
+) -> None:
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    args = build_calls["args"]
+    args.offload_train = offload_train
+    args.disable_grad_buffers_cpu_backup = args.disable_param_buffers_cpu_backup = not cpu_copy
+    args.train_env_vars = train_env_vars
+    start_slime_runner(settings()).close()
     assert build_calls["events"] == ["start", "close"]
 
 

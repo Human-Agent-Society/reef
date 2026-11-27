@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -88,9 +89,10 @@ from reef.storage.coordination.work_queue import NewWork, WorkItem
 from reef.storage.data.store import MemoryDataStore, NewItem
 from reef.storage.data.tasks import LocalTaskFileStore, files_digest
 from reef.storage.scenario.commits import CommitRecord
-from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.evaluations import EvaluationStore, StoredEvaluation
 from reef.storage.scenario.observer import ObservedScenarioStorage
 from reef.storage.scenario.record_items import evaluation_call_item
+from reef.storage.sql.evaluations import SQLEvaluationStore
 from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 TOKEN = "artifact-evaluation-test-token"
@@ -2831,6 +2833,122 @@ def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
     asyncio.run(run())
 
 
+def test_the_summary_list_reads_an_ended_evaluation_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+    read_for_list = SQLEvaluationStore.read_for_list
+    reads: list[list[str]] = []
+
+    def counted_read(store: SQLEvaluationStore, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
+        reads.append(list(evaluation_ids))
+        return read_for_list(store, evaluation_ids)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            first = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, first["evaluation_id"])
+            second = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+
+            monkeypatch.setattr(SQLEvaluationStore, "read_for_list", counted_read)
+            route = "/reef/scenarios/s/evaluations?summary=true"
+            for _ in range(2):
+                running, summary = (await (await client.get(route, headers=AUTH)).json())["evaluations"]
+                assert running["evaluation_id"] == second["evaluation_id"] and running["policy_evaluation"] is None
+                # The summary has the scores of the evaluation, and not its tasks or the score of each rollout.
+                assert "task_names" not in summary["request"] and "task_names" in ended["request"]
+                assert summary["policy_evaluation"] == {"harness": ended["policy_evaluation"]["harness"]}
+                assert (summary["mean_score"], summary["progress"]) == (ended["mean_score"], ended["progress"])
+                tasks = [ended["request"]["task_names"], None, None, None]
+                digest = hashlib.sha256(json.dumps(tasks, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                assert summary["tasks_digest"] == running["tasks_digest"] == digest
+            # The evaluation that runs is read for each list, and the ended one only for the first.
+            assert reads == [[second["evaluation_id"], first["evaluation_id"]], [second["evaluation_id"]]]
+
+    asyncio.run(run())
+
+
+def test_a_new_process_lists_an_ended_evaluation_without_a_read_of_its_rollouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, accepted["evaluation_id"])
+            stored = evaluations.get("s", accepted["evaluation_id"])
+
+            # A process that starts later has no progress in memory: the store gives the progress that was kept.
+            later = ArtifactEvaluations(dispatcher)
+            reads: list[str] = []
+            monkeypatch.setattr(later.results, "rollouts", lambda evaluation_id, scenario: reads.append(evaluation_id))
+            assert later.status_json("s", [stored])[0]["progress"] == ended["progress"]
+            assert reads == []
+
+            # A retry or a resume gives a new end: the progress of the earlier end is not read.
+            with dispatcher.locked_scenario("s") as current:
+                store = current.store.evaluations
+                assert store.ended_progress([stored.evaluation_id]) != {}
+                store.keep_ended_progress(stored.evaluation_id, stored.finished_at + 1, {"total": 9})
+                assert store.ended_progress([stored.evaluation_id]) != {stored.evaluation_id: {"total": 9}}
+                store.reopen(stored.evaluation_id)
+                assert store.ended_progress([stored.evaluation_id]) == {}
+
+    asyncio.run(run())
+
+
+def test_the_end_of_an_evaluation_keeps_its_progress_in_the_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    def kept(evaluation_id: str) -> dict[str, object]:
+        with dispatcher.locked_scenario("s") as current:
+            return dict(current.store.evaluations.ended_progress([evaluation_id]))
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            route = "/reef/scenarios/s/evaluations"
+            first = (await (await client.post(route, headers=AUTH, json=body)).json())["evaluation_id"]
+            assert kept(first) == {}
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            # No list reads the evaluation here: the end keeps the progress.
+            for _ in range(200):
+                if evaluations.get("s", first).state == "finished":
+                    break
+                await asyncio.sleep(0.05)
+            progress = kept(first)[first]
+            assert (progress["total"], progress["scored"], progress["mean_score"]) == (2, 2, 1.0)
+            assert (await finished(client, first))["progress"]["scored"] == 2
+
+            # A cancel ends the rollouts, then keeps the progress with them as cancelled.
+            second = (await (await client.post(route, headers=AUTH, json=body)).json())["evaluation_id"]
+            assert (await client.post(f"{route}/{second}/cancel", headers=AUTH)).status == 200
+            assert kept(second)[second]["cancelled"] == 2
+
+    asyncio.run(run())
+
+
 def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Path) -> None:
     # A cancel stores the failed evaluation before it ends the rollouts; a reader in between sees a running rollout.
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
@@ -2849,7 +2967,40 @@ def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Pa
                 evaluations.get("s", accepted["evaluation_id"]), state="failed", error="x", finished_at=1e10
             )
             evaluations.ended_progress.add("s", stored, running, {"ended": 0})
-            assert evaluations.ended_progress.read("s", stored) is None
+            assert evaluations.ended_progress.read("s", stored) == (False, None)
+
+    asyncio.run(run())
+
+
+def test_the_list_reads_an_ended_evaluation_without_rollouts_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The queue deletes the rollouts of an old evaluation, and an evaluation that fails at its start has none.
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    reads: list[str] = []
+
+    def no_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+        reads.append(evaluation_id)
+        return ()
+
+    monkeypatch.setattr(evaluations.results, "rollouts", no_rollouts)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            running = evaluations.get("s", accepted["evaluation_id"])
+            ended = replace(running, state="failed", error="x", finished_at=1e10)
+            for _ in range(2):
+                assert evaluations.status_json("s", [ended])[0]["progress"] is None
+            assert reads == [ended.evaluation_id]
+            # An evaluation that runs can get its rollouts later: each list reads them.
+            for _ in range(2):
+                assert evaluations.status_json("s", [running])[0]["progress"] is None
+            assert reads == [ended.evaluation_id] * 3
 
     asyncio.run(run())
 

@@ -98,7 +98,7 @@ EXAMPLE_DEPLOYMENTS = _discover_example_deployments()
 
 
 def _config_id(path: Path) -> str:
-    return str(path.relative_to(REPO_ROOT))
+    return path.relative_to(REPO_ROOT).as_posix()
 
 
 def _set_test_endpoints(config: dict) -> None:
@@ -228,6 +228,18 @@ _CONFIG_ENV = {
     "TTTD_STEPS": "1",
     "TTTD_TENSOR_PARALLEL_SIZE": "2",
 }
+
+
+# The examples whose docs give the training service PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True: the
+# AutoEnvScaling README and serve.yaml, and the docker-compose.yaml of SAO ceobench and SDFT skill_stream. The
+# others turn on no expandable segments.
+EXPANDABLE_SEGMENTS_EXAMPLES = frozenset(
+    {
+        "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
+        "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sdft/examples/skill_stream/serve.yaml",
+    }
+)
 
 
 def _install_slime_parser_stubs() -> None:
@@ -377,12 +389,23 @@ def _apply_validation_derivations(args) -> None:
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
     # ppo implies a critic.
+    explicit_critic = args.use_critic
     args.use_critic = args.use_critic or args.advantage_estimator == "ppo"
-    # Without --colocate, which Reef refuses, both offload phases default to off.
+    # Slime offloads the trainer with --offload, with --colocate unless --no-offload-train, and with a ppo critic,
+    # and then turns off the CPU copy of its buffers; finalize_reef_slime_args offloads it with --use-critic unless
+    # --no-offload-train, and leaves the copy as it is.
+    resident = args.offload_train is False
+    if args.offload:
+        args.offload_train = args.offload_rollout = True
     if args.offload_train is None:
-        args.offload_train = False
+        args.offload_train = args.colocate
     if args.offload_rollout is None:
-        args.offload_rollout = False
+        args.offload_rollout = args.colocate
+    if args.advantage_estimator == "ppo":
+        args.offload_train = True
+    args.disable_grad_buffers_cpu_backup = args.disable_param_buffers_cpu_backup = args.offload_train
+    if explicit_critic:
+        args.offload_train = not resident
 
 
 @pytest.mark.unit
@@ -409,6 +432,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
+    assert paths >= EXPANDABLE_SEGMENTS_EXAMPLES
 
 
 @pytest.mark.unit
@@ -515,7 +539,10 @@ def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> 
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", TRAINING_CONFIGS, ids=_config_id)
 def test_cookbook_training_config_parses_and_validates(config_path: Path) -> None:
-    from reef.train.slime_backend.reef_adapters.preflight import validate_slime_args
+    from reef.train.slime_backend.reef_adapters.preflight import (
+        validate_slime_args,
+        validate_training_worker_environment,
+    )
     from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
 
     args, spec, options, recipe = _parse_config(config_path)
@@ -534,6 +561,11 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
     else:
         validate_tokenizers.assert_not_called()
     validate_slime_args(args, spec)
+    # The workers get the environment that the docs give the service.
+    documented = _config_id(config_path) in EXPANDABLE_SEGMENTS_EXAMPLES
+    validate_training_worker_environment(
+        args, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"} if documented else {}
+    )
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         job_parameters = load_deployment(config_path)["reef"].get("job_parameters", {})
     if "harbor" in job_parameters:
@@ -541,6 +573,27 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
         # A task job's options pass the check that refuses them at its first submit.
         check_task_job_options(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "config",
+    [
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve-30b.yaml",
+        "recipes/sao/examples/imo_answerbench/serve-30b-multi.yaml",
+    ],
+)
+def test_an_example_whose_offloaded_critic_keeps_the_cpu_copy_keeps_expandable_segments(config: str) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_training_worker_environment
+
+    args, _, _, _ = _parse_config(REPO_ROOT / config)
+    _apply_validation_derivations(args)
+
+    # --use-critic offloads the trainer, but without --colocate, --offload or ppo its buffers keep the CPU copy.
+    assert args.offload_train is True
+    assert args.disable_grad_buffers_cpu_backup is False
+    validate_training_worker_environment(args, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
 
 
 @pytest.mark.unit

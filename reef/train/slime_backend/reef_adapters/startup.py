@@ -3,9 +3,9 @@
 ``prepare_slime_arguments`` runs before any placement group or GPU worker
 exists. It separates Reef's checkpoint retention options, parses the rest
 through Slime, applies the startup loss family and Reef's adjustments, and
-refuses arguments the component cannot run with. ``apply_unsaved_optimizer_resume``
-decides whether the workers load the optimizer state, and ``job_runtime_env``
-is the Ray environment of the workers.
+refuses arguments, and a worker environment, the component cannot run with.
+``apply_unsaved_optimizer_resume`` decides whether the workers load the optimizer state, and
+``job_runtime_env`` is the Ray environment of the workers.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     configure_critic_args_hook,
     configure_rollout_runtime,
     validate_slime_args,
+    validate_training_worker_environment,
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     MEGATRON_TRACKER,
@@ -45,8 +46,8 @@ def prepare_slime_arguments(
     dotted reference; ``recipe`` names the recipe in error messages.
     ``execution`` holds the deployment's ``execution`` and ``executors``
     sections. Raise ``RuntimeError`` for an unknown loss family, before Slime
-    parses anything, and ``ValueError`` or ``RuntimeError`` for arguments
-    the component cannot run with.
+    parses anything, and ``ValueError`` or ``RuntimeError`` for arguments,
+    or a worker environment, the component cannot run with.
     """
     try:
         spec = resolve_loss_family(loss_family)
@@ -66,6 +67,9 @@ def prepare_slime_arguments(
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
     validate_slime_args(args, spec)
+    # The workers get the Ray cluster's environment, usually this process's; each worker checks its own again
+    # (ReefMegatronTrainRayActor.init).
+    validate_training_worker_environment(args, os.environ)
     configure_critic_args_hook(args)
     configure_rollout_runtime(args)
     # Resolve the executor before any worker starts.

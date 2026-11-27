@@ -13,6 +13,7 @@ Malformed options fail startup. Worker-specific errors fail the first job.
 - ``hf-checkpoint`` must match ``inference.model-path``. Explicit architecture flags override the model's Hugging Face config.
 - ``actor-num-nodes`` and ``actor-num-gpus-per-node`` allocate training GPUs. ``num-gpus-per-node`` gives each node's physical GPU count.
 - ``rollout-num-gpus``, ``colocate``, ``sglang-*`` and ``router-*`` configure Slime's rollout engines. Configure serving engines under ``inference.options``.
+- With ``colocate``, ``offload``, ``offload-train`` or ``advantage-estimator: ppo``, the workers keep no CPU copy of their buffers while they sleep, so Reef refuses expandable segments (``expandable_segments:True`` in ``PYTORCH_CUDA_ALLOC_CONF`` or ``PYTORCH_ALLOC_CONF``, or ``SLIME_ENABLE_EXPANDABLE_SEGMENTS=1``): their optimizer step can then write zeros into the weights. A critic enabled with ``use-critic`` is not refused.
 - For multi-node training, use a checkpoint directory readable by the training host. See `checkpoint cadence <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 
 Train without an inference engine
