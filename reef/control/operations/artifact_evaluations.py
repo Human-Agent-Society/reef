@@ -75,6 +75,7 @@ from reef.evaluation.rollout_worker import (
     TreeHarness,
     harbor_agent,
     rollout_item_id,
+    rollout_position,
     template_item_id,
 )
 from reef.harness.adapters import get_adapter
@@ -282,10 +283,10 @@ def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now
         eta = (cast(int, counts["total"]) - cast(int, counts["ended"])) * window / recent
     benchmarks: list[JsonValue] = []
     if request.collection is not None:
-        # The payload names the rollout's task; ``EvaluationRollout`` wrote it (``to_payload``).
+        # The ID gives the rollout's task: the items can come without their payload (``EvaluationResults.rollouts``).
         by_task: dict[str, list[WorkItem]] = {}
         for item in items:
-            by_task.setdefault(str(item.payload["task_name"]), []).append(item)
+            by_task.setdefault(request.task_names[rollout_position(item.id)[0]], []).append(item)
         benchmark_means: list[float | None] = []
         for benchmark, task_names in request.collection.benchmarks:
             rollouts = [item for name in task_names for item in by_task.get(name, ())]
@@ -296,10 +297,6 @@ def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now
             counts["mean_score"] = mean_benchmark_score(benchmark_means)
     return {**counts, "eta_seconds": eta, "benchmarks": benchmarks}
 
-
-#: The keys of a rollout item's payload that hold the evaluation's harness (``EvaluationRollout.to_payload``). Every
-#: rollout of an evaluation repeats them, and a harness tree holds its files.
-HARNESS_PAYLOAD = ("agent", "tree")
 
 #: The most ended evaluations whose progress one ``EndedProgress`` keeps.
 ENDED_PROGRESS_ENTRIES = 10_000
@@ -686,25 +683,19 @@ class EvaluationResults:
             self.thread.join(timeout=5)
             self.thread = None
 
-    def rollouts(self, evaluation_id: str, scenario: str, *, harness: bool = True) -> tuple[WorkItem, ...]:
+    def rollouts(self, evaluation_id: str, scenario: str, *, payload: bool = True) -> tuple[WorkItem, ...]:
         """The rollout items of one evaluation, in task and repeat order. The queue reads only the items of this
         evaluation: their IDs start with one prefix.
 
-        Without ``harness``, the payloads have no ``HARNESS_PAYLOAD`` keys. Each rollout's payload repeats the
-        evaluation's harness, and a harness tree holds its files: a read for the states, the scores or the tasks of
-        the rollouts leaves it out, so it does not grow with the size of the harness. Such an item gives no
-        ``EvaluationRollout`` (``EvaluationRollout.from_item``)."""
+        Without ``payload``, each item has an empty payload. Each rollout's payload repeats the evaluation's harness,
+        and a harness tree holds its files: a read for the states or the scores of the rollouts leaves the payloads
+        out, so it does not grow with the size of the harness. The ID of such an item gives its task and repeat
+        (``rollout_position``); the item gives no ``EvaluationRollout``."""
         prefix = rollout_item_id(evaluation_id, 0, 0).rsplit(":", 2)[0] + ":"
         found = self.queue.items(
-            EVALUATIONS_QUEUE,
-            scenario=scenario,
-            kind=EVALUATION_ROLLOUT_KIND,
-            id_prefix=prefix,
-            without_payload=() if harness else HARNESS_PAYLOAD,
+            EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND, id_prefix=prefix, payload=payload
         )
-        return tuple(
-            sorted(found, key=lambda item: (cast(int, item.payload["task_index"]), cast(int, item.payload["repeat"])))
-        )
+        return tuple(sorted(found, key=lambda item: rollout_position(item.id)))
 
     def templates(self, evaluation_id: str, scenario: str) -> dict[int, WorkItem]:
         """The template items of one evaluation (``template_work``), by task index. Only an evaluation on e2b has
@@ -753,7 +744,7 @@ class EvaluationResults:
         without rollouts. So no later process reads the rollouts of the evaluation for its progress, and the progress
         outlives the queue's deletion of the rollouts. The caller holds the scenario's lock and ended the rollouts
         before the call; it keeps nothing while a rollout has not ended."""
-        items = self.rollouts(ended.evaluation_id, scenario, harness=False)
+        items = self.rollouts(ended.evaluation_id, scenario, payload=False)
         if ended.finished_at is not None and all(rollout_ended(item) for item in items):
             progress = evaluation_progress(ended, items, time.time()) if items else None
             store.keep_ended_progress(ended.evaluation_id, ended.finished_at, progress)
@@ -1726,7 +1717,7 @@ class ArtifactEvaluations:
         needs_all_items = state != "all" or lowest_first
         include_task_means = needs_all_items or benchmark is not None
         if needs_all_items:
-            items = self.results.rollouts(evaluation_id, scenario, harness=False)
+            items = self.results.rollouts(evaluation_id, scenario, payload=False)
         elif include_task_means:
             page_tasks = task_indexes[offset // per_task : (offset + limit - 1) // per_task + 1]
             item_ids = [
@@ -1738,7 +1729,7 @@ class ArtifactEvaluations:
             for item in items or ():
                 if item.scenario == scenario and item.state == "finished" and not rollout_waits(item):
                     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
-                    scores.setdefault(cast(int, item.payload["task_index"]), []).append(score)
+                    scores.setdefault(rollout_position(item.id)[0], []).append(score)
             means = {index: mean_score(values) for index, values in scores.items()}
         if lowest_first:
             task_indexes = sorted(task_indexes, key=lambda index: (means.get(index) is None, means.get(index) or 0))
@@ -1755,13 +1746,13 @@ class ArtifactEvaluations:
             selected_tasks = set(task_indexes)
             matching: dict[int, list[int]] = {}
             for item in items or ():
-                index = cast(int, item.payload["task_index"])
+                index, repeat = rollout_position(item.id)
                 if index not in selected_tasks or rollout_waits(item):
                     continue
                 if (state == "running" and item.state in ("assigned", "running")) or (
                     state == "failed" and rollout_ended(item) and not rollout_cancelled(item) and rollout_failed(item)
                 ):
-                    matching.setdefault(index, []).append(cast(int, item.payload["repeat"]))
+                    matching.setdefault(index, []).append(repeat)
             matching_positions = [(index, repeat) for index in task_indexes for repeat in matching.get(index, ())]
             total = len(matching_positions)
             positions = matching_positions[offset : offset + limit]
@@ -1797,15 +1788,15 @@ class ArtifactEvaluations:
         stored = self.get(scenario, evaluation_id)
         if stored is None:
             return None
-        items = self.results.rollouts(evaluation_id, scenario, harness=False)
+        items = self.results.rollouts(evaluation_id, scenario, payload=False)
         return self.rollout_views(scenario, stored, items, calls=calls)
 
     def rollout_items_by_id(self, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
-        """The rollout items ``item_ids`` that the queue holds, in that order, without their harness
+        """The rollout items ``item_ids`` that the queue holds, in that order, without their payload
         (``EvaluationResults.rollouts``)."""
         if not item_ids:
             return ()
-        return self.queue.read_items(EVALUATIONS_QUEUE, item_ids, without_payload=HARNESS_PAYLOAD)
+        return self.queue.read_items(EVALUATIONS_QUEUE, item_ids, payload=False)
 
     def rollout_views(
         self,
@@ -1819,13 +1810,12 @@ class ArtifactEvaluations:
         """Render all rollouts, or the specified positions in their requested order."""
         views: dict[tuple[int, int], dict[str, Any]] = {}
         for item in items:
-            # The payload gives these three (``EvaluationRollout.to_payload``). The items can come without their
-            # harness, so they give no ``EvaluationRollout``.
-            task_index, repeat = cast(int, item.payload["task_index"]), cast(int, item.payload["repeat"])
+            # The items can come without their payload, so the ID gives the rollout's task and repeat.
+            task_index, repeat = rollout_position(item.id)
             waits = rollout_waits(item)
             finished = item.state == "finished" and item.result is not None and not waits
             views[task_index, repeat] = {
-                "task": item.payload["task_name"],
+                "task": stored.request.task_names[task_index],
                 "task_index": task_index,
                 "repeat": repeat,
                 "state": "waiting" if waits else item.state,
@@ -2096,7 +2086,7 @@ class ArtifactEvaluations:
                 progress = stored_progress[stored.evaluation_id]
                 self.ended_progress.add(scenario, stored, (), progress)
             elif not kept:
-                items = self.results.rollouts(stored.evaluation_id, scenario, harness=False)
+                items = self.results.rollouts(stored.evaluation_id, scenario, payload=False)
                 progress = evaluation_progress(stored, items, now) if items else None
                 self.ended_progress.add(scenario, stored, items, progress)
                 if stored.finished_at is not None and self.ended_progress.read(scenario, stored)[0]:
