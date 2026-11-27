@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import hashlib
 import json
 import logging
 import math
@@ -88,9 +89,10 @@ from reef.storage.coordination.work_queue import NewWork, WorkItem
 from reef.storage.data.store import MemoryDataStore, NewItem
 from reef.storage.data.tasks import LocalTaskFileStore, files_digest
 from reef.storage.scenario.commits import CommitRecord
-from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.evaluations import EvaluationStore, StoredEvaluation
 from reef.storage.scenario.observer import ObservedScenarioStorage
 from reef.storage.scenario.record_items import evaluation_call_item
+from reef.storage.sql.evaluations import SQLEvaluationStore
 from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 TOKEN = "artifact-evaluation-test-token"
@@ -2827,6 +2829,47 @@ def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
                 ]
                 assert listed[0]["progress"] == ended["progress"]
             assert reads == []
+
+    asyncio.run(run())
+
+
+def test_the_summary_list_reads_an_ended_evaluation_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+    read_for_list = SQLEvaluationStore.read_for_list
+    reads: list[list[str]] = []
+
+    def counted_read(store: SQLEvaluationStore, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
+        reads.append(list(evaluation_ids))
+        return read_for_list(store, evaluation_ids)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            first = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, first["evaluation_id"])
+            second = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+
+            monkeypatch.setattr(SQLEvaluationStore, "read_for_list", counted_read)
+            route = "/reef/scenarios/s/evaluations?summary=true"
+            for _ in range(2):
+                running, summary = (await (await client.get(route, headers=AUTH)).json())["evaluations"]
+                assert running["evaluation_id"] == second["evaluation_id"] and running["policy_evaluation"] is None
+                # The summary has the scores of the evaluation, and not its tasks or the score of each rollout.
+                assert "task_names" not in summary["request"] and "task_names" in ended["request"]
+                assert summary["policy_evaluation"] == {"harness": ended["policy_evaluation"]["harness"]}
+                assert (summary["mean_score"], summary["progress"]) == (ended["mean_score"], ended["progress"])
+                tasks = [ended["request"]["task_names"], None, None, None]
+                digest = hashlib.sha256(json.dumps(tasks, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                assert summary["tasks_digest"] == running["tasks_digest"] == digest
+            # The evaluation that runs is read for each list, and the ended one only for the first.
+            assert reads == [[second["evaluation_id"], first["evaluation_id"]], [second["evaluation_id"]]]
 
     asyncio.run(run())
 

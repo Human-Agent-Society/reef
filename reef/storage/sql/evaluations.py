@@ -8,7 +8,7 @@ the table with :func:`evaluation_table` and supply their namespace.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -326,6 +326,35 @@ class SQLEvaluationStore(KeyedEvaluationStore):
 
     def newest_for_list(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         return self.select_newest(limit, include_task_digests=False)
+
+    def newest_ends(self, *, limit: int = 50) -> tuple[tuple[str, float | None], ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        table = self.table.table
+        with self.database._transaction(write=False) as connection:
+            rows = connection.execute(
+                select(table.c.evaluation_id, table.c.finished_at)
+                .where(self.table.condition())
+                .order_by(table.c.created_at.desc(), table.c.sequence.desc())
+                .limit(limit)
+            ).all()
+        return tuple((str(evaluation_id), None if ended is None else float(ended)) for evaluation_id, ended in rows)
+
+    def read_for_list(self, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
+        if not evaluation_ids:
+            return ()
+        table = self.table.table
+        with self.database._transaction(write=False) as connection:
+            rows = (
+                connection.execute(
+                    self.selection(include_task_digests=False).where(
+                        self.table.condition(), table.c.evaluation_id.in_(evaluation_ids)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return tuple(stored_evaluation(row) for row in rows)
 
     def select_newest(self, limit: int, *, include_task_digests: bool) -> tuple[StoredEvaluation, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:

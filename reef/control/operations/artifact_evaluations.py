@@ -351,6 +351,34 @@ class EndedProgress:
                 self.entries.popitem(last=False)
 
 
+def evaluation_summary(view: Mapping[str, object]) -> dict[str, object]:
+    """``view``, the status of one evaluation (``ArtifactEvaluations.status_json``), as a list of summaries gives it.
+
+    A request can name thousands of tasks, and a result holds a score for each rollout. The summary has neither:
+    ``request`` has no ``task_names``, its ``collection`` has no ``benchmarks``, and ``policy_evaluation`` keeps only
+    ``harness``. ``tasks_digest`` is the SHA-256 of the compact JSON, with sorted keys, of ``[task_names,
+    collection name, collection benchmarks, collection average]``; the last three are null without a collection.
+    Two evaluations with the same digest ran the same tasks with the same averaging.
+    """
+    request = dict(cast(Mapping[str, object], view["request"]))
+    collection = cast("Mapping[str, object] | None", request.get("collection"))
+    tasks = [
+        request.pop("task_names", None),
+        collection and collection.get("name"),
+        collection and collection.get("benchmarks"),
+        collection and collection.get("average"),
+    ]
+    if collection is not None:
+        request["collection"] = {name: value for name, value in collection.items() if name != "benchmarks"}
+    policy = cast("Mapping[str, object] | None", view["policy_evaluation"])
+    return {
+        **view,
+        "request": request,
+        "policy_evaluation": None if policy is None else {"harness": policy.get("harness")},
+        "tasks_digest": hashlib.sha256(json.dumps(tasks, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    }
+
+
 def planned_rollout(
     seed: EvaluationRollout, request: ArtifactEvaluationRequest, task_index: int, repeat: int
 ) -> EvaluationRollout:
@@ -1043,6 +1071,8 @@ class ArtifactEvaluations:
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
         self.ended_progress = EndedProgress()
+        self.ended_summaries: OrderedDict[tuple[str, str, float], dict[str, object]] = OrderedDict()
+        self.ended_summaries_lock = threading.Lock()
         self.reader: threading.Thread | None = None
 
     def open(self) -> None:
@@ -2018,6 +2048,39 @@ class ArtifactEvaluations:
                 ]
             views.append({**stored.to_json(), "progress": progress})
         return views
+
+    def summaries_json(self, scenario: str, *, limit: int = 50) -> list[dict[str, object]]:
+        """At most ``limit`` evaluations of ``scenario``, newest first, each as its ``evaluation_summary`` with its
+        ``progress``.
+
+        The summary of an ended evaluation does not change until a retry or a resume gives it a new
+        ``finished_at``. ``ended_summaries`` keeps it under ``(scenario, evaluation_id, finished_at)``, once
+        ``ended_progress`` keeps its progress, for at most ``ENDED_PROGRESS_ENTRIES`` evaluations in the order of
+        their last use. So a list reads and parses the request and the result of an ended evaluation once.
+        """
+        with self.dispatcher.locked_scenario(scenario) as current:
+            store = current.store.evaluations
+            ends = store.newest_ends(limit=limit)
+            with self.ended_summaries_lock:
+                kept = {
+                    evaluation_id: self.ended_summaries[key]
+                    for evaluation_id, finished_at in ends
+                    if finished_at is not None
+                    and (key := (scenario, evaluation_id, finished_at)) in self.ended_summaries
+                }
+                for evaluation_id, finished_at in ends:
+                    if evaluation_id in kept:
+                        self.ended_summaries.move_to_end((scenario, evaluation_id, cast(float, finished_at)))
+            read = store.read_for_list([evaluation_id for evaluation_id, _ in ends if evaluation_id not in kept])
+        for stored, view in zip(read, self.status_json(scenario, read), strict=True):
+            summary = kept[stored.evaluation_id] = evaluation_summary(view)
+            if stored.finished_at is not None and self.ended_progress.read(scenario, stored)[0]:
+                with self.ended_summaries_lock:
+                    self.ended_summaries[(scenario, stored.evaluation_id, stored.finished_at)] = summary
+                    if len(self.ended_summaries) > ENDED_PROGRESS_ENTRIES:
+                        self.ended_summaries.popitem(last=False)
+        # An evaluation that was deleted between the two reads is not listed.
+        return [kept[evaluation_id] for evaluation_id, _ in ends if evaluation_id in kept]
 
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations of ``scenario``, newest first."""
