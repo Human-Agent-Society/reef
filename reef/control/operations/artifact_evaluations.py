@@ -91,6 +91,7 @@ from reef.storage.scenario.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
     EvaluationStateConflictError,
+    EvaluationStore,
     KeyedEvaluationStore,
     StoredEvaluation,
     check_evaluation_start_id,
@@ -304,17 +305,20 @@ class EndedProgress:
     """The progress of ended evaluations, so that a list of evaluations does not read their rollouts again.
 
     Values: ``entries`` maps the key ``(scenario, evaluation_id, finished_at)`` of an ended evaluation to its
-    ``evaluation_progress``, computed from rollouts that had all ended (``rollout_ended``). It holds at most
+    ``evaluation_progress``, computed from rollouts that had all ended (``rollout_ended``), or to None when the queue
+    held none of its rollouts. It holds at most
     ``ENDED_PROGRESS_ENTRIES`` keys, in the order of their last use. ``lock`` guards ``entries`` for the threads of
     concurrent routes.
 
     The rollouts of an ended evaluation stay ended until a retry or a resume reopens the evaluation, and its next end
     gives it a new ``finished_at``. So a key describes one run of the evaluation, and its progress does not change.
+    An ended evaluation gets no new rollout, so one without rollouts keeps none.
     An entry outlives the queue's deletion of the rollouts after their retention: the list then shows the progress
     that they gave, not null.
 
-    Operations: ``read(scenario, stored)`` is the entry of ``stored``'s key, or None when ``stored`` runs or has no
-    entry. ``add(scenario, stored, items, progress)`` keeps ``progress`` under ``stored``'s key when ``stored`` ended
+    Operations: ``read(scenario, stored)`` is ``(True, entry)`` for the entry of ``stored``'s key, or
+    ``(False, None)`` when ``stored`` runs or has no entry. ``add(scenario, stored, items, progress)`` keeps
+    ``progress``, None for an evaluation without rollouts, under ``stored``'s key when ``stored`` ended
     and every one of ``items``, its rollouts, ended; else it keeps nothing. Above ``ENDED_PROGRESS_ENTRIES``, the
     least recently used key goes.
 
@@ -323,21 +327,21 @@ class EndedProgress:
     """
 
     def __init__(self) -> None:
-        self.entries: OrderedDict[tuple[str, str, float], dict[str, JsonValue]] = OrderedDict()
+        self.entries: OrderedDict[tuple[str, str, float], dict[str, JsonValue] | None] = OrderedDict()
         self.lock = threading.Lock()
 
-    def read(self, scenario: str, stored: StoredEvaluation) -> dict[str, JsonValue] | None:
+    def read(self, scenario: str, stored: StoredEvaluation) -> tuple[bool, dict[str, JsonValue] | None]:
         if stored.finished_at is None:
-            return None
+            return False, None
         key = (scenario, stored.evaluation_id, stored.finished_at)
         with self.lock:
-            progress = self.entries.get(key)
-            if progress is not None:
-                self.entries.move_to_end(key)
-            return progress
+            if key not in self.entries:
+                return False, None
+            self.entries.move_to_end(key)
+            return True, self.entries[key]
 
     def add(
-        self, scenario: str, stored: StoredEvaluation, items: Sequence[WorkItem], progress: dict[str, JsonValue]
+        self, scenario: str, stored: StoredEvaluation, items: Sequence[WorkItem], progress: dict[str, JsonValue] | None
     ) -> None:
         # A cancel stores the ended evaluation before it ends the rollouts: a reader in between keeps nothing.
         if stored.finished_at is None or not all(rollout_ended(item) for item in items):
@@ -346,6 +350,34 @@ class EndedProgress:
             self.entries[(scenario, stored.evaluation_id, stored.finished_at)] = progress
             if len(self.entries) > ENDED_PROGRESS_ENTRIES:
                 self.entries.popitem(last=False)
+
+
+def evaluation_summary(view: Mapping[str, object]) -> dict[str, object]:
+    """``view``, the status of one evaluation (``ArtifactEvaluations.status_json``), as a list of summaries gives it.
+
+    A request can name thousands of tasks, and a result holds a score for each rollout. The summary has neither:
+    ``request`` has no ``task_names``, its ``collection`` has no ``benchmarks``, and ``policy_evaluation`` keeps only
+    ``harness``. ``tasks_digest`` is the SHA-256 of the compact JSON, with sorted keys, of ``[task_names,
+    collection name, collection benchmarks, collection average]``; the last three are null without a collection.
+    Two evaluations with the same digest ran the same tasks with the same averaging.
+    """
+    request = dict(cast(Mapping[str, object], view["request"]))
+    collection = cast("Mapping[str, object] | None", request.get("collection"))
+    tasks = [
+        request.pop("task_names", None),
+        collection and collection.get("name"),
+        collection and collection.get("benchmarks"),
+        collection and collection.get("average"),
+    ]
+    if collection is not None:
+        request["collection"] = {name: value for name, value in collection.items() if name != "benchmarks"}
+    policy = cast("Mapping[str, object] | None", view["policy_evaluation"])
+    return {
+        **view,
+        "request": request,
+        "policy_evaluation": None if policy is None else {"harness": policy.get("harness")},
+        "tasks_digest": hashlib.sha256(json.dumps(tasks, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    }
 
 
 def planned_rollout(
@@ -700,6 +732,17 @@ class EvaluationResults:
             if not changes:
                 self.stopped.wait(RESULT_POLL_SECONDS)
 
+    def keep_progress(self, scenario: str, store: EvaluationStore, ended: StoredEvaluation) -> None:
+        """Keep in ``store`` the progress of ``ended``, an evaluation that just ended
+        (``EvaluationStore.keep_ended_progress``): the ``evaluation_progress`` that its rollouts give now, or None
+        without rollouts. So no later process reads the rollouts of the evaluation for its progress, and the progress
+        outlives the queue's deletion of the rollouts. The caller holds the scenario's lock and ended the rollouts
+        before the call; it keeps nothing while a rollout has not ended."""
+        items = self.rollouts(ended.evaluation_id, scenario)
+        if ended.finished_at is not None and all(rollout_ended(item) for item in items):
+            progress = evaluation_progress(ended, items, time.time()) if items else None
+            store.keep_ended_progress(ended.evaluation_id, ended.finished_at, progress)
+
     def settle_changed(self, scenario: str, evaluation_id: str) -> bool:
         """Settle the evaluation ``evaluation_id`` of ``scenario``, whose rollout items changed (``settle``), and log
         a failure; return whether the settle ended without one. The queue keeps the rollout items of a deleted
@@ -813,7 +856,8 @@ class EvaluationResults:
                         self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
                 for item in templates.values():
                     self.queue.cancel(EVALUATIONS_QUEUE, item.id, FAILURES_ERROR)
-                current.store.evaluations.fail(evaluation_id, error=error, finished_at=time.time())
+                stopped = current.store.evaluations.fail(evaluation_id, error=error, finished_at=time.time())
+                self.keep_progress(scenario, current.store.evaluations, stopped)
                 return
             # Each rollout has a fixed ID, so two settles at once add it once. The rollouts to add are those that the
             # queue does not hold, in task and repeat order.
@@ -914,6 +958,7 @@ class EvaluationResults:
                     evaluations.begin(evaluation_id)
                 if result is not None:
                     finished = evaluations.finish(evaluation_id, result=result, finished_at=time.time())
+                    self.keep_progress(scenario, evaluations, finished)
                     # A score with a harness from an item says nothing of the harness that the deployment serves.
                     if harness_item(request.harness) is None:
                         rule = current.activation_rule
@@ -923,7 +968,10 @@ class EvaluationResults:
                         else:
                             activates = rule.activates_evaluated(request.artifact_id, result)
                 else:
-                    evaluations.fail(evaluation_id, error=error or "the evaluation failed", finished_at=time.time())
+                    failed = evaluations.fail(
+                        evaluation_id, error=error or "the evaluation failed", finished_at=time.time()
+                    )
+                    self.keep_progress(scenario, evaluations, failed)
         except InternalError:
             raise
         except (ReefError, ValueError) as exc:
@@ -1040,6 +1088,8 @@ class ArtifactEvaluations:
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
         self.ended_progress = EndedProgress()
+        self.ended_summaries: OrderedDict[tuple[str, str, float], dict[str, object]] = OrderedDict()
+        self.ended_summaries_lock = threading.Lock()
         self.reader: threading.Thread | None = None
 
     def open(self) -> None:
@@ -1155,6 +1205,7 @@ class ArtifactEvaluations:
                     self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
             for item in self.results.templates(evaluation_id, scenario).values():
                 self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
+            self.results.keep_progress(scenario, current.store.evaluations, cancelled)
         return cancelled
 
     def retry(
@@ -1997,14 +2048,34 @@ class ArtifactEvaluations:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
         ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the rollouts
         of these evaluations only, not those of the scenario's other evaluations, and not those of an ended
-        evaluation whose progress ``ended_progress`` keeps."""
+        evaluation whose progress, or lack of rollouts, ``ended_progress`` or the evaluation store keeps
+        (``EvaluationStore.keep_ended_progress``)."""
         now = time.time()
         views: list[dict[str, object]] = []
+        # The evaluation's end keeps its progress in the store (``EvaluationResults.keep_progress``), so a new process
+        # does not read its rollouts again. An evaluation that ended before Reef kept the progress has none: the
+        # first list computes it and keeps it.
+        unread = [
+            stored.evaluation_id
+            for stored in evaluations
+            if stored.finished_at is not None and not self.ended_progress.read(scenario, stored)[0]
+        ]
+        stored_progress: dict[str, dict[str, JsonValue] | None] = {}
+        if unread:
+            with self.dispatcher.locked_scenario(scenario) as current:
+                store = current.store.evaluations
+                stored_progress = store.ended_progress(unread)
         for stored in evaluations:
-            progress = self.ended_progress.read(scenario, stored)
-            if progress is None and (items := self.results.rollouts(stored.evaluation_id, scenario)):
-                progress = evaluation_progress(stored, items, now)
+            kept, progress = self.ended_progress.read(scenario, stored)
+            if not kept and stored.evaluation_id in stored_progress:
+                progress = stored_progress[stored.evaluation_id]
+                self.ended_progress.add(scenario, stored, (), progress)
+            elif not kept:
+                items = self.results.rollouts(stored.evaluation_id, scenario)
+                progress = evaluation_progress(stored, items, now) if items else None
                 self.ended_progress.add(scenario, stored, items, progress)
+                if stored.finished_at is not None and self.ended_progress.read(scenario, stored)[0]:
+                    store.keep_ended_progress(stored.evaluation_id, stored.finished_at, progress)
             if progress is not None and not score_levels:
                 benchmarks = cast(list[dict[str, JsonValue]], progress["benchmarks"])
                 progress = {key: value for key, value in progress.items() if key != "score_levels"}
@@ -2014,6 +2085,39 @@ class ArtifactEvaluations:
                 ]
             views.append({**stored.to_json(), "progress": progress})
         return views
+
+    def summaries_json(self, scenario: str, *, limit: int = 50) -> list[dict[str, object]]:
+        """At most ``limit`` evaluations of ``scenario``, newest first, each as its ``evaluation_summary`` with its
+        ``progress``.
+
+        The summary of an ended evaluation does not change until a retry or a resume gives it a new
+        ``finished_at``. ``ended_summaries`` keeps it under ``(scenario, evaluation_id, finished_at)``, once
+        ``ended_progress`` keeps its progress, for at most ``ENDED_PROGRESS_ENTRIES`` evaluations in the order of
+        their last use. So a list reads and parses the request and the result of an ended evaluation once.
+        """
+        with self.dispatcher.locked_scenario(scenario) as current:
+            store = current.store.evaluations
+            ends = store.newest_ends(limit=limit)
+            with self.ended_summaries_lock:
+                kept = {
+                    evaluation_id: self.ended_summaries[key]
+                    for evaluation_id, finished_at in ends
+                    if finished_at is not None
+                    and (key := (scenario, evaluation_id, finished_at)) in self.ended_summaries
+                }
+                for evaluation_id, finished_at in ends:
+                    if evaluation_id in kept:
+                        self.ended_summaries.move_to_end((scenario, evaluation_id, cast(float, finished_at)))
+            read = store.read_for_list([evaluation_id for evaluation_id, _ in ends if evaluation_id not in kept])
+        for stored, view in zip(read, self.status_json(scenario, read), strict=True):
+            summary = kept[stored.evaluation_id] = evaluation_summary(view)
+            if stored.finished_at is not None and self.ended_progress.read(scenario, stored)[0]:
+                with self.ended_summaries_lock:
+                    self.ended_summaries[(scenario, stored.evaluation_id, stored.finished_at)] = summary
+                    if len(self.ended_summaries) > ENDED_PROGRESS_ENTRIES:
+                        self.ended_summaries.popitem(last=False)
+        # An evaluation that was deleted between the two reads is not listed.
+        return [kept[evaluation_id] for evaluation_id, _ in ends if evaluation_id in kept]
 
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations of ``scenario``, newest first."""
