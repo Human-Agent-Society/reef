@@ -472,9 +472,9 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
             newest = dispatcher.coordination.served_models.current_request("s").payload.get("serving_config", {})
-            assert runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10, (
-                "inference serves the candidate with the config of the scenario's newest request"
-            )
+            assert (
+                runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10
+            ), "inference serves the candidate with the config of the scenario's newest request"
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",
