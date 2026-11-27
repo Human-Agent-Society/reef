@@ -2597,6 +2597,21 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
             assert activated == [], "a score with a harness from an item activates nothing"
+            # The reads of the rollouts leave the tree out of each rollout's payload, and answer as before.
+            route = f"/reef/scenarios/s/evaluations/{answer['evaluation_id']}"
+            for query in ("", "?calls=false", "?limit=10", "?limit=10&state=failed", "?limit=10&sort=score"):
+                rollouts = await client.get(f"{route}/rollouts{query}", headers=AUTH)
+                assert rollouts.status == 200, await rollouts.text()
+                rows = (await rollouts.json())["rollouts"]
+                assert [(row["task"], row["task_index"], row["repeat"]) for row in rows] == (
+                    [] if "failed" in query else [("add", 0, 0)]
+                )
+            status = await (await client.get(f"{route}?score_levels=true", headers=AUTH)).json()
+            assert status["progress"]["score_levels"]["full"] == 1
+            [stored_rollout] = evaluations.results.rollouts(answer["evaluation_id"], "s")
+            [read_rollout] = evaluations.results.rollouts(answer["evaluation_id"], "s", harness=False)
+            assert stored_rollout.payload["tree"] is not None
+            assert set(stored_rollout.payload) - set(read_rollout.payload) == {"agent", "tree"}
 
         assert answer["state"] == "finished", answer
         assert answer["request"]["harness"] == harness
@@ -2804,7 +2819,7 @@ def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
     read_rollouts = evaluations.results.rollouts
     reads: list[str] = []
 
-    def counted_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+    def counted_rollouts(evaluation_id: str, scenario: str, *, harness: bool = True) -> tuple[WorkItem, ...]:
         reads.append(evaluation_id)
         return read_rollouts(evaluation_id, scenario)
 
@@ -2980,7 +2995,7 @@ def test_the_list_reads_an_ended_evaluation_without_rollouts_once(
     evaluations = ArtifactEvaluations(dispatcher)
     reads: list[str] = []
 
-    def no_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+    def no_rollouts(evaluation_id: str, scenario: str, *, harness: bool = True) -> tuple[WorkItem, ...]:
         reads.append(evaluation_id)
         return ()
 

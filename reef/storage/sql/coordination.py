@@ -39,6 +39,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    Select,
     String,
     Table,
     Text,
@@ -53,7 +54,7 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
@@ -945,6 +946,26 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
+def item_columns(table: Table, dialect: str, without_payload: Sequence[str]) -> Select[tuple[object, ...]]:
+    """The read of the columns of ``table`` that ``item_from_row`` reads. With ``without_payload``, the database
+    removes these top-level keys from the payload, so their values are not sent to the reader."""
+    if not without_payload:
+        return select(*table.c)
+    payload: ColumnElement[str]
+    if dialect == "sqlite":
+        payload = func.json_remove(table.c.payload_json, *(json_path(key) for key in without_payload))
+    else:
+        removed = sqlalchemy.cast(list(without_payload), ARRAY(Text))
+        payload = sqlalchemy.cast(sqlalchemy.cast(table.c.payload_json, JSONB).op("-")(removed), Text)
+    others = (column for column in table.c if column.name != "payload_json")
+    return select(*others, payload.label("payload_json"))
+
+
+def json_path(key: str) -> str:
+    """The SQLite JSON path of the top-level key ``key``."""
+    return "$." + json.dumps(key)
+
+
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -1407,12 +1428,15 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
-    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+    def read_items(
+        self, queue: str, item_ids: Sequence[str], *, without_payload: Sequence[str] = ()
+    ) -> tuple[WorkItem, ...]:
         if not item_ids:
             return ()
         found = {}
-        query = select(self.table).where(self.table.c.queue == queue)
         with self.database.read() as connection:
+            columns = item_columns(self.table, connection.dialect.name, without_payload)
+            query = columns.where(self.table.c.queue == queue)
             for batch in batches(dict.fromkeys(item_ids)):
                 rows = connection.execute(query.where(self.table.c.item_id.in_(batch))).mappings()
                 for row in rows:
@@ -1431,7 +1455,13 @@ class SQLWorkQueue(WorkQueue):
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
     def items(
-        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+        self,
+        queue: str,
+        *,
+        scenario: str | None = None,
+        kind: str | None = None,
+        id_prefix: str | None = None,
+        without_payload: Sequence[str] = (),
     ) -> tuple[WorkItem, ...]:
         conditions = [self.table.c.queue == queue]
         if scenario is not None:
@@ -1441,8 +1471,9 @@ class SQLWorkQueue(WorkQueue):
         if id_prefix is not None:
             check_id_prefix(id_prefix)
             conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
-        query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
+            columns = item_columns(self.table, connection.dialect.name, without_payload)
+            query = columns.where(*conditions).order_by(self.table.c.created_sequence)
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
     def prefix_state_counts(
