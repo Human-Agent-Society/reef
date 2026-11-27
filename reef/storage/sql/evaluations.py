@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
+from reef.core.values import JsonValue
 from reef.storage.scenario.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
@@ -373,7 +374,7 @@ class SQLEvaluationStore(KeyedEvaluationStore):
             )
         return tuple(stored_evaluation(row) for row in rows)
 
-    def ended_progress(self, evaluation_ids: Sequence[str]) -> dict[str, dict[str, Any] | None]:
+    def ended_progress(self, evaluation_ids: Sequence[str]) -> dict[str, dict[str, JsonValue] | None]:
         if not evaluation_ids:
             return {}
         table = self.table.table
@@ -390,7 +391,9 @@ class SQLEvaluationStore(KeyedEvaluationStore):
             ).all()
         return {str(evaluation_id): json.loads(progress_json) for evaluation_id, progress_json in rows}
 
-    def keep_ended_progress(self, evaluation_id: str, finished_at: float, progress: Mapping[str, Any] | None) -> None:
+    def keep_ended_progress(
+        self, evaluation_id: str, finished_at: float, progress: Mapping[str, JsonValue] | None
+    ) -> bool:
         table = self.table.table
         with self.database._transaction(write=True) as connection:
             sequence = connection.execute(
@@ -399,13 +402,14 @@ class SQLEvaluationStore(KeyedEvaluationStore):
                 )
             ).scalar_one_or_none()
             if sequence is None:
-                return
+                return False
             connection.execute(self.progress.delete().where(self.progress.c.sequence == sequence))
             connection.execute(
                 self.progress.insert().values(
                     sequence=sequence, finished_at=finished_at, progress_json=json.dumps(progress, ensure_ascii=False)
                 )
             )
+        return True
 
     def select_newest(self, limit: int, *, include_task_digests: bool) -> tuple[StoredEvaluation, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:

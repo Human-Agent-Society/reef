@@ -17,10 +17,11 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
+from reef.core.values import JsonValue
 
 #: The state of an evaluation: it waits for its turn, it runs, it finished with a result, or it failed with an error.
 EvaluationState = Literal["queued", "running", "finished", "failed"]
@@ -226,17 +227,20 @@ class EvaluationStore(ABC):
         store may read them without the requests and the results, which can be large."""
         return tuple((stored.evaluation_id, stored.finished_at) for stored in self.newest_for_list(limit=limit))
 
-    def ended_progress(self, evaluation_ids: Sequence[str]) -> dict[str, dict[str, Any] | None]:
+    def ended_progress(self, evaluation_ids: Sequence[str]) -> dict[str, dict[str, JsonValue] | None]:
         """The progress that ``keep_ended_progress`` kept for the evaluations of ``evaluation_ids``, by evaluation
         ID: only for an evaluation that still has the ``finished_at`` of the kept progress. A store that keeps no
         progress gives none."""
         return {}
 
-    def keep_ended_progress(self, evaluation_id: str, finished_at: float, progress: Mapping[str, Any] | None) -> None:
+    def keep_ended_progress(
+        self, evaluation_id: str, finished_at: float, progress: Mapping[str, JsonValue] | None
+    ) -> bool:
         """Keep ``progress`` as the progress of the evaluation ``evaluation_id`` that ended at ``finished_at``: None
-        for an evaluation without rollouts. It replaces the progress of an earlier end. A store may keep nothing,
-        and keeps nothing for an evaluation that it does not hold with this ``finished_at``."""
-        return None
+        for an evaluation without rollouts. It replaces the progress of an earlier end. Return whether the store
+        kept it: a store may keep nothing, and keeps nothing for an evaluation that it does not hold with this
+        ``finished_at``."""
+        return False
 
     def read_for_list(self, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
         """The evaluations of ``evaluation_ids`` that the store holds, in any order, as ``newest_for_list`` gives

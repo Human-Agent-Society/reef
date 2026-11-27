@@ -2040,7 +2040,7 @@ class ArtifactEvaluations:
             for stored in evaluations
             if stored.finished_at is not None and not self.ended_progress.read(scenario, stored)[0]
         ]
-        stored_progress: dict[str, dict[str, Any] | None] = {}
+        stored_progress: dict[str, dict[str, JsonValue] | None] = {}
         if unread:
             with self.dispatcher.locked_scenario(scenario) as current:
                 store = current.store.evaluations
@@ -2054,14 +2054,8 @@ class ArtifactEvaluations:
                 items = self.results.rollouts(stored.evaluation_id, scenario)
                 progress = evaluation_progress(stored, items, now) if items else None
                 self.ended_progress.add(scenario, stored, items, progress)
-                if stored.evaluation_id in unread and self.ended_progress.read(scenario, stored)[0]:
-                    try:
-                        store.keep_ended_progress(stored.evaluation_id, stored.finished_at, progress)
-                    except Exception:
-                        # The list answers without the kept progress: the next process computes it again.
-                        logger.warning(
-                            "could not keep the progress of evaluation %s", stored.evaluation_id, exc_info=True
-                        )
+                if stored.finished_at is not None and self.ended_progress.read(scenario, stored)[0]:
+                    store.keep_ended_progress(stored.evaluation_id, stored.finished_at, progress)
             if progress is not None and not score_levels:
                 benchmarks = cast(list[dict[str, JsonValue]], progress["benchmarks"])
                 progress = {key: value for key, value in progress.items() if key != "score_levels"}
