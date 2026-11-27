@@ -2912,6 +2912,43 @@ def test_a_new_process_lists_an_ended_evaluation_without_a_read_of_its_rollouts(
     asyncio.run(run())
 
 
+def test_the_end_of_an_evaluation_keeps_its_progress_in_the_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    def kept(evaluation_id: str) -> dict[str, object]:
+        with dispatcher.locked_scenario("s") as current:
+            return dict(current.store.evaluations.ended_progress([evaluation_id]))
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            route = "/reef/scenarios/s/evaluations"
+            first = (await (await client.post(route, headers=AUTH, json=body)).json())["evaluation_id"]
+            assert kept(first) == {}
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            # No list reads the evaluation here: the end keeps the progress.
+            for _ in range(200):
+                if evaluations.get("s", first).state == "finished":
+                    break
+                await asyncio.sleep(0.05)
+            progress = kept(first)[first]
+            assert (progress["total"], progress["scored"], progress["mean_score"]) == (2, 2, 1.0)
+            assert (await finished(client, first))["progress"]["scored"] == 2
+
+            # A cancel ends the rollouts, then keeps the progress with them as cancelled.
+            second = (await (await client.post(route, headers=AUTH, json=body)).json())["evaluation_id"]
+            assert (await client.post(f"{route}/{second}/cancel", headers=AUTH)).status == 200
+            assert kept(second)[second]["cancelled"] == 2
+
+    asyncio.run(run())
+
+
 def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Path) -> None:
     # A cancel stores the failed evaluation before it ends the rollouts; a reader in between sees a running rollout.
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
