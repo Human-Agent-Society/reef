@@ -9,7 +9,8 @@ On ``e2b``, control first adds one ``evaluation_task_template`` item for each ta
 that item is final. A ``TaskTemplateWorker`` takes a template item and builds the task's sandbox templates for the
 owner of the scenario's items. So a rollout that waits for a template builder holds no rollout slot of its evaluation
 and no sandbox slot of a worker. A rollout of an evaluation that requires prepared templates runs no trial when its
-task's template item failed, and its trial builds no template.
+task's template item failed, and its trial builds no template. A builder can also give the task's verified images;
+then a trial starts each environment from its image when its template is missing, and builds nothing for it.
 
 A worker asks inference to serve the candidate before each trial (a ``serve_artifact`` item of the ``serving`` queue),
 and waits until the engine is ready. It answers the agent's model calls from that engine on a loopback endpoint
@@ -58,6 +59,7 @@ from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts, ProviderCooldowns, refusal_limit
 from reef.evaluation.task_templates import TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
+from reef.execution.sandbox.prepared_images import PreparedImage, TaskImages, prepared_images_from_json
 from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS, SANDBOX_REQUEST_ERRORS
 from reef.execution.workers import ItemDeferredError, ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
@@ -77,6 +79,10 @@ EVALUATIONS_QUEUE = "evaluations"
 EVALUATION_ROLLOUT_KIND = "evaluation_rollout"
 #: The kind of the item that builds the sandbox templates of one task of an evaluation on e2b.
 TASK_TEMPLATE_KIND = "evaluation_task_template"
+#: The keys of a template item's result when its builder gave prepared images: their JSON list, and the task digest
+#: that the builder made them for. An item without them, such as one of an older Reef, gives no trial an image.
+PREPARED_IMAGES_RESULT = "prepared_images"
+PREPARED_DIGEST_RESULT = "task_digest"
 #: The address at which a task's container reaches this host, by default.
 DEFAULT_AGENT_HOST = "host.docker.internal"
 #: The longest wait for inference to serve a candidate, in seconds: a first start can quantize its weights.
@@ -376,6 +382,24 @@ def rollout_item_id(evaluation_id: str, task_index: int, repeat: int) -> str:
 def template_item_id(evaluation_id: str, task_index: int) -> str:
     """The ID of the template item of task ``task_index`` of an evaluation."""
     return f"{TASK_TEMPLATE_KIND}:{evaluation_id}:{task_index:05d}"
+
+
+def prepared_task_images(template: WorkItem | None, task_digest: str | None) -> tuple[PreparedImage, ...]:
+    """The prepared images that the template item ``template`` gives a trial of the task files ``task_digest``.
+
+    They are the images of the item's result (``PREPARED_IMAGES_RESULT``) when the item finished and its builder made
+    them for ``task_digest``, which is not None. Every other case gives none: no item, an item that did not finish,
+    an item whose builder gave none or that an older Reef finished, and images of another or an unknown version of
+    the task. Raise ``ValueError`` for a stored list that is not valid."""
+    if template is None or template.state != "finished" or task_digest is None:
+        return ()
+    result = template.result or {}
+    if PREPARED_IMAGES_RESULT not in result:
+        return ()
+    if result.get(PREPARED_DIGEST_RESULT) != task_digest:
+        logger.info("the prepared images of %s are for other task files; its trials do not start them", template.id)
+        return ()
+    return prepared_images_from_json(result[PREPARED_IMAGES_RESULT])
 
 
 @dataclass(frozen=True)
@@ -1018,6 +1042,7 @@ class EvaluationRolloutWorker(QueueWorker):
 
         A rollout that requires prepared templates runs only when its task's template item finished, and its trial
         builds no template. Else it fails for good with the template item's error, before its candidate is served.
+        On e2b, the trial starts the prepared images of the finished template item (``prepared_task_images``).
 
         A sandbox capacity refusal raises ``ItemDeferredError``. An invalid sandbox request fails the rollout.
         Both leave the score unset, even if the agent already called the model.
@@ -1028,8 +1053,12 @@ class EvaluationRolloutWorker(QueueWorker):
         without tools do not mask a main-loop refusal and do not fail a trial that finished with no error. When the
         inference service failed its model calls (``RolloutCalls.service_failure``), the attempt fails with no score,
         and the rollout is retried as any other failed attempt."""
+        template = (
+            self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
+            if rollout.environment == "e2b"
+            else None
+        )
         if rollout.requires_prepared_templates:
-            template = self.queue.read(EVALUATIONS_QUEUE, template_item_id(rollout.evaluation_id, rollout.task_index))
             unprepared = f"the templates of task {rollout.task_name!r} were not prepared"
             if template is None:
                 raise ItemFailedError(f"{unprepared}: the queue no longer holds its template item")
@@ -1038,6 +1067,7 @@ class EvaluationRolloutWorker(QueueWorker):
         task_directory, task_digest = self.endpoints.task_version(rollout)
         if rollout.task_digest is not None and task_digest != rollout.task_digest:
             raise ItemFailedError("the task resolver returned different files from the pinned version")
+        prepared_images = prepared_task_images(template, task_digest)
         if rollout.tree is not None:
             # A retry runs the same task with the same tree, so a task that asks for what the tree's agent cannot
             # give fails for good, before its candidate is served.
@@ -1078,8 +1108,9 @@ class EvaluationRolloutWorker(QueueWorker):
                 # ``calls`` keeps each call as it lands, so the runner keeps no call body: an agent's request holds
                 # the whole conversation so far, and a long rollout's bodies reached hundreds of MiB.
                 keeps_turns=False,
-                # A template that was removed after its preparation fails the trial; the trial does not build it.
+                # Managed trials use the prepared template or its verified image.
                 builds_templates=not rollout.requires_prepared_templates,
+                task_images=TaskImages.of_task(task_directory, prepared_images) if prepared_images else None,
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
@@ -1192,7 +1223,9 @@ class TaskTemplateWorker(QueueWorker):
     Reef queued names no owner, so the record's owner alone counts. Every failure of a build is retryable, until the
     item uses up its attempts. Control adds a task's rollouts once its item is final, also when the build failed. The
     trial then builds the template itself, and its failure is the rollout's failure; but a rollout that requires
-    prepared templates fails with the item's error, and runs no trial.
+    prepared templates fails with the item's error, and runs no trial. When the builder gives prepared images, the item
+    finishes with their JSON list and the task digest that the builder got (``PREPARED_IMAGES_RESULT``); else with an
+    empty result. The trials of that digest start the images (``prepared_task_images``).
 
     Purpose: the evaluation service starts one beside its ``EvaluationRolloutWorker``. A wait for a template builder
     then holds a slot of this worker, not a rollout slot of the evaluation or a sandbox slot.
@@ -1240,30 +1273,37 @@ class TaskTemplateWorker(QueueWorker):
         task_directory, task_digest = self.endpoints.task_version(rollout)
         if rollout.task_digest is not None and task_digest != rollout.task_digest:
             raise ItemFailedError("the task resolver returned different files from the pinned version")
-        asyncio.run(
+        images = asyncio.run(
             run_while_held(
                 self.build_task_template(owner, rollout, task_directory, task_digest),
                 lease_lost,
                 self.stopped,
             )
         )
-        return {}
+        if images is None:
+            return {}
+        return {
+            PREPARED_IMAGES_RESULT: cast(list[JsonValue], [image.to_json() for image in images]),
+            PREPARED_DIGEST_RESULT: task_digest,
+        }
 
     async def build_task_template(
         self, owner: str | None, rollout: EvaluationRollout, task_directory: Path, task_digest: str | None
-    ) -> None:
+    ) -> tuple[PreparedImage, ...] | None:
         """Make the e2b templates of the task of ``rollout``, at ``task_directory``, ready for ``owner`` with
-        ``builder``. A build that found no free builder in the task's build time limit (``TimeoutError``) waits again,
-        at most ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the item is retried.
-        Any other failure of the build fails the attempt in the same way."""
+        ``builder``, and return the prepared images that the builder gave, or None when it gave none. A build that
+        found no free builder in the task's build time limit (``TimeoutError``) waits again, at most
+        ``TEMPLATE_WAIT_S`` in all. Then raise ``ReefError``, so the attempt fails and the item is retried. Any other
+        failure of the build fails the attempt in the same way, and so does an invalid list of prepared images
+        (``ValueError``)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + TEMPLATE_WAIT_S
         while True:
             try:
-                await self.builder.build_for_version(
+                images = await self.builder.build_for_version(
                     owner, rollout.scenario, rollout.task_name, task_directory, task_digest=task_digest
                 )
-                return
+                return None if images is None else prepared_images_from_json(images)
             except TimeoutError as error:
                 if loop.time() >= deadline:
                     raise ReefError(
@@ -1279,6 +1319,8 @@ __all__ = [
     "EVALUATION_ROLLOUT_KIND",
     "MAX_VERIFIER_BYTES",
     "MAX_VERIFIER_CALLS",
+    "PREPARED_DIGEST_RESULT",
+    "PREPARED_IMAGES_RESULT",
     "TASK_TEMPLATE_KIND",
     "VERIFIER_CALLS_FILE",
     "VERIFIER_JUDGE_DIR",
@@ -1297,6 +1339,7 @@ __all__ = [
     "check_finish_timeout",
     "evaluation_call",
     "harbor_agent",
+    "prepared_task_images",
     "reply_summary",
     "rollout_item_id",
     "template_item_id",

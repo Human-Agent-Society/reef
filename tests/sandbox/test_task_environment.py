@@ -8,14 +8,17 @@ import json
 import os
 import stat
 import sys
+from collections.abc import Sequence
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from tests.support.e2b_trials import E2B_TASK_TOML, TASK_IMAGE, VERIFIER_IMAGE, harbor_e2b_environments, prepared_image
 
 from reef.execution.sandbox.agentenv.compose import TransientStartError
+from reef.execution.sandbox.prepared_images import PreparedImage
 from reef.execution.sandbox.process import (
     SANDBOX_CAPACITY_ERRORS,
     SANDBOX_REQUEST_ERRORS,
@@ -117,69 +120,6 @@ def test_a_probe_answers_with_a_reason_and_never_raises(tmp_path: Path) -> None:
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
     reason = DockerProbe(docker=str(docker), timeout_s=0.2).missing()
     assert reason.startswith(f"{docker} version did not answer:"), reason
-
-
-#: A task with time limits, resources and an environment variable of its own.
-E2B_TASK_TOML = """\
-[agent]
-timeout_sec = 900
-
-[verifier]
-timeout_sec = 300
-
-[environment]
-build_timeout_sec = 120
-cpus = 2
-memory_mb = 4096
-
-[environment.env]
-TASK_SETTING = "from-the-task"
-"""
-
-
-def harbor_e2b_environments(
-    tmp_path: Path,
-    agent: dict[str, object] | None = None,
-    dockerfile: str = "FROM python:3.12-slim\nWORKDIR /app\n",
-) -> dict[str, object]:
-    """Reef's E2B environment and Harbor's, made by Harbor's factory for one task as a trial makes them.
-
-    ``reef`` has the config of ``environment_config`` for the Harbor agent config ``agent``; ``harbor`` has the same
-    config without its ``import_path``, which is Harbor's own class. Both have the same session, trial environment and
-    network allowlist. The task's environment has ``dockerfile`` and a file ``tool``.
-    """
-    from harbor.environments.factory import EnvironmentFactory
-    from harbor.models.task.config import NetworkMode, NetworkPolicy
-    from harbor.models.task.task import Task
-    from harbor.models.trial.config import EnvironmentConfig
-    from harbor.models.trial.paths import TrialPaths
-
-    task_path = tmp_path / "task"
-    (task_path / "environment").mkdir(parents=True)
-    (task_path / "environment" / "Dockerfile").write_text(dockerfile)
-    (task_path / "environment" / "tool").write_text("#!/bin/sh\n")
-    (task_path / "tests").mkdir()
-    (task_path / "tests" / "test.sh").write_text("#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n")
-    (task_path / "instruction.md").write_text("Write nothing.\n")
-    (task_path / "task.toml").write_text(E2B_TASK_TOML)
-    task = Task(task_path)
-    reef_config = environment_config("e2b", task_path, agent)
-    configs = {
-        "reef": reef_config,
-        "harbor": {key: value for key, value in reef_config.items() if key != "import_path"},
-    }
-    return {
-        name: EnvironmentFactory.create_environment_from_config(
-            config=EnvironmentConfig.model_validate({**config, "env": {"TRIAL_SETTING": "from-the-trial"}}),
-            environment_dir=task.paths.environment_dir,
-            environment_name=task.short_name,
-            session_id="t__env",
-            trial_paths=TrialPaths(tmp_path / name),
-            task_env_config=task.config.environment.model_copy(deep=True),
-            network_policy=NetworkPolicy(network_mode=NetworkMode.ALLOWLIST, allowed_hosts=["pypi.org"]),
-        )
-        for name, config in configs.items()
-    }
 
 
 @pytest.mark.unit
@@ -896,9 +836,12 @@ class SandboxCreatedError(Exception):
     """A stand-in ``_create_sandbox`` raises it: the template part of ``start`` passed, and the sandbox starts."""
 
 
-def trial_environments(tmp_path: Path, *, builds_templates: bool) -> list[object]:
+def trial_environments(
+    tmp_path: Path, *, builds_templates: bool, prepared_images: Sequence[PreparedImage] = ()
+) -> list[object]:
     """The environment of a trial of the task under ``tmp_path`` and its separate verifier environment, made by
-    Harbor's factory from one config of ``environment_config``, as Harbor's trial makes them."""
+    Harbor's factory from one config of ``environment_config`` with ``prepared_images``, as Harbor's trial makes
+    them."""
     from harbor.environments.factory import EnvironmentFactory
     from harbor.models.task.task import Task
     from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
@@ -909,7 +852,9 @@ def trial_environments(tmp_path: Path, *, builds_templates: bool) -> list[object
     task = Task(task_path)
     verifier = resolve_verifier_environment_definition(task.config, task.paths)
     assert verifier is not None
-    config = EnvironmentConfig.model_validate(environment_config("e2b", task_path, builds_templates=builds_templates))
+    config = EnvironmentConfig.model_validate(
+        environment_config("e2b", task_path, builds_templates=builds_templates, prepared_images=prepared_images)
+    )
     return [
         EnvironmentFactory.create_environment_from_config(
             config=config,
@@ -1055,10 +1000,11 @@ def compose_environment(
     builds_templates: bool = True,
     build: str = "aenv",
     compose: str | None = "aenv",
+    prepared_images: Sequence[PreparedImage] = (),
 ) -> object:
     """Reef's E2B environment of a trial of the task of ``harbor_e2b_environments`` with ``TASK_COMPOSE``, with
     ``REEF_E2B_DOCKERFILE_BUILD`` ``build`` and ``REEF_E2B_COMPOSE`` ``compose`` (unset for None). Harbor's factory
-    makes it from ``environment_config``."""
+    makes it from ``environment_config`` with ``prepared_images``."""
     from harbor.environments.factory import EnvironmentFactory
     from harbor.models.task.task import Task
     from harbor.models.trial.config import EnvironmentConfig
@@ -1076,7 +1022,7 @@ def compose_environment(
         harbor_e2b_environments(tmp_path)
     (task_path / "environment" / "docker-compose.yaml").write_text(TASK_COMPOSE)
     task = Task(task_path)
-    config = environment_config("e2b", task_path, builds_templates=builds_templates)
+    config = environment_config("e2b", task_path, builds_templates=builds_templates, prepared_images=prepared_images)
     return EnvironmentFactory.create_environment_from_config(
         config=EnvironmentConfig.model_validate(config),
         environment_dir=task.paths.environment_dir,
@@ -1343,3 +1289,116 @@ def test_a_compose_command_as_root_names_root_by_its_uid(tmp_path: Path, monkeyp
         asyncio.run(environment.exec("true", user=user))
     users = [command[command.index("-u") + 1] for command in commands]
     assert users == ["0", "agent", "1000"]
+
+
+@pytest.mark.unit
+def test_only_an_e2b_config_carries_prepared_images(tmp_path: Path) -> None:
+    pytest.importorskip("e2b")
+    from harbor.models.task.task import Task
+    from harbor.models.trial.paths import TrialPaths
+
+    from reef.execution.sandbox.e2b import KillOnTimeoutE2BEnvironment, TemplateNotPreparedError
+
+    harbor_e2b_environments(tmp_path)
+    task_path = tmp_path / "task"
+    image = prepared_image()
+    kwargs = environment_config("e2b", task_path, prepared_images=[image])["kwargs"]
+    assert (kwargs["prepared_images"], kwargs["task_directory"]) == ([image.to_json()], str(task_path))
+    assert "prepared_images" not in environment_config("e2b", task_path).get("kwargs", {})
+    for other in ("docker", "modal"):
+        with pytest.raises(ValueError, match="only an e2b trial starts from prepared images"):
+            environment_config(other, task_path, prepared_images=[image])
+    # A forged list, or a list without its task, fails the environment before it starts.
+    task = Task(task_path)
+    options = {
+        "environment_dir": task.paths.environment_dir,
+        "environment_name": task.short_name,
+        "session_id": "t__env",
+        "trial_paths": TrialPaths(tmp_path / "forged"),
+        "task_env_config": task.config.environment,
+    }
+    for forged_image in ("registry.example/tasks/task:latest", "aenv/task@sha256:" + "c" * 64):
+        forged = {**image.to_json(), "image": forged_image}
+        with pytest.raises(ValueError, match="host/repository@sha256"):
+            KillOnTimeoutE2BEnvironment(**options, prepared_images=[forged], task_directory=str(task_path))
+    with pytest.raises(ValueError, match="given together"):
+        KillOnTimeoutE2BEnvironment(**options, prepared_images=[image.to_json()])
+    # A list without the image of the task's environment fails it, and the environment builds nothing instead.
+    other = prepared_image("tests", VERIFIER_IMAGE).to_json()
+    with pytest.raises(TemplateNotPreparedError, match=r"have no image of .*environment \(source image None\)"):
+        KillOnTimeoutE2BEnvironment(**options, prepared_images=[other], task_directory=str(task_path))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("force_build", [False, True])
+def test_each_environment_of_a_trial_starts_its_own_prepared_image_and_builds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_build: bool
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    write_separate_verifier_task(tmp_path)
+    started: list[object] = []
+
+    async def never(*arguments: object, **options: object) -> None:
+        raise AssertionError("a prepared image builds no template and reads no alias")
+
+    async def create_sandbox(environment: reef_e2b.KillOnTimeoutE2BEnvironment) -> None:
+        started.append(environment.prepared_image)
+        raise SandboxCreatedError
+
+    monkeypatch.setattr(e2b.AsyncTemplate, "alias_exists", staticmethod(never))
+    monkeypatch.setattr(e2b.AsyncTemplate, "build", staticmethod(never))
+    monkeypatch.setattr(AgentEnvTemplates, "state", never)
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", never)
+    monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "_create_sandbox", create_sandbox)
+    images = (prepared_image(), prepared_image("tests", VERIFIER_IMAGE, template_id=None))
+    # Also a trial that builds no template, and a forced build: the deployment prepared the images.
+    for builds_templates in (True, False):
+        for environment in trial_environments(tmp_path, builds_templates=builds_templates, prepared_images=images):
+            with pytest.raises(SandboxCreatedError):
+                asyncio.run(environment.start(force_build=force_build))
+    assert started == [*images, *images]
+    # A list without an image of the task's environment, or of its verifier, or with another source image, fails the
+    # trial before its agent runs: the environment does not go back to its template or its Dockerfile.
+    pinned = prepared_image(source_image="registry.example/tasks/task:1")
+    for partial in (images[1:], images[:1], [pinned, images[1]]):
+        with pytest.raises(reef_e2b.TemplateNotPreparedError, match="a task with prepared images builds none"):
+            trial_environments(tmp_path, builds_templates=True, prepared_images=partial)
+
+
+@pytest.mark.unit
+def test_a_compose_task_starts_its_project_and_its_plain_verifier_starts_its_prepared_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox, ImageNotFoundError
+    from reef.execution.sandbox.e2b import TemplateNotPreparedError
+
+    images = [prepared_image(), prepared_image("tests", VERIFIER_IMAGE)]
+    write_separate_verifier_task(tmp_path)
+    environment = compose_environment(tmp_path, monkeypatch, prepared_images=images)
+    # The project of a Compose task starts as before; its separate verifier has no Compose file.
+    assert environment.compose_ops is not None and environment.prepared_image == images[0]
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
+    asyncio.run(environment.start(force_build=False))
+    assert calls[0].project["services"]["main"]["image"] == TASK_IMAGE
+    assert [call for call in calls if not isinstance(call, ComposeSandbox)] == [
+        ("prepare", "sandbox-1"),
+        ("connect", "sandbox-1", environment._sandbox_timeout),
+    ]
+    verifier = trial_environments(tmp_path, builds_templates=False, prepared_images=images)[1]
+    assert verifier.compose_ops is None and verifier.prepared_image == images[1]
+    for forced in (False, True):
+        missing = compose_environment(tmp_path, monkeypatch, prepared_images=images)
+        calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
+        with pytest.raises(ImageNotFoundError):
+            asyncio.run(missing.start(force_build=forced))
+        assert len(calls) == 1 and calls[0].project["services"]["main"]["image"] == TASK_IMAGE
+    # Without Compose the main service runs as an ordinary environment and needs its own verified image.
+    single = compose_environment(tmp_path, monkeypatch, compose=None, prepared_images=images)
+    assert single.compose_ops is None and single.prepared_image == images[0]
+    rewritten = [prepared_image(source_image="registry.example/tasks/task@sha256:" + "e" * 64), images[1]]
+    with pytest.raises(TemplateNotPreparedError, match="have no image of"):
+        compose_environment(tmp_path, monkeypatch, compose=None, prepared_images=rewritten)

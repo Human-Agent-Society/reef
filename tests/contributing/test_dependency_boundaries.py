@@ -448,10 +448,36 @@ def test_the_agentenv_build_and_compose_helpers_load_without_the_e2b_package() -
         "sys.modules['e2b'] = None\n"
         "from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, dockerfile_build\n"
         "from reef.execution.sandbox.agentenv.compose import ComposeSandbox, TransientStartError, compose_mode\n"
+        "from reef.execution.sandbox.agentenv.images import ColdSandbox\n"
         "assert (dockerfile_build({}), compose_mode({})) == ('e2b', 'off')\n"
-        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError\n"
+        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError and ColdSandbox\n"
         "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
+
+
+def test_shared_trial_code_reads_prepared_images_without_a_provider_adapter() -> None:
+    # Evaluation, Harbor rollouts, training and the shared task environment config read prepared task images through
+    # their shared contract. Only a provider's trial environment imports the provider's adapter.
+    shared = [
+        path
+        for package in ("reef/evaluation", "reef/harness", "reef/train")
+        for path in sorted((REPO_ROOT / package).rglob("*.py"))
+    ]
+    shared += [REPO_ROOT / "reef/execution/sandbox/task_environment.py"]
+    offenders: list[str] = []
+    for path in shared:
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        offenders.extend(
+            f"{path.relative_to(REPO_ROOT)} -> {target}"
+            for target in _imports_of(imported, "reef.execution.sandbox.agentenv")
+        )
+    assert offenders == []
+    # The contract is plain data: it imports no provider, SDK, HTTP client or other part of Reef beyond its core.
+    contract = REPO_ROOT / "reef/execution/sandbox/prepared_images.py"
+    imported = _imported_modules(ast.parse(contract.read_text(encoding="utf-8")), package="reef.execution.sandbox")
+    assert [target for target in imported if target.startswith("reef.") and not target.startswith("reef.core.")] == []
+    assert [target for module in ("aiohttp", "e2b", "harbor") for target in _imports_of(imported, module)] == []
 
 
 def test_slime_training_component_import_does_not_load_megatron_stack() -> None:

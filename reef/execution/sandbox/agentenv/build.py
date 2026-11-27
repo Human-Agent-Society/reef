@@ -150,7 +150,8 @@ class AgentEnvTemplates:
     Values: ``api_url`` is the deployment's API URL without a trailing slash, and ``api_key`` its API key. Both are
     non-empty. The E2B SDK reads them from ``E2B_API_URL`` and ``E2B_API_KEY``.
     Purpose: ``ensure_aenv_template`` reads the state of an alias and deletes a failed template through it, and
-    ``DockerfileBuild.run`` gives both values to ``aenv build``.
+    ``DockerfileBuild.run`` gives both values to ``aenv build``. A trial of a prepared image checks its template
+    (``is_ready``) and starts the image without a template (``reef.execution.sandbox.agentenv.images``).
     """
 
     api_url: str
@@ -165,10 +166,12 @@ class AgentEnvTemplates:
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Self:
         """The deployment of ``E2B_API_URL`` and ``E2B_API_KEY`` in ``environ``. Raise ``ValueError`` when either
-        is unset: an ``aenv`` build needs the deployment's own URL, not E2B's default."""
+        is unset: an ``aenv`` build and a prepared image need the deployment's own URL, not E2B's default."""
         api_url, api_key = environ.get("E2B_API_URL", "").strip(), environ.get("E2B_API_KEY", "").strip()
         if not api_url or not api_key:
-            raise ValueError(f"{DOCKERFILE_BUILD_VARIABLE}=aenv needs E2B_API_URL and E2B_API_KEY")
+            raise ValueError(
+                f"{DOCKERFILE_BUILD_VARIABLE}=aenv and prepared task images need E2B_API_URL and E2B_API_KEY"
+            )
         return cls(api_url.rstrip("/"), api_key)
 
     async def state(self, alias: str) -> TemplateState | None:
@@ -197,6 +200,37 @@ class AgentEnvTemplates:
                 builds = (await response.json())["builds"]
         created_at = {build["buildID"]: build["createdAt"] for build in builds}[template_id]
         return TemplateState(template_id, "building", reason, datetime.fromisoformat(created_at))
+
+    async def is_ready(self, template_id: str, wait_seconds: float) -> bool:
+        """Whether the template ``template_id`` exists and its build, which has the template's ID, is ``ready``. A
+        template that is gone is not ready. The read waits at most ``wait_seconds``, a positive number, and then
+        raises ``TimeoutError``. Raise ``aiohttp.ClientResponseError`` for any other refused read, and for a redirect,
+        which the read does not follow with the API key."""
+        template = quote(template_id, safe="")
+        url = f"{self.api_url}/templates/{template}/builds/{template}/status"
+        async with (
+            aiohttp.ClientSession(
+                headers={"X-API-Key": self.api_key}, timeout=aiohttp.ClientTimeout(total=wait_seconds)
+            ) as session,
+            session.get(url, allow_redirects=False) as response,
+        ):
+            if response.status == 404:
+                return False
+            if 300 <= response.status < 400:
+                raise aiohttp.ClientResponseError(
+                    response.request_info,
+                    response.history,
+                    status=response.status,
+                    message="AgentENV redirected the read of a template's status",
+                    headers=response.headers,
+                )
+            response.raise_for_status()
+            try:
+                body = await response.json()
+            except (aiohttp.ContentTypeError, ValueError):
+                # An unreadable status cannot establish that this snapshot is ready.
+                return False
+            return isinstance(body, dict) and body.get("status") == "ready"
 
     async def delete(self, template_id: str) -> None:
         """Delete the template ``template_id``. A template that is gone already counts as deleted."""
