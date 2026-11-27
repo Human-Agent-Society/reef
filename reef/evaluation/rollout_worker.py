@@ -379,6 +379,12 @@ def rollout_item_id(evaluation_id: str, task_index: int, repeat: int) -> str:
     return f"{EVALUATION_ROLLOUT_KIND}:{evaluation_id}:{task_index:05d}:{repeat:05d}"
 
 
+def rollout_position(item_id: str) -> tuple[int, int]:
+    """The task index and the repeat of the rollout item ``item_id``, which ``rollout_item_id`` made."""
+    task_index, repeat = item_id.rsplit(":", 2)[1:]
+    return int(task_index), int(repeat)
+
+
 def template_item_id(evaluation_id: str, task_index: int) -> str:
     """The ID of the template item of task ``task_index`` of an evaluation."""
     return f"{TASK_TEMPLATE_KIND}:{evaluation_id}:{task_index:05d}"
@@ -1342,6 +1348,7 @@ __all__ = [
     "prepared_task_images",
     "reply_summary",
     "rollout_item_id",
+    "rollout_position",
     "template_item_id",
     "verifier_call",
     "verifier_output",
