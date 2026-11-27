@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
@@ -225,6 +225,18 @@ class EvaluationStore(ABC):
         """The ``(evaluation_id, finished_at)`` of at most ``limit`` evaluations, newest ``created_at`` first. A
         store may read them without the requests and the results, which can be large."""
         return tuple((stored.evaluation_id, stored.finished_at) for stored in self.newest_for_list(limit=limit))
+
+    def ended_progress(self, evaluation_ids: Sequence[str]) -> dict[str, dict[str, Any] | None]:
+        """The progress that ``keep_ended_progress`` kept for the evaluations of ``evaluation_ids``, by evaluation
+        ID: only for an evaluation that still has the ``finished_at`` of the kept progress. A store that keeps no
+        progress gives none."""
+        return {}
+
+    def keep_ended_progress(self, evaluation_id: str, finished_at: float, progress: Mapping[str, Any] | None) -> None:
+        """Keep ``progress`` as the progress of the evaluation ``evaluation_id`` that ended at ``finished_at``: None
+        for an evaluation without rollouts. It replaces the progress of an earlier end. A store may keep nothing,
+        and keeps nothing for an evaluation that it does not hold with this ``finished_at``."""
+        return None
 
     def read_for_list(self, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
         """The evaluations of ``evaluation_ids`` that the store holds, in any order, as ``newest_for_list`` gives

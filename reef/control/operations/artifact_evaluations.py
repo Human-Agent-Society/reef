@@ -2030,15 +2030,38 @@ class ArtifactEvaluations:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
         ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the rollouts
         of these evaluations only, not those of the scenario's other evaluations, and not those of an ended
-        evaluation whose progress, or lack of rollouts, ``ended_progress`` keeps."""
+        evaluation whose progress, or lack of rollouts, ``ended_progress`` or the evaluation store keeps
+        (``EvaluationStore.keep_ended_progress``)."""
         now = time.time()
         views: list[dict[str, object]] = []
+        # The store keeps the progress of an ended evaluation, so a new process does not read its rollouts again.
+        unread = [
+            stored.evaluation_id
+            for stored in evaluations
+            if stored.finished_at is not None and not self.ended_progress.read(scenario, stored)[0]
+        ]
+        stored_progress: dict[str, dict[str, Any] | None] = {}
+        if unread:
+            with self.dispatcher.locked_scenario(scenario) as current:
+                store = current.store.evaluations
+                stored_progress = store.ended_progress(unread)
         for stored in evaluations:
             kept, progress = self.ended_progress.read(scenario, stored)
-            if not kept:
+            if not kept and stored.evaluation_id in stored_progress:
+                progress = stored_progress[stored.evaluation_id]
+                self.ended_progress.add(scenario, stored, (), progress)
+            elif not kept:
                 items = self.results.rollouts(stored.evaluation_id, scenario)
                 progress = evaluation_progress(stored, items, now) if items else None
                 self.ended_progress.add(scenario, stored, items, progress)
+                if stored.evaluation_id in unread and self.ended_progress.read(scenario, stored)[0]:
+                    try:
+                        store.keep_ended_progress(stored.evaluation_id, stored.finished_at, progress)
+                    except Exception:
+                        # The list answers without the kept progress: the next process computes it again.
+                        logger.warning(
+                            "could not keep the progress of evaluation %s", stored.evaluation_id, exc_info=True
+                        )
             if progress is not None and not score_levels:
                 benchmarks = cast(list[dict[str, JsonValue]], progress["benchmarks"])
                 progress = {key: value for key, value in progress.items() if key != "score_levels"}

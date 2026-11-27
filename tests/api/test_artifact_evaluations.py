@@ -472,9 +472,9 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
             newest = dispatcher.coordination.served_models.current_request("s").payload.get("serving_config", {})
-            assert (
-                runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10
-            ), "inference serves the candidate with the config of the scenario's newest request"
+            assert runtime.serve_scenarios == ["s"] * 10 and runtime.serve_configs == [newest] * 10, (
+                "inference serves the candidate with the config of the scenario's newest request"
+            )
             routes = dispatcher.coordination.served_models.read_scenario("s")
             assert set(routes) == {
                 "active",
@@ -2870,6 +2870,44 @@ def test_the_summary_list_reads_an_ended_evaluation_once(tmp_path: Path, monkeyp
                 assert summary["tasks_digest"] == running["tasks_digest"] == digest
             # The evaluation that runs is read for each list, and the ended one only for the first.
             assert reads == [[second["evaluation_id"], first["evaluation_id"]], [second["evaluation_id"]]]
+
+    asyncio.run(run())
+
+
+def test_a_new_process_lists_an_ended_evaluation_without_a_read_of_its_rollouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, accepted["evaluation_id"])
+            stored = evaluations.get("s", accepted["evaluation_id"])
+
+            # A process that starts later has no progress in memory: the store gives the progress that was kept.
+            later = ArtifactEvaluations(dispatcher)
+            reads: list[str] = []
+            monkeypatch.setattr(later.results, "rollouts", lambda evaluation_id, scenario: reads.append(evaluation_id))
+            assert later.status_json("s", [stored])[0]["progress"] == ended["progress"]
+            assert reads == []
+
+            # A retry or a resume gives a new end: the progress of the earlier end is not read.
+            with dispatcher.locked_scenario("s") as current:
+                store = current.store.evaluations
+                assert store.ended_progress([stored.evaluation_id]) != {}
+                store.keep_ended_progress(stored.evaluation_id, stored.finished_at + 1, {"total": 9})
+                assert store.ended_progress([stored.evaluation_id]) != {stored.evaluation_id: {"total": 9}}
+                store.reopen(stored.evaluation_id)
+                assert store.ended_progress([stored.evaluation_id]) == {}
 
     asyncio.run(run())
 
