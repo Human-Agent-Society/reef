@@ -2849,7 +2849,40 @@ def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Pa
                 evaluations.get("s", accepted["evaluation_id"]), state="failed", error="x", finished_at=1e10
             )
             evaluations.ended_progress.add("s", stored, running, {"ended": 0})
-            assert evaluations.ended_progress.read("s", stored) is None
+            assert evaluations.ended_progress.read("s", stored) == (False, None)
+
+    asyncio.run(run())
+
+
+def test_the_list_reads_an_ended_evaluation_without_rollouts_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The queue deletes the rollouts of an old evaluation, and an evaluation that fails at its start has none.
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    reads: list[str] = []
+
+    def no_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+        reads.append(evaluation_id)
+        return ()
+
+    monkeypatch.setattr(evaluations.results, "rollouts", no_rollouts)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            running = evaluations.get("s", accepted["evaluation_id"])
+            ended = replace(running, state="failed", error="x", finished_at=1e10)
+            for _ in range(2):
+                assert evaluations.status_json("s", [ended])[0]["progress"] is None
+            assert reads == [ended.evaluation_id]
+            # An evaluation that runs can get its rollouts later: each list reads them.
+            for _ in range(2):
+                assert evaluations.status_json("s", [running])[0]["progress"] is None
+            assert reads == [ended.evaluation_id] * 3
 
     asyncio.run(run())
 

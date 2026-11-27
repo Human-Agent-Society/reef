@@ -304,17 +304,20 @@ class EndedProgress:
     """The progress of ended evaluations, so that a list of evaluations does not read their rollouts again.
 
     Values: ``entries`` maps the key ``(scenario, evaluation_id, finished_at)`` of an ended evaluation to its
-    ``evaluation_progress``, computed from rollouts that had all ended (``rollout_ended``). It holds at most
+    ``evaluation_progress``, computed from rollouts that had all ended (``rollout_ended``), or to None when the queue
+    held none of its rollouts. It holds at most
     ``ENDED_PROGRESS_ENTRIES`` keys, in the order of their last use. ``lock`` guards ``entries`` for the threads of
     concurrent routes.
 
     The rollouts of an ended evaluation stay ended until a retry or a resume reopens the evaluation, and its next end
     gives it a new ``finished_at``. So a key describes one run of the evaluation, and its progress does not change.
+    An ended evaluation gets no new rollout, so one without rollouts keeps none.
     An entry outlives the queue's deletion of the rollouts after their retention: the list then shows the progress
     that they gave, not null.
 
-    Operations: ``read(scenario, stored)`` is the entry of ``stored``'s key, or None when ``stored`` runs or has no
-    entry. ``add(scenario, stored, items, progress)`` keeps ``progress`` under ``stored``'s key when ``stored`` ended
+    Operations: ``read(scenario, stored)`` is ``(True, entry)`` for the entry of ``stored``'s key, or
+    ``(False, None)`` when ``stored`` runs or has no entry. ``add(scenario, stored, items, progress)`` keeps
+    ``progress``, None for an evaluation without rollouts, under ``stored``'s key when ``stored`` ended
     and every one of ``items``, its rollouts, ended; else it keeps nothing. Above ``ENDED_PROGRESS_ENTRIES``, the
     least recently used key goes.
 
@@ -323,21 +326,21 @@ class EndedProgress:
     """
 
     def __init__(self) -> None:
-        self.entries: OrderedDict[tuple[str, str, float], dict[str, JsonValue]] = OrderedDict()
+        self.entries: OrderedDict[tuple[str, str, float], dict[str, JsonValue] | None] = OrderedDict()
         self.lock = threading.Lock()
 
-    def read(self, scenario: str, stored: StoredEvaluation) -> dict[str, JsonValue] | None:
+    def read(self, scenario: str, stored: StoredEvaluation) -> tuple[bool, dict[str, JsonValue] | None]:
         if stored.finished_at is None:
-            return None
+            return False, None
         key = (scenario, stored.evaluation_id, stored.finished_at)
         with self.lock:
-            progress = self.entries.get(key)
-            if progress is not None:
-                self.entries.move_to_end(key)
-            return progress
+            if key not in self.entries:
+                return False, None
+            self.entries.move_to_end(key)
+            return True, self.entries[key]
 
     def add(
-        self, scenario: str, stored: StoredEvaluation, items: Sequence[WorkItem], progress: dict[str, JsonValue]
+        self, scenario: str, stored: StoredEvaluation, items: Sequence[WorkItem], progress: dict[str, JsonValue] | None
     ) -> None:
         # A cancel stores the ended evaluation before it ends the rollouts: a reader in between keeps nothing.
         if stored.finished_at is None or not all(rollout_ended(item) for item in items):
@@ -1997,13 +2000,14 @@ class ArtifactEvaluations:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
         ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the rollouts
         of these evaluations only, not those of the scenario's other evaluations, and not those of an ended
-        evaluation whose progress ``ended_progress`` keeps."""
+        evaluation whose progress, or lack of rollouts, ``ended_progress`` keeps."""
         now = time.time()
         views: list[dict[str, object]] = []
         for stored in evaluations:
-            progress = self.ended_progress.read(scenario, stored)
-            if progress is None and (items := self.results.rollouts(stored.evaluation_id, scenario)):
-                progress = evaluation_progress(stored, items, now)
+            kept, progress = self.ended_progress.read(scenario, stored)
+            if not kept:
+                items = self.results.rollouts(stored.evaluation_id, scenario)
+                progress = evaluation_progress(stored, items, now) if items else None
                 self.ended_progress.add(scenario, stored, items, progress)
             if progress is not None and not score_levels:
                 benchmarks = cast(list[dict[str, JsonValue]], progress["benchmarks"])
