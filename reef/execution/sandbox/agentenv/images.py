@@ -1,25 +1,46 @@
 """The start of a prepared task image (``reef.execution.sandbox.prepared_images``) on AgentENV.
 
-Reef's E2B trial class starts an environment with a prepared image from the image's template when the template is
+``start_prepared_image`` starts an environment with a prepared image from the image's template when the template is
 ready. Otherwise it starts the image itself with AgentENV's ``POST /sandboxes-cold`` (``ColdSandbox``), also after
-AgentENV answered that its worker has no snapshot of the template (``is_missing_snapshot``). So a template that is
-missing or not ready never sends a task with a verified image back through a Dockerfile build.
+AgentENV answered that its worker has no snapshot of the template (``is_missing_snapshot``), and runs the image's start
+as the template ran it (``run_image_start``). So a template that is missing or not ready never sends a task with a
+verified image back through a Dockerfile build. The trial environment does the sandbox's own operations through
+``PreparedImageHost``; Reef's E2B trial class implements them with the E2B SDK, so this module needs no SDK.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import math
 import re
+import time
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 
 import aiohttp
 
 from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv.build import BUILD_OUTPUT_TAIL_CHARS, AgentEnvTemplates
-from reef.execution.sandbox.prepared_images import IMAGE_REFERENCE
+from reef.execution.sandbox.prepared_images import IMAGE_REFERENCE, PreparedImage
 from reef.execution.sandbox.process import SandboxCapacityError, SandboxRequestError
 
+logger = logging.getLogger(__name__)
+
+#: The pause between two runs of a prepared image's ready command after a cold start, in seconds, as in AgentENV's
+#: template runner.
+READY_POLL_SECONDS = 2.0
+#: The longest wait of a cold start for a prepared image's start to be ready, in seconds, as in AgentENV's template
+#: runner. The environment's start time limit can end it sooner.
+READY_LIMIT_SECONDS = 600.0
+#: When the start of a prepared image without a ready command is ready, in seconds after it began: AgentENV's template
+#: runner then uses ``/agentenv/bin/busybox sleep 20`` as the ready command.
+DEFAULT_READY_SECONDS = 20.0
+#: The longest wait for AgentENV's state of a prepared image's template, in seconds.
+TEMPLATE_STATUS_WAIT_SECONDS = 5.0
 #: The statuses with which AgentENV refuses a cold start for want of a free worker now (429, 503): it made no
 #: sandbox, and a later start can pass. Any other failure can leave a sandbox that still starts, such as a gateway's
 #: 502 or 504, or has a lasting cause, so the start is not sent again.
@@ -144,10 +165,164 @@ class ColdSandbox:
         raise ColdSandboxError(message)
 
 
+class PreparedImageHost(ABC):
+    """A trial environment whose sandbox starts from a prepared image on AgentENV (``start_prepared_image``).
+
+    Values: the environment's own state. It holds at most one sandbox, and each operation below that runs a command
+    acts on that sandbox.
+    Purpose: ``KillOnTimeoutE2BEnvironment`` (``reef.execution.sandbox.e2b.trial``) implements these operations with
+    the E2B SDK, and ``start_prepared_image`` calls them.
+    """
+
+    @abstractmethod
+    async def start_from_template(self, template_id: str) -> bool:
+        """Create the sandbox from the template ``template_id``, hold it, and return True. Return False, and hold no
+        sandbox, only when AgentENV answered that its worker has no snapshot of the template
+        (``is_missing_snapshot``). Raise any other failure as the create call raises it."""
+
+    @abstractmethod
+    def cold_sandbox(self, image: str) -> ColdSandbox:
+        """The cold start of ``image``, with the values of a template's create call: the environment's lifetime,
+        network options, metadata and startup variables, and the resources that a template build would set."""
+
+    @abstractmethod
+    async def attach_sandbox(self, sandbox_id: str) -> None:
+        """Connect to the sandbox ``sandbox_id``, which a cold start made, and hold it."""
+
+    @abstractmethod
+    async def discard_sandbox(self, sandbox_id: str) -> None:
+        """Delete the sandbox ``sandbox_id`` of a start that did not finish, and hold no sandbox. A delete that fails
+        is logged, and AgentENV deletes the sandbox at the end of its lifetime."""
+
+    @abstractmethod
+    def start_command(self, command: str) -> AbstractAsyncContextManager[asyncio.Future[None]]:
+        """Start ``command`` in the background in the held sandbox, with no time limit, as the image's own user, in
+        its working directory and with its variables. Entering the context returns once the command runs, with a future
+        that ends with the command: with None for an exit with 0, else with the command's error. Leaving the context,
+        also by an error or a cancellation, stops following the command, which keeps running."""
+
+    @abstractmethod
+    async def command_passes(self, command: str, timeout_seconds: int) -> bool:
+        """Whether ``command`` exits with 0 in the held sandbox, run as ``start_command`` runs one but in the
+        foreground, for at most ``timeout_seconds``. Raise when the command cannot run or runs past that time."""
+
+
+async def start_prepared_image(
+    host: PreparedImageHost, templates: AgentEnvTemplates, prepared: PreparedImage, deadline: float
+) -> None:
+    """Start the sandbox of ``host`` from ``prepared`` on ``templates``' deployment, without a template build, by
+    ``deadline``: the ``time.monotonic()`` time of the end of the environment's start time limit.
+
+    When AgentENV reads the template ``prepared.template_id`` as ready (``template_is_ready``), the sandbox starts from
+    it, as from any template (``PreparedImageHost.start_from_template``): its snapshot already ran the image's start.
+    The image starts cold instead when it has no template, when the template is not ready, and when AgentENV answered
+    that its worker has no snapshot of that template. AgentENV gives that answer before it allocates a sandbox, so the
+    cold start makes no second sandbox. Every other failure of the template's start is raised as the host raises it:
+    a refusal for want of capacity waits, and no cold start follows another answer, another template's answer, or an
+    answer that did not come.
+
+    The cold start (``ColdSandbox``) waits for its answer until ``deadline``, and is sent once. Then the image's start
+    runs (``run_image_start``). When the start fails after AgentENV made the sandbox, also when it is cancelled, the
+    host deletes the sandbox before this raises. Raise what ``ColdSandbox.create`` raises, and ``ColdSandboxError``
+    for a later failure.
+    """
+    if prepared.template_id is not None and await template_is_ready(templates, prepared.template_id, deadline):
+        if await host.start_from_template(prepared.template_id):
+            return
+        logger.info(
+            "AgentENV has no snapshot of the template %s; starting %s cold", prepared.template_id, prepared.image
+        )
+    sandbox_id = await host.cold_sandbox(prepared.image).create(templates, max(deadline - time.monotonic(), 1.0))
+    try:
+        await host.attach_sandbox(sandbox_id)
+        await run_image_start(host, prepared, deadline)
+    except BaseException as error:
+        await host.discard_sandbox(sandbox_id)
+        if not isinstance(error, Exception) or isinstance(error, ColdSandboxError):
+            raise
+        raise ColdSandboxError(f"the sandbox {sandbox_id} of {prepared.image} did not start: {error}") from error
+
+
+async def template_is_ready(templates: AgentEnvTemplates, template_id: str, deadline: float) -> bool:
+    """Whether AgentENV reads the template ``template_id`` as ready (``AgentEnvTemplates.is_ready``). The read waits
+    at most ``TEMPLATE_STATUS_WAIT_SECONDS``, and at most until ``deadline``, a ``time.monotonic()`` time, though at
+    least 1 s. A read that gives no answer in that time, a lost connection, and an answer of 429 or 5xx count as not
+    ready: the read allocates nothing, so the verified image can start at once. Credential and request errors reach
+    the caller."""
+    try:
+        return await templates.is_ready(
+            template_id, min(TEMPLATE_STATUS_WAIT_SECONDS, max(deadline - time.monotonic(), 1.0))
+        )
+    except aiohttp.ClientResponseError as error:
+        if error.status != 429 and not 500 <= error.status < 600:
+            raise
+    except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
+        pass
+    logger.warning("AgentENV could not report the state of template %s; starting from its image", template_id)
+    return False
+
+
+async def run_image_start(host: PreparedImageHost, prepared: PreparedImage, deadline: float) -> None:
+    """Run the start of ``prepared`` in the sandbox that ``host`` holds, as AgentENV's template runner ran it before
+    the template's snapshot.
+
+    Both commands run as the image's own user, in its working directory and with its variables
+    (``PreparedImageHost.start_command``). ``prepared.start`` starts in the background and keeps running. The start is
+    ready when ``prepared.ready`` exits with 0; it runs again ``READY_POLL_SECONDS`` after each other exit. Without a
+    ready command, the start is ready ``DEFAULT_READY_SECONDS`` after it began, and an image without either command is
+    ready at once. When this returns or raises, also when it is cancelled, it has disconnected from the start command.
+
+    Raise ``ColdSandboxError`` when the start command ends with an error before the start is ready, and when the start
+    is not ready ``READY_LIMIT_SECONDS`` after it began, or at ``deadline``, a ``time.monotonic()`` time, when that
+    comes first. A run of the ready command ends at that limit too."""
+    if prepared.start is None and prepared.ready is None:
+        return
+    began = time.monotonic()
+    limit_seconds = min(READY_LIMIT_SECONDS, max(deadline - began, 0.0))
+    ready_by = began + limit_seconds
+    # The start command runs before the first run of the ready command.
+    starting: AbstractAsyncContextManager[asyncio.Future[None] | None] = (
+        nullcontext(None) if prepared.start is None else host.start_command(prepared.start)
+    )
+
+    def check_start(ended: asyncio.Future[None] | None) -> None:
+        # An end with 0 is a start that leaves no process of its own.
+        failure = ended.exception() if ended is not None and ended.done() else None
+        if failure is not None:
+            raise ColdSandboxError(
+                f"the start command of {prepared.image} ended before the start was ready: {failure}"
+            ) from failure
+
+    async with starting as ended:
+        while True:
+            check_start(ended)
+            seconds_left = ready_by - time.monotonic()
+            if seconds_left <= 0:
+                raise ColdSandboxError(f"the start of {prepared.image} was not ready in {limit_seconds:.0f} s")
+            if prepared.ready is None:
+                if time.monotonic() - began >= DEFAULT_READY_SECONDS:
+                    return
+            elif await host.command_passes(prepared.ready, math.ceil(seconds_left)):
+                # The ready command and the start command can end in the same turn of the event loop.
+                if ended is not None:
+                    await asyncio.sleep(0)
+                    check_start(ended)
+                return
+            await asyncio.sleep(min(READY_POLL_SECONDS, seconds_left))
+
+
 __all__ = [
     "CAPACITY_STATUSES",
+    "DEFAULT_READY_SECONDS",
     "NETWORK_FIELDS",
+    "READY_LIMIT_SECONDS",
+    "READY_POLL_SECONDS",
+    "TEMPLATE_STATUS_WAIT_SECONDS",
     "ColdSandbox",
     "ColdSandboxError",
+    "PreparedImageHost",
     "is_missing_snapshot",
+    "run_image_start",
+    "start_prepared_image",
+    "template_is_ready",
 ]
