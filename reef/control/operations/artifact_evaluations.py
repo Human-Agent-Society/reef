@@ -353,6 +353,65 @@ class EndedProgress:
                 self.entries.popitem(last=False)
 
 
+#: The most ended rollouts whose call totals one ``EndedCallTotals`` keeps.
+ENDED_CALL_TOTALS_ENTRIES = 100_000
+#: The most rollouts whose calls a read of every rollout of an evaluation reads one rollout at a time. Above it, the
+#: read takes all the calls of the evaluation in one pass.
+SINGLE_ROLLOUT_READS = 256
+
+
+class EndedCallTotals:
+    """The call totals of ended rollouts, so that a read of the rollouts does not add up their calls again.
+
+    Values: ``entries`` maps the key ``(scenario, evaluation_id, task_index, repeat)`` of a rollout to
+    ``(attempt_count, ended_at, totals)``: the two values of its item when it ended, and the
+    ``EvaluationCallTotals`` of its kept calls by caller, without the callers that have no call. It holds at most
+    ``ENDED_CALL_TOTALS_ENTRIES`` keys, in the order of their last use. ``lock`` guards ``entries`` for the threads
+    of concurrent routes.
+
+    A worker keeps every call of a rollout before it ends the rollout's item
+    (``reef.evaluation.rollout_worker``), so an ended rollout gets no new call until a retry or a resume runs it
+    again. Its next end has a higher ``attempt_count``, so an entry describes the calls of one end of the rollout.
+
+    Operations: ``read(scenario, evaluation_id, item)`` is the totals of the entry of the rollout item ``item`` when
+    ``item`` ended (``rollout_ended``) with the entry's ``attempt_count`` and ``ended_at``; else None.
+    ``add(scenario, evaluation_id, item, totals)`` keeps ``totals`` for ``item`` when ``item`` ended; else it keeps
+    nothing. Above ``ENDED_CALL_TOTALS_ENTRIES``, the least recently used key goes.
+
+    Purpose: ``ArtifactEvaluations.rollout_views`` reads an entry before it reads a rollout's calls, and adds one
+    after it added up the calls of an ended rollout.
+    """
+
+    def __init__(self) -> None:
+        self.entries: OrderedDict[
+            tuple[str, str, int, int], tuple[int, float | None, Mapping[Caller, EvaluationCallTotals]]
+        ] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def read(self, scenario: str, evaluation_id: str, item: WorkItem) -> Mapping[Caller, EvaluationCallTotals] | None:
+        if not rollout_ended(item):
+            return None
+        key = (scenario, evaluation_id, *rollout_position(item.id))
+        with self.lock:
+            entry = self.entries.get(key)
+            if entry is None or entry[:2] != (item.attempt_count, item.ended_at):
+                return None
+            self.entries.move_to_end(key)
+            return entry[2]
+
+    def add(
+        self, scenario: str, evaluation_id: str, item: WorkItem, totals: Mapping[Caller, EvaluationCallTotals]
+    ) -> None:
+        if not rollout_ended(item):
+            return
+        key = (scenario, evaluation_id, *rollout_position(item.id))
+        with self.lock:
+            self.entries[key] = (item.attempt_count, item.ended_at, totals)
+            self.entries.move_to_end(key)
+            if len(self.entries) > ENDED_CALL_TOTALS_ENTRIES:
+                self.entries.popitem(last=False)
+
+
 def evaluation_summary(view: Mapping[str, object]) -> dict[str, object]:
     """``view``, the status of one evaluation (``ArtifactEvaluations.status_json``), as a list of summaries gives it.
 
@@ -1094,6 +1153,7 @@ class ArtifactEvaluations:
         self.queue = dispatcher.queue
         self.results = EvaluationResults(dispatcher)
         self.ended_progress = EndedProgress()
+        self.ended_call_totals = EndedCallTotals()
         self.ended_summaries: OrderedDict[tuple[str, str, float], dict[str, object]] = OrderedDict()
         self.ended_summaries_lock = threading.Lock()
         self.reader: threading.Thread | None = None
@@ -1863,34 +1923,56 @@ class ArtifactEvaluations:
         ]
         if not calls:
             return listed
-        totals: dict[tuple[int, int, Caller], EvaluationCallTotals] = {}
         evaluation_id = stored.evaluation_id
+        by_position = {rollout_position(item.id): item for item in items}
+        totals: dict[tuple[int, int], Mapping[Caller, EvaluationCallTotals]] = {}
+        unread: list[tuple[int, int]] = []
+        for view in listed:
+            position = (view["task_index"], view["repeat"])
+            queued = by_position.get(position)
+            ended_totals = None if queued is None else self.ended_call_totals.read(scenario, evaluation_id, queued)
+            if ended_totals is not None:
+                totals[position] = ended_totals
+            # No worker took the rollout yet, so it has no call: its item waits in the queue, or the evaluation
+            # runs and has not added the item. An ended evaluation can outlive its items, and keeps their calls.
+            elif not (queued.attempt_count == 0 if queued is not None else stored.finished_at is None):
+                unread.append(position)
         place = self.call_store(scenario)
-        kept: Iterator[StoredItem]
-        if place is None:
-            kept = iter(())
-        elif positions is None:
-            kept = evaluation_call_items(*place, scenario, evaluation_id, content=False)
-        else:
-            kept = (
-                item
-                for position in positions
-                for item in evaluation_call_items(*place, scenario, evaluation_id, content=False, rollout=position)
-            )
-        for call_item in kept:
-            summary = evaluation_call_summary(call_item)
-            key = (summary.task_index, summary.repeat, summary.caller)
-            found = totals.get(key)
-            totals[key] = EvaluationCallTotals(
-                (0 if found is None else found.count) + 1,
-                (0 if found is None else found.failed) + (summary.status != 200),
-                (0 if found is None else found.prompt_tokens) + (summary.prompt_tokens or 0),
-                (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
-            )
+        if place is not None and unread:
+            kept: Iterator[StoredItem]
+            if positions is None and len(unread) > SINGLE_ROLLOUT_READS:
+                kept = evaluation_call_items(*place, scenario, evaluation_id, content=False)
+            else:
+                kept = (
+                    call_item
+                    for position in unread
+                    for call_item in evaluation_call_items(
+                        *place, scenario, evaluation_id, content=False, rollout=position
+                    )
+                )
+            read: dict[tuple[int, int], dict[Caller, EvaluationCallTotals]] = {position: {} for position in unread}
+            for call_item in kept:
+                summary = evaluation_call_summary(call_item)
+                of_rollout = read.get((summary.task_index, summary.repeat))
+                if of_rollout is None:
+                    continue
+                found = of_rollout.get(summary.caller)
+                of_rollout[summary.caller] = EvaluationCallTotals(
+                    (0 if found is None else found.count) + 1,
+                    (0 if found is None else found.failed) + (summary.status != 200),
+                    (0 if found is None else found.prompt_tokens) + (summary.prompt_tokens or 0),
+                    (0 if found is None else found.completion_tokens) + (summary.completion_tokens or 0),
+                )
+            for position, of_rollout in read.items():
+                totals[position] = of_rollout
+                queued = by_position.get(position)
+                if queued is not None:
+                    self.ended_call_totals.add(scenario, evaluation_id, queued, of_rollout)
         fields: tuple[tuple[Caller, str], ...] = (("agent", "calls"), ("verifier", "verifier_calls"))
         for view in listed:
+            of_view = totals.get((view["task_index"], view["repeat"]), {})
             for caller, field in fields:
-                found = totals.get((view["task_index"], view["repeat"], caller))
+                found = of_view.get(caller)
                 view[field] = None if found is None else found.to_json()
         return listed
 
