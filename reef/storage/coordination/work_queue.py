@@ -24,7 +24,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from reef.core.errors import ReefError
@@ -440,12 +440,16 @@ class WorkQueue(ABC):
     def read(self, queue: str, item_id: str) -> WorkItem | None:
         """The item, or None."""
 
-    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+    def read_items(
+        self, queue: str, item_ids: Sequence[str], *, without_payload: Sequence[str] = ()
+    ) -> tuple[WorkItem, ...]:
         """The items in ``queue`` in the order of ``item_ids``.
 
-        Include one result per occurrence of an ID that exists in the queue. Skip missing IDs.
+        Include one result per occurrence of an ID that exists in the queue. Skip missing IDs. The payload of each
+        item has no top-level key of ``without_payload``, as for ``items``.
         """
-        return tuple(item for item_id in item_ids if (item := self.read(queue, item_id)) is not None)
+        found = (self.read(queue, item_id) for item_id in item_ids)
+        return tuple(without_payload_keys(item, without_payload) for item in found if item is not None)
 
     @abstractmethod
     def read_changes(self, queue: str, after_sequence: int, *, limit: int = 1000) -> tuple[WorkItem, ...]:
@@ -453,11 +457,21 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def items(
-        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+        self,
+        queue: str,
+        *,
+        scenario: str | None = None,
+        kind: str | None = None,
+        id_prefix: str | None = None,
+        without_payload: Sequence[str] = (),
     ) -> tuple[WorkItem, ...]:
         """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order. ``id_prefix``,
         a non-empty string, keeps only the items whose ID starts with it; a store reads only those. Raise
-        ``ValueError`` for another ``id_prefix``."""
+        ``ValueError`` for another ``id_prefix``.
+
+        The payload of each item has no top-level key of ``without_payload``: a store does not read their values. A
+        reader that needs a few fields of many items names the large ones here, so the read does not grow with
+        them. Such an item is not the stored one: do not add it to a queue again."""
 
     def prefix_state_counts(
         self, queue: str, *, scenario: str, kind: str, id_prefix: str, marker: str
@@ -507,6 +521,13 @@ class WorkQueue(ABC):
         for item in self.items(queue, scenario=scenario):
             counts[item.state] += 1
         return counts
+
+
+def without_payload_keys(item: WorkItem, keys: Sequence[str]) -> WorkItem:
+    """``item`` without the top-level payload keys ``keys``; ``item`` itself when it has none of them."""
+    if not any(key in item.payload for key in keys):
+        return item
+    return replace(item, payload={key: value for key, value in item.payload.items() if key not in keys})
 
 
 def check_id_prefix(id_prefix: object) -> None:

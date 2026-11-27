@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import math
 import threading
@@ -165,6 +166,25 @@ def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_co
     assert [item.id for item in queue.items("jobs", scenario="other", id_prefix="rollout:e1:")] == []
     with pytest.raises(ValueError, match="id_prefix"):
         queue.items("jobs", id_prefix="")
+
+
+@pytest.mark.unit
+def test_a_read_without_payload_keys_leaves_their_values_out(open_coordination):
+    queue = open_coordination().queue
+    payload = {"task_index": 3, "tree": {"files": {"a.md": "x" * 1000}}, "agent": None, 'a "quoted" key': 1}
+    queue.append(NewWork("jobs", "rollout:e1:0", "s", "rollout", payload))
+    whole = queue.append(NewWork("jobs", "rollout:e1:1", "s", "rollout", {"task_index": 4}))
+    left_out = ("tree", "agent", 'a "quoted" key', "absent")
+
+    listed = queue.items("jobs", id_prefix="rollout:e1:", without_payload=left_out)
+    assert [dict(item.payload) for item in listed] == [{"task_index": 3}, {"task_index": 4}]
+    read = queue.read_items("jobs", ["rollout:e1:1", "rollout:e1:0"], without_payload=left_out)
+    assert read == (whole, listed[0])
+    assert WorkQueue.read_items(queue, "jobs", ["rollout:e1:0"], without_payload=left_out) == (listed[0],)
+    # Only the payload differs from the stored item.
+    stored = queue.read("jobs", "rollout:e1:0")
+    assert dict(stored.payload) == payload
+    assert listed[0] == dataclasses.replace(stored, payload={"task_index": 3})
 
 
 def job(
