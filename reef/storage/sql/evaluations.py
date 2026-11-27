@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
+from reef.core.values import JsonValue
 from reef.storage.scenario.evaluations import (
     EvaluationStart,
     EvaluationStartConflictError,
@@ -90,6 +91,20 @@ def evaluation_digest_table(metadata: MetaData) -> Table:
     )
 
 
+def evaluation_progress_table(metadata: MetaData) -> Table:
+    """The progress of an ended evaluation, kept outside its list row: ``progress_json`` is the progress that the
+    rollouts gave when the evaluation ended at ``finished_at``, or JSON null for an evaluation without rollouts."""
+    return Table(
+        "artifact_evaluation_progress",
+        metadata,
+        Column(
+            "sequence", BigInteger, ForeignKey("artifact_evaluation.sequence", ondelete="CASCADE"), primary_key=True
+        ),
+        Column("finished_at", Float(53), nullable=False),
+        Column("progress_json", Text, nullable=False),
+    )
+
+
 def evaluation_start_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
     """Define the start IDs of one scenario or of the stores that share the database."""
     scope = (
@@ -110,11 +125,14 @@ def evaluation_start_table(metadata: MetaData, *, foreign_key: str | None = None
 class SQLEvaluationStore(KeyedEvaluationStore):
     """The artifact evaluations of one scenario in its record database."""
 
-    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable, starts: ScopedTable, digests: Table) -> None:
+    def __init__(
+        self, database: SQLScenarioDatabase, table: ScopedTable, starts: ScopedTable, digests: Table, progress: Table
+    ) -> None:
         self.database = database
         self.table = table
         self.starts = starts
         self.digests = digests
+        self.progress = progress
 
     def selection(self, *, include_task_digests: bool = True) -> Select[Any]:
         """Select evaluations and, when requested, the digests keyed by their unique sequence."""
@@ -356,6 +374,43 @@ class SQLEvaluationStore(KeyedEvaluationStore):
             )
         return tuple(stored_evaluation(row) for row in rows)
 
+    def ended_progress(self, evaluation_ids: Sequence[str]) -> dict[str, dict[str, JsonValue] | None]:
+        if not evaluation_ids:
+            return {}
+        table = self.table.table
+        with self.database._transaction(write=False) as connection:
+            rows = connection.execute(
+                select(table.c.evaluation_id, self.progress.c.progress_json)
+                .join(self.progress, self.progress.c.sequence == table.c.sequence)
+                .where(
+                    self.table.condition(),
+                    table.c.evaluation_id.in_(evaluation_ids),
+                    # A retry or a resume gives the evaluation a new end: the progress of the earlier end is stale.
+                    self.progress.c.finished_at == table.c.finished_at,
+                )
+            ).all()
+        return {str(evaluation_id): json.loads(progress_json) for evaluation_id, progress_json in rows}
+
+    def keep_ended_progress(
+        self, evaluation_id: str, finished_at: float, progress: Mapping[str, JsonValue] | None
+    ) -> bool:
+        table = self.table.table
+        with self.database._transaction(write=True) as connection:
+            sequence = connection.execute(
+                select(table.c.sequence).where(
+                    self.table.condition(), table.c.evaluation_id == evaluation_id, table.c.finished_at == finished_at
+                )
+            ).scalar_one_or_none()
+            if sequence is None:
+                return False
+            connection.execute(self.progress.delete().where(self.progress.c.sequence == sequence))
+            connection.execute(
+                self.progress.insert().values(
+                    sequence=sequence, finished_at=finished_at, progress_json=json.dumps(progress, ensure_ascii=False)
+                )
+            )
+        return True
+
     def select_newest(self, limit: int, *, include_task_digests: bool) -> tuple[StoredEvaluation, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
@@ -395,6 +450,7 @@ def stored_evaluation(row: RowMapping | Mapping[str, Any]) -> StoredEvaluation:
 __all__ = [
     "SQLEvaluationStore",
     "evaluation_digest_table",
+    "evaluation_progress_table",
     "evaluation_start_table",
     "evaluation_table",
     "stored_evaluation",

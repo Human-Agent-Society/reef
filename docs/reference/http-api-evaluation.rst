@@ -105,7 +105,8 @@ defaulting to 50. Add ``/{evaluation_id}`` for one evaluation:
   ``benchmark_scores`` lists each benchmark's task count and mean; otherwise empty.
 - ``progress``: ``total``, ``ended``, ``scored``, ``failed``, ``cancelled``,
   ``running``, ``mean_score``, ``eta_seconds`` and per-benchmark counts.
-  Cancellations are excluded from ``ended``. Progress becomes null after retention.
+  Cancellations are excluded from ``ended``. An ended evaluation keeps its progress after
+  the queue deletes its rollouts; one that ended before Reef kept the progress has null.
 
 On the list, ``summary=true`` gives each evaluation without its large parts:
 ``request`` has no ``task_names``, its ``collection`` has no ``benchmarks``, and
