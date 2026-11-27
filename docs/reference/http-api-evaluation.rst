@@ -107,6 +107,12 @@ defaulting to 50. Add ``/{evaluation_id}`` for one evaluation:
   ``running``, ``mean_score``, ``eta_seconds`` and per-benchmark counts.
   Cancellations are excluded from ``ended``. Progress becomes null after retention.
 
+On the list, ``summary=true`` gives each evaluation without its large parts:
+``request`` has no ``task_names``, its ``collection`` has no ``benchmarks``, and
+``policy_evaluation`` keeps only ``harness``. ``tasks_digest`` is the SHA-256 of the
+compact JSON of ``[task_names, collection name, collection benchmarks, collection average]``
+with sorted keys. Evaluations with the same digest ran the same tasks with the same averaging.
+
 ``score_levels=true`` adds ``full`` (≥1), ``part`` (0 < score < 1), ``zero`` (≤0),
 ``failed`` and ``pending`` counts. Shared tasks count in every containing benchmark.
 

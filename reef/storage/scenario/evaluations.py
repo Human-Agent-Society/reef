@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -219,6 +220,17 @@ class EvaluationStore(ABC):
     def newest_for_list(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations for a list. Stores may leave task digests out of these requests."""
         return self.newest(limit=limit)
+
+    def newest_ends(self, *, limit: int = 50) -> tuple[tuple[str, float | None], ...]:
+        """The ``(evaluation_id, finished_at)`` of at most ``limit`` evaluations, newest ``created_at`` first. A
+        store may read them without the requests and the results, which can be large."""
+        return tuple((stored.evaluation_id, stored.finished_at) for stored in self.newest_for_list(limit=limit))
+
+    def read_for_list(self, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
+        """The evaluations of ``evaluation_ids`` that the store holds, in any order, as ``newest_for_list`` gives
+        them."""
+        found = (self.read(evaluation_id) for evaluation_id in evaluation_ids)
+        return tuple(stored for stored in found if stored is not None)
 
 
 class KeyedEvaluationStore(EvaluationStore):
