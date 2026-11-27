@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe
-from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples
+from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples, GeneratedTaskSettings
+from reef.samples import Record2Sample
 from reef.train.pipeline import PipelineSpec
 
 
@@ -25,7 +27,11 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     says in the backend's own shape: ``objective``, a dotted reference to a method
     that the deployment provides, and the rollouts (``rollout`` on Tinker, ``harbor``
     on Slime). The recipe requires both: the deployment's training component checks them
-    (``reef.control.scenario.live_objects.check_recipe_objects``).
+    (``reef.control.scenario.live_objects.check_recipe_objects``). With ``designer_delay``
+    above 0, the task jobs also train the Designer's replies (``carries_delayed_samples``),
+    so the training backend and the objective must train delayed samples: ``check_recipe_objects``
+    refuses the deployment otherwise, and the stages build only the delayed samples that the
+    backend's limit keeps.
 
     Enabled rounds save each task and its train/eval split in the scenario's task store before their rollouts run.
     Eval tasks stay in the store without rollouts or training feedback.
@@ -38,6 +44,18 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     def report_type(self) -> type[ReportBase]:
         # A scored report: what a source session ends with. The recipe trains on no report.
         return ScoredRolloutReport
+
+    def carries_delayed_samples(self) -> bool:
+        """Whether the record-to-sample stage is a ``GeneratedTaskSamples`` whose ``designer_delay`` is above 0. A
+        config that the stage refuses carries none here: the stage refuses it when a scenario builds it."""
+        stage = self.stages().record2sample
+        stage_class = Record2Sample.referenced_class(stage)
+        if not issubclass(stage_class, GeneratedTaskSamples):
+            return False
+        try:
+            return GeneratedTaskSettings.parse(stage.config, plugin_class=stage_class).designer_delay > 0
+        except PluginConfigError:
+            return False
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

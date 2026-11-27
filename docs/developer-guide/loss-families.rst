@@ -94,7 +94,8 @@ Declare ``policy_gradient_weight(args)`` for losses of the form
 Returning ``None`` refuses centering. Samples need sampler ``topk_indices``
 and ``topk_log_probs`` under ``extra.reef.training`` at every trained position.
 Teacher probabilities cannot substitute for sampler probabilities.
-Traffic records lack these tensors. Invalid rows fail validation.
+Traffic records lack these tensors, also with ``x-reef-record-training``.
+Invalid rows fail validation.
 
 Slime requires context parallel size 1 and compatible policy-loss options.
 Distillation requires sampled reverse KL, positive teacher top-K, renormalization

@@ -65,6 +65,9 @@ Facts must match live capabilities and define default roots, schemas and read-on
 ``default_start`` returns small files and determining inputs without weights.
 ``start_files`` narrows validation reads. Unsupported starts raise ``ValueError``.
 ``check_artifact`` returns ``None`` for local acceptance or JSON for the component's remote check.
+``delayed_sample_limit(parameters)`` returns the ``DelayedSampleLimit`` of a task job's ``JobData.delayed`` (count and sampling distribution), or ``None`` when it trains none.
+Every service refuses a recipe whose task jobs carry delayed samples (``designer_delay``) when it returns ``None`` or raises ``ValueError``.
+The component's limit must equal the facts' for every task job it accepts; Slime's ``check_task_jobs`` checks this.
 See `TrainingBackendFacts <../../reef/train/component.py>`__.
 
 Jobs and data

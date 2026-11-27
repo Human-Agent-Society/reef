@@ -36,6 +36,10 @@ SCENARIO_HEADER = "x-reef-scenario"
 #: serves the call from the scenario's snapshot as it serves any other, keeps no record of it, and returns the
 #: response with its training block. Such a rollout is not user data, so it never becomes a record.
 ROLLOUT_HEADER = "x-reef-rollout"
+#: ``1`` or ``true`` asks the inference service to keep the call's exact sample (``response.training``,
+#: ``reef.core.training_capture``) in its record, so that a recipe can train the call as sampled; ``0``, ``false``
+#: or no header keeps none. The service parses it (``reef.api.wire``), and a Designer client sends it.
+RECORD_TRAINING_HEADER = "x-reef-record-training"
 
 
 def parse_references(payload: Mapping[str, Any]) -> tuple[str, ...]:

@@ -13,6 +13,11 @@ Component
 
 A part of a scenario, such as model weights or a harness, with its own artifact selection.
 
+Delayed sample
+--------------
+
+The exact sample of a served call that trains in a later task job beside its rollouts, with an advantage that the recipe gives it (``JobData.delayed``). SPADE's `Designer replies <configuration-generated-tasks.rst#designer-replies>`__ are delayed samples.
+
 Feedback
 --------
 

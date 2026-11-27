@@ -155,7 +155,10 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "rollout_function_path": "slime.rollout.sglang_rollout.generate_rollout",
         "partial_rollout": False,
         "dynamic_sampling_filter_path": None,
+        # Slime's default rollout distribution, which the facts read (SlimeRolloutOptions.from_parsed).
+        "rollout_temperature": 1.0,
         "rollout_top_p": 1.0,
+        "rollout_top_k": -1,
         "use_rollout_routing_replay": False,
         "use_score_centering": False,
         "compute_advantages_and_returns": False,

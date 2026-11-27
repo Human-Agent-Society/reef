@@ -20,6 +20,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import CommitPendingError, TrainingStartRefusedError
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -158,6 +159,7 @@ class Trainer:
         task_storage: TaskStorage | None = None,
         samples: TrainerSamples | None = None,
         job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None,
+        delayed_sample_limit: DelayedSampleLimit | None = None,
     ) -> Trainer:
         """Build a trainer and its pipeline.
 
@@ -176,7 +178,9 @@ class Trainer:
         starts its first job from ``root``, its scenario's root snapshot
         (``TrainingComponent.root_start``); ``root`` is then required, and a
         root that the component cannot start from raises
-        ``TrainingStartRefusedError``.
+        ``TrainingStartRefusedError``. ``delayed_sample_limit`` is the
+        delayed samples that one task job of ``job_loop`` trains, or None
+        (``PipelineContext.delayed_sample_limit``).
         """
         trains = job_loop is not None
         if samples is None and job_loop is not None:
@@ -193,6 +197,7 @@ class Trainer:
                 samples=samples,
                 # None gives every kind empty parameters: the training component's own defaults.
                 job_parameters={kind: {} for kind in SAMPLE_KINDS} if job_parameters is None else job_parameters,
+                delayed_sample_limit=delayed_sample_limit,
             )
         )
         if pipeline.training_mode != training_mode:
@@ -672,16 +677,17 @@ class Trainer:
         with self._lock:
             return self.pending_commit.result if isinstance(self.pending_commit, PendingTrainingResult) else None
 
-    def reserve_job(self, *, automatic_jobs: bool = True) -> JobData | None:
+    def reserve_job(self, *, automatic_jobs: bool = True, served: ServedArtifacts | None = None) -> JobData | None:
         """Reserve the data of the job that the trainer submits next, or return the reserved data. Return None when
         the trainer accepts no job now (``accepts_job``), when no job data is ready, and while a result waits for
-        its commit. Without ``automatic_jobs``, only a request's job data is ready."""
+        its commit. Without ``automatic_jobs``, only a request's job data is ready. ``served`` is what the scenario
+        serves now, which judges the new data's delayed samples (``TrainingPipeline.build_job_data``)."""
         with self._lock:
             if isinstance(self.pending_commit, PendingTrainingResult):
                 return None
             if self.pending_commit is None and not self.accepts_job():
                 return None
-            return self.reserve_job_data(automatic_jobs)
+            return self.reserve_job_data(automatic_jobs, served)
 
     def submit_job(
         self, data: JobData, *, start: str | None = None, train_from_artifact_id: str | None = None
@@ -745,8 +751,9 @@ class Trainer:
     def advance_job(self, *, train_from_artifact_id: str | None = None) -> TrainingCommit | None:
         """Move the trainer's jobs forward and return the next commit, if any: the result that waits for its commit,
         else news of a running job (``poll_jobs``), else the submission of the next job, which continues the
-        training start (``reserve_job``, ``submit_job``). A scenario gives the job of a request that names
-        ``train_from`` its own start (``Scenario.prepare_job``)."""
+        training start (``reserve_job``, ``submit_job``). It judges no delayed sample: a scenario builds its jobs
+        against what it serves, and gives the job of a request that names ``train_from`` its own start
+        (``Scenario.prepare_job``)."""
         result = self.pending_result() or self.poll_jobs()
         if result is not None or not self.trains:
             return result
@@ -763,7 +770,7 @@ class Trainer:
             self.pending_commit = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
         return TrainingCommit(dict(self._state), {"skipped": "request failed", "error": error})
 
-    def reserve_job_data(self, automatic_jobs: bool = True) -> JobData | None:
+    def reserve_job_data(self, automatic_jobs: bool = True, served: ServedArtifacts | None = None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the
         lock."""
         if self.pending_commit is not None:
@@ -775,7 +782,7 @@ class Trainer:
             # The data of a job that waited for its check is gone, such as after its request was cancelled.
             self.job_check_waits = False
             return None
-        data = self._pipeline.build_job_data(sample_count)
+        data = self._pipeline.build_job_data(sample_count, served)
         self.pending_commit = JobDataReservation(data)
         return data
 

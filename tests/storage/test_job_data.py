@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 
 import pytest
+from tests.support.job_data import delayed_sample
 from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobData, TaskFiles, TaskSample
 from reef.storage.data.job_data import (
+    DELAYED_FILE,
     JOB_FILE,
     SAMPLES_FILE,
     JobDataRef,
@@ -15,6 +18,7 @@ from reef.storage.data.job_data import (
     job_data_key,
     job_task_files,
     read_job_data,
+    sample_lines,
     write_job_data,
 )
 from reef.storage.data.store import MemoryDataStore
@@ -151,3 +155,38 @@ def test_a_job_data_reference_copies_nothing_until_a_component_reads_it(tmp_path
     assert local.read() == opened.read() and local == opened
     with pytest.raises(ValueError, match="malformed job data reference"):
         JobDataRef.from_dict({key: value for key, value in written.to_dict().items() if key != "key"}, store)
+
+
+def test_a_directory_keeps_the_delayed_samples_of_a_task_job(tmp_path):
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    task = stored_task(task_files, "one", task_dir(tmp_path / "a", "add"))
+    data = JobData("s:data:3", (task,), delayed=(delayed_sample(1.5), delayed_sample(-0.75)))
+    write_job_data(data, tmp_path / "carried")
+    read = read_job_data(tmp_path / "carried", (task.task_path,), "s:data:3")
+    assert read == data
+    assert [entry.advantage for entry in read.delayed] == [1.5, -0.75]
+    assert len((tmp_path / "carried" / DELAYED_FILE).read_text().splitlines()) == 2
+    # The header stays the same: the delayed samples have their own file.
+    assert sorted(path.name for path in (tmp_path / "carried").iterdir()) == [DELAYED_FILE, JOB_FILE, SAMPLES_FILE]
+    assert set(json.loads((tmp_path / "carried" / JOB_FILE).read_text())) == {"format", "key", "sample_count", "kind"}
+    # Data without delayed samples writes no file for them.
+    write_job_data(JobData("s:data:4", (task,)), tmp_path / "plain")
+    assert not (tmp_path / "plain" / DELAYED_FILE).exists()
+    assert read_job_data(tmp_path / "plain", (task.task_path,)).delayed == ()
+    # A reference of the data store reads them back too.
+    assert MemoryDataStore(task_files).write_job_directory(data).read().delayed == data.delayed
+
+
+def test_the_key_names_the_delayed_samples_and_keeps_the_key_of_data_without_them(tmp_path):
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    tasks = (stored_task(task_files, "one", task_dir(tmp_path / "a", "add")),)
+    plain = JobData("t", tasks)
+    carried = JobData("t", tasks, delayed=(delayed_sample(1.0),))
+    other = JobData("t", tasks, delayed=(delayed_sample(-1.0),))
+    assert len({job_data_key(plain), job_data_key(carried), job_data_key(other)}) == 3
+    assert job_data_key(carried) == job_data_key(JobData("u", tasks, delayed=(delayed_sample(1.0),)))
+    # The key of data without delayed samples is the key of its lines alone, as before.
+    digest = hashlib.sha256()
+    for entry in sample_lines(plain):
+        digest.update(json.dumps(entry, sort_keys=True, separators=(",", ":")).encode())
+    assert job_data_key(plain) == digest.hexdigest()

@@ -5,7 +5,10 @@ normalizes the provider request, renders the prompt once, calls the selected
 engine's native generate route, and answers with the provider response. The
 response carries no training tensors: a training component renders a recorded
 call with its own chat template and computes the log probabilities that it
-needs with its own weights.
+needs with its own weights. The one exception is a call that asks to record
+its sample (``x-reef-record-training``): ``inference_with_sample`` adds the
+exact sample as a ``training`` block (``reef.core.training_capture``), which
+the inference service keeps in the record and never returns to the client.
 
 The engine-specific part is a :class:`NativeGenerateClient`: it shapes the
 native request and parses the native response into a
@@ -24,15 +27,35 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
+from reef.core.training_capture import sample_training, sampling_distribution
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.interfaces import InferenceArtifact, InferenceStream, parse_full_weight_name
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
+from reef.inference.residency import ADAPTER_NAME_PREFIX, parse_adapter_name
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
 ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
+
+
+def bound_runtime_load_id(served_model: str | None) -> str | None:
+    """The runtime load that the route name ``served_model`` binds: the load of a full-weight name
+    (``parse_full_weight_name``) or of an adapter name (``parse_adapter_name``); None for no name or a plain model
+    name, which binds no weights.
+
+    The engine admits a request that names such a load only while it serves that load, and drains its requests
+    before every weight change (request pinning), so the whole reply comes from that load.
+    """
+    if served_model is None:
+        return None
+    full_weight = parse_full_weight_name(served_model)
+    if full_weight is not None:
+        return full_weight[1]
+    if served_model.startswith(ADAPTER_NAME_PREFIX):
+        return parse_adapter_name(served_model)[1]
+    return None
 
 
 @dataclass(frozen=True)
@@ -597,8 +620,24 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         response, provider_response = await self._complete(artifact, call)
         return provider_response if call.anthropic else response
 
-    async def _complete(self, artifact: InferenceArtifact, call: ChatCall) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run one buffered generation; return the OpenAI-shaped response and the provider-shaped one."""
+    async def inference_with_sample(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The provider response of a chat call with its exact sample as the ``training`` block
+        (``reef.core.training_capture.sample_training``). The block is absent when the engine aborted the call, or
+        when the route names no weight load (``artifact.served_model`` None or a plain model name): then no single
+        policy is known to have drawn the reply (``bound_runtime_load_id``)."""
+        if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
+            raise ValueError(f"only {CHAT_COMPLETIONS_PATH} and {ANTHROPIC_MESSAGES_PATH} record their sample")
+        call = self._chat_call(path, payload)
+        _, provider_response = await self._complete(artifact, call, with_sample=True)
+        return provider_response
+
+    async def _complete(
+        self, artifact: InferenceArtifact, call: ChatCall, *, with_sample: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run one buffered generation; return the OpenAI-shaped response and the provider-shaped one, which carries
+        the exact sample with ``with_sample`` (``inference_with_sample``)."""
         native = await super().inference(
             artifact,
             self._client.generate_path,
@@ -606,9 +645,18 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         )
         captured = self._client.parse(native)
         response = self._response_from_capture(call, captured, call.tool_parser)
-        if not call.anthropic:
-            return response, response
-        return response, anthropic_response(call.payload, response)
+        provider = anthropic_response(call.payload, response) if call.anthropic else response
+        # Only a route that binds one weight load keeps the sample; the record names the artifact, not the load.
+        if not with_sample or bound_runtime_load_id(artifact.served_model) is None or not captured.output_ids:
+            return response, provider
+        sample = sample_training(
+            prompt_ids=call.prompt_ids,
+            output_ids=captured.output_ids,
+            rollout_log_probs=captured.rollout_log_probs,
+            finish_reason=captured.finish_reason,
+            distribution=sampling_distribution(call.sampling_params),
+        )
+        return response, {**provider, "training": sample}
 
     def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""
@@ -982,6 +1030,7 @@ __all__ = [
     "ChatStreamRelay",
     "NativeGenerateClient",
     "TokenNativeChatHandler",
+    "bound_runtime_load_id",
     "finite_log_prob",
     "integer_tokens",
     "normalize_finish_reason",

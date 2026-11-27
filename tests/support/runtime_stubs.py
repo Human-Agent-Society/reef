@@ -11,7 +11,7 @@ from reef.artifact import Artifact, DefaultStart
 from reef.control.scenario.live_objects import LiveObjects
 from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyModel
-from reef.core.job_data import Sample
+from reef.core.job_data import DelayedSampleLimit, Sample
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
@@ -330,6 +330,9 @@ class StubFacts(TrainingBackendFacts):
 
     def check_import_start(self, artifact_dir: Path) -> None:
         self.component.check_import_start(artifact_dir)
+
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        return self.component.delayed_sample_limit(parameters)
 
 
 def live_objects(

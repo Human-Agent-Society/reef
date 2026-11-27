@@ -8,6 +8,7 @@ from tests.support.threshold_processor import ThresholdJobData
 
 from reef.core import AgentRecord, RequestType
 from reef.evaluation import UpdateCandidate
+from reef.samples.staleness import ServedArtifacts
 from reef.train import JobData, PipelineContext, PreparedHarnessJob, Trainer, TrainingCommit, TrainingPipeline
 from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
@@ -32,7 +33,7 @@ class ExamplePipeline(TrainingPipeline):
     def ready(self, sample_count: int) -> bool:
         return len(self.items) >= sample_count
 
-    def build_job_data(self, sample_count: int) -> JobData:
+    def build_job_data(self, sample_count: int, served: ServedArtifacts | None = None) -> JobData:
         self.events.append("build")
         self.pending = JobData(data_id="batch-1")
         return self.pending

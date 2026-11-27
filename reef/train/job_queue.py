@@ -85,6 +85,7 @@ from reef.artifact.components import ComponentChecks
 from reef.artifact.repository import RegistrationAwareRepositoryBackendFactory, Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError, ReefError
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.observability.base import (
@@ -511,6 +512,8 @@ class JobQueueComponent(TrainingComponent):
       ``ValueError`` with the component's message, raises ``RuntimeError`` when the training service could not run
       the check, or raises ``ArtifactError`` when it gave no answer within ``answer_seconds``.
     - ``changed_parts(start, checkpoint)`` is ``checkpoint.changed_parts``, which the training worker recorded.
+    - ``delayed_sample_limit(parameters)`` is ``facts.delayed_sample_limit(parameters)``, which equals the
+      component's.
     - ``import_start``, ``check_job`` and ``check_task_jobs`` raise ``InternalError``: control reaches the
       component only through the members above.
 
@@ -560,6 +563,9 @@ class JobQueueComponent(TrainingComponent):
             raise ValueError(f"artifact {artifact.ref.revision!r} has no local files to train from")
         self.facts.check_import_start(artifact.local_path)
         return SnapshotStart(artifact.ref.revision).to_text()
+
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        return self.facts.delayed_sample_limit(parameters)
 
     def import_start(self, artifact_dir: Path) -> str:
         raise InternalError("control names the snapshot of a start (snapshot_start); the training service imports it")

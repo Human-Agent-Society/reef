@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from reef_client.client import ReefClient, ReefClientError
 
 from reef.core.errors import InternalError, ReefError
 from reef.core.prompts import untrusted_text
+from reef.core.records_types import RECORD_TRAINING_HEADER
 from reef.core.tasks.harbor import HarborTaskError, checked_files
 from reef.samples.generator.inputs import MAX_ASSET_BYTES, MAX_ASSET_FILES, TaskGenerationRequest, record_document
 
@@ -28,6 +30,10 @@ DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12
 GROUNDING_CHARS = 6000
 DESIGNER_TIMEOUT_S = 1800.0
+# While the scenario's engine starts, Reef answers 503 inference_starting with Retry-After 30
+# (reef/api/inference_service.py); a first generation that runs on the served policy waits it out.
+STARTUP_WAIT_S = 1800.0
+STARTUP_RETRY_S = 30.0
 CHAT_PATH = "/v1/chat/completions"
 RESPONSES_PATH = "/v1/responses"
 SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -161,7 +167,7 @@ def designer_prompt(request: DesignerRequest) -> str:
 HARBOR_RULES_TEXT = """RULES:
 - The agent gets a shell in a container built from environment/Dockerfile and the text of instruction.md; it has at most {turn_limit} commands. It never sees tests/ or solution/.
 - TWO NETWORK PHASES: the build of environment/Dockerfile has network, so install there every package the task and the verifier need and COPY every fixture from environment/ into the image; the agent's container and the verifier have no network, so nothing may download at solve or grade time, and a task whose intended solution downloads anything is refused.
-- environment/Dockerfile starts FROM a public image (python:3.12-slim, ubuntu:24.04) and is read by the CLASSIC Docker parser: no heredocs (a heredoc body is read as instructions and the build fails); to create a file, put it next to the Dockerfile and COPY it, or write it on one line with printf. The image installs tmux (the agent runs inside it; `apt-get install -y tmux`), creates every directory the instruction or the scripts write to, and the agent starts in the image's WORKDIR. COPY sources are paths relative to environment/ (`COPY app.conf /etc/app.conf`, never `COPY environment/app.conf`), and every source must be a file in the reply's environment. Install only package names the base image's package manager has (the base image already has coreutils, grep, sed and find; netcat is netcat-openbsd on Debian), and nothing the build cannot do (chattr, mount, systemctl).
+- environment/Dockerfile starts FROM a public image (python:3.12-slim, ubuntu:24.04) and is read by the CLASSIC Docker parser: no heredocs (a heredoc body is read as instructions and the build fails); to create a file, put it next to the Dockerfile and COPY it, or write it on one line with printf. The image installs tmux (the agent runs inside it; `apt-get install -y tmux`), creates every directory the instruction or the scripts write to, and the agent starts in the image's WORKDIR. COPY sources are paths relative to environment/ (`COPY app.conf /etc/app.conf`, never `COPY environment/app.conf`), and every source must be a file in the reply's environment. Install only real package names of the base image's package manager, and nothing the build cannot do (chattr, mount, systemctl). Do not install the commands the base image already has (ls, cat, grep, sed, find): find is a command, not a package name. On Debian and Ubuntu there is no package named netcat; install netcat-openbsd.
 - NO PROCESS SURVIVES THE BUILD: Harbor starts the agent's container with `sleep infinity`, so a RUN that launches a program, a CMD or an ENTRYPOINT run nothing by the time the agent arrives, and a log such a program would have written does not exist. Hidden state lives in files the build wrote (configs, logs, a database file, a git history). A task that needs a running service has the instruction name the command that starts it (the reference solution starts it the same way, and the verifier checks the outcome after), or declares the service as a second container in environment/docker-compose.yaml.
 - instruction.md is at least 80 characters, self contained, and never contains the answer.
 - tests/test.sh is the verifier: it runs after the agent, with /tests holding the tests/ files, and writes one number in [0, 1] to /logs/verifier/reward.txt (1 for success). It checks the outcome, never the transcript, and needs nothing the image lacks. It writes the reward on every path, the failure path included (`echo 0 > /logs/verifier/reward.txt`), and the file holds the number only.
@@ -257,8 +263,16 @@ class Designer(ABC):
 
     @abstractmethod
     def answer(
-        self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
-    ) -> DesignerAnswer: ...
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        scenario: str,
+        model: str,
+        tags: Mapping[str, str],
+        is_recording_training: bool = False,
+    ) -> DesignerAnswer:
+        """Answer one designer prompt; with ``is_recording_training`` the call's record keeps its exact sample, so
+        that a recipe can train the Designer on it."""
 
     @abstractmethod
     def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str: ...
@@ -287,9 +301,18 @@ class ReefDesigner(Designer):
         self.client = ReefClient(reef_url, token=token, timeout_s=float(timeout_s))
 
     def answer(
-        self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        scenario: str,
+        model: str,
+        tags: Mapping[str, str],
+        is_recording_training: bool = False,
     ) -> DesignerAnswer:
         headers = {f"x-reef-tag-{name}": value for name, value in tags.items()}
+        if is_recording_training:
+            # The record keeps the sampled tokens and their log-probs.
+            headers[RECORD_TRAINING_HEADER] = "1"
         if self.api == "responses":
             # Responses takes the system turns as instructions and every other turn as typed input.
             path = RESPONSES_PATH
@@ -314,10 +337,18 @@ class ReefDesigner(Designer):
         else:
             path = CHAT_PATH
             request = {"messages": [dict(message) for message in messages]}
+        deadline = time.monotonic() + STARTUP_WAIT_S
         try:
-            body, record_id = self.client.inference_with_record(
-                scenario, path, {**self.request_options, "model": model, **request}, extra_headers=headers
-            )
+            while True:
+                try:
+                    body, record_id = self.client.inference_with_record(
+                        scenario, path, {**self.request_options, "model": model, **request}, extra_headers=headers
+                    )
+                    break
+                except ReefClientError as exc:
+                    if exc.status != 503 or "inference_starting" not in exc.body or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(STARTUP_RETRY_S)
         except ReefClientError as exc:
             raise DesignerError(f"the designer call was refused ({exc.status}): {exc.body[:300]}") from exc
         except OSError as exc:

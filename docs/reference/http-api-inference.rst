@@ -63,6 +63,8 @@ To receive token IDs from Reef's SGLang or vLLM backend, set ``"return_token_ids
 - Messages returns top-level ``prompt_token_ids`` and ``token_ids``, or carries them in ``message_delta`` when streaming.
 - Records retain the same fields. Without the flag, responses contain no token IDs.
 
+With `x-reef-record-training: 1 <http-api.rst#headers>`__, the record also keeps the engine's exact sample; the response does not.
+
 The receipt identifies the stored record:
 
 +---------------+-----------------------------------------------------------+

@@ -13,8 +13,9 @@ from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
-from reef.core.job_data import JobOutcome
+from reef.core.job_data import DelayedSampleLimit, JobOutcome
 from reef.core.tasks import HarborTask
+from reef.core.training_capture import SamplingDistribution
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.recipe.generated_tasks import GeneratedTaskJobData
 from reef.recipe.generated_tasks.generator import (
@@ -33,6 +34,9 @@ from reef.train.pipeline import TrainingPipeline
 from reef.train.sample2job import Sample2JobSettings
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
+#: The delayed samples that a task job of the tests' training component trains: up to 64, sampled as the Designer
+#: calls of the Designer tests are.
+DELAYED_LIMIT = DelayedSampleLimit(64, SamplingDistribution(0.6, 1.0, -1))
 
 
 class ScriptedGenerator(TaskGenerator):
@@ -170,8 +174,12 @@ def stage_settings(config: Mapping[str, object]) -> tuple[GeneratedTaskSettings,
     )
 
 
-def job_data_stage(settings: Sample2JobSettings, context: PipelineContext) -> GeneratedTaskJobData:
-    return GeneratedTaskJobData(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
+def job_data_stage(
+    settings: Sample2JobSettings, context: PipelineContext, designer_delay: int = 0
+) -> GeneratedTaskJobData:
+    return GeneratedTaskJobData(
+        context, buffer_size=settings.buffer_size, job_samples=settings.job_samples, designer_delay=designer_delay
+    )
 
 
 def scenario_session(tmp_path: Path, scenario: str = "tasks") -> tuple[ScenarioStore, SampleStore]:
@@ -196,6 +204,7 @@ def rounds(
         task_storage=session.tasks,
         samples=samples.for_trainer(""),
         training_mode=str(config.pop("training_mode", "auto")),
+        delayed_sample_limit=DELAYED_LIMIT,
     )
     sample_settings, batch_settings = stage_settings(
         {"buffer_size": 2, "rounds": 3, "description": DESCRIPTION, **config}
@@ -207,7 +216,7 @@ def rounds(
         context,
         session,
         record2sample=generation,
-        sample2job=job_data_stage(batch_settings, context),
+        sample2job=job_data_stage(batch_settings, context, sample_settings.designer_delay),
     )
     worker.generation = generation
     return built, service

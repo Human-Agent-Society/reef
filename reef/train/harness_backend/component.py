@@ -64,7 +64,7 @@ from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
-from reef.storage.data.job_data import JobDataKind
+from reef.storage.data.job_data import DELAYED_FILE, JobDataKind
 from reef.storage.durable_files import read_json, write_json
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
@@ -227,6 +227,10 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     def check_job(self, job: TrainingJob) -> None:
         job_component(job)
+        # Delayed samples ride only with tasks (JobData.delayed); a harness step runs its tasks and trains no sample.
+        # Their file tells, so the check copies no task file.
+        if job.kind == "task" and (job.data_dir / DELAYED_FILE).is_file():
+            raise ValueError("a harness step trains no delayed samples; submit the job's tasks without them")
         tasks = job.parameters.get("evaluation_tasks")
         if tasks is not None and (not isinstance(tasks, list) or not all(isinstance(task, str) for task in tasks)):
             raise ValueError("parameters.evaluation_tasks of a harness job must be a list of task paths or null")

@@ -18,6 +18,7 @@ from typing import Any
 
 from reef.core.job_data import JobData, trajectories
 from reef.core.plugins import import_plugin_class
+from reef.train.slime_backend.group_advantages import GroupAdvantageRule
 from reef.train.slime_backend.schedule import RolloutUnit, StepScheduling, next_steps
 from reef.train.slime_backend.signals import TrainingSignal
 
@@ -33,12 +34,22 @@ class SlimeObjective(ABC):
     before the first pass, so later passes are off-policy: a clipped PPO-style
     ratio tolerates that, an unclipped one does not. ``rollout_unit`` is the
     rows that one optimizer step keeps together: ``"sample"`` or
-    ``"comparison_set"``.
+    ``"comparison_set"``. Two attributes apply to task jobs only, so an
+    objective that sets either has the ``slime`` loss family.
+    ``advantage_rule`` is the rule that turns the rewards of each prompt
+    group of a task job into advantages, or None for Slime's own reward step
+    (``reef.train.slime_backend.task_advantages``). ``carries_samples`` says
+    whether a task job of the objective trains the job data's delayed samples
+    (``JobData.delayed``) in its first optimizer step; such an objective
+    declares its ``advantage_rule``, since Slime's own reward step would center
+    the delayed samples with the task rollouts.
 
     Purpose: ``prepare_slime_job`` calls ``prepare`` with a job's complete data, so
     group-relative statistics do not depend on the data-parallel partitioning.
     ``prepare`` returns the proposed objective state; the component commits it
     with the job's last checkpoint. Model-dependent terms stay in the loss family.
+    A task job calls no ``prepare``: its driver reads ``advantage_rule`` and
+    ``carries_samples``.
 
     The module that defines a subclass imports no torch, Ray or Slime at module
     scope: a service without the GPU stack resolves the recipe's objective to
@@ -49,6 +60,8 @@ class SlimeObjective(ABC):
     loss_family: str = ""
     supports_multiple_epochs: bool = False
     rollout_unit: RolloutUnit = "sample"
+    advantage_rule: GroupAdvantageRule | None = None
+    carries_samples: bool = False
 
     def validate_scheduling(self, scheduling: StepScheduling) -> None:
         """Raise ``ValueError`` for a job schedule whose passes this objective's loss cannot train correctly.
@@ -78,7 +91,7 @@ def register_objective(name: str, objective: SlimeObjective | str) -> None:
     A reference is not imported here, so a method package registers its objective without importing its code.
     Registering the same value twice changes nothing. ``TypeError``: the value is neither. ``ValueError``: the
     reference is malformed, the objective does not declare ``name`` with a loss family, or ``name`` holds
-    another value.
+    another value, or its ``advantage_rule`` or ``carries_samples`` breaks the rules of ``SlimeObjective``.
     """
     if isinstance(objective, str):
         module_name, _, attribute = objective.partition(":")
@@ -93,6 +106,20 @@ def register_objective(name: str, objective: SlimeObjective | str) -> None:
             raise ValueError("an objective must declare a non-empty loss_family")
         if not isinstance(objective.supports_multiple_epochs, bool):
             raise ValueError("an objective must declare supports_multiple_epochs as a bool")
+        if objective.advantage_rule is not None and not isinstance(objective.advantage_rule, GroupAdvantageRule):
+            raise ValueError("an objective's advantage_rule must be a GroupAdvantageRule or None")
+        if not isinstance(objective.carries_samples, bool):
+            raise ValueError("an objective must declare carries_samples as a bool")
+        if (objective.advantage_rule is not None or objective.carries_samples) and objective.loss_family != "slime":
+            raise ValueError(
+                "an objective with advantage_rule or carries_samples trains task jobs, which need the 'slime' loss "
+                "family"
+            )
+        if objective.carries_samples and objective.advantage_rule is None:
+            raise ValueError(
+                "an objective that carries samples declares its advantage_rule: Slime's own reward step would center "
+                "the delayed samples with the task rollouts"
+            )
         if objective.name != name:
             raise ValueError(f"objective {objective.name!r} cannot register under the name {name!r}")
     existing = OBJECTIVES.get(name)

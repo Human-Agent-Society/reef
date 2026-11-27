@@ -458,6 +458,17 @@ class InferenceHandler(Plugin, ABC):
     async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return the provider response for one native request payload."""
 
+    async def inference_with_sample(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return the provider response for one native request payload with the engine's exact sample as its
+        ``training`` block (``reef.core.training_capture.sample_training``), for a call that records it
+        (``x-reef-record-training``). The inference service keeps the block in the record and never returns it to
+        the client. ``ValueError`` from a handler that cannot give the exact sample, which the default is; the
+        service answers it with 400. The token-native chat handlers of SGLang and vLLM give the sample of a buffered
+        chat call whose route names one weight load (``reef.inference.chat.bound_runtime_load_id``)."""
+        raise ValueError(f"{type(self).__name__} gives no exact sample to record")
+
     def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
         """``payload`` addressed to ``model_name``, the name under which the engine serves an artifact
         (``ServedArtifact.model_name``). The default names it as the request's ``model``."""

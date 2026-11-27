@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from tests.slime_backend.test_slime_component import worker_args
 from tests.slime_backend.test_slime_launch import MODEL, SAO, deployment_config, settings_of
+from tests.support.carrying_objective import CARRYING_OBJECTIVE, CARRYING_OPTIONS
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.base_root import BASE_FILE, BaseRoot
@@ -118,6 +119,58 @@ def test_the_component_refuses_options_whose_written_facts_differ_from_the_parse
     parsed(**LORA_PARSED)
     with pytest.raises(RuntimeError, match=r"as written state .*lora_rank=0.* but Slime parsed .*lora_rank=8"):
         component_factory(component_config(tmp_path, FULL), MODEL, {})
+
+
+HARBOR = {"environment": "modal", "concurrency": 4}
+#: The task parameters of an objective that carries samples, and of one that carries none.
+CARRYING = {"objective": CARRYING_OBJECTIVE, "harbor": HARBOR}
+NOT_CARRYING = {"objective": "slime_dataset", "harbor": HARBOR}
+#: Slime's options as written for a task job that carries samples: groups of 2 in rollouts of 4 prompts.
+CARRYING_WRITTEN = {
+    "rollout-batch-size": 4,
+    "n-samples-per-prompt": 2,
+    "global-batch-size": 7,
+    "rollout-temperature": 0.6,
+}
+#: What Slime's parser makes of them, with the other options that such a task job needs.
+CARRYING_PARSED = {
+    "loss_family": "slime",
+    "loss_type": "policy_loss",
+    "compute_advantages_and_returns": True,
+    **CARRYING_OPTIONS,
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("written", "refusal"),
+    [
+        (CARRYING_WRITTEN, None),
+        # Slime parsed a rollout temperature that the options as written do not state: control would keep the
+        # replies of another distribution than the one that the job trains under.
+        (
+            {key: value for key, value in CARRYING_WRITTEN.items() if key != "rollout-temperature"},
+            r"as written state the delayed sample limit .*temperature=1\.0.* but Slime parsed .*temperature=0\.6",
+        ),
+    ],
+)
+def test_the_component_refuses_task_jobs_whose_written_delayed_sample_limit_differs_from_the_parsed_one(
+    tmp_path, parsed, written, refusal
+) -> None:
+    """Control builds each job's data with the facts' limit of the options as written; the training service checks
+    that Slime parsed the same limit when it checks the recipe's task jobs."""
+    parsed(**CARRYING_PARSED)
+    component = component_factory(component_config(tmp_path, written), MODEL, {})
+    try:
+        if refusal is None:
+            component.check_task_jobs(CARRYING)
+        else:
+            with pytest.raises(ValueError, match=refusal):
+                component.check_task_jobs(CARRYING)
+        # An objective that carries no samples trains none, so the limits take no part in its check.
+        component.check_task_jobs(NOT_CARRYING)
+    finally:
+        component.close()
 
 
 @pytest.mark.unit

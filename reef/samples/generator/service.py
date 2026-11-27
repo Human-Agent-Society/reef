@@ -264,6 +264,7 @@ class ProposalJob(Job):
         generation: int,
         index: int,
         tags: Mapping[str, str],
+        is_recording_training: bool = False,
     ) -> None:
         super().__init__()
         self.designer = designer
@@ -273,6 +274,7 @@ class ProposalJob(Job):
         self.generation = generation
         self.index = index
         self.tags = dict(tags)
+        self.is_recording_training = is_recording_training
 
     async def run(self) -> dict[str, object]:
         answer = await asyncio.to_thread(
@@ -281,6 +283,7 @@ class ProposalJob(Job):
             scenario=self.scenario,
             model=self.model,
             tags=self.tags,
+            is_recording_training=self.is_recording_training,
         )
         try:
             reply = parse_harbor_reply(answer.text)
@@ -606,6 +609,9 @@ class GeneratorService:
             scenario = checked_string(body, "scenario", label="a proposal")
             skill = fields.get("skill")
             grounding = fields.get("grounding")
+            is_recording_training = body.get("record_training", False)
+            if not isinstance(is_recording_training, bool):
+                raise WireError("record_training must be true or false")
             designer_request = DesignerRequest(
                 inputs=TaskGenerationRequest(
                     source_records=source_records_from_document(fields, scenario=scenario),
@@ -628,6 +634,7 @@ class GeneratorService:
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),
                 tags=checked_tags(body.get("tags")),
+                is_recording_training=is_recording_training,
             )
         except (WireError, ValueError) as exc:
             return error_response(400, str(exc))

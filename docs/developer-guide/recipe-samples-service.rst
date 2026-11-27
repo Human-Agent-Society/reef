@@ -89,6 +89,7 @@ Checks rerun after serving or configuration changes.
 Staleness is permanent; manual requests can bypass it.
 Tasks, uploads and scenarios without served weights never become stale.
 Set ``goes_stale=False`` to disable checks, as SFT and harness stages do.
+Control judges the Designer replies that a generated-task job carries when it builds the job data, with a lag of ``max_artifact_lag`` artifacts (default 0).
 
 Generated samples
 -----------------

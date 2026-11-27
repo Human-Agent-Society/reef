@@ -614,6 +614,12 @@ Recipe selection, artifact activation and pipeline stages.
    ``pipeline.record2sample.config.review-min-reward-std`` : number : unset
        A review retires a task whose rewards have a smaller population standard deviation; 0 turns this off; default 0.
 
+   ``pipeline.record2sample.config.designer-delay`` : integer : 0
+       The rounds after which the Designer replies of a generation train, beside the task rollouts of the first job of that later round; 0 trains no Designer reply.
+
+   ``pipeline.record2sample.config.max-artifact-lag`` : integer : 0
+       The artifacts that the scenario served after the one that drew a Designer reply, at most, for the reply to train; 0 trains only replies of the served artifact. Tasks never go stale.
+
 Harness evolution
 -----------------
 

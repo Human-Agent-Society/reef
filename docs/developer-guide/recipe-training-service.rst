@@ -76,6 +76,9 @@ The objective sees the whole job before optimizer partitioning.
 Multiple epochs require ``supports_multiple_epochs=True``; old-policy probabilities
 are computed once. ``rollout_unit="comparison_set"`` keeps comparison rows together.
 
+A task-job ``SlimeObjective`` on the ``slime`` family can set ``advantage_rule``, a ``GroupAdvantageRule`` that turns each task's rewards into advantages; ``None`` keeps Slime's reward step.
+With an ``advantage_rule``, ``carries_samples=True`` trains ``JobData.delayed`` in the job's first optimizer step.
+
 Keep torch, Ray and Slime imports out of objective module scope.
 Register by reference with the backend's ``register_objective(name, reference)``;
 the referenced module also registers its loss family.
@@ -88,6 +91,7 @@ Training uses the model's chat template and starting weights.
 Match `serving template arguments <../reference/configuration-inference.rst#chat-template-arguments>`__.
 Unrenderable or overlength inputs and multi-segment teacher samples are skipped.
 ``unrenderable_samples`` counts exclusions. Task rollouts retain exact engine tokens.
+Delayed samples retain the exact tokens and log probabilities of a call that sent ``x-reef-record-training``.
 
 Checkpoints pass `component validation <components.rst#admission-checks>`__ before storage.
 Control commits them; activation separately decides whether they serve.

@@ -253,7 +253,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         parameters = self.job_parameters(job.parameters)
         self.job_start(job)
         if job.kind == "task":
-            tasks = [item for item in job.read_data().samples if isinstance(item, TaskSample)]
+            data = job.read_data()
+            if data.delayed:
+                raise ValueError("Tinker trains no delayed samples: a task job trains only the rollouts of its tasks")
+            tasks = [item for item in data.samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):

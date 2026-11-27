@@ -30,8 +30,9 @@ from reef.control.scenario.live_objects import RecipeChecks
 from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError
-from reef.core.job_data import JobData, TaskSample
+from reef.core.job_data import DelayedSampleLimit, JobData, TaskSample
 from reef.core.snapshot import RootSource, SnapshotRef
+from reef.core.training_capture import SamplingDistribution
 from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ArtifactFormat
 from reef.observability.base import (
@@ -941,6 +942,19 @@ def test_a_queue_component_serves_the_parameters_schema_of_its_facts(tmp_path):
     queue = memory_coordination().work_queue
     assert JobQueueComponent(Declaring(), queue).parameters_schema("task") == {"title": "task"}
     assert JobQueueComponent(StepFacts(), queue).parameters_schema("task") is None
+
+
+@pytest.mark.unit
+def test_a_queue_component_gives_the_delayed_sample_limit_of_its_backends_facts():
+    limit = DelayedSampleLimit(2, SamplingDistribution(1.0, 1.0, -1))
+
+    class Carrying(StepFacts):
+        def delayed_sample_limit(self, parameters):
+            return limit
+
+    queue = memory_coordination().work_queue
+    assert JobQueueComponent(Carrying(), queue).delayed_sample_limit({}) == limit
+    assert JobQueueComponent(StepFacts(), queue).delayed_sample_limit({}) is None
 
 
 @pytest.mark.unit

@@ -58,6 +58,9 @@ Subclass ``Sample2Job`` and select it in ``Recipe.pipeline_spec()``:
 ``JobData`` with the supplied ID. Do not call models or train here.
 Submission consumes every supplied sample, including omitted ones;
 job failure does not return them.
+Task-only data can also carry ``JobData.delayed``: ``DelayedSample`` trajectories that train with their own advantages beside the task rollouts.
+Keep them within ``context.delayed_sample_limit`` (see `Backend facts <training-backends.rst#backend-facts>`__); the pipeline drops the stale ones.
+The generated-task recipe carries `Designer replies <task-generators.rst#designer-replies>`__ this way.
 
 ``job_parameters(data)`` supplies backend parameters.
 Declare accepted request types, trajectories and tasks through the

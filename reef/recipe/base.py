@@ -230,6 +230,16 @@ class WeightTrainingRecipe(Recipe):
         """
         return type(self).configured_parameters(self.job_parameters)
 
+    def carries_delayed_samples(self) -> bool:
+        """Whether the recipe's task jobs carry delayed samples (``JobData.delayed``) as its configuration says;
+        False by default.
+
+        For such a recipe, the training backend's facts must give a delayed sample limit for its task parameters
+        (``reef.control.scenario.live_objects.check_recipe_objects``), and the scenario factory gives the limit to its
+        stages (``reef.control.scenario.factory.read_trainer_spec``).
+        """
+        return False
+
     def build_components(self, scenario: str) -> ScenarioComponents:
         """One component, ``weights``. Its kind and its layout are not configuration yet: the runtime and the
         training component give them (``reef.control.scenario.live_objects.scenario_components``)."""

@@ -38,7 +38,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
 from reef.core.errors import InternalError, ReefError, RuntimeConfigError
-from reef.core.job_data import JobData
+from reef.core.job_data import DelayedSampleLimit, JobData
 from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
@@ -355,7 +355,9 @@ class TrainingBackendFacts(ABC):
     answers these members from it, so the two cannot differ. Only the facts state the default start: the
     component has no ``default_start`` and no ``default_start_inputs``. ``default_start().inputs`` equals
     ``default_start_inputs``, and ``component.root_start`` accepts a root that holds ``default_start()``: the
-    component starts training from the files that the facts write.
+    component starts training from the files that the facts write. ``delayed_sample_limit(parameters)`` equals
+    ``component.delayed_sample_limit(parameters)`` for the parameters that the training service accepts
+    (``TrainingComponent.check_task_jobs``).
 
     A member reads at most the settings, the files that a caller hands it (``check_root_start`` reads the root
     snapshot's files), and local paths that the settings name. ``check_root_start`` and ``check_import_start``
@@ -443,6 +445,17 @@ class TrainingBackendFacts(ABC):
         Control calls it when a trainer starts training from an artifact (``train-from``, a request's
         ``train_from``), so the refusal reaches the caller at once.
         """
+
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        """The delayed samples that a task job with ``parameters`` trains beside its tasks, or None when it trains
+        none (``TrainingComponent.delayed_sample_limit``). The default is None.
+
+        Control builds the data of each job and has no component, so it reads the limit here: the scenario factory
+        gives it to the stages (``reef.train.trainer_builder.TrainerSpec.delayed_sample_limit``), and
+        ``check_recipe_objects`` refuses a deployment whose task jobs carry delayed samples when it is None.
+        ``ValueError``: the parameters or the settings do not allow the delayed samples that the objective trains.
+        """
+        return None
 
     def check_artifact(self, files: ArtifactFiles) -> Mapping[str, JsonValue] | None:
         """Check ``files`` as a snapshot in the layout of the backend's snapshots, as far as the files and the
@@ -605,6 +618,18 @@ class TrainingComponent(ABC):
         component trains trajectories only. ``check_job`` still checks each job.
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
+
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        """The delayed samples (``JobData.delayed``) that a task job with ``parameters`` trains beside its tasks, or
+        None when it trains none. The default is None.
+
+        ``check_job`` refuses a job whose delayed samples are outside the limit. Control holds no component: the
+        backend's facts state the same limit (``TrainingBackendFacts.delayed_sample_limit``), and a deployment whose
+        task jobs carry delayed samples is refused before any job when they state none
+        (``reef.control.scenario.live_objects.check_recipe_objects``). ``ValueError``: the parameters or the
+        component's options do not allow the delayed samples that the objective trains.
+        """
+        return None
 
     def check_remote_artifact(self, names: Mapping[str, JsonValue]) -> None:
         """Raise ``ValueError`` unless everything that ``names`` names resolves on the component's service.

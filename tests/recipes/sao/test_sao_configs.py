@@ -445,6 +445,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
         "recipes/beta/spade/examples/tinker/serve.yaml",
+        "recipes/beta/spade/examples/slime/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
@@ -567,12 +568,24 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
         args, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"} if documented else {}
     )
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        job_parameters = load_deployment(config_path)["reef"].get("job_parameters", {})
+        config = load_deployment(config_path)
+    job_parameters = config["reef"].get("job_parameters", {})
     if "harbor" in job_parameters:
-        from reef.train.slime_backend.harbor_rollouts import check_task_job_options
+        from reef.train.slime_backend.facts import SlimeFacts, SlimeRolloutOptions
+        from reef.train.slime_backend.harbor_rollouts import check_delayed_task_job, check_task_job_options
+        from reef.train.slime_backend.objectives import resolve_objective
+        from reef.train.slime_backend.parameters import SlimeJobParameters
 
         # A task job's options pass the check that refuses them at its first submit.
         check_task_job_options(args)
+        objective = resolve_objective(SlimeJobParameters.from_parameters(job_parameters).objective)
+        if objective.carries_samples:
+            check_delayed_task_job(args, objective)
+            # Control builds the job data with the limit of the options as written; the training service checks
+            # that it equals the limit of Slime's parse (SlimeTrainingComponent.check_task_jobs).
+            _set_test_endpoints(config)
+            written = SlimeFacts.from_arguments(_slime_tokens(config)[0]).delayed_sample_limit(job_parameters)
+            assert written == SlimeRolloutOptions.from_parsed(args).delayed_sample_limit()
 
 
 @pytest.mark.unit

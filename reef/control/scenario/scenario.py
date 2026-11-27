@@ -361,11 +361,13 @@ class Scenario:
 
         An automatic job waits until the samples service judged the trainer's samples against what the scenario
         serves now (``TrainingPipeline.mark_staled``), so that it takes no sample that the samples service marks stale.
-        A request's job does not wait: the request names its samples."""
+        A request's job does not wait: the request names its samples. The new job data leaves out the delayed
+        samples that are stale against what the scenario serves now (``TrainingPipeline.build_job_data``)."""
         component_trainer = self._committer.component_trainer(component)
         trainer = component_trainer.trainer
-        judged = trainer.pipeline.judged(self.served_artifacts())
-        data = trainer.reserve_job(automatic_jobs=automatic_jobs and judged)
+        served = self.served_artifacts()
+        judged = trainer.pipeline.judged(served)
+        data = trainer.reserve_job(automatic_jobs=automatic_jobs and judged, served=served)
         if data is None:
             return None
         component = component_trainer.component

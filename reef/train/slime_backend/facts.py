@@ -1,24 +1,30 @@
 """What the Slime backend states from its options alone, without Slime's parser or a component.
 
-``SlimeFacts`` reads four of Slime's options: the model, and the LoRA rank, alpha and target modules. The
-component answers the same members from the value of its parsed arguments (``SlimeFacts.from_parsed``), and it
-refuses to start when the options as written give another value (``SlimeFacts.from_arguments``). The module imports
-no Slime, Megatron, Ray or torch module, so control and inference read it in an environment without them.
+``SlimeFacts`` reads the model and the LoRA rank, alpha and target modules from Slime's options. The component
+answers the same members from the value of its parsed arguments (``SlimeFacts.from_parsed``), and it refuses to start
+when the options as written give another value (``SlimeFacts.from_arguments``). The facts also read the rollout
+options that bound the delayed samples of a task job (``SlimeRolloutOptions``); the training service checks those
+against the parsed arguments when it checks the recipe's task jobs. The module imports no Slime, Megatron, Ray or
+torch module, so control and inference read it in an environment without them.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
 from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.repository import DefaultStart
+from reef.core.job_data import DelayedSampleLimit
+from reef.core.training_capture import sampling_distribution
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.data.job_data import JobDataKind
 from reef.train.component import ScenarioRoot, TrainingBackendFacts
-from reef.train.slime_backend.parameters import slime_parameters_schema
+from reef.train.slime_backend.objectives import resolve_objective
+from reef.train.slime_backend.parameters import SlimeJobParameters, slime_parameters_schema
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 #: The name of the Slime training component, which its jobs carry.
@@ -65,6 +71,160 @@ def option_values(arguments: Sequence[str], flag: str) -> list[str] | None:
     return values
 
 
+def option_number(arguments: Sequence[str], flag: str, kind: type[int] | type[float]) -> int | float | None:
+    """The value of the last ``flag`` in ``arguments`` as ``kind``, or None when it is absent (``option_values``).
+
+    ``ValueError``: the option has no value, or one that is not a ``kind``."""
+    values = option_values(arguments, flag)
+    if values is None:
+        return None
+    if len(values) != 1:
+        raise ValueError(f"{flag} takes one value, got {values!r}")
+    try:
+        return kind(values[0])
+    except ValueError as exc:
+        raise ValueError(f"{flag} is a number: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class SlimeRolloutOptions:
+    """The rollout options of Slime that bound the delayed samples of a task job.
+
+    Values, each the option that the engines and Slime's parser accept:
+
+    - ``temperature`` is ``--rollout-temperature``, a finite number that is at least 0 (Slime's default 1.0).
+    - ``top_p`` is ``--rollout-top-p``, a number in (0, 1] (default 1.0).
+    - ``top_k`` is ``--rollout-top-k``: -1, for no limit, or a positive int (default -1).
+    - ``batch_size`` is ``--rollout-batch-size``, the prompts of one rollout: a positive int, or None when the options
+      give none.
+    - ``samples_per_prompt`` is ``--n-samples-per-prompt``, a positive int (default 1).
+    - ``global_batch_size`` is the samples of one optimizer step: ``--global-batch-size``, or the value that Slime
+      computes from ``--num-steps-per-rollout``. It is a positive int, or None when the options give none.
+
+    The constructor refuses other values, bools included, with a ``ValueError`` that names the field and the option.
+
+    Purpose: ``SlimeFacts`` holds the value of its options, and ``delayed_sample_limit`` computes the limit from it,
+    so control (``SlimeFacts.delayed_sample_limit``) and the training service
+    (``harbor_rollouts.delayed_sample_limit``) give the same limit.
+    """
+
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = -1
+    batch_size: int | None = None
+    samples_per_prompt: int = 1
+    global_batch_size: int | None = None
+
+    def __post_init__(self) -> None:
+        temperature, top_p, top_k = self.temperature, self.top_p, self.top_k
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not (math.isfinite(temperature) and temperature >= 0)
+        ):
+            raise ValueError(
+                "SlimeRolloutOptions.temperature (--rollout-temperature) must be a finite number of at least 0, "
+                f"got {temperature!r}"
+            )
+        if isinstance(top_p, bool) or not isinstance(top_p, (int, float)) or not 0 < top_p <= 1:
+            raise ValueError(f"SlimeRolloutOptions.top_p (--rollout-top-p) must be in (0, 1], got {top_p!r}")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or not (top_k == -1 or top_k > 0):
+            raise ValueError(
+                f"SlimeRolloutOptions.top_k (--rollout-top-k) must be -1 or a positive int, got {top_k!r}"
+            )
+        for name, option, value, may_be_none in (
+            ("batch_size", "--rollout-batch-size", self.batch_size, True),
+            ("samples_per_prompt", "--n-samples-per-prompt", self.samples_per_prompt, False),
+            (
+                "global_batch_size",
+                "--global-batch-size, or the value of --num-steps-per-rollout",
+                self.global_batch_size,
+                True,
+            ),
+        ):
+            if value is None and may_be_none:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                domain = "a positive int or None" if may_be_none else "a positive int"
+                raise ValueError(f"SlimeRolloutOptions.{name} ({option}) must be {domain}, got {value!r}")
+
+    @classmethod
+    def from_arguments(cls, arguments: Sequence[str]) -> Self:
+        """The rollout options of the Slime argument list ``arguments``, read as written, with Slime's defaults.
+
+        With ``--num-steps-per-rollout`` and ``--rollout-batch-size``, ``global_batch_size`` is
+        ``--rollout-batch-size * --n-samples-per-prompt // --num-steps-per-rollout``, as Slime computes it.
+        ``ValueError``: an option is no number of its kind, ``--num-steps-per-rollout`` is below 1, or a value is
+        outside the domain of its field.
+        """
+        temperature = option_number(arguments, "--rollout-temperature", float)
+        top_p = option_number(arguments, "--rollout-top-p", float)
+        top_k = option_number(arguments, "--rollout-top-k", int)
+        batch_size = option_number(arguments, "--rollout-batch-size", int)
+        samples_per_prompt = option_number(arguments, "--n-samples-per-prompt", int)
+        global_batch_size = option_number(arguments, "--global-batch-size", int)
+        steps = option_number(arguments, "--num-steps-per-rollout", int)
+        samples = 1 if samples_per_prompt is None else int(samples_per_prompt)
+        if steps is not None and steps < 1:
+            raise ValueError(f"--num-steps-per-rollout must be a positive int, got {steps}")
+        if steps is not None and batch_size is not None:
+            # Slime's own rule: the steps of one rollout split its samples.
+            global_batch_size = int(batch_size) * samples // int(steps)
+        return cls(
+            1.0 if temperature is None else float(temperature),
+            1.0 if top_p is None else float(top_p),
+            -1 if top_k is None else int(top_k),
+            None if batch_size is None else int(batch_size),
+            samples,
+            None if global_batch_size is None else int(global_batch_size),
+        )
+
+    @classmethod
+    def from_parsed(cls, args: SlimeArguments) -> Self:
+        """The rollout options of Slime's parsed arguments ``args``. ``ValueError``: a value is outside the domain of
+        its field."""
+        return cls(
+            float(args.rollout_temperature),
+            float(args.rollout_top_p),
+            int(args.rollout_top_k),
+            args.rollout_batch_size,
+            int(args.n_samples_per_prompt),
+            args.global_batch_size,
+        )
+
+    def delayed_sample_limit(self) -> DelayedSampleLimit:
+        """The delayed samples that a task job that carries samples trains with these options.
+
+        The job trains at most ``min(--global-batch-size, (--rollout-batch-size - 1) * --n-samples-per-prompt)``
+        delayed samples, which keeps the delayed groups and a task in the first rollout and the samples in its first
+        optimizer step. Each sample comes from Slime's rollout distribution (``--rollout-temperature``,
+        ``--rollout-top-p``, ``--rollout-top-k``), so that its recorded log-probs are those of the sampler that the
+        workers' log-probs stand for. ``ValueError`` for a greedy rollout distribution, for options that give no
+        rollout or optimizer step size, or for a rollout of fewer than two prompts.
+        """
+        distribution = sampling_distribution(
+            {"temperature": self.temperature, "top_p": self.top_p, "top_k": self.top_k}
+        )
+        if distribution is None:
+            raise ValueError(
+                "a task job that carries samples needs a sampled rollout distribution: a positive "
+                "--rollout-temperature and a --rollout-top-p in (0, 1]"
+            )
+        if self.batch_size is None or self.global_batch_size is None:
+            raise ValueError(
+                "a task job that carries samples needs --rollout-batch-size, and --global-batch-size or "
+                "--num-steps-per-rollout, in Slime's options"
+            )
+        if self.batch_size < 2:
+            raise ValueError(
+                "a task job that carries samples needs --rollout-batch-size of at least 2: its first rollout leads "
+                "with a delayed group, even an empty one, and needs a task beside it"
+            )
+        return DelayedSampleLimit(
+            min(self.global_batch_size, (self.batch_size - 1) * self.samples_per_prompt), distribution
+        )
+
+
 @dataclass(frozen=True)
 class SlimeFacts(TrainingBackendFacts):
     """The facts of one Slime deployment: the model that it starts from and the LoRA that it trains, if any.
@@ -84,6 +244,10 @@ class SlimeFacts(TrainingBackendFacts):
     the adapter that Megatron initializes, so the root holds no weight file. A component holds one job's weights at
     a time, so neither scenarios nor the jobs of one scenario share it.
 
+    ``rollout`` holds the rollout options that bound a task job's delayed samples (``delayed_sample_limit``). It takes
+    no part in the equality of two values: Slime derives some of those options, so the training service compares the
+    limits themselves when it checks the recipe's task jobs (``SlimeTrainingComponent.check_task_jobs``).
+
     Purpose: ``SlimeComponentFactory.facts`` makes one from the deployment's options (``from_arguments``);
     ``SlimeJobs`` makes one from its parsed arguments (``from_parsed``) and answers from it.
     """
@@ -92,6 +256,7 @@ class SlimeFacts(TrainingBackendFacts):
     lora_rank: int = 0
     lora_alpha: int | None = None
     lora_target_modules: tuple[str, ...] | None = None
+    rollout: SlimeRolloutOptions = field(default_factory=SlimeRolloutOptions, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.hf_checkpoint, str) or not self.hf_checkpoint:
@@ -115,8 +280,10 @@ class SlimeFacts(TrainingBackendFacts):
     def from_arguments(cls, arguments: Sequence[str]) -> Self:
         """The facts of the Slime argument list ``arguments``, read as written, without Slime's parser.
 
-        Each option is read by its full name (``option_values``). ``ValueError``: ``--hf-checkpoint`` is absent, or
-        a LoRA option is no value of ``SlimeFacts``.
+        Each option is read by its full name (``option_values``). ``ValueError``: ``--hf-checkpoint`` is absent, a
+        LoRA option is no value of ``SlimeFacts``, a rollout option is no number of its kind or is outside the domain
+        of its ``SlimeRolloutOptions`` field, or ``--num-steps-per-rollout`` is below 1
+        (``SlimeRolloutOptions.from_arguments``).
         """
         checkpoint = option_values(arguments, "--hf-checkpoint")
         if not checkpoint:
@@ -131,19 +298,26 @@ class SlimeFacts(TrainingBackendFacts):
             raise ValueError(f"--megatron-lora-rank and --megatron-lora-alpha are integers: {exc}") from exc
         if rank > 0 and alpha is None:
             alpha = rank
-        return cls(checkpoint[0], rank, alpha, None if targets is None else tuple(targets))
+        rollout = SlimeRolloutOptions.from_arguments(arguments)
+        return cls(checkpoint[0], rank, alpha, None if targets is None else tuple(targets), rollout)
 
     @classmethod
     def from_parsed(cls, args: SlimeArguments, *, lora: bool) -> Self:
-        """The facts of Slime's parsed arguments ``args``; ``lora`` is whether the actor trains a LoRA adapter."""
+        """The facts of Slime's parsed arguments ``args``; ``lora`` is whether the actor trains a LoRA adapter.
+
+        ``ValueError``: a LoRA value is no value of ``SlimeFacts``, or a rollout option is outside the domain of its
+        ``SlimeRolloutOptions`` field (``SlimeRolloutOptions.from_parsed``).
+        """
+        rollout = SlimeRolloutOptions.from_parsed(args)
         if not lora:
-            return cls(args.hf_checkpoint)
+            return cls(args.hf_checkpoint, rollout=rollout)
         targets = args.megatron_lora_target_modules
         return cls(
             args.hf_checkpoint,
             int(args.megatron_lora_rank),
             args.megatron_lora_alpha,
             None if targets is None else tuple(targets),
+            rollout,
         )
 
     @property
@@ -186,6 +360,14 @@ class SlimeFacts(TrainingBackendFacts):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
         return slime_parameters_schema(kind)
 
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        """The limit of the rollout options (``SlimeRolloutOptions.delayed_sample_limit``) for a task job whose
+        objective carries samples; None for a job of another objective."""
+        objective = resolve_objective(SlimeJobParameters.from_parameters(parameters).objective)
+        if not objective.carries_samples:
+            return None
+        return self.rollout.delayed_sample_limit()
+
     @property
     def start_files(self) -> tuple[str, ...]:
         """No file: a root is checked by its source, and a published snapshot is refused unread."""
@@ -216,6 +398,8 @@ __all__ = [
     "MEGATRON_TO_HF_TARGETS",
     "SLIME_COMPONENT",
     "SlimeFacts",
+    "SlimeRolloutOptions",
     "hf_lora_target_modules",
+    "option_number",
     "option_values",
 ]

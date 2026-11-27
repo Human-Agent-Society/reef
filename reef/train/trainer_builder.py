@@ -13,6 +13,7 @@ from typing import Any
 
 from reef.artifact.components import ScenarioComponents
 from reef.core.components import RECORDS_COMPONENT
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger
 from reef.storage.data.store import DataStore
@@ -37,7 +38,9 @@ class TrainerSpec:
 
     Live objects from their holder: ``job_component`` runs the trainer's jobs; None is a trainer that only reads
     records. ``data_store`` keeps the data directory of each job; None keeps them in a temporary directory
-    (``JobLoop``).
+    (``JobLoop``). ``delayed_sample_limit`` is the delayed samples that one task job trains, as the facts of the
+    training backend state it (``TrainingBackendFacts.delayed_sample_limit``), or None for a recipe whose task jobs
+    carry none (``WeightTrainingRecipe.carries_delayed_samples``).
 
     Purpose: the scenario factory reads one from a recipe (``reef.control.scenario.factory.read_trainer_specs``), and
     ``build_trainer`` builds the trainer.
@@ -50,10 +53,13 @@ class TrainerSpec:
     job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None
     job_component: TrainingComponent | None = None
     data_store: DataStore | None = None
+    delayed_sample_limit: DelayedSampleLimit | None = None
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
+        if self.delayed_sample_limit is not None and not isinstance(self.delayed_sample_limit, DelayedSampleLimit):
+            raise TypeError("delayed_sample_limit must be a DelayedSampleLimit or None")
 
 
 @dataclass(frozen=True)
@@ -131,6 +137,7 @@ def build_trainer(
         training_mode=spec.training_mode,
         task_storage=task_storage,
         samples=samples,
+        delayed_sample_limit=spec.delayed_sample_limit,
     )
 
 

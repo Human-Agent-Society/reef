@@ -37,7 +37,12 @@ stores them like the samples of a unit, and they train like any other sample. Th
 
 The samples service decides which stored samples are stale (``mark_stale``, with the
 stage's ``Record2Sample.is_stale``) and marks them in the store. The automatic
-jobs leave a marked sample out; the pipeline runs no staleness check of its own.
+jobs leave a marked sample out; the pipeline runs no staleness check of its own on stored samples.
+
+A sample-to-job stage can add delayed samples to a task job's data (``JobData.delayed``), such as the generated-task
+recipe's Designer replies. They are not stored samples, so the samples service never marks them: the pipeline judges
+each one with the stage's ``Record2Sample.is_stale`` against the served artifacts that control gives
+``build_job_data``, and leaves out the stale ones.
 """
 
 from __future__ import annotations
@@ -811,11 +816,13 @@ class TrainingPipeline:
             return False
         return len(self.auto_entries()) >= sample_count
 
-    def build_job_data(self, sample_count: int | None) -> JobData:
+    def build_job_data(self, sample_count: int | None, served: ServedArtifacts | None = None) -> JobData:
         """Return the handed out job data, or build the next job's data when ``ready`` for ``sample_count``.
 
         The data of a failed request (``request_failure``) holds no sample: the trainer consumes the request with a
-        skip row and trains nothing, so the pipeline does not read the samples that the request names.
+        skip row and trains nothing, so the pipeline does not read the samples that the request names. ``served`` is
+        what the scenario serves now (``Scenario.served_artifacts``), against which new data leaves out its stale
+        delayed samples (``without_stale_delayed``); None judges none.
         """
         if self.pending is None:
             if not self.ready(sample_count):
@@ -831,11 +838,32 @@ class TrainingPipeline:
             self.reserved_sample_ids = tuple(stored.sample_id for stored, _ in entries)
             samples = tuple(grouped(stored, sample) for stored, sample in entries)
             if request is None:
-                self.pending = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
+                data = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
+                self.pending = self.without_stale_delayed(data, served)
             else:
                 data = self.sample2job.make_job_data(samples, f"{self.scenario}:request:{request.id}")
-                self.pending = replace(data, request=request)
+                self.pending = replace(self.without_stale_delayed(data, served), request=request)
         return self.pending
+
+    def without_stale_delayed(self, data: JobData, served: ServedArtifacts | None) -> JobData:
+        """``data`` without the delayed samples that the record-to-sample stage finds stale against ``served``
+        (``Record2Sample.is_stale``); ``data`` itself when ``served`` is None.
+
+        A delayed sample reaches job data from the sample-to-job stage, not from the store, so the samples service
+        never marks it; this check runs on it in both training modes, since no request names it.
+        """
+        if served is None or not data.delayed:
+            return data
+        fresh = tuple(item for item in data.delayed if not self.record2sample.is_stale((item.trajectory,), served))
+        if len(fresh) == len(data.delayed):
+            return data
+        logger.warning(
+            "job data %s of scenario %s leaves out %d stale delayed samples",
+            data.data_id,
+            self.scenario,
+            len(data.delayed) - len(fresh),
+        )
+        return replace(data, delayed=fresh)
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         """The commit that submits the job data's job consumed it: return the consumed IDs, ``sample:<id>`` for each

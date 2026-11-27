@@ -18,6 +18,8 @@ Import ``TaskGenerator`` from ``reef.recipe.generated_tasks``:
   Empty ``errors`` means valid. Return task defects there; raise when validation cannot run.
 - Optional ``async record_results(results, *, generation)`` receives candidate-order results.
   Make repeated delivery idempotent, including after restart.
+- Optional ``designer_advantages(generation)`` maps the inference record ID of each Designer reply to train to a finite advantage.
+  Reef calls it after ``record_results`` when ``designer_delay`` is above 0; give the same answer after restart.
 
 Tasks are values; validate private copies.
 Generators require scenario task storage and cannot publish directly.
@@ -40,3 +42,11 @@ Use ``GeneratorState.read/write/remove`` for documents and ``save_files/files``
 for durable file copies. Writes survive restart on another host.
 Do not change returned file copies. Archival retires state.
 See `generator types <../../reef/recipe/generated_tasks/generator.py>`__ for complete signatures and result fields.
+
+Designer replies
+----------------
+
+With ``designer_delay`` above 0, delivery saves generation g's replies that have an advantage as task store document ``designer/<g>``.
+Control reads them from the store and carries them as ``JobData.delayed``, so it can run apart from the samples service.
+A reply trains only when its served call kept its exact sample (`x-reef-record-training <../reference/http-api.rst#headers>`__).
+See `Designer replies <../reference/configuration-generated-tasks.rst#designer-replies>`__ for when they train.

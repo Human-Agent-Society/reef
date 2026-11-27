@@ -18,8 +18,9 @@ generator's method:
   training component rolls out on its own sampler. ``GenerationRunner`` owns
   generation, validation, task publication and result delivery on the stage's worker.
   ``StoredGeneratorState`` is the generator's state in the scenario's task store.
-- ``results``: each train task's first rollout result and the generations
-  delivered to the generator, kept in the task store's documents.
+- ``results``: each train task's first rollout result, the generations
+  delivered to the generator and the Designer replies that train
+  (``DesignerReplies``), kept in the task store's documents.
 - ``training``: how the stage trains its train tasks (``TaskTraining``): once
   each (``SingleUseTraining``), or again from a training pool, and the task
   samples that both read.

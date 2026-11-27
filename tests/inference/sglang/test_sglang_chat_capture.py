@@ -15,8 +15,9 @@ from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.api.streaming import stream_record
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
-from reef.inference.chat import _json_arguments_equal, sse_json_events
+from reef.inference.chat import _json_arguments_equal, bound_runtime_load_id, sse_json_events
 from reef.inference.interfaces import InferenceArtifact, full_weight_name
+from reef.inference.residency import adapter_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 
 
@@ -1454,3 +1455,89 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_rea
         assert "training" not in response
 
     asyncio.run(run())
+
+
+#: A route that names the full-weight load ``e:3``, as the inference service gives the handler.
+PINNED = InferenceArtifact("artifact-A", served_model=full_weight_name("/remote/model", "e:3"))
+
+
+async def answer_with_sample(
+    artifact: InferenceArtifact,
+    meta_info: dict,
+    request: dict,
+    path: str = "/v1/chat/completions",
+    pins: list[str | None] | None = None,
+) -> dict:
+    """``inference_with_sample`` of a stub SGLang engine that answers with ``meta_info``; ``pins`` takes the load that
+    each request names (``x-reef-served-model``)."""
+
+    async def generate(native_request):
+        if pins is not None:
+            pins.append(native_request.headers.get("x-reef-served-model"))
+        return web.json_response({"text": "env", "meta_info": {"finish_reason": {"type": "stop"}, **meta_info}})
+
+    app = web.Application()
+    app.router.add_post("/generate", generate)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        backend = SGLangInferenceHandler(
+            str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+        )
+        return await backend.inference_with_sample(artifact, path, request)
+    finally:
+        await server.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_a_call_that_records_its_sample_gets_the_exact_ids_log_probs_and_distribution(path) -> None:
+    request = {
+        "model": "served-model",
+        "messages": [{"role": "user", "content": "write an environment"}],
+        "max_tokens": 2,
+        "temperature": 0.6,
+        "top_p": 1.0,
+        "top_k": -1,
+    }
+    meta_info = {"output_token_logprobs": [[-0.25, 20], [-0.5, 21]]}
+    pins: list[str | None] = []
+
+    response = asyncio.run(answer_with_sample(PINNED, meta_info, request, path, pins))
+
+    assert pins == [PINNED.served_model], "the engine admits the request only while it serves that load"
+
+    assert response["training"] == {
+        "tokens": [10, 11, 20, 21],
+        "loss_mask": [1, 1],
+        "rollout_log_probs": [-0.25, -0.5],
+        "prompt_length": 2,
+        "response_length": 2,
+        "finish_reason": "stop",
+        "distribution": {"temperature": 0.6, "top_p": 1.0, "top_k": -1},
+    }
+    assert ("content" in response) == (path == "/v1/messages")
+
+
+@pytest.mark.unit
+def test_a_sample_is_recorded_only_on_a_route_that_names_one_weight_load(tmp_path) -> None:
+    request = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 2, "temperature": 0.6}
+    meta_info = {"output_token_logprobs": [[-0.1, 20], [-0.2, 21]]}
+    adapter = InferenceArtifact("artifact-B", served_model=adapter_name("spade", "e:4"))
+
+    assert "distribution" not in asyncio.run(answer_with_sample(PINNED, meta_info, request))["training"]
+    # An adapter name binds one load too. The block names no load: the record names the artifact that answered.
+    adapted = asyncio.run(answer_with_sample(adapter, meta_info, request))["training"]
+    assert adapted["rollout_log_probs"] == [-0.1, -0.2] and "runtime_load_id" not in adapted
+    # A route that names no load binds no weights: no single policy is known to have drawn the reply.
+    assert "training" not in asyncio.run(answer_with_sample(local_artifact(tmp_path), meta_info, request))
+    plain = InferenceArtifact("artifact-C", served_model="model")
+    assert "training" not in asyncio.run(answer_with_sample(plain, meta_info, request))
+    assert (bound_runtime_load_id(None), bound_runtime_load_id("model")) == (None, None)
+
+
+@pytest.mark.unit
+def test_only_a_chat_call_records_its_sample() -> None:
+    request = {"messages": [{"role": "user", "content": "hello"}]}
+    with pytest.raises(ValueError, match="record their sample"):
+        asyncio.run(answer_with_sample(PINNED, {}, request, "/v1/messages/count_tokens"))

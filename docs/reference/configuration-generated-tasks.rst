@@ -8,6 +8,18 @@ Set training and evaluation splits in ``pipeline.record2sample.config``. Set ``r
 A positive ``pool-capacity`` reuses generated training tasks across jobs. Imported tasks train once.
 For review thresholds and other stage options, see the `settings reference <configuration-settings.rst#recipe>`__.
 
+Designer replies
+----------------
+
+With ``designer-delay`` d above 0, the first task job of round g + d also trains generation g's Designer replies with the generator's advantages.
+A round that published no train task passes them to the next round that did.
+A reply trains at most once, from the exact sample that its served call kept; SPADE's ``train_designer`` asks for it.
+A carrying job that fails or is cancelled does not train them again.
+The last d generations of a run train only when the run continues with more rounds.
+Every service refuses ``designer-delay`` at start unless the training backend and objective train delayed samples.
+A job drops, with a warning, replies of another sampling distribution, replies over its limit, and replies more than ``max-artifact-lag`` artifacts behind the served one.
+See `Designer replies <../developer-guide/task-generators.rst#designer-replies>`__ for the generator side.
+
 Rollout job parameters
 ----------------------
 

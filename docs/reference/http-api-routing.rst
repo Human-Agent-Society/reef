@@ -11,6 +11,7 @@ Routed external-model requests
 - Supported routes: ``POST /v1/chat/completions``, ``POST /reef/report``, ``GET /healthz``. Others return 404.
 - With the `external router lifecycle <configuration-routing.rst#external-router-lifecycle>`__, these rules cover manifest Scenarios; inference also serves ``GET /readyz`` and control receives reports.
 - ``x-reef-rollout: 1`` or ``true`` returns 400 (``unsupported_rollout``). Rollout calls remain available when routing is disabled.
+- ``x-reef-record-training: 1`` or ``true`` returns 400 (``unsupported_record_training``): an external provider gives no exact sample.
 
 .. list-table:: Client fields
    :header-rows: 1

@@ -44,6 +44,10 @@ Rules:
   A stream that fails after its headers went out gets no terminal event and no receipt: the replica closes the
   connection, so the client reads a transport error, and the record keeps the incomplete delivery. A stream that the
   engine aborted keeps its terminal event, without a receipt.
+- ``x-reef-record-training`` keeps the call's exact sample (``training``) in its record, never in the response. It
+  is 400 for a call that streams or is not recorded, for a body whose ``temperature``, ``top_p`` or ``top_k`` neither
+  the call nor the scenario's serving config names, and for an engine that gives no exact sample with its
+  distribution (``InferenceHandler.inference_with_sample``).
 """
 
 from __future__ import annotations
@@ -73,8 +77,9 @@ from reef.api.streaming import (
 from reef.api.web import service_application
 from reef.api.wire import HeaderError, RequestHeaders, parse_request_headers, with_request_tags
 from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
-from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
+from reef.core.records_types import RECORD_TRAINING_HEADER, ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.training_capture import DISTRIBUTION_KEYS
 from reef.core.values import JsonValue
 from reef.inference.interfaces import (
     EngineClients,
@@ -328,7 +333,8 @@ async def read_object(request: web.Request) -> dict[str, Any]:
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
     """``response`` as the client gets it and the record keeps it: without a ``training`` block, which an engine
     handler may return. Serving returns no training tensors; a training component computes the ones it needs. The
-    record names the artifact that answered by its ``artifact_id``."""
+    record names the artifact that answered by its ``artifact_id``. A call with ``x-reef-record-training`` is the one
+    exception: its record keeps the block (``InferenceReplica.record``), and the client still gets this value."""
     return {key: value for key, value in response.items() if key != "training"}
 
 
@@ -444,7 +450,8 @@ class InferenceReplica:
         """Append the record of one request that the artifact ``artifact_id`` answered; return its ID.
 
         The stored payload also names ``artifact_id``. With ``traffic``, ``metadata.traffic`` holds the bucket and the
-        weights.
+        weights. Its response keeps the engine's ``training`` block only when the call asked for it
+        (``RequestHeaders.is_recording_training``).
         """
         recorded = with_request_tags(payload, parsed)
         if traffic is not None:
@@ -459,7 +466,7 @@ class InferenceReplica:
             payload={
                 **recorded,
                 "artifact_id": artifact_id,
-                "response": provider_response(response),
+                "response": dict(response) if parsed.is_recording_training else provider_response(response),
             },
             artifact_id=artifact_id,
         )
@@ -627,21 +634,23 @@ class InferenceReplica:
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
-    async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The answer of the engine of ``served`` to ``payload`` under the row's model name. An engine's 4xx keeps its
-        status and message; a 5xx, an unreachable engine or an answer that is no JSON object is 502, and an engine
-        that does not answer in time 504. ``RuntimeLoadMismatchError`` when the engine refuses the row's model name
-        (421); ``answer`` then retries once."""
+    async def forward(
+        self, served: ServedArtifact, path: str, payload: Mapping[str, Any], *, with_sample: bool = False
+    ) -> dict[str, Any]:
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name, with its exact sample as
+        ``training`` when ``with_sample`` (``InferenceHandler.inference_with_sample``); 400 for a handler that gives
+        none. An engine's 4xx keeps its status and message; a 5xx, an unreachable engine or an answer that is no JSON
+        object is 502, and an engine that does not answer in time 504. ``RuntimeLoadMismatchError`` when the engine
+        refuses the row's model name (421); ``answer`` then retries once."""
         handler = self.handler(served)
+        artifact = InferenceArtifact(served.artifact_id, served_model=served.model_name)
+        addressed = handler.address_model(payload, served.model_name)
         try:
-            return await asyncio.wait_for(
-                handler.inference(
-                    InferenceArtifact(served.artifact_id, served_model=served.model_name),
-                    path,
-                    handler.address_model(payload, served.model_name),
-                ),
-                timeout=self.timeout_seconds,
-            )
+            if with_sample:
+                answer = handler.inference_with_sample(artifact, path, addressed)
+            else:
+                answer = handler.inference(artifact, path, addressed)
+            return await asyncio.wait_for(answer, timeout=self.timeout_seconds)
         except UpstreamStatusError as exc:
             if exc.status == 421:
                 raise RuntimeLoadMismatchError("the engine refused the selected binding") from exc
@@ -650,6 +659,10 @@ class InferenceReplica:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
+        except ValueError as exc:
+            if not with_sample:
+                raise
+            raise web.HTTPBadRequest(text=f"the engine at {served.url} cannot record its sample: {exc}") from exc
 
     def bound_target(self, scenario: str, name: str) -> tuple[ServedArtifact, Mapping[str, JsonValue], str]:
         """Read one exact serving row and its settings without the stale-read fallback.
@@ -692,6 +705,10 @@ class InferenceReplica:
         except HeaderError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         payload = await read_object(request)
+        if parsed.is_recording_training and (not record or payload.get("stream") is True):
+            raise web.HTTPBadRequest(
+                text=f"{RECORD_TRAINING_HEADER} asks for a recorded call without stream; this call is neither"
+            )
         binding_id = request.headers.get(BINDING_HEADER)
         attempt_id = request.headers.get(ATTEMPT_HEADER)
         strict = single_attempt
@@ -741,10 +758,15 @@ class InferenceReplica:
                     raise web.HTTPBadRequest(text=str(exc)) from exc
             else:
                 sent = self.request_payload(parsed.scenario, served, payload)
+            if parsed.is_recording_training and any(sent.get(key) is None for key in DISTRIBUTION_KEYS):
+                raise web.HTTPBadRequest(
+                    text=f"a call with {RECORD_TRAINING_HEADER} names {list(DISTRIBUTION_KEYS)}, "
+                    "or its scenario's serving config does, so that its record names the distribution it sampled"
+                )
             try:
                 if streaming:
                     return await self.relay_stream(request, path, parsed, sent, served, record=record, traffic=traffic)
-                response = await self.forward(served, path, sent)
+                response = await self.forward(served, path, sent, with_sample=parsed.is_recording_training)
             except RuntimeLoadMismatchError as exc:
                 if attempt == attempts - 1:
                     raise web.HTTPServiceUnavailable(text=str(exc), headers={"Retry-After": "1"}) from exc
@@ -757,6 +779,13 @@ class InferenceReplica:
             if attempt == attempts - 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served = await self.row_for_retry(parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact)
+        training = response.get("training")
+        if parsed.is_recording_training and not (isinstance(training, Mapping) and "distribution" in training):
+            raise web.HTTPBadRequest(
+                text=f"the engine of {served.artifact_id} gave no exact sample with its distribution to record: "
+                f"a call with {RECORD_TRAINING_HEADER} needs a token-native chat engine, a route that names one "
+                "weight load (a full-weight or adapter name), and no min_p, penalty or logit bias"
+            )
         reply_headers = {ARTIFACT_HEADER: served.artifact_id}
         if binding_id is not None and attempt_id is not None:
             reply_headers.update({BINDING_HEADER: binding_id, ATTEMPT_HEADER: attempt_id})

@@ -35,3 +35,4 @@ Configure the handler under ``inference.handler-config``. Use underscores in key
 
 Training renders the exchange again. Match its chat template arguments to serving:
 set ``training.options.apply-chat-template-kwargs`` for Slime or ``training.options.chat-template-kwargs`` for Tinker.
+The record of a call with `x-reef-record-training <http-api.rst#headers>`__ also keeps the engine's tokens; a delayed sample trains them as they are.
