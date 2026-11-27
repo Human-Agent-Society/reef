@@ -516,8 +516,11 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
 
             store.query, store.read_many = spied_query, spied_read_many
             try:
-                for route in (rollouts_route, calls_route):
-                    assert (await client.get(route, headers=AUTH)).status == 200
+                # Every rollout ended, and the read above added up their calls: a second read reads no call, and
+                # answers the same totals.
+                again = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+                assert again == rollouts and reads == []
+                assert (await client.get(calls_route, headers=AUTH)).status == 200
             finally:
                 del store.query, store.read_many
             assert reads and set(reads) == {("query", False)}
@@ -1848,7 +1851,11 @@ def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts
     asyncio.run(run())
 
 
-def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(tmp_path: Path) -> None:
+def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reads of every rollout take the calls of the evaluation in one pass, as for a large evaluation.
+    monkeypatch.setattr("reef.control.operations.artifact_evaluations.SINGLE_ROLLOUT_READS", 0)
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -1876,7 +1883,21 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
             # The first rollout fails in its sandbox, the cancel stops the second in its run, and two never start.
             first = await taken()
+
+            def keep_call(attempt: int) -> None:
+                summary = EvaluationCallSummary(
+                    0, 0, attempt, 0, "/v1/chat/completions", 200, 5.0, 0.1, 3, 1, "stop", 0
+                )
+                call = EvaluationCall(summary, {"messages": []}, {"choices": []})
+                dispatcher.add_evaluation_call("s", accepted["evaluation_id"], artifact_id, call)
+
+            async def first_calls() -> int:
+                rows = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+                return rows[0]["calls"]["count"]
+
+            keep_call(1)
             queue.fail(EVALUATIONS_QUEUE, first.id, "w", "the sandbox stopped", retryable=False)
+            assert await first_calls() == 1
             second = await taken()
             queue.start(EVALUATIONS_QUEUE, second.id, "w")
             assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
@@ -1889,7 +1910,10 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             assert (await (await client.post(f"{route}/retry", headers=AUTH)).json())["state"] == "running"
             item = await taken()
             assert (item.id, item.attempt_count) == (first.id, 2)
+            keep_call(2)
             queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            # The totals of the rollout's first end do not hide the call of its second attempt.
+            assert await first_calls() == 2
             answer = await finished(client, accepted["evaluation_id"])
             assert (answer["state"], answer["error"]) == ("failed", CANCELLED_ERROR)
             progress = answer["progress"]
