@@ -330,9 +330,10 @@ class TaskRolloutResult:
     Values: ``token`` names the driver whose rollout it was, ``task`` the task's name, and ``group_index`` Slime's
     prompt group. ``reward`` holds the verifier score, including zero. It is None when the trial could not run or
     completed without a score. An unscored trial contributes no sample and no value to the reward mean.
-    ``assembled`` holds exactly when the rollout's sample trains, which requires a score. ``error`` is why the sample does not train, and "" if
-    it does. Purpose: ``HarborRolloutSession`` appends it to ``TASK_ROLLOUTS_FILE``, and the driver reads it to check
-    each Slime rollout and to report ``rollout_rewards``.
+    ``assembled`` holds exactly when the rollout's sample trains, which requires a score.
+    ``error`` explains why the sample did not train and is empty for a sample that trains.
+    ``HarborRolloutSession`` appends the result to ``TASK_ROLLOUTS_FILE``. The driver reads it to check each
+    Slime rollout and report ``rollout_rewards``.
     """
 
     token: str
