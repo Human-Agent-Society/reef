@@ -344,12 +344,13 @@ class ServingWorker(QueueWorker):
         runtime = self.live.runtime
         if runtime is None:
             raise ValueError("the process has no inference runtime")
-        if self.owner is None or self.owner.lease_lost.is_set():
+        owner = self.owner
+        if owner is None or owner.lease_lost.is_set():
             raise WorkLeaseLostError("the serving worker lost runtime ownership")
         with self.open_lock:
             if not self.opened:
                 self.open_runtime(runtime)
-        if lease_lost.is_set() or self.owner.lease_lost.is_set():
+        if lease_lost.is_set() or owner.lease_lost.is_set():
             raise WorkLeaseLostError("the serving worker lost its lease")
         if item.kind != SERVE_ARTIFACT_KIND:
             self.candidate_starts.clear()
@@ -380,13 +381,14 @@ class ServingWorker(QueueWorker):
             if start is not None and item.created_at < start[0]:
                 return start[1]
             began = time.time()
-            # An item that its rollout cancelled loses its lease: the runtime stops at its next check, and does not
-            # start the artifact for a rollout that is gone.
+            # Both leases belong to this start. The runtime polls them before each expensive startup step.
             try:
-                with serving_work(lease_lost, redeploy=False):
+                with serving_work(lease_lost, owner.lease_lost, redeploy=False):
                     result = self.serve_artifact(item, runtime)
             except StartupStoppedError as error:
                 raise WorkLeaseLostError("the serve item ended while inference started its artifact") from error
+            if lease_lost.is_set() or owner.lease_lost.is_set():
+                raise WorkLeaseLostError("the serving worker lost its lease")
             self.candidate_starts[key] = (began, result)
             return result
         selected = self.routes.current_request(item.scenario)
@@ -401,7 +403,7 @@ class ServingWorker(QueueWorker):
         )
         watcher.start()
         try:
-            with serving_work(stop, redeploy=REDEPLOY in item.payload):
+            with serving_work(stop, lease_lost, owner.lease_lost, redeploy=REDEPLOY in item.payload):
                 return self.start_request(item, runtime, lambda: self.check_stop(stop, lease_lost))
         except StartupStoppedError as error:
             self.check_stop(stop, lease_lost)

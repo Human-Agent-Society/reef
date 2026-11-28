@@ -40,15 +40,15 @@ class StartupStoppedError(InternalError):
     """The runtime stopped serving work because ``stopping`` became true."""
 
 
-#: The stop event and the redeploy flag of the serving work that runs in this context (``serving_work``).
-WORK: ContextVar[tuple[threading.Event, bool] | None] = ContextVar("reef_serving_work", default=None)
+#: The stop events and the redeploy flag of the serving work that runs in this context (``serving_work``).
+WORK: ContextVar[tuple[tuple[threading.Event, ...], bool] | None] = ContextVar("reef_serving_work", default=None)
 
 
 @contextmanager
-def serving_work(stop: threading.Event, *, redeploy: bool) -> Iterator[None]:
-    """Bind ``stopping`` in the block to ``stop``, and ``redeploying`` to ``redeploy``. A thread that the block starts
-    sees them only when it runs in a copy of the context (``contextvars.copy_context``)."""
-    token = WORK.set((stop, redeploy))
+def serving_work(stop: threading.Event, *additional_stops: threading.Event, redeploy: bool) -> Iterator[None]:
+    """In this block, ``stopping`` is true when any stop event is set, and ``redeploying`` returns ``redeploy``.
+    A child thread sees these values when it runs in a copy of the context (``contextvars.copy_context``)."""
+    token = WORK.set(((stop, *additional_stops), redeploy))
     try:
         yield
     finally:
@@ -59,7 +59,7 @@ def stopping() -> bool:
     """Whether the serving work that runs in this context should stop: a newer request replaced it, or its worker lost
     it. A runtime reads it in long steps and then raises ``StartupStoppedError``. Outside a serving work, False."""
     work = WORK.get()
-    return work is not None and work[0].is_set()
+    return work is not None and any(stop.is_set() for stop in work[0])
 
 
 def redeploying() -> bool:

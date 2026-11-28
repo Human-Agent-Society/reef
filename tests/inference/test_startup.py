@@ -47,6 +47,7 @@ from reef.inference.startup import StartupFailedError, StartupStoppedError, rede
 from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.storage.coordination.served_models import (
+    INFERENCE_OWNER_QUEUE,
     REDEPLOY,
     SERVE_ARTIFACT_KIND,
     SERVING_KIND,
@@ -982,7 +983,8 @@ def test_retirement_preserves_an_endpoint_that_another_slot_serves(stoppable, mo
 
 
 @pytest.mark.unit
-def test_a_cancelled_serve_item_stops_the_start_of_its_artifact(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lost_queue", [SERVING_QUEUE, INFERENCE_OWNER_QUEUE])
+def test_lease_loss_stops_the_start_of_a_candidate(tmp_path, monkeypatch, lost_queue):
     # Two slots, so that each item runs on its own thread.
     runtime = StoppableRuntime(2)
     runtime.release.set()
@@ -1003,12 +1005,13 @@ def test_a_cancelled_serve_item_stops_the_start_of_its_artifact(tmp_path, monkey
     worker = ServingWorker(
         recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
-    started, stopped = threading.Event(), threading.Event()
+    started, stopped, release = threading.Event(), threading.Event(), threading.Event()
 
     def serve_artifact(artifact, scenario, serving_config):
         started.set()
         while not stopping():
-            time.sleep(0.02)
+            if release.wait(0.02):
+                return
         stopped.set()
         raise StartupStoppedError
 
@@ -1022,13 +1025,17 @@ def test_a_cancelled_serve_item_stops_the_start_of_its_artifact(tmp_path, monkey
         worker.queue.append(NewWork(SERVING_QUEUE, "evaluation-candidate", "math", SERVE_ARTIFACT_KIND, payload))
         assert worker.run_once()
         assert started.wait(5)
-        worker.queue.cancel(SERVING_QUEUE, "evaluation-candidate", "the rollout stopped waiting")
+        item_id = "evaluation-candidate" if lost_queue == SERVING_QUEUE else worker.owner.item.id
+        worker.queue.cancel(lost_queue, item_id, "the claim ended")
         assert stopped.wait(5)
         worker.item_threads[-1].join(5)
-        # The cancellation stays the item's end.
         item = worker.queue.read(SERVING_QUEUE, "evaluation-candidate")
-        assert (item.state, item.error) == ("failed", "the rollout stopped waiting")
+        if lost_queue == SERVING_QUEUE:
+            assert (item.state, item.error) == ("failed", "the claim ended")
+        else:
+            assert item.state != "finished"
     finally:
+        release.set()
         worker.stop()
         control.close()
 
