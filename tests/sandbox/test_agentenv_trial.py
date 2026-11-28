@@ -203,6 +203,7 @@ def test_a_prepared_image_starts_from_its_ready_template_as_a_template_starts(
         ("template-1", "ready", (400, "template template-1 not found")),
         ("template-1", "ready", (400, "worker error: template template-1 not found")),
         ("template-1", "ready", (500, "worker error: snapshot 'template-1' is not ready")),
+        ("template-1", "ready", (424, "template template-1: resource lookup failed before placement")),
     ],
     ids=[
         "no-template",
@@ -218,6 +219,7 @@ def test_a_prepared_image_starts_from_its_ready_template_as_a_template_starts(
         "not-found",
         "worker-not-found",
         "not-ready",
+        "resource-lookup",
     ],
 )
 def test_a_prepared_image_starts_cold_when_its_template_cannot_start_it(
@@ -285,6 +287,9 @@ def test_a_prepared_image_starts_cold_when_its_template_cannot_start_it(
         ("timeout", SandboxCapacityError, 1),
         ("gateway", SandboxCapacityError, 1),
         ("bad-request", SandboxRequestError, 1),
+        ("forwarded-lookup", SandboxCapacityError, 1),
+        ("other-lookup", SandboxCapacityError, 1),
+        ("gateway-timeout", SandboxCapacityError, 1),
         # The answer of another template, or an answer that AgentENV does not give for a missing snapshot, is no
         # sign that this template's snapshot is missing.
         ("other-template", SandboxRequestError, 1),
@@ -307,7 +312,10 @@ def test_a_template_start_that_fails_otherwise_never_starts_the_image_cold(
         "busy": e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available"),
         "timeout": httpx.ReadTimeout("timed out"),
         "gateway": json.JSONDecodeError("Expecting value", "<html>504 Gateway Time-out</html>", 0),
+        "gateway-timeout": sdk_error(504, "the worker timed out"),
         "bad-request": sdk_error(400, "the template needs 64 vCPUs"),
+        "forwarded-lookup": sdk_error(502, "template template-1: resource lookup failed before placement"),
+        "other-lookup": sdk_error(424, "template template-2: resource lookup failed before placement"),
         "other-template": sdk_error(400, "template template-2 not found"),
         "not-found-404": sdk_error(404, "template template-1 not found"),
         "other-500": sdk_error(500, "worker error: disk full"),

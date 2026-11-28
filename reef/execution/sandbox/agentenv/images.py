@@ -1,11 +1,9 @@
 """The start of a prepared task image (``reef.execution.sandbox.prepared_images``) on AgentENV.
 
 ``start_prepared_image`` starts an environment with a prepared image from the image's template when the template is
-ready. Otherwise it starts the image itself with AgentENV's ``POST /sandboxes-cold`` (``ColdSandbox``), also after
-AgentENV answered that its worker has no snapshot of the template (``is_missing_snapshot``), and runs the image's start
-as the template ran it (``run_image_start``). So a template that is missing or not ready never sends a task with a
-verified image back through a Dockerfile build. The trial environment does the sandbox's own operations through
-``PreparedImageHost``; Reef's E2B trial class implements them with the E2B SDK, so this module needs no SDK.
+ready. If the template is unavailable before allocation, Reef starts the verified image with
+AgentENV's ``POST /sandboxes-cold`` and runs its start command (``run_image_start``).
+The E2B trial class implements ``PreparedImageHost`` with the E2B SDK.
 """
 
 from __future__ import annotations
@@ -219,8 +217,8 @@ class PreparedImageHost(ABC):
     @abstractmethod
     async def start_from_template(self, template_id: str) -> bool:
         """Create the sandbox from the template ``template_id``, hold it, and return True. Return False, and hold no
-        sandbox, only when AgentENV answered that its worker has no snapshot of the template
-        (``is_missing_snapshot``). Raise any other failure as the create call raises it."""
+        sandbox, when the worker has no snapshot or the gateway explicitly refused placement for this template.
+        Raise any other failure as the create call raises it."""
 
     @abstractmethod
     def cold_sandbox(self, image: str) -> ColdSandbox:
@@ -257,11 +255,8 @@ async def start_prepared_image(
 
     When AgentENV reads the template ``prepared.template_id`` as ready (``template_is_ready``), the sandbox starts from
     it, as from any template (``PreparedImageHost.start_from_template``): its snapshot already ran the image's start.
-    The image starts cold instead when it has no template, when the template is not ready, and when AgentENV answered
-    that its worker has no snapshot of that template. AgentENV gives that answer before it allocates a sandbox, so the
-    cold start makes no second sandbox. Every other failure of the template's start is raised as the host raises it:
-    a refusal for want of capacity waits, and no cold start follows another answer, another template's answer, or an
-    answer that did not come.
+    The image starts cold if the template is absent or unready, the worker lacks its snapshot, or the gateway
+    refuses this template before placement. An ambiguous create response propagates to the caller.
 
     The cold start (``ColdSandbox``) waits for its answer until ``deadline``, retrying only HTTP 503 in place and
     sending every other answer once. Then the image's start runs (``run_image_start``). When the start fails after
@@ -271,9 +266,7 @@ async def start_prepared_image(
     if prepared.template_id is not None and await template_is_ready(templates, prepared.template_id, deadline):
         if await host.start_from_template(prepared.template_id):
             return
-        logger.info(
-            "AgentENV has no snapshot of the template %s; starting %s cold", prepared.template_id, prepared.image
-        )
+        logger.info("AgentENV could not place template %s. Starting %s cold.", prepared.template_id, prepared.image)
     sandbox_id = await host.cold_sandbox(prepared.image).create(templates, max(deadline - time.monotonic(), 1.0))
     try:
         await host.attach_sandbox(sandbox_id)
