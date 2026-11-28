@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
 torch = pytest.importorskip("torch")
 
 
@@ -268,6 +270,27 @@ def test_lora_save_writes_the_rollouts_megatron_checkpoint_and_adapter(monkeypat
     saved = [("megatron", 5), ("adapter", tmp_path / "hf" / "checkpoint-5", ["lora_A"], 5)]
     # An offloaded model is on the GPU only while it saves.
     assert events == ([("wake_up",), *saved, ("sleep",)] if offload_train else saved)
+
+
+@pytest.mark.unit
+def test_an_offloaded_worker_checks_its_own_environment_before_it_builds_the_model(monkeypatch) -> None:
+    # The variable reaches only the worker, as from the raylet of an external cluster; the service never saw it.
+    module = _load_train_actor(monkeypatch)
+    started: list[str] = []
+    base = module.ReefMegatronTrainRayActor.__mro__[1]
+    monkeypatch.setattr(base, "init", lambda self, args, role, **_kwargs: started.append(role), raising=False)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    worker = object.__new__(module.ReefMegatronTrainRayActor)
+
+    # The critic's role keeps the CPU copy of its parameter buffers, but not of its gradient buffers.
+    critic = {"disable_grad_buffers_cpu_backup": True, "disable_param_buffers_cpu_backup": False, "train_env_vars": {}}
+
+    with pytest.raises(ValueError, match="cannot use expandable segments"):
+        worker.init(SlimeArguments(offload_train=True, **critic), "critic")
+    assert started == []
+    # A worker that stays on the GPU keeps them.
+    worker.init(SlimeArguments(offload_train=False, **critic), "critic")
+    assert started == ["critic"]
 
 
 @pytest.mark.unit

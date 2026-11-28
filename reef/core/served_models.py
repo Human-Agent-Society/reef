@@ -1,7 +1,7 @@
 """The values that tell an inference service what to serve: served artifacts and the keys that name them.
 
 Control decides what each scenario serves and writes it to the ``served_models`` table
-(``reef.storage.served_models``). An inference service reads that table on each request and sends the request to
+(``reef.storage.coordination.served_models``). An inference service reads that table on each request and sends the request to
 the engine that the value names. The ``artifact_id`` of the value is the only identity that crosses services.
 
 Reef's engines serve each load under its own model name: an adapter by its scenario and load, and full weights by

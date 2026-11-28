@@ -1,454 +1,81 @@
 Write a recipe
 ==============
 
-A recipe is the method a deployment runs: how recorded traffic is processed,
-how it becomes the data of a training job, and what signal that data carries.
-The deployment's activation rule, not the recipe, decides whether an artifact
-that training makes serves.
+A recipe defines how records become samples, jobs and artifacts.
+Reef handles storage, submission, commits and recovery.
+First check the `existing recipes <../user-guide/recipes.rst>`__.
 
-`Quickstart <../getting-started/quickstart.rst>`__ defines the term.
+Choose an extension
+-------------------
 
-Accepting records, replaying them after a restart, holding a job's data until it is
-acknowledged, committing algorithm state, submitting training jobs, and
-publishing the next version are Reef's job, not the method's.
+- **Weights:** subclass ``WeightTrainingRecipe`` and select sample stages and an objective.
+- **Harness:** use ``HarnessEvolutionRecipe`` with a `Method <write-a-harness-method.rst>`__.
+- **Both:** combine recipes with `CompositeRecipe <../reference/configuration-recipe.rst#composite-recipes>`__.
 
-This page covers a **weight** recipe. For a harness evolution method, a
-``Method`` that edits a harness tree for a fixed model, see `Write a harness
-method <write-a-harness-method.rst>`__.
+Recipes are frozen configuration dataclasses. Keep running clients and workers
+out of their fields: services can run separately.
 
-.. code:: mermaid
+.. list-table::
+   :header-rows: 1
 
-   flowchart TB
-       accTitle: How a recipe collects records and publishes an update
-       subgraph COLLECT["1. Collect"]
-           direction LR
-           REQ["Inference request"]
-           REP["Optional report"]
-           STORE[("Records")]
-           REQ --> STORE
-           REP --> STORE
-       end
-       subgraph RESOLVE["2. Resolve and select"]
-           direction LR
-           ENG["Resolve reported<br/>or computed feedback"]
-           SAMPLE["Make sample"]
-           BATCH["Make job data"]
-           ENG -->|"resolved feedback"| SAMPLE
-           SAMPLE --> BATCH
-       end
-       subgraph EVOLVE["3. Train and publish"]
-           direction LR
-           PLAN["Plan job"]
-           JOB["Training component<br/>runs the job"]
-           EVAL["Evaluate checkpoint"]
-           SELECT["Select or reject"]
-           VER["New snapshot<br/>serves later requests ↻"]
-           PLAN -->|"job data + method"| JOB
-           JOB -->|"saved checkpoint"| EVAL
-           EVAL --> SELECT
-           SELECT -->|"select"| VER
-       end
-       COLLECT -->|"stored records"| RESOLVE
-       RESOLVE -->|"typed job data"| EVOLVE
-       class SAMPLE,BATCH,PLAN,EVAL,SELECT user-owned
+   * - Service
+     - Extension
+   * - Control
+     - `Reports, job data and activation <recipe-control-service.rst>`__
+   * - Samples
+     - `Record selection and sample creation <recipe-samples-service.rst>`__
+   * - Training
+     - `Objectives and losses <recipe-training-service.rst>`__
+   * - Every service loading a scenario
+     - `Artifact declarations <components.rst>`__
 
-The shaded steps are the method's. A reported-feedback processor assembles
-valid reports and their already stored inference records into samples, then
-puts complete units into job data. The recipe gives the parameters of the
-training job for each kind of sample. The training component runs the job: the
-method's objective prepares the signal, and the backend trains it and saves
-checkpoints. The backend validates the required training fields. A contract
-failure raises an error; the backend does not silently drop reports. For each
-saved checkpoint, the evaluator measures it and the selector decides whether
-to publish it.
+A minimal weight recipe
+-----------------------
 
-Before you write one
---------------------
-
-If an existing recipe's processor, objective, and components already match your method, change its config instead. Re-read
-`Choosing a recipe <../user-guide/recipes.rst>`__.
-
-Build one
----------
-
-A weight recipe is four pieces plus the class that binds them.
-
-.. container:: config
-
-   ``training objective``
-       a backend's objective (``SlimeObjective`` or ``TinkerObjective``) declaring a loss family and implementing ``prepare(data, state)`` to return advantages, metrics, and proposed state in a ``TrainingSignal``. It also declares ``rollout_unit``, the rows that one optimizer step keeps together (``"sample"`` by default, or ``"comparison_set"``), and ``supports_multiple_epochs``, whether its loss accepts more than one pass over a job's data. No torch or Ray import at module scope.
-
-   ``pipeline stages``
-       the record stage, the record-to-sample stage, and the sample-to-job stage that turn valid reports and referenced records into samples and typed job data; ``pipeline_spec()`` names them
-
-   ``report type``
-       the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
-
-   ``recipe class``
-       a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``default_parameters()`` gives each training job's parameters by the kind of its samples, normally the ``objective`` by registered name or dotted class/instance path
-
-`Python API <../reference/python-api.rst>`__ is the contract for each.
-``recipes/sao/`` is the smallest cookbook implementation and the one to read
-alongside this page. Its ``recipe.py`` and ``processor.py``
-total fewer than 200 lines; the ``slime/`` package holds its objective and its loss family.
-
-A recipe is configuration: it has no training component and no inference
-runtime. Reef builds both from the deployment config, and the process that
-runs a service holds them (``reef.scenario.live_objects.LiveObjects``). The
-training component runs the recipe's jobs; the runtime serves the weights
-that Reef publishes.
-
-Configure it
-~~~~~~~~~~~~
-
-Keep your module in a package installed in the environment of the Reef
-service, and verify the import it will perform:
-
-.. code:: bash
-
-   python -c "from my_pkg.my_method import MyMethodRecipe"
-
-The training component runs in the service's process. Slime's Ray workers get
-the service's ``PYTHONPATH``, so they can import a cookbook loss family too.
-
-Copy a weight-training config as described in `Evolve your model
-<../user-guide/evolve-your-model.rst>`__ and select the class by dotted path:
-
-.. code:: yaml
-
-   recipe:
-     implementation: "my_pkg.my_method:MyMethodRecipe"
-   pipeline:
-     sample2job:
-       config:
-         job_samples: ${training.config.global_batch_size}
-   training:
-     config:
-       global_batch_size: 4
-     options:
-       global-batch-size: "${training.config.global_batch_size}"
-
-This fragment shows only the new keys; keep the inference, storage and training
-settings from the config you copied. ``pipeline.sample2job.config.job_samples``
-is required: Reef submits a job when it holds this many samples. The batch
-size belongs to the training component. For Slime it is
-``training.options.global-batch-size``, and Slime cuts each job's data into
-optimizer steps of this size. With the same value for both, one job is one
-optimizer step (see `Job size <processors.rst#job-size>`__). The recipe does
-not configure optimizer steps. Add the Slime flags your
-loss family requires (`the mapping <loss-families.rst#family-to-slime-flags>`__).
-The Slime backend gets the loss family from the objective in the recipe's
-parameters. Do not repeat
-the recipe or its family in the environment. Reef has no global
-recipe-implementation registry.
-
-.. code:: bash
-
-   reef serve -c path/to/my-method.yaml
-
-Declare each method setting once with ``config_field``:
+This excerpt binds SDFT's report, stages and objective.
+See the `complete implementation <../../recipes/sdft/recipe.py>`__ for imports.
 
 .. code:: python
 
-   from dataclasses import dataclass
-   from reef.recipe import WeightTrainingRecipe, config_field
+   @dataclass(frozen=True, kw_only=True)
+   class SDFTRecipe(WeightTrainingRecipe):
+       name: str = "sdft"
 
-   @dataclass(frozen=True)
-   class MyMethodRecipe(WeightTrainingRecipe):
-       clip_ratio: float = config_field(0.2, env="MY_CLIP_RATIO", help="Bound on the policy ratio.")
-       temperature: float = config_field(0.5, allow_nonfinite=False)
-       tags: tuple[str, ...] = config_field(())
-
-The shared parser reads annotations, defaults, help and environment fallback
-from these declarations. Supported types are ``str``, ``int``, ``float``,
-``bool``, ``tuple[str, ...]``, ``Mapping[str, Any]`` / ``dict[str, Any]``, and
-optional forms. Object fields can use ``config_field(default_factory=dict)``.
-Keep range and cross-field checks in ``__post_init__``. Do not repeat scalar
-conversion in the service layer or recipe hooks.
-
-A recipe class declares its configuration and does not load itself. One
-loader, ``reef.recipe.loading.load_recipe``, makes the recipe value from the
-declarations of the class:
-
-- ``config_field`` fields, from ``recipe.config`` and their environment
-  fallbacks.
-- ``section_field`` fields. Each holds one config section, parsed into the
-  ``Settings`` dataclass of the field's annotation.
-- ``reader_field`` fields. Each names a ``ConfigReader``, whose ``read``
-  returns the field's value from the config, the environment and the parsed
-  sections. Use one for a value that no single section holds, such as a file
-  that a section names. The value is configuration, never an object that
-  runs.
-- ``section_defaults``, a class attribute with the class's own defaults for
-  its sections. The loader merges the deployment's config over them, key by
-  key. Reefine sets its method, seed and evaluation defaults this way.
-- ``refused_sections``, a class attribute that maps a config section to an
-  error message. The loader raises ``RecipeConfigError`` with that message
-  when the deployment sets the section. SAO refuses ``optimization`` this way.
-- The ``pipeline`` and ``activation`` sections, which every recipe has.
-
-For a weight-training deployment,
-``reef.service.deploy.training.training_recipe_config`` translates the flat
-deployment layout and rejects unknown fields; it does not convert scalar
-values. The service resolves the fields before it builds the training
-component and passes them to the loader. ``build_recipe`` loads a recipe from
-a class reference for standalone use. Do not add a loading method to a recipe
-class: check the relation between fields in ``__post_init__``.
-
-Train each kind of sample with its own method
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-A weight trainer has one training component. Reef submits one job each time
-job data is ready. The pipeline's sample-to-job stage gives the job its data
-(``make_job_data``) and its parameters (``job_parameters``). A job holds
-samples of one kind: trajectories or tasks. Its parameters are those of
-``default_parameters()`` for that kind, with the
-``recipe.config.job_parameters`` setting over them, for example a ``scheduling`` or a
-``save_interval``. Reef reads none of them, and each training backend owns their
-names and shapes. The component's defaults fill the rest, such as its
-configured learning rate.
-
-A recipe that trains each kind with its own method, such as SFT on
-trajectories and a policy objective on tasks, gives each kind its own
-``objective``. The same component switches the objective from one job to the next. The
-job's ``backend`` is always the component's name, so the parameters do not
-name it.
-
-.. code:: python
-
-   from reef.recipe import WeightTrainingRecipe
-
-
-   class MyMethodRecipe(WeightTrainingRecipe):
-       @classmethod
-       def default_parameters(cls):
-           return {
-               "trajectory": {"objective": "sft"},
-               "task": {
-                   "objective": "my_pkg.objectives:PolicyObjective",
-                   "learning_rate_schedule": {"name": "policy", "peak_learning_rate": 1e-6, "warmup_steps": 10},
-               },
-           }
-
-- ``default_parameters()`` must return the same parameters at every call. A
-  retry after a restart computes the job again, and the parameters are part of
-  the job's identity.
-- The stage refuses job data that holds both kinds, and a kind that the
-  result does not name.
-- The component resolves the objective in its own process. Use a dotted
-  reference for an objective from another package. The ``sft`` objective is
-  built in on each backend (`SFT <../user-guide/recipes/sft.rst>`__).
-- A kind that the result leaves out trains only for a request that gives its
-  parameters. Override ``configured_parameters`` when ``job_parameters`` should
-  reach only some kinds.
-- To train again from the base weights with no training state, call
-  ``POST /reef/scenarios/{scenario}/train-from`` with the scenario's root
-  snapshot, when it holds the default start.
-- The parameters can also give the optional ``scheduling`` parameter, an object
-  of ``epochs`` (a positive int, default 1), ``shuffle`` (default ``false``),
-  ``remainder`` (``"partial"``, the default, ``"drop"`` or ``"error"``) and
-  ``packing_length`` (default ``null``). It sets how the component trains the
-  job's data: the passes over it, the rollout order, and what happens to a
-  last step with fewer rollouts than the batch size. With
-  ``packing_length``, the component first packs the rollouts into packs of
-  at most that many tokens, and one step trains batch-size packs. The
-  component refuses ``epochs`` above 1 for an objective that does not
-  declare ``supports_multiple_epochs``.
-- ``save_interval`` (Slime and Tinker) saves a checkpoint after each
-  ``save_interval`` optimizer steps of the job.
-- The component refuses a method that it cannot train, and the job fails.
-  `Per-job families <loss-families.rst#per-job-families>`__ and `Train with
-  Tinker <../user-guide/tinker.rst>`__ list what each backend supports.
-
-A ``LearningRateSchedule`` counts optimizer steps. A job that selects the
-active schedule continues it, also on a retry or after a restart. A job that
-selects another schedule starts that schedule at step 0. A job that selects no
-schedule keeps the active one. The component keeps the schedule's progress
-with each checkpoint it saves. Starting a schedule does not reset the
-optimizer state. A job continues the objective
-state of the previous job only when it trains the same objective. A job of
-another objective starts with an empty objective state. While a schedule is active, job metrics include
-``learning_rate`` and ``learning_rate_schedule``.
-
-Activate an artifact
-~~~~~~~~~~~~~~~~~~~~
-
-A recipe trains; it does not decide what serves. Each artifact that a
-training job saves goes onto the scenario's snapshot chain. The next job
-starts from it. The deployment's activation rule decides whether the
-artifact also serves: at once, after an evaluation of it, or only when a
-person activates it. The rule applies to every recipe, so a recipe class
-has no evaluation or selection code. A harness step's evaluation in
-``evolution.evaluation`` decides only which candidate tree the step keeps
-(see `Write a harness method <write-a-harness-method.rst#evaluation>`__).
-Name the rule in the top-level ``activation`` section:
-
-.. code:: yaml
-
-   activation:
-     module: evaluated
-     config:
-       min_mean_score: 0.8
-
-The built-in rules are ``always`` (the default), ``never`` and
-``evaluated``. A rule of your own is an ``ActivationRule`` subclass
-(``reef.core.activation``) named by ``package.module:ClassName``. Reef
-imports and checks the class when it loads the deployment config. It builds
-the rule with the class method ``from_config``, which receives the opaque
-``config``:
-
-.. code:: python
-
-   from reef import ActivationRule
-
-
-   class ComponentRule(ActivationRule):
-       def __init__(self, components):
-           self.components = frozenset(components)
+       @property
+       def report_type(self) -> type[ReportBase]:
+           return TeacherContextReport
 
        @classmethod
-       def from_config(cls, config):
-           return cls(config["components"])
+       def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+           return {kind: {"objective": "sdft"} for kind in SAMPLE_KINDS}
 
-       def activates(self, made):
-           return made.component in self.components
+       @classmethod
+       def pipeline_spec(cls) -> PipelineSpec:
+           return PipelineSpec(record2sample=SDFTSamples, sample2job=DistillJobData)
 
-``activates`` receives a ``MadeArtifact``: the component whose trainer made
-the artifact and, for a harness tree, the node kinds it changes. Override
-``activates_evaluated`` to activate an artifact when an evaluation of it
-finishes. `Configuration
-<../reference/configuration.rst#the-activation-section>`__ lists the
-built-in rules and their settings.
-
-Where the feedback comes from
------------------------------
-
-Reef never invents feedback. Use whatever already judges your agent; for the
-numeric ``score`` field, a consistent scale where higher is better. If you have
-no number, `Choosing a recipe <../user-guide/recipes.rst>`__ lists the methods that need
-none.
-
-External method services
-------------------------
-
-A configuration file describes components and their parameters. It does not
-accept ``service``, ``services`` or ``execution.services``. HTTP settings belong
-in ``reef``. Reef assembles its HTTP process and supported inference/training
-backends. Additional method services run independently of Reef's orchestrator.
-
-Declare a recipe field for the external endpoint and implement the client in
-the method package. For example, OpenClawRL uses ``recipe.config.prm-url`` and
-``recipe.config.prm-tokenizer-path`` to call its independently served PRM.
-CLI overrides such as ``--recipe.config.prm-url http://localhost:23001`` use the
-same field declarations and validation as YAML. Request timeouts and scoring
-failure behavior belong to that recipe's client.
-
-The method's deployment tools own external service startup, readiness, resources
-and shutdown. Reef does not register their processes, probe their health or
-reserve their GPUs. The OpenClawRL example's ``docker-compose.yaml`` starts PRM
-and user-model containers on devices separate from Reef/Slime. A remote endpoint
-can be substituted without changing Reef's process topology. Reef shutdown or a
-training startup failure leaves independently deployed services running.
-
-Backend environment defaults belong to their integration; Slime's defaults
-live in ``reef/train/slime_backend/launch.py`` and honor explicit environment
-overrides.
-
-
-Training backend deployment
----------------------------
-
-``training.backend`` selects one ``TrainingDeployment`` from
-``reef.train.deployment``. The built-in names are ``slime`` (the default) and
-``tinker``. A definition lives under its integration. It describes the
-deployment and does not allocate model resources:
-
-* ``prepare(config, settings)`` receives the resolved deployment plus parsed
-  service settings as a mapping. It validates backend combinations, binds
-  derived values in ``config`` and returns the process definitions that the
-  HTTP service waits for: for Slime, the optional teacher engine; for an
-  in-process backend, none. It must not download models, allocate devices or
-  construct a component.
-* ``component_config(settings, *, default_parameters)`` returns the config that
-  ``reef.train.component.build_training_component`` builds in the HTTP
-  process. Its ``type`` is the dotted reference of the component's
-  ``TrainingComponentFactory``. ``default_parameters`` is the recipe's parameters
-  by sample kind, or empty before a recipe is selected. A backend that starts its
-  workers with one method reads it, as Slime reads ``objective``.
-* ``http_environment(settings)`` returns variables for the HTTP service
-  process. A value can name ``${endpoints.<service>}`` of a service that
-  ``prepare`` returned.
-* ``trainer_serving_config(settings)`` returns the runtime config of the
-  backend's own serving, such as Tinker's sampler, or ``None`` when the
-  backend has none (the default). ``inference.serving: trainer`` selects it.
-
-The class attributes ``requires_local_model`` (default true),
-``supports_teacher_engine`` and ``default_serving`` declare what the
-integration needs and accepts. A hosted integration sets
-``requires_local_model`` to false, so deployment resolution keeps a remote
-model identifier. ``default_serving`` (``engines`` unless overridden) is the
-serving of a deployment that sets no ``inference.serving`` and no engine
-setting.
-
-The ``TrainingComponentFactory`` that the config's ``type`` names returns the
-``TrainingComponent`` alone. It runs in the HTTP service's process, which
-holds it beside the recipe (``LiveObjects.training_component``); the recipe
-does not hold it. The backend does not build
-serving: the ``inference`` section selects it, and the component's
-``artifact_format`` tells the serving runtime what each snapshot holds.
-The factory's ``facts(config, model_path, environ)`` states the backend's
-``TrainingBackendFacts`` from the same config without building the component;
-see `Facts without a component <executors.rst#facts-without-a-component>`__.
-`Training components <executors.rst#training-components>`__ defines the
-component contract, and `Serving saved weights
-<executors.rst#serving-saved-weights>`__ defines how published weights reach
-the engines.
-
-The built-in components derive from
-``reef.train.local_jobs.LocalJobComponent``. It keeps each job in its own
-directory (``job.json``, ``checkpoints.json`` and ``result.json``). It runs
-one job at a time in a worker thread, and it resumes unfinished jobs after a
-restart. A subclass implements these methods:
-
-* ``check_job(job)`` raises ``ValueError`` for a job the component cannot
-  train. ``submit`` then records nothing. The training service also calls it
-  before control adds the job to the queue.
-* ``run(job, directory)`` trains the job to its end, records each checkpoint
-  with ``save_checkpoint``, and returns the job's metrics. A resumed job finds
-  its earlier checkpoints with ``saved(directory)``. An exception ends the job
-  as failed.
-* ``close_resources()`` optionally releases what the subclass owns.
-
-The subclass must call ``start_jobs()`` once it can train, for example at the
-end of its constructor. Until then no job runs, including the jobs that a
-restart left.
-
-An in-process integration can reuse the supplied definition:
+Register objectives by import reference in the package's ``__init__.py``:
 
 .. code:: python
 
-   from reef.train.deployment import InProcessTrainingDeployment
+   from reef.train.slime_backend.objectives import register_objective
 
-   class Deployment(InProcessTrainingDeployment):
-       component_type = "my_backend.runtime:factory"
+   register_objective("sdft", "recipes.sdft.slime:SdftObjective")
 
-Here ``factory`` is a lightweight ``TrainingComponentFactory`` instance. Its
-``config_type()`` declarations validate ``training.options`` using the shared
-parser. Import execution libraries only when the factory constructs the
-component, and provide any backend-owned defaults there. The base ``prepare``
-refuses Ray and training executor settings. The ``inference`` section stays
-the serving's: the integration neither reads nor refuses it.
+Set ``recipe.implementation`` to the recipe's ``package.module:ClassName``.
+Configure stages under ``pipeline.record2sample`` and ``pipeline.sample2job``.
+SDFT requires ``sample2job.config.job_samples``.
+Use the `SDFT deployment <../../recipes/sdft/examples/skill_stream/serve.yaml>`__
+for backend and engine settings.
 
-Select ``--training.backend my_backend.launch:Deployment`` directly, or register
-an installed name in the integration distribution:
+Settings and packaging
+-----------------------
 
-.. code:: toml
+Declare configurable fields with ``config_field``, for example
+``clip_ratio: float = config_field(0.2, env="MY_CLIP_RATIO")``.
+Validate ranges in ``__post_init__``. Invalid settings raise ``RecipeConfigError``.
+Use the `shared configuration loader <../../reef/recipe/__init__.py>`__.
 
-   [project.entry-points."reef.training_backends"]
-   my-backend = "my_backend.launch:Deployment"
-
-This enables ``--training.backend my-backend``. Only the selected definition
-is imported. Missing or ambiguous names fail explicitly, without falling back
-to Slime. Do not introduce a separate user-facing runtime selector for weight
-training: runtime wiring belongs to the selected backend. Method dependencies
-remain the recipe's responsibility.
+Put methods in ``recipes/<name>/`` with a README and runnable examples.
+The wheel excludes these packages; install them where every service can import them.
+Record-following plug-ins must handle data removed by
+`retention <../user-guide/storage.rst#record-retention>`__.

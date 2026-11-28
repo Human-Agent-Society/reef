@@ -20,7 +20,7 @@ deployment trains weights. No recipe class decides that for the launcher.
 
 The loader builds no runtime and no training component, and a recipe holds
 none (RFC #1390): the service assembly builds them
-(``reef.service.assembly.load_deployment``).
+(``reef.api.assembly.load_deployment``).
 """
 
 from __future__ import annotations

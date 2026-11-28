@@ -16,7 +16,7 @@ from typing import Any, Self
 from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.repository import DefaultStart
 from reef.core.weight_layout import ArtifactFormat
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.component import ScenarioRoot, TrainingBackendFacts
 from reef.train.slime_backend.parameters import slime_parameters_schema
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments

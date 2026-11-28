@@ -155,9 +155,10 @@ class CaptureProxy:
     Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
     call with ``tags`` as ``x-reef-tag-<name>`` headers, and keeps the receipts.
 
-    With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
-    record of it, and the captured response holds the whole training block. A streaming agent still gets a
-    stream, which the proxy makes from the complete answer.
+    Every call goes to the upstream as the agent sent it, and the agent gets the upstream's answer as it is, a
+    stream's bytes unchanged. The proxy captures a streamed answer as the answer that the stream adds up to
+    (``SSEAccumulator``), with every field that the stream carried. With ``is_unrecorded``, every call carries
+    ``ROLLOUT_HEADER``: Reef keeps no record of it.
 
     ``observer``, when set, gets each captured call as it lands (``CaptureObserver``). With ``keeps_bodies`` false,
     the captures that ``drain`` returns have no request body, and no response body when they answered 200
@@ -183,9 +184,7 @@ class CaptureProxy:
             fixed["authorization"] = f"Bearer {token}"
         if is_unrecorded:
             fixed[ROLLOUT_HEADER] = "1"
-        self.config = ServeConfig(
-            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
-        )
+        self.config = ServeConfig(upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS)
         #: The tag channel: the record keeps which snapshot (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
         for name, value in (tags or {}).items():

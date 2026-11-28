@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
@@ -37,6 +38,7 @@ from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import (
     save_lora_adapter_to_path,
 )
 from reef.train.slime_backend.reef_adapters.megatron.scheduler_resume import restore_scheduler_progress
+from reef.train.slime_backend.reef_adapters.preflight import validate_training_worker_environment
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     APPLIED_LEARNING_RATE,
     OPTIMIZER_UPDATES_METRIC,
@@ -76,6 +78,8 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     _get_current_node_ip_and_free_port = staticmethod(reef_node_ip_and_free_port)
 
     def init(self, args, role, with_ref=False, with_opd_teacher=False):
+        # Ray can give the worker variables that the service never saw, such as an external cluster's.
+        validate_training_worker_environment(args, os.environ)
         result = super().init(args, role, with_ref=with_ref, with_opd_teacher=with_opd_teacher)
         if isinstance(result, int):
             restore_scheduler_progress(args, result, self.opt_param_scheduler)

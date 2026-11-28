@@ -8,6 +8,7 @@ from dataclasses import dataclass, fields
 from typing import Any
 from urllib.parse import urlsplit
 
+from reef.core.config import config_option
 from reef.core.values import JsonValue
 
 #: Every control route is under this path. Any other path is an inference request for the engines.
@@ -99,12 +100,41 @@ class RemoteInferenceSettings:
     deployment validates them; the remote inference service reads them.
     """
 
-    url: str
-    control_token_env: str = DEFAULT_CONTROL_TOKEN_ENV
-    inference_token_env: str = DEFAULT_INFERENCE_TOKEN_ENV
-    startup_timeout_s: float = 3600.0
-    model_path: str | None = None
-    slot_urls: tuple[str, ...] = ()
+    url: str = config_option(
+        help="Base URL of the inference component: HTTP or HTTPS, without credentials, query or fragment."
+    )
+    control_token_env: str = config_option(
+        DEFAULT_CONTROL_TOKEN_ENV,
+        help=(
+            "Environment variable that holds the component's control token. It must differ from "
+            "inference.remote.inference-token-env."
+        ),
+    )
+    inference_token_env: str = config_option(
+        DEFAULT_INFERENCE_TOKEN_ENV,
+        help=(
+            "Environment variable that holds the component's inference token. It must differ from "
+            "inference.remote.control-token-env."
+        ),
+    )
+    startup_timeout_s: float = config_option(
+        3600.0,
+        help="Deadline of one engine start on the component, in seconds, including the model download.",
+    )
+    model_path: str | None = config_option(
+        None,
+        help=(
+            "Model that the component loads: a Hugging Face repository ID or a path on the component's host. "
+            "Unset takes inference.model-path as written."
+        ),
+    )
+    slot_urls: tuple[str, ...] = config_option(
+        (),
+        help=(
+            "Base URLs of further components, each different from inference.remote.url and from each other. "
+            "Each one serves one more full-weight checkpoint; adapter artifacts refuse it."
+        ),
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "url", component_url(self.url, "inference.remote.url"))

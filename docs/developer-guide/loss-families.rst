@@ -1,174 +1,29 @@
 Loss families
 =============
 
-A method's objective owns signal preparation and declares its
-``loss_family``. A loss family implements the model-dependent computation for
-one backend. Preparation runs on the job's full data; tensor loss hooks run after
-the backend's forward passes.
-
-- ``reef/train/slime_backend/`` holds Slime integration machinery, with the
-  ``SlimeObjective`` base class and its table in ``objectives.py`` and the
-  loss families in ``loss_families.py``. Each
-  method's Slime implementation lives in ``recipes/<name>/slime/``. Its
-  ``__init__.py`` holds the objective and the spec, torch-free code that runs in
-  the Slime component's process, and its ``objective.py`` contains worker hooks.
-- ``reef/train/tinker_backend/`` has modules of the same names for Tinker: a
-  method can also supply a ``TinkerObjective`` and a ``TinkerLoss``.
-  TTTD computes its advantages in one function that names no backend
-  (``recipes/tttd/objective.py``); its Slime and Tinker objectives both call it.
-
-The two backends share no code: each has its own objectives, loss families,
-``TrainingSignal`` and step schedule. A Slime module of a method imports from
-``reef.train.slime_backend`` only, and a Tinker module from
-``reef.train.tinker_backend`` only.
-
-A recipe names its objective in ``default_parameters()``, a parameter that Reef
-reads as opaque data. ``TrainingSignal`` carries advantages, metrics and proposed
-state. The training
-component cuts each job's data into optimizer steps of its batch size. The
-objective's ``rollout_unit`` keeps each sample, or each comparison set, in one
-step; the job's optional ``scheduling`` parameter sets the passes, the order
-and the last step (`Python API <../reference/python-api.rst>`__).
-The Slime backend reads the objective of the recipe's parameters when it connects
-(trajectory kind first, then task kind), and the workers start with that
-objective's family. A job that selects another
-objective trains that objective's family on the same workers (see
-`Per-job families`_).
-
-Layout
-------
-
-.. code:: text
-
-   recipes/<name>/slime/
-     __init__.py     the spec: a SlimeAlgorithm subclass, no torch; a custom
-                     wire row's shaper and payload builder live here too
-     objective.py    the @worker_hook hooks, torch
-
-Register a method
------------------
-
-A method makes one registration call for each backend that it supports, in its
-package ``__init__``. The call names the objective by reference, so the public
-half of the package imports none of the method's backend code:
-
-.. code:: python
-
-   # my_pkg/__init__.py
-   from reef.train.slime_backend.objectives import register_objective
-
-   register_objective("my", "my_pkg.slime:MyObjective")
-
-``register_objective`` records the reference and imports nothing. The first
-``resolve_objective("my")`` imports ``my_pkg.slime``. That module defines the
-objective and, under ``@register_loss_family``, the loss family that the
-objective names in ``loss_family``:
-
-.. code:: python
-
-   # my_pkg/slime/__init__.py
-   from reef.train.slime_backend.algorithm import SlimeAlgorithm
-   from reef.train.slime_backend.loss_families import register_loss_family
-   from reef.train.slime_backend.objectives import SlimeObjective
-
-
-   @register_loss_family
-   class MyAlgorithm(SlimeAlgorithm):
-       loss_family = "my"
-       ...
-
-
-   class MyObjective(SlimeObjective):
-       name = "my"
-       loss_family = "my"
-       ...
-
-So a process knows a method's loss family after it resolved the method's
-objective, or after it resolved the family's dotted reference. The decorator
-also records the reference of the class (``my_pkg.slime:MyAlgorithm``). The
-Slime component sends that reference to the job's driver and stamps it on
-``args.loss_family_ref``, so each Megatron worker, which starts without the
-component's registrations, imports the family too.
-
-Slime keeps three tables. ``objectives.OBJECTIVES`` maps a name to an
-objective, or to the reference of an objective that the process did not import
-yet. ``loss_families.LOSS_FAMILIES`` maps a name to an imported family.
-``loss_families.LOSS_FAMILY_REFERENCES`` maps a name to the reference that
-another process imports; it holds the built-in families from the start.
-
-Tinker registers the same way, with the functions of its own package:
-
-.. code:: python
-
-   # my_pkg/__init__.py
-   from reef.train.tinker_backend.objectives import register_objective
-
-   register_objective("my", "my_pkg.tinker:MyTinkerObjective")
-
-   # my_pkg/tinker.py
-   from reef.train.tinker_backend.loss_families import register_loss_family
-   from reef.train.tinker_backend.losses import TinkerLoss
-   from reef.train.tinker_backend.objectives import TinkerObjective
-
-
-   @register_loss_family
-   class MyTinkerLoss(TinkerLoss):
-       loss_family = "my"
-       ...
-
-
-   class MyTinkerObjective(TinkerObjective):
-       name = "my"
-       loss_family = "my"
-       ...
-
-Tinker trains in the component's process, so it keeps two tables only:
-``objectives.OBJECTIVES`` and ``loss_families.LOSS_FAMILIES``. A package that
-supports both backends imports each ``register_objective`` under its own name
-(see ``recipes/tttd/__init__.py``).
-
-A test or a deployment module can also register an instance:
-``register_objective(objective.name, objective)`` and
-``register_loss_family(family)``. A Slime family that registers as an instance
-has no reference, so only that process knows it.
+A loss family supplies model-dependent computation for each optimizer step.
+Slime uses ``SlimeAlgorithm``; Tinker uses ``TinkerLoss`` without worker hooks.
+See `objectives <recipe-training-service.rst#the-objective>`__ for job preparation.
 
 Family to Slime flags
 ---------------------
 
-The recipe's ``loss_family`` and the Slime flags in ``training.options`` must
-describe the same objective. The Slime component checks them at start and
-refuses a mismatch.
+The family and ``training.options.loss-type`` must agree:
 
-+---------------------------+-------------------+
-| Loss family               | ``--loss-type``   |
-+===========================+===================+
-| ``importance_sampling``   | ``custom_loss``   |
-+---------------------------+-------------------+
-| ``sao``                   | ``policy_loss``   |
-+---------------------------+-------------------+
-| ``sft``                   | ``sft_loss``      |
-+---------------------------+-------------------+
-| ``slime``                 | ``policy_loss``   |
-+---------------------------+-------------------+
-| ``tttd``                  | ``custom_loss``   |
-+---------------------------+-------------------+
-| ``openclawrl``            | ``custom_loss``   |
-+---------------------------+-------------------+
-| ``sdft``                  | ``custom_loss``   |
-+---------------------------+-------------------+
+- ``sft``: ``sft_loss``.
+- ``slime`` and ``sao``: ``policy_loss``.
+- ``importance_sampling``, ``tttd``, ``openclawrl``, ``sdft``, ``sdpo`` and ``opd``: ``custom_loss``.
 
-Every family except ``slime`` refuses ``--use-rollout-logprobs``. Serving returns no
-log-probabilities, so the actor computes the old-policy log-probabilities of
-each row with the weights of the job's start. Objectives that need old-policy
-log-probabilities, such as TTTD and the distillation importance-sampling
-correction, read these values. They are exact for an on-policy stage and
-an approximation for a stage that accepts a lag. ``importance_sampling`` reads recorded rollout log-probabilities
-(``rollout_log_probs``) as ``q`` instead, without the flag, and refuses a row
-without them. No built-in job data records them on Slime, so a method that selects
-this family must provide such samples.
+Mismatches fail startup. Only ``slime`` accepts ``use-rollout-logprobs``.
+Importance sampling requires recorded ``rollout_log_probs``;
+other rendered traffic normally uses actor-computed old-policy probabilities.
 
 The spec
 --------
+
+Keep declarations in ``recipes/<name>/slime/__init__.py`` without GPU imports.
+Put worker hooks in ``objective.py``; torch imports are allowed there.
+Import public backend interfaces, not ``reef_adapters``.
 
 .. code:: python
 
@@ -184,386 +39,70 @@ The spec
        required_objective_hooks = ("custom_loss_function_path",)
 
        def validate_specific_args(self, args, source):
-           if getattr(args, "kl_coef", 0) <= 0:
+           if args.kl_coef <= 0:
                raise RuntimeError(f"{source} requires --kl-coef > 0")
 
-``loss_family``, ``loss_type``, and ``validate_specific_args`` are required. The
-rest has defaults. The overrides, in the order the pipeline reaches them:
+``custom_loss`` replaces the loss. For only the policy-gradient primitive,
+use ``policy_loss`` with ``uses_pg_loss_primitive=True``.
+Class registration sends import references to workers; instance registration is process-local.
 
-- ``parse_specific_options`` and ``apply_driver_options``: family flags
-  (``--<name>-*``) in the Slime arguments, stripped before Slime's parser sees
-  them and stamped onto ``args``.
-- ``configure_backend_args``: derive backend settings once ``loss_family`` is
-  stamped. SAO turns Slime's advantage pass on here.
-- ``shape_sample_row`` and ``build_rollout_data``: a custom wire row. The
-  default row is ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``;
-  a family appends its own columns and reads them back. The component fills
-  ``tokens`` and ``loss_mask`` when it renders the sample with the model's
-  chat template. ``rollout_log_probs`` is empty for a rendered sample; only
-  a task rollout of the component fills it, and the payload carries the column
-  only when every row has it.
-- ``prepare_rollout``: work in the component's process before the workers
-  train a job.
-- ``bind``: a per-run instance carrying state such as a critic schedule.
-- ``train``: critic and actor orchestration; the default is one actor step.
-- ``rollout_metrics``: rollout version and timing metrics after the step.
-- ``policy_gradient_weight``: the weight the family's loss puts on the
-  sampled token's score, which score centering needs (below).
-
-Two loss lanes
---------------
-
-``loss_type = "custom_loss"`` replaces Slime's loss with the
-``custom_loss_function_path`` hook (``tttd``, ``openclawrl``, ``sdft``).
-``uses_pg_loss_primitive = True`` keeps Slime's ``policy_loss`` and swaps only
-the per-token primitive through ``custom_pg_loss_function_path`` (``sao``); the
-adapter layer points Slime's CISPO callsite at it.
-
-Objective hooks
----------------
-
-``objective.py`` registers each channel the spec listed in
-``required_objective_hooks``, with ``@worker_hook("<channel>")``
-(``reef.train.slime_backend.algorithm``). The worker imports the module at init, checks that
-every declared channel is present, and projects the dotted paths onto ``args``.
-A missing module or hook stops the worker; nothing falls back to Slime's default
-loss.
-
-- ``custom_loss_function_path``: ``<name>_loss(args, batch, logits, sum_of_sample_mean)``
-- ``custom_pg_loss_function_path``: ``<name>_loss(args, ppo_kl, log_probs, advantages)``
-- ``custom_advantage_function_path``: ``<name>_advantages(args, rollout_data)``
-- ``reef_actor_init_hook_path``: ``<name>_actor_init(actor)``, once, after the
-  actor has loaded its weights
-- ``reef_actor_pre_train_hook_path``: ``<name>_actor_pre_train(actor, rollout_data)``,
-  before every training step
-
-``tests/slime_backend/test_slime_algorithm_contract.py`` enforces the entry point
-names and the layering: family packages never import ``reef_adapters``, the
-adapter layer never names a family, the spec module stays torch-free, family flags
-carry the ``--<name>-`` prefix.
-
-Wire declarations
------------------
-
-A family that ships more than the five policy columns declares them on the spec.
-
-- ``rollout_data_keys``: per-sample payload keys the rollout manager
-  partitions across data-parallel ranks.
-- ``rollout_tensor_dtypes``: which of those become tensors, and as what
-  (``"int"``, ``"long"``, ``"float32"``). Ragged fields stay undeclared and
-  pass through as lists.
-- ``response_aligned_keys``: tensors laid out per response token; the worker
-  slices them for context parallelism the way it slices advantages.
-- ``external_batch_keys``: keys the worker forwards through ``get_batch``
-  into the microbatch.
-- ``rollout_log_skip_keys``: non-scalar keys hidden from Slime's numeric
-  rollout logger.
-- ``critic_value_head_zero_init`` and ``critic_value_mask_key``: critic
-  families only.
-
-Bundled families worth reading: ``reef/train/slime_backend/sft.py`` (the
-built-in SFT family: Slime's ``sft_loss`` and no hooks),
-``reef/train/slime_backend/native.py`` (the built-in ``slime`` family of dataset
-jobs and task jobs, whose advantages and loss are Slime's; see `Dataset jobs on
-Slime <../reference/configuration.rst#dataset-jobs-on-slime>`__),
-``recipes/tttd/slime/`` (two hooks, the default row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
-``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
-frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
-(thin families on the distillation base below).
-
-Per-job families
-----------------
-
-A job can select an objective of another family (`Train each kind of sample with its own method
-<write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__). The workers keep their
-startup flags. The family brings its ``--loss-type``, objective hooks,
-advantage routing, wire keys, and the defaults of its family flags. Before the
-family's first job trains, the Slime component validates the family against
-the startup flags.
-Only the actor workers switch; the critic keeps the startup family. A ``self``
-distillation teacher copies the actor's weights at the family's first job, and
-Reef does not checkpoint that copy.
-
-The Slime component fails the job for a family that:
-
-- needs its own family flags, which only the startup family parses;
-- configures the critic, as SAO does;
-- is a second distillation family;
-- declares a wire key with a dtype that another family of the run declares
-  differently;
-- fails its own validation against the startup flags.
-
-A learning-rate schedule sets the rate of each actor optimizer step through
-Slime's before-train-step hook. Reef runs any
-``--custom-megatron-before-train-step-hook-path`` first. Megatron's scheduler
-keeps its configured curve, so a checkpoint still loads under the startup
-flags. The recipe schedule advances only after a successful actor optimizer
-update. A rejected attempt uses the same rate on the next attempt. Reef
-records the completed update count in the checkpoint's ``start.json``. If
-Megatron saves the weights and Reef stops before it writes ``start.json``,
-recovery estimates the count from the planned steps. If Reef wrote
-``start.json``, recovery uses the count in that file. A job that selects a
-schedule fails when the run uses ``--decoupled-lr``.
-
-The distillation base
+Worker hooks and data
 ---------------------
 
-The recipes that distil a teacher on the student's own samples (SDFT, SDPO,
-on-policy distillation) compute the same per-token divergence and differ in
-who the teacher is and which divergence is minimized. Both are settings of
-one implementation in the backend, ``reef/train/slime_backend/distill/``,
-and each such recipe's family is a thin subclass of it:
+Register declared channels with ``@worker_hook(channel)`` in ``objective.py``.
+Missing hooks stop the worker without falling back.
+A custom loss receives ``args, batch, logits, sum_of_sample_mean``;
+a custom policy-gradient primitive receives ``args, ppo_kl, log_probs, advantages``.
 
-- ``DistillAlgorithm`` is the base that runs in the component's process: the
-  seven-column wire row
-  (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
-  by the student's response ids verbatim, which the component renders from
-  the sample's teacher request, and ``sample_weight``, the factor
-  on that sample's mean divergence, 1 unless the recipe's stages set
-  ``distill_sample_weight`` on the sample), the ``--<name>-*`` flags under
-  the family's own prefix (``teacher``, ``divergence``, ``top-k``,
-  ``top-k-source``, ``top-k-distribution``, ``teacher-update-rate``,
-  ``teacher-checkpoint``, ``importance-sampling-cap``,
-  ``importance-sampling-level``, ``skip-response-tokens``, ``jsd-beta``) and
-  the settings they stamp on ``args`` under ``distill_*`` names, which the
-  worker hooks read whatever the prefix was. A family names itself, sets
-  its defaults in a ``DistillAlgorithmSettings`` subclass, and its ``objective.py``
-  forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
-  ``distill.objective``.
-- The teacher is ``self`` (the student's own weights reading the privileged
-  prefix: the current weights at update rate 1, a slow-moving copy below it,
-  a frozen snapshot at 0) or ``separate`` (another checkpoint that fits the
-  actor's model, loaded beside the actor's weights). The pre-train hook
-  switches the teacher's weights in through the actor's backups, runs one
-  forward-only pass over the teacher sequences of the job's data, and switches the
-  actor back.
-- The divergence is the forward KL, the reverse KL or the generalized JSD,
-  over the teacher's whole distribution (``top-k`` 0: one row of this rank's
-  vocab shard per response position, kept in float16 on the host) or over K
-  ids per position, the teacher's own top-K or the current student's (one
-  more forward before the step, which needs zero dropout), either
-  renormalized over them, the reverse KL then estimated at the sampled
-  token, or with one bucket for the rest of the vocabulary as SDPO's
-  reference does. The kernels reduce across the vocab shards of tensor
-  parallel with ``reef/train/slime_backend/vocab_parallel.py`` and write the
-  gradients out where autograd over one shard would drop the coupling
-  through the global log-sum-exp;
-  ``tests/slime_backend/test_distill_parity.py`` pins them to a pure-Python
-  reference and to the dense gradients across four ranks.
+Extra wire columns need ``rollout_data_keys`` and optional tensor dtypes.
+Declare response-aligned tensors for context parallelism and ``external_batch_keys``
+for microbatches. See `SlimeAlgorithm <../../reef/train/slime_backend/algorithm.py>`__
+for hook signatures, wire fields and actor/critic orchestration.
 
-The base registers no family and imports nothing from ``reef_adapters``;
-``recipes/openclawrl/slime/`` imports its packing schedule from it. The
-operations over vocab shards (log-sum-exp, the log-probs at ids on any
-shard, the top-K ids) live in ``reef/train/slime_backend/vocab_parallel.py``,
-shared by the distillation base, score centering and OpenClaw-RL's teacher.
+Jobs can switch actor families, but startup flags remain fixed.
+New family flags, critic changes, a second distillation family or conflicting dtypes are rejected.
 
-Teacher engine
---------------
+Actor learning-rate schedules
+-----------------------------
 
-A Slime distillation family can score its ``separate`` teacher on a frozen
-SGLang engine instead of swapping a checkpoint into the actor, so the teacher
-may differ from the student in size and parallel layout as long as it uses the
-student's token ids. A deployment's ``teacher`` section declares it:
-``model-path`` names the HF weights, ``num-gpus`` reserves its own Ray GPUs and
-sets its tensor parallel size, ``port`` its internal endpoint, ``timeout`` the
-deadline of one scoring request, and ``options`` native SGLang options. The
-checkpoint teacher stays the default; the wire row, the loss and the report
-schema do not change.
+A recipe schedule advances after each successful actor optimizer update. A rejected update uses the same rate on the next attempt.
+The checkpoint start records the confirmed update count. If the process stops after saving weights but before writing the start, recovery uses the planned step count.
 
-The Slime component sends each sample's rendered teacher sequence (teacher
-prompt and response ids) to the
-engine's ``/generate`` with ``max_new_tokens=0``, sixteen requests at a time, and the log-probs requested
-from the last prompt token, checks the returned ids and row counts against the
-student's response, and fills ``distill_teacher_sampled_log_probs``,
-``distill_teacher_topk_ids`` and ``distill_teacher_topk_log_probs`` before the
-batch is partitioned and tensorized. Scoring completes before the batch
-reaches the workers, so a scoring failure fails the job and leaves no
-partially scored batch.
-``perf/distill_teacher_time`` is the scoring wall time in seconds, endpoint
-validation included.
+Distillation
+------------
 
-With a ``teacher`` section, ``reef serve`` starts the teacher as its own
-SGLang Ray service, ``distill-teacher``, and adds ``--<family>-teacher-url``,
-``--<family>-teacher-model-path`` and ``--<family>-teacher-timeout`` to the
-Slime arguments. Without the section, ``training.options`` can set them for an
-engine that you run yourself. The endpoint must serve
-the model at ``teacher-model-path``, whose tokenizer is checked against the
-student's vocabulary and decoder at startup. The chat templates may differ:
-the component renders the teacher sequence with the student's chat template,
-and the engine does not retokenize it. Keep ``teacher=separate`` and drop
-``teacher-checkpoint``.
+Extend ``DistillAlgorithm`` and forward loss/pre-train hooks to
+``reef.train.slime_backend.distill.objective``.
+Rows add teacher prompt tokens followed by student response tokens, and sample weight.
 
-The engine path supports the sampled reverse KL and the teacher-selected top-K
-forward, reverse and JSD objectives at rollout temperature 1, since SGLang's
-input log-probs are not tempered. The exact full-vocabulary and
-student-selected top-K representations stay on the checkpoint teacher, whose
-scoring runs on the actor. An unsupported combination fails validation. Engine
-log-probs come from the engine's bf16 kernels rather than the trainer's; for a
-frozen teacher that is a small constant bias.
+Teachers can follow student weights, retain a copy, load a checkpoint or use
+a compatible frozen engine. Teacher scoring precedes training; failure rejects the batch.
+Engine teachers support sampled reverse KL and teacher-selected top-K KL/JSD
+at temperature 1. Full-vocabulary or student-selected top-K requires checkpoint teachers.
+See the `distillation contract <../../reef/train/slime_backend/distill/algorithm.py>`__
+and `OPD teacher setup <../user-guide/recipes/opd.rst#teacher-engine>`__.
 
 Score centering
 ---------------
 
-Score centering is a correction Reef adds to a family's own policy-gradient
-loss; it is not a loss family. It implements `Score Centering Stabilizes
-Off-policy Reinforcement Learning <https://arxiv.org/abs/2609.20807>`_
-(Appendix A, equations 9-14). When the rollout engine's distribution ``q``
-differs from the trainer's ``p`` (a quantized engine, stale weights), a
-policy gradient drifts toward ``q``; score centering subtracts that drift.
-It is off unless ``--score-centering`` is set, and only a family that
-declares the weight its loss puts on the sampled token's score accepts it.
-SAO, ``importance_sampling`` and the distillation base's sampled reverse-KL
-mode support it.
+Centering is optional and corrects sampler/trainer probability mismatch.
+Enable ``training.options.score-centering`` and set ``score-centering-top-k``.
+Native ``slime`` task jobs use ``use-score-centering`` instead.
 
-A family declares its weight with ``policy_gradient_weight``. Its loss must
-have the form ``-A_t * sg[f(p_t / q_t)] * log p_t``, with ``q`` the rollout
-engine's probability:
+Declare ``policy_gradient_weight(args)`` for losses of the form
+``-A_t * sg[f(p_t / q_t)] * log p_t``. Here ``p`` and ``q`` are trainer and sampler probabilities;
+``A`` is advantage and ``sg`` stops gradients:
 
-.. code:: python
+- ``none``: ``f(r)=1``.
+- ``truncated``: ``f(r)=min(r, upper)``.
+- ``masked``: ``f(r)=r`` strictly inside ``(lower, upper)``, otherwise zero.
 
-   def policy_gradient_weight(self, args):
-       # SAO: the ratio masked to its trust region.
-       return PolicyGradientWeight("masked", lower=1 - args.eps_clip, upper=1 + args.eps_clip_high)
+Returning ``None`` refuses centering. Samples need sampler ``topk_indices``
+and ``topk_log_probs`` under ``extra.reef.training`` at every trained position.
+Teacher probabilities cannot substitute for sampler probabilities.
+Traffic records lack these tensors. Invalid rows fail validation.
 
-   def policy_gradient_weight(self, args):
-       # importance_sampling: the ratio truncated at Slime's --tis-clip.
-       return PolicyGradientWeight("truncated", upper=args.tis_clip)
-
-``PolicyGradientWeight`` (``reef.train.slime_backend.algorithm``) is ``none``
-(``f = 1``, plain off-policy REINFORCE), ``truncated`` (``min(r, upper)``) or
-``masked`` (``r`` strictly inside ``(lower, upper)``, else 0). The default,
-``None``, refuses score centering: a clipped surrogate against a recomputed
-old policy or a full-distribution KL loss has no such weight. For unclipped
-importance sampling (``f = r``) the term below is identically zero, since
-that estimator has no drift.
-
-Reef then adds this term to the family's loss at every trained response
-position:
-
-.. code:: text
-
-   A * sum_{v in H} sg[q_v * f(p_v / q_v) - alpha * p_v] * log p_v
-
-   rho   = max(1 - q(H), eps) / max(1 - p(H), eps)
-   alpha = rho * f(1 / rho)
-
-``H`` is the sampler's recorded top-K ids, the sampler's tail is
-approximated as ``rho * p``, and ``sg`` stops the gradient. The term uses the
-loss's own advantages and is reduced with the same per-sample mean, so the
-loss's weighted score ends up centered under the sampler, tail included. It
-is zero when ``q = p``. It is added inside Slime's policy loss for a stock or
-pg-primitive family. The distillation base adds it inside its own loss, using
-the teacher signal and that loss's masks; other custom losses use a wrapper.
-
-The term reads the sampler's top-K, so every trained sample must carry the
-top-K that its sampler recorded. Serving records no tensors: a sample that
-serving recorded cannot train with score centering. A training component's own
-task rollouts record the sampler's top-K (see the requirements below).
-
-To enable it, set the flags in ``training.options``:
-
-.. code:: yaml
-
-   training:
-     options:
-       score-centering: true
-       score-centering-top-k: 128
-
-Each step then reports the ``score_centering_*`` metrics listed below.
-
-For sampled on-policy distillation (OPD), select ``reverse`` divergence,
-a positive teacher ``top-k``, and ``renormalized`` top-K distribution on a
-family using ``DistillAlgorithm``. In this mode the reverse KL is estimated
-at the sampled token. Its advantage is the detached
-``log teacher(y) - log student(y)``. The correction uses that advantage
-before importance weighting, and preserves sample weights, loss masks and
-``skip-response-tokens``. No external advantages are needed.
-
-For example, add these options to an SDFT configuration along with the
-score-centering options above:
-
-.. code:: yaml
-
-   training:
-     options:
-       sdft-divergence: reverse
-       sdft-top-k: 128
-       sdft-top-k-distribution: renormalized
-       sdft-importance-sampling-level: token
-       sdft-importance-sampling-cap: 2.0
-
-Use the ``sdpo-`` prefix for SDPO. These settings change the recipe's
-default divergence. Centering accepts token-level truncated importance
-sampling, or no importance weighting (``importance-sampling-cap: 0``).
-It refuses sequence-level importance weights, full-vocabulary KL,
-top-K-plus-tail divergences, forward KL and JSD. OpenClaw-RL's separate
-top-K OPD surrogate is not supported.
-
-``score-centering-top-k`` describes the correction's head; the family's
-``top-k`` describes the teacher pass. They need not match. Teacher top-K log-probs cannot replace the sampler's
-recorded head. Centering approximates the score correction with the tail
-model above; it does not correct the distribution of sampled prefixes or
-make the off-policy update an exact on-policy KL gradient.
-
-+-----------------------------------+---------+-------------------------------------+
-| Flag                              | Default | Meaning                             |
-+===================================+=========+=====================================+
-| ``score-centering``               | off     | add the term to the family's loss   |
-+-----------------------------------+---------+-------------------------------------+
-| ``score-centering-top-k``         | 128     | sampler log-probs read per position |
-+-----------------------------------+---------+-------------------------------------+
-| ``score-centering-min-tail-mass`` | 1e-6    | floor applied to both tail masses   |
-+-----------------------------------+---------+-------------------------------------+
-
-Inputs and requirements:
-
-- Samples need the sampler's top-K, at least ``score-centering-top-k`` per
-  trained position, in ``extra.reef.training`` (``topk_indices`` and
-  ``topk_log_probs``). A sample that serving recorded has none, and the
-  component fails the job. The Spindle full-parameter component's task rollouts
-  record them when its ``score_centering`` option is on. A task job on Slime
-  trains the ``slime`` family, which refuses this term; it uses Slime's own
-  ``--use-score-centering`` instead (`Task jobs on Slime
-  <../reference/configuration.rst#task-jobs-on-slime>`__). So on Slime, this
-  term reads only the samples that a method provides with recorded heads. The
-  recorded log-probs are the same distribution as ``rollout_log_probs`` and the
-  trainer's: after
-  temperature and before the top-k, top-p and min-p filters (see the
-  configuration reference). With those filters on, the correction centers
-  against the unfiltered distribution.
-- When the flag is on, the Slime component adds each wire row's recorded top-K to the
-  payload as ``sampler_topk_indices`` and ``sampler_topk_log_probs``; the
-  family's wire row is unchanged. Multi-turn assembly of a rollout keeps the
-  recorded rows aligned with the joined response, gives inserted context an
-  empty row, and drops top-K for the whole sample when a turn has none.
-- Before each job trains, the component keeps the first ``top-k`` entries of every
-  trained position. It refuses a sample with missing or short rows,
-  duplicate or negative ids, non-finite log-probs, or a head mass above one,
-  and, when the sample carries ``rollout_log_probs``, a head whose entry for
-  the sampled token disagrees with them (rows shifted against the
-  response). The worker also refuses ids outside the vocabulary. The check
-  runs in torch (``score_centering/heads.py``); 64 samples of 1,024 tokens at
-  ``top-k`` 128 take under a second on a CPU.
-- The Slime component refuses a family that declares no weight and
-  ``--context-parallel-size`` above 1. For a family on Slime's policy loss it
-  also refuses ``--use-tis``, ``--get-mismatch-metrics``, ``--use-opsm`` and
-  ``--custom-pg-loss-reducer-function-path``: Slime reweights, masks or
-  re-reduces the policy-gradient term under them, beyond the declared weight.
-  The critic's value loss is left alone.
-- The recorded top-K dominates the size of a rollout's sample: at a head of
-  128 a response token carries about 3.5 KB of JSON instead of about 35
-  bytes. A smaller head shrinks samples, but leaves more of the drift uncorrected
-  when the sampler's tail differs from the trainer's (the paper found 32
-  effective in its settings).
-
-The step reports aggregate metrics only, as sums of per-sample means:
-``score_centering_term`` (the reduced term), ``score_centering_correction_l1``
-(the L1 norm of the centering coefficients),
-``score_centering_sampler_head_mass``, ``score_centering_trainer_head_mass``,
-``score_centering_tail_ratio`` and ``score_centering_tail_clipped`` (the
-fraction of positions where a tail fell below the floor); ``loss`` includes
-the term. ``tests/slime_backend/test_score_centering_parity.py`` checks the
-term, added to each weight's loss and to SAO's and ``importance_sampling``'s
-own losses, against a full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
-checks the sampled OPD loss against that gradient, including skipped tokens,
-masked positions and sample weights.
+Slime requires context parallel size 1 and compatible policy-loss options.
+Distillation requires sampled reverse KL, positive teacher top-K, renormalization
+and token-level weights. See the `centering implementation
+<../../reef/train/slime_backend/score_centering>`__ for supported combinations and metrics.

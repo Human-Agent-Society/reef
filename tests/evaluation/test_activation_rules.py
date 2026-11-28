@@ -6,13 +6,13 @@ import pytest
 from tests.support.activation_rule_plugin import ComponentRule
 
 from recipes.sao import SAORecipe
+from reef.api.training import training_recipe_config
 from reef.core.activation import MadeArtifact
 from reef.core.evaluation import PolicyEvaluation, PolicyHarness, PolicyModel, RolloutScore, RolloutScores
 from reef.evaluation import AlwaysActivate, EvaluatedActivation, NeverActivate
 from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.recipe import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.service.deploy.training import training_recipe_config
 
 PLUGIN = "tests.support.activation_rule_plugin"
 
