@@ -13,16 +13,18 @@ from pathlib import Path
 
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
 from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 
 from reef.artifact import Artifact, ArtifactConflictError, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.control.dispatcher import Dispatcher, build_default_dispatcher
 from reef.core import AgentRecord
+from reef.samples.service import SamplesWorker
 from reef.storage.sql.coordination import memory_coordination
 from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
-from reef.train.job_queue import TrainingJobWorker
+from reef.train.job_queue import TrainingCheckWorker, TrainingJobWorker
 from reef.train.types import TrainingCommit
 
 
@@ -76,21 +78,20 @@ COMMITS_PER_JOB = 3
 
 def wait_for_jobs(dispatcher: Dispatcher, expected: int) -> None:
     """Wait until the scenario's trainer has finished ``expected`` jobs."""
-    for _ in range(5000):
-        if dispatcher.get_or_create_scenario("math").trainer.state["finished_jobs"] == expected:
-            return
-        time.sleep(0.001)
-    raise AssertionError("async training did not commit")
+    wait_until(
+        lambda: dispatcher.get_or_create_scenario("math").trainer.state["finished_jobs"] == expected,
+        message=f"math did not finish exactly {expected} training jobs",
+    )
 
 
 def poll_jobs_quickly(dispatcher: Dispatcher) -> None:
-    """Make the training worker look at the jobs queue often.
+    """Poll each queue in the training path quickly.
 
-    The training worker runs each job on its own thread and looks for the next job after its poll time. The
-    trainer's worker polls a running job every ``local_workers.POLL_SECONDS``, which the tests patch.
+    Every batch needs samples and a job check before training. Leaving either
+    queue at its production interval adds a wait to each of the sequential jobs.
     """
     for worker in dispatcher.workers.workers:
-        if isinstance(worker, TrainingJobWorker):
+        if isinstance(worker, (SamplesWorker, TrainingCheckWorker, TrainingJobWorker)):
             worker.poll_seconds = 0.01
 
 

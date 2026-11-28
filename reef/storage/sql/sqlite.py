@@ -33,6 +33,7 @@ from reef.storage.sql.data import SQLiteDataStore
 from reef.storage.sql.evaluations import (
     SQLEvaluationStore,
     evaluation_digest_table,
+    evaluation_progress_table,
     evaluation_start_table,
     evaluation_table,
 )
@@ -57,6 +58,7 @@ STAGE_RECORD_TABLE = ScopedTable(stage_record_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 EVALUATION_START_TABLE = ScopedTable(evaluation_start_table(_METADATA))
 EVALUATION_DIGEST_TABLE = evaluation_digest_table(_METADATA)
+EVALUATION_PROGRESS_TABLE = evaluation_progress_table(_METADATA)
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 
 
@@ -163,7 +165,9 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
-        return SQLEvaluationStore(self, EVALUATION_TABLE, EVALUATION_START_TABLE, EVALUATION_DIGEST_TABLE)
+        return SQLEvaluationStore(
+            self, EVALUATION_TABLE, EVALUATION_START_TABLE, EVALUATION_DIGEST_TABLE, EVALUATION_PROGRESS_TABLE
+        )
 
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history in this database; it is durable unless the database is in memory."""

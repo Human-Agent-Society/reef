@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -88,9 +89,10 @@ from reef.storage.coordination.work_queue import NewWork, WorkItem
 from reef.storage.data.store import MemoryDataStore, NewItem
 from reef.storage.data.tasks import LocalTaskFileStore, files_digest
 from reef.storage.scenario.commits import CommitRecord
-from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.evaluations import EvaluationStore, StoredEvaluation
 from reef.storage.scenario.observer import ObservedScenarioStorage
 from reef.storage.scenario.record_items import evaluation_call_item
+from reef.storage.sql.evaluations import SQLEvaluationStore
 from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 TOKEN = "artifact-evaluation-test-token"
@@ -514,8 +516,11 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
 
             store.query, store.read_many = spied_query, spied_read_many
             try:
-                for route in (rollouts_route, calls_route):
-                    assert (await client.get(route, headers=AUTH)).status == 200
+                # Every rollout ended, and the read above added up their calls: a second read reads no call, and
+                # answers the same totals.
+                again = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+                assert again == rollouts and reads == []
+                assert (await client.get(calls_route, headers=AUTH)).status == 200
             finally:
                 del store.query, store.read_many
             assert reads and set(reads) == {("query", False)}
@@ -786,6 +791,51 @@ def test_filtered_rollout_pages_keep_numeric_repeat_order(tmp_path: Path) -> Non
                     for item in taken:
                         assert item is not None
                         queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox stopped", retryable=False)
+
+    asyncio.run(run())
+
+
+@pytest.mark.integration
+def test_a_rollout_view_counts_the_attempts_that_waited_for_sandbox_capacity_or_a_stopped_worker(
+    tmp_path: Path,
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            harness = {"name": "terminus-2"}
+            request = ArtifactEvaluationRequest(
+                artifact_id, "weights", harness=harness, task_names=("add",), rollouts_per_task=2
+            )
+            for repeat in (0, 1):
+                rollout = EvaluationRollout(
+                    "s", "e", artifact_id, "weights", 0, "add", repeat, PolicyModel("m"), harness, "docker", {}
+                )
+                queue.append(rollout_work(rollout))
+            with dispatcher.locked_scenario("s") as current:
+                current.store.evaluations.create(
+                    evaluation_id="e", owner="test", request=request, created_at=time.time()
+                )
+            # Repeat 0 finds no sandbox capacity twice and then loses its worker; repeat 1 runs once.
+            for deferred in (True, True, False):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                assert item is not None and item.payload["repeat"] == 0
+                error = "waiting for sandbox capacity: no node has 12 vCPUs free" if deferred else "the worker stopped"
+                # The last give-back keeps repeat 0 out of the queue, so the next take gets repeat 1.
+                later = None if deferred else time.time() + 3600
+                queue.give_back(EVALUATIONS_QUEUE, item.id, "w", error=error, deferred=deferred, available_at=later)
+            other = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            assert other is not None and other.payload["repeat"] == 1
+            response = await client.get("/reef/scenarios/s/evaluations/e/rollouts?calls=false", headers=AUTH)
+            assert response.status == 200, await response.text()
+            counts = [
+                (row["repeat"], row["attempt_count"], row["stopped_attempt_count"], row["deferred_attempt_count"])
+                for row in (await response.json())["rollouts"]
+            ]
+            # attempt_count minus stopped_attempt_count is the attempts that count: none for repeat 0.
+            assert counts == [(0, 3, 3, 2), (1, 1, 0, 0)]
 
     asyncio.run(run())
 
@@ -1802,7 +1852,11 @@ def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts
     asyncio.run(run())
 
 
-def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(tmp_path: Path) -> None:
+def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reads of every rollout take the calls of the evaluation in one pass, as for a large evaluation.
+    monkeypatch.setattr("reef.control.operations.artifact_evaluations.SINGLE_ROLLOUT_READS", 0)
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -1830,7 +1884,21 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
             # The first rollout fails in its sandbox, the cancel stops the second in its run, and two never start.
             first = await taken()
+
+            def keep_call(attempt: int) -> None:
+                summary = EvaluationCallSummary(
+                    0, 0, attempt, 0, "/v1/chat/completions", 200, 5.0, 0.1, 3, 1, "stop", 0
+                )
+                call = EvaluationCall(summary, {"messages": []}, {"choices": []})
+                dispatcher.add_evaluation_call("s", accepted["evaluation_id"], artifact_id, call)
+
+            async def first_calls() -> int:
+                rows = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+                return rows[0]["calls"]["count"]
+
+            keep_call(1)
             queue.fail(EVALUATIONS_QUEUE, first.id, "w", "the sandbox stopped", retryable=False)
+            assert await first_calls() == 1
             second = await taken()
             queue.start(EVALUATIONS_QUEUE, second.id, "w")
             assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
@@ -1843,7 +1911,10 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             assert (await (await client.post(f"{route}/retry", headers=AUTH)).json())["state"] == "running"
             item = await taken()
             assert (item.id, item.attempt_count) == (first.id, 2)
+            keep_call(2)
             queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            # The totals of the rollout's first end do not hide the call of its second attempt.
+            assert await first_calls() == 2
             answer = await finished(client, accepted["evaluation_id"])
             assert (answer["state"], answer["error"]) == ("failed", CANCELLED_ERROR)
             progress = answer["progress"]
@@ -2335,6 +2406,96 @@ def test_an_attempt_that_plays_two_roles_gives_one_trajectory_for_each_role_with
 
 
 @pytest.mark.unit
+def test_auxiliary_title_generation_gets_no_reward_while_toolless_subagents_keep_reward() -> None:
+    """Single-turn auxiliary title-generation conversations without tools receive ``scored=False`` and no reward,
+    while both tool-bearing conversations and required tool-less subagent conversations (such as a native ``writer``
+    role) keep ``scored=True`` and the parent rollout's reward."""
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 1.0},
+    )
+    tool_spec = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+    title_call = chat_call(
+        1,
+        0,
+        [
+            {"role": "system", "content": "You are a title generator. You output ONLY a thread title."},
+            {"role": "user", "content": "Generate a title for this conversation:\nsolve add"},
+        ],
+        "Solve add task",
+    )
+    title_user_only_base = chat_call(
+        1,
+        1,
+        [{"role": "user", "content": "Generate a title for this conversation:\nwrite tests"}],
+        "Write tests",
+    )
+    title_user_only = replace(title_user_only_base, request={**(title_user_only_base.request or {}), "tools": []})
+    writer_subagent_base = chat_call(
+        1,
+        2,
+        [
+            {"role": "system", "content": "You are the writer. Return only the final number."},
+            {"role": "user", "content": "verified: the count is 9592"},
+        ],
+        "9592",
+    )
+    writer_subagent = replace(writer_subagent_base, request={**(writer_subagent_base.request or {}), "tools": []})
+    main_base = chat_call(1, 3, [{"role": "user", "content": "solve add"}], "running tests")
+    main_call = replace(main_base, request={**(main_base.request or {}), "tools": tool_spec})
+
+    title_traj, title_user_traj, writer_traj, main_traj = attempt_trajectories(
+        "s", "e1", item, [title_call, title_user_only, writer_subagent, main_call]
+    )
+    assert title_traj["extra"]["reef"]["reward"] is None
+    assert title_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert title_user_traj["extra"]["reef"]["reward"] is None
+    assert title_user_traj["extra"]["reef"]["evaluation"]["scored"] is False
+    assert writer_traj["extra"]["reef"]["reward"] == 1.0
+    assert writer_traj["extra"]["reef"]["evaluation"]["scored"] is True
+    assert main_traj["extra"]["reef"]["reward"] == 1.0
+    assert main_traj["extra"]["reef"]["evaluation"]["scored"] is True
+
+
+@pytest.mark.unit
+def test_single_conversation_without_tools_still_carries_the_rollout_reward() -> None:
+    """A text-only benchmark rollout without tool definitions keeps scored=True and the rollout reward."""
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "coser", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 0.8},
+    )
+    first = [{"role": "user", "content": "Act out the scene."}]
+    second = [*first, {"role": "assistant", "content": "Line one."}, {"role": "user", "content": "Continue."}]
+    calls = [chat_call(1, 0, first, "Line one."), chat_call(1, 1, second, "Line two.")]
+
+    (trajectory,) = attempt_trajectories("s", "e1", item, calls)
+    assert trajectory["extra"]["reef"]["reward"] == 0.8
+    assert trajectory["extra"]["reef"]["evaluation"]["scored"] is True
+
+
+@pytest.mark.unit
 def test_streaming_releases_finished_conversations_and_preserves_shared_branches() -> None:
     rollout = EvaluationRollout("s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {}, "docker", {})
     item = WorkItem(
@@ -2461,6 +2622,21 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
             assert activated == [], "a score with a harness from an item activates nothing"
+            # The reads of the rollouts read no payload, which holds the tree, and answer as before.
+            route = f"/reef/scenarios/s/evaluations/{answer['evaluation_id']}"
+            for query in ("", "?calls=false", "?limit=10", "?limit=10&state=failed", "?limit=10&sort=score"):
+                rollouts = await client.get(f"{route}/rollouts{query}", headers=AUTH)
+                assert rollouts.status == 200, await rollouts.text()
+                rows = (await rollouts.json())["rollouts"]
+                assert [(row["task"], row["task_index"], row["repeat"]) for row in rows] == (
+                    [] if "failed" in query else [("add", 0, 0)]
+                )
+            status = await (await client.get(f"{route}?score_levels=true", headers=AUTH)).json()
+            assert status["progress"]["score_levels"]["full"] == 1
+            [stored_rollout] = evaluations.results.rollouts(answer["evaluation_id"], "s")
+            [read_rollout] = evaluations.results.rollouts(answer["evaluation_id"], "s", payload=False)
+            assert stored_rollout.payload["tree"] is not None
+            assert read_rollout == replace(stored_rollout, payload={})
 
         assert answer["state"] == "finished", answer
         assert answer["request"]["harness"] == harness
@@ -2668,7 +2844,7 @@ def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
     read_rollouts = evaluations.results.rollouts
     reads: list[str] = []
 
-    def counted_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+    def counted_rollouts(evaluation_id: str, scenario: str, *, payload: bool = True) -> tuple[WorkItem, ...]:
         reads.append(evaluation_id)
         return read_rollouts(evaluation_id, scenario)
 
@@ -2697,6 +2873,122 @@ def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
     asyncio.run(run())
 
 
+def test_the_summary_list_reads_an_ended_evaluation_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+    read_for_list = SQLEvaluationStore.read_for_list
+    reads: list[list[str]] = []
+
+    def counted_read(store: SQLEvaluationStore, evaluation_ids: Sequence[str]) -> tuple[StoredEvaluation, ...]:
+        reads.append(list(evaluation_ids))
+        return read_for_list(store, evaluation_ids)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            first = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, first["evaluation_id"])
+            second = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+
+            monkeypatch.setattr(SQLEvaluationStore, "read_for_list", counted_read)
+            route = "/reef/scenarios/s/evaluations?summary=true"
+            for _ in range(2):
+                running, summary = (await (await client.get(route, headers=AUTH)).json())["evaluations"]
+                assert running["evaluation_id"] == second["evaluation_id"] and running["policy_evaluation"] is None
+                # The summary has the scores of the evaluation, and not its tasks or the score of each rollout.
+                assert "task_names" not in summary["request"] and "task_names" in ended["request"]
+                assert summary["policy_evaluation"] == {"harness": ended["policy_evaluation"]["harness"]}
+                assert (summary["mean_score"], summary["progress"]) == (ended["mean_score"], ended["progress"])
+                tasks = [ended["request"]["task_names"], None, None, None]
+                digest = hashlib.sha256(json.dumps(tasks, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                assert summary["tasks_digest"] == running["tasks_digest"] == digest
+            # The evaluation that runs is read for each list, and the ended one only for the first.
+            assert reads == [[second["evaluation_id"], first["evaluation_id"]], [second["evaluation_id"]]]
+
+    asyncio.run(run())
+
+
+def test_a_new_process_lists_an_ended_evaluation_without_a_read_of_its_rollouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, accepted["evaluation_id"])
+            stored = evaluations.get("s", accepted["evaluation_id"])
+
+            # A process that starts later has no progress in memory: the store gives the progress that was kept.
+            later = ArtifactEvaluations(dispatcher)
+            reads: list[str] = []
+            monkeypatch.setattr(later.results, "rollouts", lambda evaluation_id, scenario: reads.append(evaluation_id))
+            assert later.status_json("s", [stored])[0]["progress"] == ended["progress"]
+            assert reads == []
+
+            # A retry or a resume gives a new end: the progress of the earlier end is not read.
+            with dispatcher.locked_scenario("s") as current:
+                store = current.store.evaluations
+                assert store.ended_progress([stored.evaluation_id]) != {}
+                store.keep_ended_progress(stored.evaluation_id, stored.finished_at + 1, {"total": 9})
+                assert store.ended_progress([stored.evaluation_id]) != {stored.evaluation_id: {"total": 9}}
+                store.reopen(stored.evaluation_id)
+                assert store.ended_progress([stored.evaluation_id]) == {}
+
+    asyncio.run(run())
+
+
+def test_the_end_of_an_evaluation_keeps_its_progress_in_the_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    def kept(evaluation_id: str) -> dict[str, object]:
+        with dispatcher.locked_scenario("s") as current:
+            return dict(current.store.evaluations.ended_progress([evaluation_id]))
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            route = "/reef/scenarios/s/evaluations"
+            first = (await (await client.post(route, headers=AUTH, json=body)).json())["evaluation_id"]
+            assert kept(first) == {}
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            # No list reads the evaluation here: the end keeps the progress.
+            for _ in range(200):
+                if evaluations.get("s", first).state == "finished":
+                    break
+                await asyncio.sleep(0.05)
+            progress = kept(first)[first]
+            assert (progress["total"], progress["scored"], progress["mean_score"]) == (2, 2, 1.0)
+            assert (await finished(client, first))["progress"]["scored"] == 2
+
+            # A cancel ends the rollouts, then keeps the progress with them as cancelled.
+            second = (await (await client.post(route, headers=AUTH, json=body)).json())["evaluation_id"]
+            assert (await client.post(f"{route}/{second}/cancel", headers=AUTH)).status == 200
+            assert kept(second)[second]["cancelled"] == 2
+
+    asyncio.run(run())
+
+
 def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Path) -> None:
     # A cancel stores the failed evaluation before it ends the rollouts; a reader in between sees a running rollout.
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
@@ -2715,7 +3007,40 @@ def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Pa
                 evaluations.get("s", accepted["evaluation_id"]), state="failed", error="x", finished_at=1e10
             )
             evaluations.ended_progress.add("s", stored, running, {"ended": 0})
-            assert evaluations.ended_progress.read("s", stored) is None
+            assert evaluations.ended_progress.read("s", stored) == (False, None)
+
+    asyncio.run(run())
+
+
+def test_the_list_reads_an_ended_evaluation_without_rollouts_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The queue deletes the rollouts of an old evaluation, and an evaluation that fails at its start has none.
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    reads: list[str] = []
+
+    def no_rollouts(evaluation_id: str, scenario: str, *, payload: bool = True) -> tuple[WorkItem, ...]:
+        reads.append(evaluation_id)
+        return ()
+
+    monkeypatch.setattr(evaluations.results, "rollouts", no_rollouts)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            running = evaluations.get("s", accepted["evaluation_id"])
+            ended = replace(running, state="failed", error="x", finished_at=1e10)
+            for _ in range(2):
+                assert evaluations.status_json("s", [ended])[0]["progress"] is None
+            assert reads == [ended.evaluation_id]
+            # An evaluation that runs can get its rollouts later: each list reads them.
+            for _ in range(2):
+                assert evaluations.status_json("s", [running])[0]["progress"] is None
+            assert reads == [ended.evaluation_id] * 3
 
     asyncio.run(run())
 

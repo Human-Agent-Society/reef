@@ -122,9 +122,11 @@ class ServingWorker(QueueWorker):
     ``live`` supplies the runtime, and ``recipe`` with ``live`` each scenario's components. ``backends`` resolves durable snapshots.
     ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized snapshots, or uses the repository default.
     A long-lived work lease gives one worker runtime ownership, including health checks and idle periods.
-    Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
-    runtime, offers it the routes from before (``InferenceRuntime.adopt``), keeps the routes that it took over, and
-    queues every completed selection again. ``owner`` is None before ownership. ``recovered`` becomes true after the
+    Other replicas only read routes. The owner recovers completed selections before it takes new work: it queues
+    every completed selection again, and it keeps a route from before only when the runtime takes it over. A route at
+    a URL that the runtime does not serve (``InferenceRuntime.handler_for``), such as one of a stopped stack, goes
+    before the runtime opens. The owner offers the other routes to the runtime after it opens
+    (``InferenceRuntime.adopt``). ``owner`` is None before ownership. ``recovered`` becomes true after the
     recovery. ``open_attempted`` becomes true before the first call that opens the runtime, and ``opened`` after a
     call that opened it: ``stop`` also shuts down a runtime that opened in part. ``release_due`` is whether a
     serving work ran since the runtime last released what no route uses
@@ -217,7 +219,13 @@ class ServingWorker(QueueWorker):
             return False
         if not self.recovered:
             previous = tuple(self.routes.all_served())
-            kept = self.adopted(previous) if previous else ()
+            # Routes at another URL go before the open.
+            own = tuple(served for served in previous if self.owner.runtime.handler_for(served.url) is not None)
+            if len(own) < len(previous):
+                self.routes.recover_completed(
+                    self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds, kept=own
+                )
+            kept = self.adopted(own) if previous else ()
             self.routes.recover_completed(
                 self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds, kept=kept
             )

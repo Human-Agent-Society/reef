@@ -35,6 +35,7 @@ from reef.storage.sql.data import PostgresDataStore
 from reef.storage.sql.evaluations import (
     SQLEvaluationStore,
     evaluation_digest_table,
+    evaluation_progress_table,
     evaluation_start_table,
     evaluation_table,
 )
@@ -84,6 +85,7 @@ class PostgresRecordDatabase:
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_start_table = evaluation_start_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_digest_table = evaluation_digest_table(metadata)
+        self.evaluation_progress_table = evaluation_progress_table(metadata)
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
             self._engine = create_engine(postgres_url(database_url), pool_pre_ping=True, hide_parameters=True)
@@ -256,6 +258,7 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
             ScopedTable(self._database.evaluation_table, scope=scope),
             ScopedTable(self._database.evaluation_start_table, scope=scope),
             self._database.evaluation_digest_table,
+            self._database.evaluation_progress_table,
         )
 
     def commit_history(self) -> SQLCommitHistory:
