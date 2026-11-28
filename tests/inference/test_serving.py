@@ -673,7 +673,7 @@ def test_checkpoint_slots_serve_two_checkpoints_and_switch_between_them_without_
     serving.open()
     assert serving.served_artifact("a", "math") is None and serving.served_model_name("math") == "test-model"
     loaded_a = serving.activate_checkpoint(a)
-    route_b = serving.serve_artifact(b, scenario="math")
+    route_b = serving.serve_artifact(b, scenario="math", serving_config={})
     loaded_b = second.backend.loads()[-1][3]
     route_a = ServedArtifact("a", "http://slot-a.example", full_weight_name("test-model", loaded_a))
     assert serving.served_artifact("a", "math") == route_a
@@ -685,10 +685,13 @@ def test_checkpoint_slots_serve_two_checkpoints_and_switch_between_them_without_
     # A promotion and a rollback between the two bound checkpoints load nothing and keep both routes.
     calls = [len(engines.backend.events) for engines in slot_engines]
     assert serving.activate_checkpoint(b) == loaded_b and serving.served_model_name("math") == route_b.model_name
-    assert serving.activate_checkpoint(a) == loaded_a and serving.serve_artifact(b, scenario="math") == route_b
+    assert (
+        serving.activate_checkpoint(a) == loaded_a
+        and serving.serve_artifact(b, scenario="math", serving_config={}) == route_b
+    )
     # Both slots are bound, so a third checkpoint gets none, neither beside the active one nor as the active one.
     with pytest.raises(ReefError, match=r"the 2 checkpoint slots .* \(a, b\), so artifact 'c' has no slot"):
-        serving.serve_artifact(c, scenario="math")
+        serving.serve_artifact(c, scenario="math", serving_config={})
     with pytest.raises(ReefError, match="has no slot"):
         serving.activate_checkpoint(c)
     # Only the exact route of a checkpoint's last verified load releases its slot.
@@ -704,7 +707,7 @@ def test_checkpoint_slots_serve_two_checkpoints_and_switch_between_them_without_
     with pytest.raises(RuntimeError, match="generation is paused"):
         second.backend.generate()
     # The freed slot loads the third checkpoint under a new load ID, and the stopped route releases nothing again.
-    route_c = serving.serve_artifact(c, scenario="math")
+    route_c = serving.serve_artifact(c, scenario="math", serving_config={})
     serving.stop_serving(route_b)
     loaded_c = second.backend.loads()[-1][3]
     assert loaded_c != loaded_b
@@ -733,13 +736,13 @@ def test_a_stop_releases_the_slot_of_a_checkpoint_that_the_slot_has_not_restored
         serving.activate_checkpoint(a)
     assert serving.served_model_name("math") == route_b.model_name and serving.served_artifact("b", "math") == route_b
     with pytest.raises(ReefError, match="has no slot"):
-        serving.serve_artifact(c, scenario="math")
+        serving.serve_artifact(c, scenario="math", serving_config={})
     # The slot gives no route while it must restore a, so the last verified route is what releases it.
     serving.stop_serving(route_a)
     first.backend.fail_load = False
     with pytest.raises(ReefError, match="no verified full-weight artifact"):
         serving.slots[0].recover_engines()
-    route_c = serving.serve_artifact(c, scenario="math")
+    route_c = serving.serve_artifact(c, scenario="math", serving_config={})
     loaded_c = first.backend.loads()[-1][3]
     assert loaded_c != loaded_a
     assert route_c == ServedArtifact("c", "http://slot-a.example", full_weight_name("test-model", loaded_c))
@@ -753,7 +756,7 @@ def test_a_stop_of_the_active_checkpoint_frees_its_slot_and_leaves_none_active(s
     a, b, c = checkpoints(tmp_path)
     serving.activate_checkpoint(a)
     route_a = serving.served_artifact("a", "math")
-    route_b = serving.serve_artifact(b, scenario="math")
+    route_b = serving.serve_artifact(b, scenario="math", serving_config={})
     assert route_a is not None and route_b is not None
     # No route uses the active checkpoint any more, as after its scenario was removed: its stop frees the slot.
     calls = len(first.backend.events)
@@ -775,7 +778,7 @@ def test_a_stop_of_the_active_checkpoint_frees_its_slot_and_leaves_none_active(s
     serving.stop_serving(route_c)
     assert serving.served_artifact("c", "math") is None and serving.served_model_name("math") == "test-model"
     assert serving.served_artifact("b", "math") == route_b
-    assert serving.serve_artifact(a, scenario="math") is not None
+    assert serving.serve_artifact(a, scenario="math", serving_config={}) is not None
     assert first.backend.generate() == (a.local_path, a.local_path)
 
 
@@ -786,8 +789,12 @@ def test_checkpoint_slots_release_only_the_bindings_that_no_retained_route_uses(
     d = published_snapshot(saved_full_weights(tmp_path / "d"), "d")
     serving.activate_checkpoint(a)
     route_a = serving.served_artifact("a", "math")
-    route_b = serving.serve_artifact(b, scenario="math")
-    assert route_a is not None and route_b is not None and serving.serve_artifact(c, scenario="math") is not None
+    route_b = serving.serve_artifact(b, scenario="math", serving_config={})
+    assert (
+        route_a is not None
+        and route_b is not None
+        and serving.serve_artifact(c, scenario="math", serving_config={}) is not None
+    )
     # A route uses a binding through its URL and model name, whatever artifact it names. b waits for its stop.
     retained = [ServedArtifact("alias", route_a.url, route_a.model_name), route_b]
 
@@ -800,7 +807,7 @@ def test_checkpoint_slots_release_only_the_bindings_that_no_retained_route_uses(
         with pytest.raises(RuntimeError, match="did not pause"):
             serving.release_unreferenced_artifacts(retained)
     with pytest.raises(ReefError, match="has no slot"):
-        serving.serve_artifact(d, scenario="math")
+        serving.serve_artifact(d, scenario="math", serving_config={})
     calls = [len(slot.backend.events) for slot in engines]
     serving.release_unreferenced_artifacts(retained)
     assert [len(slot.backend.events) for slot in engines] == [calls[0], calls[1], calls[2] + 1]
@@ -808,7 +815,7 @@ def test_checkpoint_slots_release_only_the_bindings_that_no_retained_route_uses(
     assert serving.served_artifact("a", "math") == route_a and serving.served_artifact("b", "math") == route_b
     assert serving.served_model_name("math") == route_a.model_name
     # The slot that c left serves another checkpoint.
-    route_d = serving.serve_artifact(d, scenario="math")
+    route_d = serving.serve_artifact(d, scenario="math", serving_config={})
     assert route_d is not None and route_d.url == "http://slot-c.example"
     # Without a route, every binding goes, the active one too.
     serving.release_unreferenced_artifacts([])
@@ -822,7 +829,7 @@ def test_a_stop_whose_pause_fails_keeps_the_checkpoint_in_its_slot(slot_engines,
     serving = opened(checkpoint_slots(first, second))
     a, b, c = checkpoints(tmp_path)
     serving.activate_checkpoint(a)
-    route_b = serving.serve_artifact(b, scenario="math")
+    route_b = serving.serve_artifact(b, scenario="math", serving_config={})
     assert route_b is not None
 
     def refuse_pause():
@@ -837,10 +844,10 @@ def test_a_stop_whose_pause_fails_keeps_the_checkpoint_in_its_slot(slot_engines,
     serving.slots[1].recover_engines()
     assert serving.served_artifact("b", "math") == route_b
     with pytest.raises(ReefError, match="has no slot"):
-        serving.serve_artifact(c, scenario="math")
+        serving.serve_artifact(c, scenario="math", serving_config={})
     serving.stop_serving(route_b)
     assert serving.served_artifact("b", "math") is None
-    route_c = serving.serve_artifact(c, scenario="math")
+    route_c = serving.serve_artifact(c, scenario="math", serving_config={})
     assert route_c is not None and route_c.url == "http://slot-b.example"
     assert second.backend.generate() == (c.local_path, c.local_path)
 
@@ -854,7 +861,7 @@ def test_a_load_that_fails_in_a_free_slot_binds_nothing_and_leaves_the_slot_free
     assert route_a is not None
     second.backend.fail_load = True
     with pytest.raises(RuntimeError, match="one replica changed"):
-        serving.serve_artifact(b, scenario="math")
+        serving.serve_artifact(b, scenario="math", serving_config={})
     with pytest.raises(RuntimeError, match="one replica changed"):
         serving.activate_checkpoint(b)
     # Neither failure bound b or selected it: a stays active under its route, and the other slot stays paused.
@@ -864,11 +871,11 @@ def test_a_load_that_fails_in_a_free_slot_binds_nothing_and_leaves_the_slot_free
         second.backend.generate()
     # The slot is still free, so another checkpoint loads into it and then holds it.
     second.backend.fail_load = False
-    route_c = serving.serve_artifact(c, scenario="math")
+    route_c = serving.serve_artifact(c, scenario="math", serving_config={})
     assert route_c is not None and route_c.url == "http://slot-b.example"
     assert second.backend.generate() == (c.local_path, c.local_path)
     with pytest.raises(ReefError, match="has no slot"):
-        serving.serve_artifact(b, scenario="math")
+        serving.serve_artifact(b, scenario="math", serving_config={})
 
 
 def test_checkpoint_slots_open_after_a_slot_did_not_open_and_shut_every_slot_down(slot_engines, tmp_path, caplog):
@@ -901,7 +908,7 @@ def test_checkpoint_slots_open_after_a_slot_did_not_open_and_shut_every_slot_dow
     assert not any(slot.inference_admission_status["open"] for slot in serving.slots)
     # The shutdown is final: no checkpoint loads afterwards, and a second shutdown reaches no slot again.
     with pytest.raises(ReefError, match="shut down"):
-        serving.serve_artifact(b, scenario="math")
+        serving.serve_artifact(b, scenario="math", serving_config={})
     serving.shutdown()
     assert second.backend.loads() == [] and (first.closes, second.closes) == (1, 1)
 

@@ -42,30 +42,73 @@ class EvaluationSettings(Settings):
     builds the evaluator, the task source and the publication policy from it.
     """
 
-    tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: instructions, or task directories.")
-    task_manifest: str | None = config_option(None, help="A split manifest whose eval side names the tasks.")
-    tasks_root: str | None = config_option(None, help="The directory of the task manifest's task directories.")
-    imported_tasks: bool = config_option(
-        False, help="Evaluate each job on the eval split of the scenario's imported tasks."
+    tasks: tuple[str, ...] = config_option(
+        (),
+        help=("The evaluation tasks: instructions, or task directories for an adapter that takes a task directory."),
     )
-    scorer: str | Mapping[str, Any] | None = config_option(None, help="The TaskScorer that scores each run.")
-    policy: str = config_option("compare", help="The publication policy: compare, floor or none.")
+    task_manifest: str | None = config_option(
+        None,
+        help=(
+            "A split manifest whose eval side names the tasks, at least one, as directories under "
+            "tasks-root. The adapter needs an npm, uv or git install, or must take task directories."
+        ),
+    )
+    tasks_root: str | None = config_option(
+        None, help="The directory of the task manifest's task directories. Set it together with task-manifest."
+    )
+    imported_tasks: bool = config_option(
+        False,
+        help=(
+            "Evaluate each job on the eval split of the scenario's imported tasks. The adapter needs "
+            "an npm, uv or git install, or must take task directories."
+        ),
+    )
+    scorer: str | Mapping[str, Any] | None = config_option(
+        None, help="The TaskScorer that scores each run. Required unless policy is none."
+    )
+    policy: str = config_option(
+        "compare",
+        help=(
+            "The publication policy: compare (the candidate against the current tree), floor (the "
+            "candidate alone against floor-score) or none (no evaluation)."
+        ),
+    )
     statistic: str = config_option("wins", help="What compare compares: wins (pairwise) or mean.")
     min_margin: float = config_option(
-        0.0, help="The margin a candidate must exceed: wins minus losses, or the mean score difference."
+        0.0,
+        help=(
+            "The margin a compare candidate must exceed: wins minus losses, or the mean score "
+            "difference. It is at least 0."
+        ),
     )
-    floor_score: float = config_option(1.0, help="The score every floor run must reach.")
+    floor_score: float = config_option(1.0, help="The score every floor run must reach. It must be positive.")
     repeats: int = config_option(1, help="The runs per task and tree.")
     task_timeout_s: float = config_option(600.0, help="The seconds one task run may take.")
     agent_host: str = config_option(
-        "host.docker.internal", help="The address at which an agent in a Harbor task's container reaches Reef."
+        "host.docker.internal",
+        help=(
+            "The host name or address at which an agent in a Harbor task's container reaches Reef. It"
+            " replaces a loopback host of the served model's URL; the port stays."
+        ),
     )
     forbid_residue: bool = config_option(False, help="Score a run that leaves files behind 0.")
-    collect_failures: bool = config_option(False, help="Add failing traffic prompts to the evaluation tasks.")
-    collector: str | Mapping[str, Any] | None = config_option(None, help="The TaskCollector that picks the prompts.")
+    collect_failures: bool = config_option(
+        False,
+        help=(
+            "Add the prompts of each job's traces to the evaluation tasks. Startup refuses it when the "
+            "evaluation tasks are task directories."
+        ),
+    )
+    collector: str | Mapping[str, Any] | None = config_option(
+        None, help="The TaskCollector that picks the prompts. Startup refuses it without collect-failures."
+    )
     max_collected_tasks: int = config_option(50, help="The most prompts collection adds in total; 0 adds none.")
     max_collected_per_client: int = config_option(
-        5, help="The most prompts collection adds per tagged client; 0 sets no per-client limit."
+        5,
+        help=(
+            "The most prompts collection adds per tagged client (the x-reef-tag-client tag, else the "
+            "session tag); 0 sets no per-client limit. Untagged traffic has no per-client limit."
+        ),
     )
 
     def __post_init__(self) -> None:

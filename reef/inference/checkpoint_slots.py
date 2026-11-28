@@ -168,11 +168,16 @@ class CheckpointSlotsRuntime(InferenceRuntime):
             self.active_artifact_id = artifact.artifact_id
             return version
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
         """Serve ``artifact`` (``bind``) beside the active checkpoint, which stays active, and return its route.
 
-        None when the binding became uncertain after the load, as ``served_artifact`` says.
+        The slots serve each checkpoint of a scenario with the same fields, so ``serving_config`` applies to every
+        slot first (``apply_serving_config``). None when the binding became uncertain after the load, as
+        ``served_artifact`` says.
         """
+        self.apply_serving_config(scenario, serving_config)
         with self.lock:
             self.bind(artifact)
             return self.served_artifact(artifact.artifact_id, scenario)

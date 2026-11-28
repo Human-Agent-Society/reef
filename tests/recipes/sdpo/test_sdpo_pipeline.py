@@ -20,12 +20,12 @@ from tests.support.runtime_stubs import STUB_ROOT
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOSettings
 from recipes.sdpo.slime import SdpoAlgorithm, SdpoSettings
+from reef.api.training import training_recipe_config
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.service.deploy.training import training_recipe_config
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data

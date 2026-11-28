@@ -40,7 +40,7 @@ This package depends on core values, runtime and artifact contracts, and
 sandbox execution, never on training, recipes, scenario coordination, or the
 HTTP service. The evolution loop is ``reef.train.harness_backend``; versioning
 (staging, publishing, the commit history, recovery and activation) is Reef's
-artifact stack (``reef.artifact``, ``reef.scenario``).
+artifact stack (``reef.artifact``, ``reef.control.scenario``).
 """
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor

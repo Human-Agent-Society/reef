@@ -9,11 +9,11 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
 from reef.core import AgentRecord
-from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class ImportingInference(StubInferenceRuntime):

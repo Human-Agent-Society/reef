@@ -24,9 +24,9 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.storage.commits import CommitRecord
-from reef.storage.observer import ObservedScenarioStore, RecordObserver
-from reef.storage.scenario import ScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.observer import ObservedScenarioStore, RecordObserver
+from reef.storage.scenario.store import ScenarioStore
 
 logger = logging.getLogger(__name__)
 

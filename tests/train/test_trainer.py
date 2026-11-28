@@ -30,22 +30,22 @@ from recipes.sao.processor import SAOSettings
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.control.dispatcher import Dispatcher
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefusedError
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import call_summary, source_record_id, trajectory_reward
-from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.record2sample.service import ProducedSamples
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.samples.service import ProducedSamples
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.commit_history import CommitHistoryScenarioStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, PipelineContext, Trainer, TrainingPipeline
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
@@ -470,7 +470,7 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
 
 @pytest.mark.unit
 def test_a_selection_names_the_tasks_that_read_and_stored_each_sample() -> None:
-    from reef.record2sample.service import Selection
+    from reef.samples.service import Selection
 
     class Recording(Selection):
         def __init__(self) -> None:

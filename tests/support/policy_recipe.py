@@ -13,7 +13,7 @@ from typing import Any
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.recipe.base import WeightTrainingRecipe
-from reef.storage.samples import SAMPLE_KINDS, SampleKind
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 

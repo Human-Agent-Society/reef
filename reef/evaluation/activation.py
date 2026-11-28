@@ -107,7 +107,10 @@ class EvaluatedActivation(ActivationRule):
         return False
 
     def activates_evaluated(self, artifact_id: str, evaluation: PolicyEvaluation) -> bool:
-        score = evaluation.mean_score
+        return self.meets_threshold(evaluation.mean_score)
+
+    def meets_threshold(self, score: float | None) -> bool:
+        """Whether the evaluation has a score at or above the threshold."""
         return score is not None and score >= self.min_mean_score
 
 
