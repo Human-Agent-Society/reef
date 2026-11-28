@@ -162,6 +162,11 @@ RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
     python -c "import torch; from slime_plugins.models.qwen3_5_vl_utils import get_packed_cp_local_indices; \
                assert get_packed_cp_local_indices([0, 3, 4, 7], 1, 0, torch.device('cpu')).tolist() == list(range(7))"
 
+# Keep fully masked responses at zero in Slime's REINFORCE++ returns and
+# normalized advantages. Remove this patch when the Slime pin has the fix.
+RUN SLIME_SITE=$(python -c "from importlib.metadata import distribution; print(distribution('slime').locate_file(''))") && \
+    git -C "$SLIME_SITE" apply "$PWD/docker/patch/slime_reinforce_plus_plus_masks.patch"
+
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
 # adapters. The base does not bundle it. 0.6.2 is the newest release that

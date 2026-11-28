@@ -328,10 +328,12 @@ class TaskRolloutResult:
     """What one rollout of a task job came to.
 
     Values: ``token`` names the driver whose rollout it was, ``task`` the task's name, and ``group_index`` Slime's
-    prompt group. ``reward`` is the rollout's score, or None when the infrastructure failed. ``assembled`` holds if and
-    only if the rollout's sample trains, which implies a reward. ``error`` is why the sample does not train, and "" if
-    it does. Purpose: ``HarborRolloutSession`` appends it to ``TASK_ROLLOUTS_FILE``, and the driver reads it to check
-    each Slime rollout and to report ``rollout_rewards``.
+    prompt group. ``reward`` holds the verifier score, including zero. It is None when the trial could not run or
+    completed without a score. An unscored trial contributes no sample and no value to the reward mean.
+    ``assembled`` holds exactly when the rollout's sample trains, which requires a score.
+    ``error`` explains why the sample did not train and is empty for a sample that trains.
+    ``HarborRolloutSession`` appends the result to ``TASK_ROLLOUTS_FILE``. The driver reads it to check each
+    Slime rollout and report ``rollout_rewards``.
     """
 
     token: str
@@ -469,16 +471,23 @@ class HarborRolloutSession:
             return self.finish(task, group_index, removed_fields(f"the rollout raised: {exc!r}", self.top_k), None)
         if rollout.is_infrastructure_failure:
             return self.finish(task, group_index, removed_fields(rollout.error, self.top_k), None)
-        reward = 0.0 if rollout.reward is None else rollout.reward
+        reward = rollout.reward
         sample = rollout_sample(rollout, task, self.assembly, self.source.job_id)
         fields = None if sample is None else assembled_fields(rollout, sample, self.top_k)
         if fields is None:
-            error = rollout.error or "the rollout's model calls do not assemble into a sample"
+            if reward is None:
+                error = "the verifier returned no finite primary reward"
+            else:
+                error = rollout.error or "the rollout's model calls do not assemble into a sample"
             return self.finish(task, group_index, removed_fields(error, self.top_k), reward)
         return self.finish(task, group_index, fields, reward)
 
     def finish(self, task: str, group_index: int, fields: SampleFields, reward: float | None) -> SampleFields:
-        """Append the rollout's result and return ``fields``. ``reward`` is None when the infrastructure failed."""
+        """Append the rollout's result and return ``fields`` unchanged.
+
+        Store None for a failed trial or a completed trial without a verifier score. A scored trial retains its
+        numeric reward even when its tokens could not be assembled into a sample.
+        """
         result = TaskRolloutResult(
             self.source.token, task, group_index, reward, not fields.remove_sample, fields.error
         )

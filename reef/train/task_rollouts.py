@@ -298,9 +298,9 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
     """The sample of one rollout in ``group``, or None when it has no calls, an aborted call, or does not assemble.
 
     Each call sampled the weights ``start``, so each turn's record names ``start`` as its ``artifact_id``: the
-    turns of one rollout are one policy. A rollout that ran without a reward scores 0.
+    turns of one rollout are one policy. A rollout without a reward produces no sample.
     """
-    if not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
+    if rollout.reward is None or not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
         return None
     inferences = tuple(
         AgentRecord.create(
@@ -312,7 +312,7 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
         for turn in rollout.turns
     )
     try:
-        sample = assembly.assemble(inferences, rollout.reward or 0.0, source_id=rollout.rollout_id)
+        sample = assembly.assemble(inferences, rollout.reward, source_id=rollout.rollout_id)
     except ValueError:
         logger.warning("rollout %s of task %s does not assemble into a sample", rollout.rollout_id, group)
         return None
