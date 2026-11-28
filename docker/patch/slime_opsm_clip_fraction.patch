@@ -1,0 +1,20 @@
+--- a/slime/backends/megatron_utils/loss.py
++++ b/slime/backends/megatron_utils/loss.py
+@@ -1205,7 +1205,7 @@
+
+     # Compute OPSM mask if enabled
+     if args.use_opsm:
+-        opsm_mask, opsm_clipfrac = compute_opsm_mask(
++        opsm_mask, _ = compute_opsm_mask(
+             args=args,
+             full_log_probs=full_log_probs,
+             full_old_log_probs=full_old_log_probs,
+@@ -1244,6 +1244,8 @@
+
+     if args.use_opsm:
+         pg_loss = pg_loss * opsm_mask
++        # Count rejected active tokens with the original training reducer.
++        opsm_clipfrac = sum_of_sample_mean(1 - opsm_mask)
+
+     # Apply off-policy correction using importance sampling if enabled
+     if args.get_mismatch_metrics or args.use_tis:
