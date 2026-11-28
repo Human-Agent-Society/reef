@@ -1334,5 +1334,7 @@ def test_old_claim_cannot_mutate_an_item_retaken_by_the_same_worker(open_coordin
         queue.finish("jobs", "j", "worker", {}, claim=old, now=6)
     with pytest.raises(WorkLeaseLostError):
         queue.write_metadata("jobs", "j", "progress", 1, lease=old)
+    with pytest.raises(WorkLeaseLostError):
+        queue.give_back("jobs", "j", "worker", claim=current, attempt=current.attempt_count + 1, now=6)
     assert queue.read("jobs", "j") == current
     assert queue.finish("jobs", "j", "worker", {}, claim=current, now=6).state == "finished"

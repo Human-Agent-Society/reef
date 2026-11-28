@@ -1442,6 +1442,17 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
+    @contextmanager
+    def locked_attempt(self, claim: WorkItem) -> Iterator[WorkItem]:
+        with self.database.connection(write=True) as connection:
+            current = self.row(connection, claim.queue, claim.id, lock=True)
+            if current is None or (current.created_sequence, current.attempt_count) != (
+                claim.created_sequence,
+                claim.attempt_count,
+            ):
+                raise WorkLeaseLostError(f"the attempt no longer owns {claim.queue}/{claim.id}")
+            yield current
+
     def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         if not item_ids:
             return ()

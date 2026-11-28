@@ -468,7 +468,8 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
 
 
 @pytest.mark.unit
-def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("paused", ["checkpoint", "records"])
+def test_replacement_outputs_survive_when_the_first_worker_resumes(tmp_path, monkeypatch, paused):
     queue = memory_coordination(lease_seconds=30).work_queue
     backends = registered_backends(tmp_path / "artifacts")
     backend = backends("s")
@@ -478,9 +479,11 @@ def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(
     resume_first = threading.Event()
     store = backend.store_content
 
+    paused_content = job_records_content("j1") if paused == "records" else checkpoint_content("j1", 1, attempt=1)
+
     def store_content(name, directory):
         store(name, directory)
-        if name != job_records_content("j1") and directory == tmp_path / "first" / "j1" / "step-1":
+        if name == paused_content and directory == tmp_path / "first" / "j1" / "step-1":
             first_stored.set()
             assert resume_first.wait(WAIT_SECONDS)
 
@@ -500,7 +503,6 @@ def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(
     first_thread.start()
     try:
         assert first_stored.wait(WAIT_SECONDS)
-        (abandoned,) = queue.read(JOBS_QUEUE, "j1").metadata[STORED_CONTENT_KEY]
         assert queue.requeue_expired(now=time.time() + 60)
         assert replacement.run_once()
         view = JobQueueComponent(StepFacts(), queue)
@@ -520,8 +522,10 @@ def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(
         expected_parent=backend.current(),
     )
     assert (backend.materialize(snapshot).local_path / "weights.txt").read_text() == "step 1"
-    with pytest.raises(ArtifactError):
-        backend.materialize_content(abandoned)
+    assert (backend.materialize_content(job_records_content("j1")) / "weights.txt").read_text() == "step 1"
+    if paused == "checkpoint":
+        with pytest.raises(ArtifactError):
+            backend.materialize_content(checkpoint_content("j1", 1, attempt=1))
 
 
 @pytest.mark.unit
@@ -595,6 +599,50 @@ class HeldSteps(StepComponent):
         result = super().run(job, directory)
         self.release.wait(WAIT_SECONDS)
         return result
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("takeover", [False, True])
+def test_only_a_control_cancellation_stops_the_current_local_run(tmp_path, monkeypatch, takeover):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    component = HeldSteps(tmp_path / "jobs")
+    backends = registered_backends(tmp_path / "artifacts")
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "tasks")),
+        backends,
+        checks=ACCEPT_ALL,
+        worker_id="training",
+        poll_seconds=0.01,
+        slots=2,
+    )
+    original = queue.take(JOBS_QUEUE, "training", [job_kind("steps")])
+    taken = []
+
+    def progress_after_takeover(job_id):
+        if not takeover:
+            queue.cancel(JOBS_QUEUE, job_id, "cancelled")
+        elif not taken:
+            assert queue.requeue_expired(now=time.time() + 60)
+            taken.append(queue.take(JOBS_QUEUE, "training", [job_kind("steps")]))
+        return {"step": 1}
+
+    monkeypatch.setattr(component, "job_progress", progress_after_takeover)
+    try:
+        worker.run_taken(original)
+        if not takeover:
+            assert component.status("j1").error == "cancelled"
+            return
+        assert component.status("j1").state == "running"
+        component.release.set()
+        worker.run_taken(taken[0])
+        assert queue.read(JOBS_QUEUE, "j1").state == "finished"
+        assert (backends("s").materialize_content(job_records_content("j1")) / "weights.txt").is_file()
+    finally:
+        component.release.set()
+        worker.stop()
 
 
 @pytest.mark.unit

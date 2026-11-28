@@ -23,7 +23,8 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -242,8 +243,11 @@ class WorkQueue(ABC):
     and record facts about it (``write_metadata``); a producer queues a final item again (``retry``); control deletes
     old final items (``delete_final``).
 
-    For a held mutation, pass the item returned by take as claim. The queue checks its creation sequence and
-    attempt under the write lock, including when the same worker ID takes the item again.
+    A held mutation requires an assigned or running item held by the given worker through the operation's time.
+    With ``claim=None``, only the worker's lease and any supplied ``attempt`` constrain the mutation.
+    With the item returned by ``take`` as ``claim``, its creation sequence and attempt must also match.
+    When an operation accepts both ``claim`` and ``attempt``, both constraints apply. The queue checks them under
+    the write lock. A missing item, invalid lease, or mismatch raises ``WorkLeaseLostError`` without mutation.
     """
 
     def __init__(
@@ -465,6 +469,15 @@ class WorkQueue(ABC):
     @abstractmethod
     def read(self, queue: str, item_id: str) -> WorkItem | None:
         """The item, or None."""
+
+    @abstractmethod
+    @contextmanager
+    def locked_attempt(self, claim: WorkItem) -> Iterator[WorkItem]:
+        """Yield the current item of the same creation and attempt. Raise WorkLeaseLostError if it is gone or replaced.
+
+        Until the block exits, no writer can take, retry, or delete the item. The caller can check the state and
+        act on the corresponding local run. The block must not call the queue.
+        """
 
     def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         """The items in ``queue`` in the order of ``item_ids``.
