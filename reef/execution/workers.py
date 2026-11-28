@@ -320,7 +320,11 @@ class QueueWorker(ServiceWorker):
     def defer(self, item: WorkItem, reason: str) -> None:
         """Give ``item`` back with ``reason``, to wait as ``ItemDeferredError`` says. ``item`` is the item as this
         attempt took it, so its deferral count is the stored one: only this attempt can change it while it holds
-        the item."""
+        the item. The queue refuses an error text with surrounding spaces or none, and an exception's message can
+        have them (a sandbox service's answer ends with a newline), so the worker strips ``reason`` first, as
+        ``fail`` does: else the give-back raises, and the item stays held until its lease expires and uses an
+        attempt."""
+        reason = reason.strip() or "waiting for capacity"
         # The item can wait without limit, so the exponent has a bound: a float holds no ``2**1024``.
         doublings = min(item.deferred_attempt_count, 32)
         delay_seconds = min(self.first_deferral_seconds * 2**doublings, self.max_deferral_seconds)

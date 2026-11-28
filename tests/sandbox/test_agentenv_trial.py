@@ -332,7 +332,11 @@ def test_a_template_start_that_fails_otherwise_never_starts_the_image_cold(
 @pytest.mark.parametrize(
     ("answer", "raised"),
     [
-        ((503, {"message": "no nodes available"}), SandboxCapacityError),
+        # AgentENV's own answer, which ends with a newline.
+        (
+            (503, '{"code":503,"message":"no nodes available","error_code":"sandbox_capacity_unavailable"}\n'),
+            SandboxCapacityError,
+        ),
         ((504, "<html>Gateway Time-out</html>"), ColdSandboxError),
         ((401, {"message": "invalid API key"}), ColdSandboxError),
         ((500, {"message": "image pull failed"}), ColdSandboxError),
@@ -356,6 +360,8 @@ def test_a_cold_start_that_fails_is_sent_once_and_keeps_its_meaning(
     # Harbor's retry does not send it again; a full worker waits in the queue as for a template's start.
     assert (len(api.cold_bodies), steps) == (1, [])
     assert (type(failed.value).__name__ in SANDBOX_CAPACITY_ERRORS) == (raised is SandboxCapacityError)
+    # The message becomes the queue item's error, which has no surrounding spaces.
+    assert str(failed.value) == str(failed.value).strip()
 
 
 @pytest.mark.unit
