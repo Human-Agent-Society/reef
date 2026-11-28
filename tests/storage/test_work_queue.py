@@ -730,6 +730,21 @@ def test_a_worker_gives_an_item_without_capacity_back_and_waits_longer_each_time
 
 
 @pytest.mark.unit
+def test_a_capacity_refusal_whose_message_ends_with_a_newline_still_gives_the_item_back():
+    # AgentENV's 503 answer ends with a newline, and the refusal's message carries it: the give-back must not raise,
+    # or the item stays held until its lease expires and uses an attempt.
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.append(job("a"))
+        refusal = 'waiting for sandbox capacity: AgentENV refused a sandbox (HTTP 503): {"code":503}\n'
+        assert FailingWorker(queue, ItemDeferredError(refusal)).run_once()
+        item = queue.read("jobs", "a")
+        assert (item.state, item.error) == ("queued", refusal.strip())
+        assert (item.worker_id, item.deferred_attempt_count) == (None, 1)
+        assert queue.has_attempts_left(item)
+
+
+@pytest.mark.unit
 def test_a_retried_item_waits_for_capacity_as_a_new_item_does(monkeypatch):
     clock = {"wall": 1000.0}
     monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])

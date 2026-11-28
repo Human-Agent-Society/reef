@@ -152,7 +152,7 @@ class ColdSandbox:
                         raise ColdSandboxError(f"AgentENV started a sandbox of {self.image} and named no sandbox ID")
                     return sandbox_id
                 status = response.status
-                text = (await response.text())[-BUILD_OUTPUT_TAIL_CHARS:]
+                text = (await response.text())[-BUILD_OUTPUT_TAIL_CHARS:].strip()
         except TimeoutError as error:
             raise ColdSandboxError(f"AgentENV did not answer the cold start of {self.image} in time") from error
         except (aiohttp.ClientError, json.JSONDecodeError) as error:
