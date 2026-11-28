@@ -33,7 +33,7 @@ Calls sort by index, excluding replaced retries; conversations sort by first cal
 - ``extra.reef.records`` contains each call's ``agent_record_id``, ``created_at`` (``started_at``) and ``payload``. Payload excludes conversation, tools and response (``call_summary``); steps hold the conversation.
 - ``extra.reef.reward`` holds the rollout score for scored conversations in the final attempt. It is null for other conversations or a failed score.
   In an attempt with multiple conversations, single-turn title generation without tools receives no score. Required tool-less subagents and roles keep the reward.
-- ``extra.reef.evaluation`` is ``{evaluation_id, task, task_index, repeat, attempt, caller, conversation, scored}``. ``conversation`` starts at 0; ``scored`` is true only for scored conversations of the final attempt.
+- ``extra.reef.evaluation`` is ``{evaluation_id, task, task_index, repeat, attempt, caller, conversation, scored}``. ``conversation`` starts at 0; ``scored`` is true exactly when that conversation carries a numeric reward, including zero.
 
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts/{task_index}/{repeat}/trajectories`` returns ``{scenario, evaluation_id, task_index, repeat, trajectories}`` in attempt, then conversation order.
 
