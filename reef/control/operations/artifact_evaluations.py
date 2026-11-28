@@ -906,11 +906,14 @@ class EvaluationResults:
             # Only the shared rollout inputs need a payload. Retention can remove the first item, in which case
             # the first remaining rollout or template supplies those inputs as before.
             # Older requests can lack task names. Read those names and their scores from the same queue rows.
-            seed = None
             if request.task_names:
-                seed = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, 0, 0))
-                if seed is None and request.environment == "e2b":
+                rollout_seed = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, 0, 0))
+                if rollout_seed is None and request.environment == "e2b":
                     seed = self.queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 0))
+                else:
+                    seed = rollout_seed
+            else:
+                seed = None
             items = self.rollouts(evaluation_id, scenario, payload=seed is None)
             templates = (
                 self.templates(evaluation_id, scenario, payload=seed is None) if request.environment == "e2b" else {}
