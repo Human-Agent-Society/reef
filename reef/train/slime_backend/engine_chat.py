@@ -73,8 +73,8 @@ class EngineChat(RolloutChat):
     ``router_url`` is the engines' router. ``model_path`` is the model directory whose tokenizer and chat template
     render each request; the tokenizer loads at the first call. ``timeout_s`` is a positive bound on one call,
     in seconds. ``topk_logprobs`` is 0, or the positive number of the engines' top log-probs to record at each
-    response token, for score centering. ``distribution`` holds SGLang's ``temperature``, ``top_p`` and ``top_k`` of
-    the distribution that the trainer reads: each call samples it, whatever the agent asks. ``max_response_tokens``
+    response token, for score centering. ``distribution`` supplies the job's sampling defaults for ``temperature``,
+    ``top_p`` and ``top_k``. These override the agent's values. A trial can override each default. ``max_response_tokens``
     is a positive bound on the response tokens of one call, or None. Each answer is a chat completion whose
     ``training`` block holds the prompt and response token IDs, the response's loss mask and sampled log-probs,
     ``runtime_load_id``, the weights the engines hold for the job, the engines' ``weight_version`` when they give it,
@@ -82,8 +82,7 @@ class EngineChat(RolloutChat):
     response token. Another path gets 404, a request outside text system, user and assistant messages (or with ``n``
     other than 1) 400, an engine error status its own status, and an unusable engine answer 502.
 
-    template_kwargs supplies the job's renderer defaults. A request may override
-    individual template keys. Trial sampling options override request sampling.
+    ``template_kwargs`` supplies the job's renderer defaults. A request may override individual template keys.
     The request token limit remains bounded by the job and trial limits.
     """
 
