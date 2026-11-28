@@ -95,5 +95,7 @@ Slime constraints
 Slime supports one scenario and one continuing save root; it rejects train-from.
 Sample jobs count optimizer steps in ``save_interval`` and checkpoint steps.
 Task and dataset jobs count rollout iterations.
+Before training an iteration, workers check each planned step across all data-parallel ranks.
+An optimizer step with zero tokens contributing to loss fails the job.
 Only the final checkpoint retains next objective state; skipped jobs retain no new state.
 ``colocate`` shares training/rollout GPUs, never production inference GPUs.

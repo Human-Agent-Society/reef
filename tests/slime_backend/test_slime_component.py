@@ -52,7 +52,12 @@ from reef.train.slime_backend.loss_families import register_loss_family, resolve
 from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters import startup
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
+from reef.train.slime_backend.reef_adapters.batches import (
+    WORKER_SWITCH_KEY,
+    TrainingBatchProcessor,
+    check_step_counts,
+    rank_step_counts,
+)
 from reef.train.slime_backend.reef_adapters.preflight import (
     PYTORCH_ALLOCATOR_ENVS,
     SLIME_EXPANDABLE_SEGMENTS_ENV,
@@ -1259,6 +1264,16 @@ def test_the_batch_processor_registers_a_familys_keys_and_refuses_another_dtype(
     assert (args.custom_rollout_data_keys, args.reef_rollout_tensor_dtypes) == (("a",), {"a": "int"})
     with pytest.raises(ValueError, match="positive dp_size"):
         TrainingBatchProcessor(args, {"dp_size": 0})
+
+
+@pytest.mark.unit
+def test_the_step_counts_find_a_later_step_without_a_token_with_loss() -> None:
+    # Two steps of one micro-batch on this rank: samples 0 and 1 train, and step 1's sample 2 was removed.
+    counts = rank_step_counts([3, 0, 0], [[0, 1], [2]], [1, 1])
+    assert counts == [2, 1, 3, 1, 1, 0]
+    assert check_step_counts([2, 1, 3, 1, 1, 4], [2, 1]) == 3
+    with pytest.raises(RuntimeError, match="optimizer step 1 of the rollout trains nothing: it has 1 rollouts"):
+        check_step_counts(counts, [2, 1])
 
 
 @pytest.mark.unit

@@ -9,7 +9,7 @@ Slime's training options
 Set native flags under ``training.options``, without the leading ``--``.
 Malformed options fail startup. Worker-specific errors fail the first job.
 
-- Set ``global-batch-size`` explicitly. It counts samples per optimizer step.
+- Set ``global-batch-size`` explicitly. It counts samples per optimizer step. A step with zero tokens contributing to loss fails the job before the iteration trains.
 - ``hf-checkpoint`` must match ``inference.model-path``. Explicit architecture flags override the model's Hugging Face config.
 - ``actor-num-nodes`` and ``actor-num-gpus-per-node`` allocate training GPUs. ``num-gpus-per-node`` gives each node's physical GPU count.
 - ``rollout-num-gpus``, ``colocate``, ``sglang-*`` and ``router-*`` configure Slime's rollout engines. Configure serving engines under ``inference.options``.
@@ -79,3 +79,6 @@ Send ``POST /reef/train`` with a Slime prompt dataset:
 Use an absolute ``dataset.path`` on the Ray cluster. Each epoch runs ``len(dataset) // rollout-batch-size`` rollout iterations.
 ``save_interval`` counts rollout iterations. Omit it to save only at job end.
 Set Slime's dataset and reward plugin options under ``training.options``. Reef sets ``data-source-path`` from the request.
+
+Slime drops trailing rollouts that do not fill a step. Choose ``rollout-batch-size`` times ``n-samples-per-prompt`` as a multiple of ``global-batch-size``.
+When Slime drops converted samples, the worker logs the planned and converted sample counts.

@@ -55,6 +55,41 @@ def tensorize_external_fields(data: dict[str, Any], extra_dtypes: Mapping[str, s
             data[key] = [torch.as_tensor(value, dtype=dtype).detach().cpu().contiguous() for value in data[key]]
 
 
+def rank_step_counts(
+    loss_token_counts: Sequence[int], micro_batch_indices: Sequence[Sequence[int]], num_microbatches: Sequence[int]
+) -> list[int]:
+    """One data-parallel rank's counts of each optimizer step of a rollout, three per step.
+
+    ``loss_token_counts`` holds the tokens with loss of each sample of the rank's partition.
+    ``micro_batch_indices`` are the rank's micro-batches in step order, as indices into the partition, and step
+    ``s`` has ``num_microbatches[s]`` of them. For each step, the result holds the rank's samples, its samples
+    without a token with loss, and its tokens with loss. The sum over the ranks gives the step's counts.
+    """
+    counts: list[int] = []
+    micro_batches = iter(micro_batch_indices)
+    for micro_batch_count in num_microbatches:
+        samples = [index for _ in range(micro_batch_count) for index in next(micro_batches)]
+        tokens = [loss_token_counts[index] for index in samples]
+        counts += [len(samples), tokens.count(0), sum(tokens)]
+    return counts
+
+
+def check_step_counts(step_counts: Sequence[int], global_batch_sizes: Sequence[int]) -> int:
+    """Raise ``RuntimeError`` when a step of Slime's plan of a rollout trains no token, and return the planned samples.
+
+    ``step_counts`` is the sum of ``rank_step_counts`` over the data-parallel ranks, and ``global_batch_sizes``
+    holds the rollouts of each step. A removed sample has no token with loss: Slime zeroes its loss mask.
+    """
+    steps = [step_counts[index : index + 3] for index in range(0, len(step_counts), 3)]
+    for step, ((samples, without_loss, tokens), rollouts) in enumerate(zip(steps, global_batch_sizes, strict=True)):
+        if tokens == 0:
+            raise RuntimeError(
+                f"optimizer step {step} of the rollout trains nothing: it has {rollouts} rollouts and "
+                f"{samples} samples, {without_loss} of them removed or fully masked, and 0 tokens with loss"
+            )
+    return sum(samples for samples, _, _ in steps)
+
+
 class TrainingBatchProcessor:
     """Split one rollout's training data across the data-parallel ranks, tensorize it and put it in Ray's store.
 

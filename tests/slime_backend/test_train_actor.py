@@ -80,6 +80,7 @@ def _load_train_actor(monkeypatch: pytest.MonkeyPatch):
         monkey_patch_torch_dist=lambda: None,
     )
     _StubTimer.reset()
+    _stub_module(monkeypatch, "megatron.core", mpu=types.SimpleNamespace(get_data_parallel_group=lambda: "dp"))
     _stub_module(monkeypatch, "slime.observability.timer", timer=_stub_timer_decorator, Timer=_StubTimer)
     _stub_module(
         monkeypatch, "torch_memory_saver", torch_memory_saver=types.SimpleNamespace(disable=lambda: nullcontext())
@@ -307,3 +308,84 @@ def test_external_checkpoint_clears_student_adapter_only_for_frozen_roles(monkey
     if enabled and tag in ("ref", "distill_teacher"):
         expected += [("zero", actor.model), ("backup", tag)]
     assert calls == expected
+
+
+def load_on_rank_zero(monkeypatch, module, reduced_groups, *, other_rank_mask: list[int], raw_reward_count: int = 2):
+    """Load one rollout on DP rank 0 of 2: one optimizer step of 2 rollouts, one sample on each rank.
+
+    Rank 0's sample has no token with loss, as Slime makes a removed sample. The all-reduce adds the counts of
+    rank 1, whose sample has ``other_rank_mask``, and records its group in ``reduced_groups``. ``raw_reward_count``
+    is the samples Slime converted.
+    """
+    rank_data = {
+        "loss_masks": [torch.zeros(3, dtype=torch.int)],
+        "micro_batch_indices": [[0]],
+        "num_microbatches": [1],
+        "global_batch_sizes": [2],
+        "raw_reward": [0.0] * raw_reward_count,
+    }
+    base = module.ReefMegatronTrainRayActor.__mro__[1]
+    monkeypatch.setattr(base, "_get_rollout_data", lambda self, ref: dict(rank_data), raising=False)
+    _stub_module(monkeypatch, "slime.backends.megatron_utils.cp_utils", slice_log_prob_with_cp=None)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
+    # Rank 1's counts of the step, as ``rank_step_counts`` gives them: samples, samples without loss, tokens.
+    other_rank = [1, int(not any(other_rank_mask)), sum(other_rank_mask)]
+
+    def all_reduce(tensor, group):
+        reduced_groups.append(group)
+        tensor += torch.tensor(other_rank)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+    actor.args = types.SimpleNamespace()
+    actor.role = "actor"
+    return actor._get_rollout_data("ref")
+
+
+@pytest.mark.unit
+def test_a_step_whose_samples_are_all_removed_fails_before_it_trains(monkeypatch) -> None:
+    module = _load_train_actor(monkeypatch)
+    reduced_groups: list[str] = []
+
+    with pytest.raises(RuntimeError) as failure:
+        load_on_rank_zero(monkeypatch, module, reduced_groups, other_rank_mask=[0, 0])
+
+    assert str(failure.value) == (
+        "optimizer step 0 of the rollout trains nothing: it has 2 rollouts and 2 samples, "
+        "2 of them removed or fully masked, and 0 tokens with loss"
+    )
+    # The data-parallel ranks sum their counts: each holds a part of the step.
+    assert reduced_groups == ["dp"]
+
+
+@pytest.mark.unit
+def test_a_step_with_one_live_sample_on_another_rank_trains(monkeypatch) -> None:
+    module = _load_train_actor(monkeypatch)
+
+    loaded = load_on_rank_zero(monkeypatch, module, [], other_rank_mask=[0, 1, 1])
+
+    assert loaded["global_batch_sizes"] == [2]
+
+
+@pytest.mark.unit
+def test_a_step_plan_that_drops_converted_samples_trains_with_a_warning(monkeypatch, caplog) -> None:
+    # Slime's build_dp_schedule drops the rollouts after the last full step by design, for example when a rollout
+    # function returns a rollout count that is not a multiple of the step. The job must not fail for it.
+    module = _load_train_actor(monkeypatch)
+
+    with caplog.at_level("WARNING", logger=module.__name__):
+        loaded = load_on_rank_zero(monkeypatch, module, [], other_rank_mask=[1], raw_reward_count=3)
+
+    assert loaded["global_batch_sizes"] == [2]
+    assert "trains 2 of its 3 samples, in steps of [2] rollouts" in caplog.text
+
+
+@pytest.mark.unit
+def test_a_step_plan_that_trains_every_converted_sample_logs_nothing(monkeypatch, caplog) -> None:
+    module = _load_train_actor(monkeypatch)
+
+    with caplog.at_level("WARNING", logger=module.__name__):
+        load_on_rank_zero(monkeypatch, module, [], other_rank_mask=[1])
+
+    assert "step plan" not in caplog.text
