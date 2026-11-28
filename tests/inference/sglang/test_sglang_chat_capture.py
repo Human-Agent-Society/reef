@@ -289,7 +289,13 @@ def test_native_stream_capture_joins_many_disjoint_text_chunks() -> None:
         )
 
     assert capture.text == "prefix-" + "".join(chunks)
-    assert capture.response()["text"] == capture.text
+    response = capture.response()
+    assert response["text"] == capture.text
+    capture.text = ""
+    assert capture.text_fragments == []
+    assert capture.response() == {**response, "text": ""}
+    with pytest.raises(TypeError, match="must be a string"):
+        capture.text = None
 
 
 @pytest.mark.unit

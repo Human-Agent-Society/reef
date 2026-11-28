@@ -193,8 +193,9 @@ class SGLangStreamingToolParser(StreamingToolParser):
 class NativeStreamCapture:
     """Accumulate the disjoint incremental events of one SGLang stream into its complete native response.
 
-    Values: ``text_fragments`` holds the nonempty text deltas of accepted events in order. ``text`` joins those
-    fragments. ``output_ids`` joins the events' output token IDs.
+    ``text_fragments`` starts empty. Assigning a string to ``text`` replaces the fragments with that string as
+    their seed, or clears them for an empty string. Each later event appends its nonempty text delta.
+    Reading ``text`` joins the fragments. ``output_ids`` joins the events' output token IDs.
     ``meta`` holds each list field of ``_LIST_META_KEYS`` joined over the events in order, and the newest value of
     every other ``meta_info`` field. ``last_output_logprobs`` holds the newest event's own
     ``output_token_logprobs``. ``seen`` is whether an event arrived.
@@ -229,7 +230,9 @@ class NativeStreamCapture:
 
     @text.setter
     def text(self, value: str) -> None:
-        self.text_fragments = [value]
+        if not isinstance(value, str):
+            raise TypeError("capture text must be a string")
+        self.text_fragments = [value] if value else []
 
     def accept(self, event: Mapping[str, Any]) -> str:
         meta = event.get("meta_info")
