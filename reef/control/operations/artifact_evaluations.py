@@ -2239,7 +2239,7 @@ class ArtifactEvaluations:
 
     def summaries_json(self, scenario: str, *, limit: int = 50) -> list[dict[str, object]]:
         """At most ``limit`` evaluations of ``scenario``, newest first, each as its ``evaluation_summary`` with its
-        ``progress``.
+        ``progress`` and its ``start_id``: the ID of the start that made it, null for a start without an ID.
 
         The summary of an ended evaluation does not change until a retry or a resume gives it a new
         ``finished_at``. ``ended_summaries`` keeps it under ``(scenario, evaluation_id, finished_at)``, once
@@ -2260,6 +2260,8 @@ class ArtifactEvaluations:
                     if evaluation_id in kept:
                         self.ended_summaries.move_to_end((scenario, evaluation_id, cast(float, finished_at)))
             read = store.read_for_list([evaluation_id for evaluation_id, _ in ends if evaluation_id not in kept])
+            listed = [evaluation_id for evaluation_id, _ in ends]
+            start_ids = store.start_ids(listed) if isinstance(store, KeyedEvaluationStore) else {}
         for stored, view in zip(read, self.status_json(scenario, read), strict=True):
             summary = kept[stored.evaluation_id] = evaluation_summary(view)
             if stored.finished_at is not None and self.ended_progress.read(scenario, stored)[0]:
@@ -2268,7 +2270,11 @@ class ArtifactEvaluations:
                     if len(self.ended_summaries) > ENDED_PROGRESS_ENTRIES:
                         self.ended_summaries.popitem(last=False)
         # An evaluation that was deleted between the two reads is not listed.
-        return [kept[evaluation_id] for evaluation_id, _ in ends if evaluation_id in kept]
+        return [
+            {**kept[evaluation_id], "start_id": start_ids.get(evaluation_id)}
+            for evaluation_id in listed
+            if evaluation_id in kept
+        ]
 
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
         """At most ``limit`` evaluations of ``scenario``, newest first."""

@@ -214,6 +214,16 @@ class SQLEvaluationStore(KeyedEvaluationStore):
             raise EvaluationStartConflictError("start_id already names a different evaluation request")
         return stored_evaluation(row), row["first_work_json"]
 
+    def start_ids(self, evaluation_ids: Sequence[str]) -> dict[str, str]:
+        starts = self.starts.table
+        with self.database._transaction(write=False) as connection:
+            rows = connection.execute(
+                select(starts.c.evaluation_id, starts.c.start_id).where(
+                    self.starts.condition(), starts.c.evaluation_id.in_(evaluation_ids)
+                )
+            ).all()
+        return dict(row.tuple() for row in rows)
+
     def pending_starts(self) -> tuple[tuple[str, str], ...]:
         starts = self.starts.table
         with self.database._transaction(write=False) as connection:

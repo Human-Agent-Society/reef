@@ -284,6 +284,10 @@ class KeyedEvaluationStore(EvaluationStore):
         """
 
     @abstractmethod
+    def start_ids(self, evaluation_ids: Sequence[str]) -> dict[str, str]:
+        """Return the start ID of each of ``evaluation_ids`` that a start with an ID made, by evaluation ID."""
+
+    @abstractmethod
     def pending_starts(self) -> tuple[tuple[str, str], ...]:
         """Return the evaluation ID and saved admission data of each pending start."""
 

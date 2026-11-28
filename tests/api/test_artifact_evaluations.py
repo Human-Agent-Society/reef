@@ -3200,13 +3200,16 @@ def test_the_summary_list_reads_an_ended_evaluation_once(tmp_path: Path, monkeyp
                 item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
                 queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
             ended = await finished(client, first["evaluation_id"])
-            second = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            keyed = {**body, "start_id": "request-2"}
+            second = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=keyed)).json()
 
             monkeypatch.setattr(SQLEvaluationStore, "read_for_list", counted_read)
             route = "/reef/scenarios/s/evaluations?summary=true"
             for _ in range(2):
                 running, summary = (await (await client.get(route, headers=AUTH)).json())["evaluations"]
                 assert running["evaluation_id"] == second["evaluation_id"] and running["policy_evaluation"] is None
+                # Each summary names the start ID of its request, also the ended one that the list keeps.
+                assert (running["start_id"], summary["start_id"]) == ("request-2", None)
                 # The summary has the scores of the evaluation, and not its tasks or the score of each rollout.
                 assert "task_names" not in summary["request"] and "task_names" in ended["request"]
                 assert summary["policy_evaluation"] == {"harness": ended["policy_evaluation"]["harness"]}
