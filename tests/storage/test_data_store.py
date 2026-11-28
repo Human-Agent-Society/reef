@@ -1309,6 +1309,24 @@ def test_refresh_after_expiration_scan_preserves_delayed_read(store, monkeypatch
     assert opened[0].read().samples == (sample,)
 
 
+def test_a_directory_published_before_an_error_remains_eligible_for_cleanup(store, monkeypatch):
+    publish = store.job_directories.write_directory
+    written = []
+
+    def publish_then_fail(key, source):
+        written.append(publish(key, source))
+        raise OSError("lost publication acknowledgement")
+
+    monkeypatch.setattr(store.job_directories, "write_directory", publish_then_fail)
+    monkeypatch.setattr(time, "time", lambda: 20.0)
+    with pytest.raises(OSError, match="publication acknowledgement"):
+        store.write_job_directory(JobData("empty"))
+    assert store.job_directory(written[0]).is_dir()
+    assert store.delete_unused_job_directories(21) == 1
+    with pytest.raises(FileNotFoundError):
+        store.job_directory(written[0])
+
+
 def test_a_private_job_directory_ends_with_its_store_and_a_shared_one_survives(tmp_path):
     with closing(LocalTaskFileStore(tmp_path / "tasks")) as files:
         memory = MemoryDataStore(files)

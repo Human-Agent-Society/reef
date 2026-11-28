@@ -702,7 +702,9 @@ class DataStore(Plugin, JobDataReader, ABC):
     A subclass sets ``job_directories`` and ``job_directory_ttl_seconds``, and keeps the time of the last use of each
     directory, by its key:
     ``write_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
-    ``delete_job_directory_record(key)``.
+    ``delete_job_directory_record(key)``. Concurrent backends override ``job_directory_use`` and
+    ``delete_expired_job_directory`` to synchronize registration, publication and deletion for each key.
+    The defaults require the caller to serialize those operations.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -992,15 +994,22 @@ class DataStore(Plugin, JobDataReader, ABC):
 
     @contextmanager
     def job_directory_use(self, key: str) -> Iterator[None]:
-        """Publish or reuse a directory, then record when the operation completed."""
+        """Register before publishing so cleanup can find an interrupted write. Refresh the use on success."""
+        self.write_job_directory_use(key, time.time())
         yield
         self.write_job_directory_use(key, time.time())
 
     def delete_expired_job_directory(self, key: str, cutoff: float) -> bool:
         """Remove an expired directory and its use record. Return whether it was removed."""
+        if key not in self.job_directories_unused_since(cutoff):
+            return False
+        self.remove_job_directory(key)
+        return True
+
+    def remove_job_directory(self, key: str) -> None:
+        """Remove the directory before forgetting its key, so cleanup can retry a failed removal."""
         self.job_directories.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
         self.delete_job_directory_record(key)
-        return True
 
     def write_job_directory(self, data: JobData) -> JobDataRef:
         key = job_data_key(data)
@@ -1359,9 +1368,8 @@ class MemoryDataStore(DataStore):
 
     @contextmanager
     def job_directory_use(self, key: str) -> Iterator[None]:
-        with self.job_directory_lock:
+        with self.job_directory_lock, super().job_directory_use(key):
             yield
-            self.write_job_directory_use(key, time.time())
 
     def write_job_directory_use(self, key: str, time: float) -> None:
         with self.job_directory_lock:
@@ -1379,7 +1387,8 @@ class MemoryDataStore(DataStore):
         with self.job_directory_lock:
             if self.job_directory_uses.get(key, cutoff) >= cutoff:
                 return False
-            return super().delete_expired_job_directory(key, cutoff)
+            self.remove_job_directory(key)
+            return True
 
     def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)

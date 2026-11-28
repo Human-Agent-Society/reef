@@ -760,11 +760,17 @@ class SQLDataStore(DataStore):
 
     @contextmanager
     def job_directory_use(self, key: str) -> Iterator[None]:
-        with self.transaction() as connection:
-            # The upsert locks this key against expiration through the directory's publication.
-            self.register_job_directory(connection, key, time.time())
-            yield
-            self.register_job_directory(connection, key, time.time())
+        table = self.job_directory_table
+        while True:
+            with self.transaction() as connection:
+                held = connection.scalar(select(table.c.key).where(table.c.key == key).with_for_update())
+                if held is not None:
+                    yield
+                    self.register_job_directory(connection, key, time.time())
+                    return
+            # Commit the first registration separately. Even if publication raises after writing the files,
+            # rollback leaves a key that expiration can find. Lock it again in case cleanup ran in between.
+            self.write_job_directory_use(key, time.time())
 
     def write_job_directory_use(self, key: str, time: float) -> None:
         with self.transaction() as connection:
