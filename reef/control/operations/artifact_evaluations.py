@@ -1428,11 +1428,12 @@ class ArtifactEvaluations:
                 ]
                 if expected_attempts is not None:
                     by_id = {item.id: item for item in items}
+                    failed_ids = {item.id for item in again}
                     if any(
                         key not in by_id
                         or by_id[key].attempt_count < count
                         or (
-                            by_id[key].attempt_count == count and rollout_ended(by_id[key]) and by_id[key] not in again
+                            by_id[key].attempt_count == count and rollout_ended(by_id[key]) and key not in failed_ids
                         )
                         for key, count in expected_attempts.items()
                     ):
