@@ -1031,13 +1031,24 @@ class SQLWorkQueue(WorkQueue):
         return saved
 
     def held(
-        self, connection: Connection, queue: str, item_id: str, worker_id: str, now: float, attempt: int | None = None
+        self,
+        connection: Connection,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        now: float,
+        attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         item = self.row(connection, queue, item_id, lock=True)
         if (
             item is None
             or item.state not in HELD_STATES
             or item.worker_id != worker_id
+            or (
+                claim is not None
+                and (claim.created_sequence, claim.attempt_count) != (item.created_sequence, item.attempt_count)
+            )
             or (attempt is not None and item.attempt_count != attempt)
             or (item.lease_expires_at is not None and item.lease_expires_at < now)
         ):
@@ -1210,22 +1221,26 @@ class SQLWorkQueue(WorkQueue):
                 error=None,
             )
 
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def extend_lease(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         moment = clock(now)
         lease_expires_at = moment + self.lease_seconds
         # A lease extension numbers no change, so it takes no counter. ``held`` locks the item's row (PostgreSQL) or
         # the database (SQLite), so no other write changes the item between the check and the update.
         with self.database.connection(write=True) as connection:
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, claim=claim)
             connection.execute(
                 update(self.table).where(*self.key(item.queue, item.id)).values(lease_expires_at=lease_expires_at)
             )
             return replace(item, lease_expires_at=lease_expires_at)
 
-    def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def start(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, claim=claim)
             return (
                 item
                 if item.state == "running"
@@ -1241,11 +1256,12 @@ class SQLWorkQueue(WorkQueue):
         *,
         number: int,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
         now: float | None = None,
     ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt, claim)
             if number < len(item.progress):
                 return item
             if number != len(item.progress):
@@ -1253,11 +1269,18 @@ class SQLWorkQueue(WorkQueue):
             return self.write_item(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
 
     def finish(
-        self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        result: Mapping[str, JsonValue],
+        *,
+        claim: WorkItem | None = None,
+        now: float | None = None,
     ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, claim=claim)
             return self.write_item(
                 connection,
                 counter,
@@ -1280,11 +1303,12 @@ class SQLWorkQueue(WorkQueue):
         retryable: bool,
         now: float | None = None,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt, claim)
             again = retryable and self.has_attempts_left(item)
             return self.write_item(
                 connection,
@@ -1309,13 +1333,14 @@ class SQLWorkQueue(WorkQueue):
         error: str = "the worker stopped",
         deferred: bool = False,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         if available_at is not None and not is_finite_time(available_at):
             raise ValueError("available_at is a finite time or None")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt, claim)
             # The count grows from the stored row in the give-back's own change, so a deferral counts once, and an
             # attempt that no longer holds the item counts none.
             metadata = dict(item.metadata)

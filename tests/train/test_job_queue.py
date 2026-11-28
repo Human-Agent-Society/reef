@@ -760,7 +760,7 @@ class LosingQueue:
     def __getattr__(self, name: str):
         return getattr(self.queue, name)
 
-    def append_progress(self, queue, item_id, worker_id, entry, *, number, attempt):
+    def append_progress(self, queue, item_id, worker_id, entry, *, number, claim):
         self.queue.cancel(queue, item_id, "cancelled")
         raise WorkLeaseLostError(f"job {item_id} is no longer held by {worker_id}")
 

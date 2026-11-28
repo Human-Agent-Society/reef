@@ -161,7 +161,7 @@ class ScenarioTrainingRequests:
                     "scenario %r: request %s is held elsewhere; it settles later", self.scenario, request.id
                 )
                 return
-            self.queue.finish(TRAINING_REQUESTS_QUEUE, item.id, self.worker_id, {"consumed": True})
+            self.queue.finish(TRAINING_REQUESTS_QUEUE, item.id, self.worker_id, {"consumed": True}, claim=item)
 
     def give(self, trainers: Iterable[Trainer]) -> None:
         """Give every trainer of ``trainers`` the queued requests that none of them consumed, and finish the items

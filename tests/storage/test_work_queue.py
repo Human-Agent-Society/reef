@@ -347,13 +347,15 @@ class FlakyLeaseWorkQueue(SQLWorkQueue):
         self.success_count = 0
         self.lock = threading.Lock()
 
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def extend_lease(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         with self.lock:
             self.call_count += 1
             outcome = self.outcomes.pop(0) if self.outcomes else None
         if outcome is not None:
             raise outcome
-        extended = super().extend_lease(queue, item_id, worker_id, now=now)
+        extended = super().extend_lease(queue, item_id, worker_id, claim=claim, now=now)
         with self.lock:
             self.success_count += 1
         return extended
@@ -1301,3 +1303,25 @@ def test_a_producer_queues_a_final_item_again_and_it_gets_one_more_attempt(open_
     # An item that is not final stays as it is, and an unknown item is None.
     assert queue.retry("jobs", "b", now=11) == rerun
     assert queue.retry("jobs", "missing") is None
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_old_claim_cannot_mutate_an_item_retaken_by_the_same_worker(open_coordination, recreate):
+    queue = open_coordination().queue
+    work = NewWork("jobs", "j", "s", "train", {})
+    queue.append(work, now=0)
+    old = queue.take("jobs", "worker", ["train"], now=1)
+    if recreate:
+        queue.finish("jobs", "j", "worker", {}, claim=old, now=2)
+        queue.delete_final(finished_before=3)
+        queue.append(work, now=4)
+    else:
+        queue.give_back("jobs", "j", "worker", claim=old, now=2)
+    current = queue.take("jobs", "worker", ["train"], now=5)
+    for mutation in (queue.start, queue.extend_lease):
+        with pytest.raises(WorkLeaseLostError):
+            mutation("jobs", "j", "worker", claim=old, now=6)
+    with pytest.raises(WorkLeaseLostError):
+        queue.finish("jobs", "j", "worker", {}, claim=old, now=6)
+    assert queue.read("jobs", "j") == current
+    assert queue.finish("jobs", "j", "worker", {}, claim=current, now=6).state == "finished"

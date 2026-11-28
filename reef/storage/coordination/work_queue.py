@@ -241,6 +241,9 @@ class WorkQueue(ABC):
     fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``read``)
     and record facts about it (``write_metadata``); a producer queues a final item again (``retry``); control deletes
     old final items (``delete_final``).
+
+    For a held mutation, pass the item returned by take as claim. The queue checks its creation sequence and
+    attempt under the write lock, including when the same worker ID takes the item again.
     """
 
     def __init__(
@@ -318,12 +321,16 @@ class WorkQueue(ABC):
         """
 
     @abstractmethod
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def extend_lease(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item, without changing
         ``changed_sequence``; else raise ``WorkLeaseLostError``."""
 
     @abstractmethod
-    def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def start(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         """Change the held item from ``assigned`` to ``running``; ``WorkLeaseLostError`` when ``worker_id`` does not
         hold it. A running item stays running."""
 
@@ -337,6 +344,7 @@ class WorkQueue(ABC):
         *,
         number: int,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
         now: float | None = None,
     ) -> WorkItem:
         """Append ``progress`` as progress number ``number`` (0-based) of the held item. Adding a number that the
@@ -346,7 +354,14 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def finish(
-        self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        result: Mapping[str, JsonValue],
+        *,
+        claim: WorkItem | None = None,
+        now: float | None = None,
     ) -> WorkItem:
         """Make the held item ``finished`` with ``result``, ended at ``now``; ``WorkLeaseLostError`` when ``worker_id``
         does not hold it."""
@@ -362,6 +377,7 @@ class WorkQueue(ABC):
         retryable: bool,
         now: float | None = None,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         """End the held attempt with ``error``: the item becomes ``queued`` when ``retryable`` and it has attempts
         left, else ``failed``, ended at ``now``. Raise ``WorkLeaseLostError`` unless ``worker_id`` holds the item
@@ -379,6 +395,7 @@ class WorkQueue(ABC):
         error: str = "the worker stopped",
         deferred: bool = False,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         """End the held attempt without a result: the item becomes ``queued`` with ``error``, a non-empty text, and one
         more ``stopped_attempt_count``. A worker takes it again from ``available_at``, a finite time, or at once when
@@ -596,7 +613,7 @@ class LeaseExtender:
         wait_seconds = normal_wait_seconds
         while not self.done.wait(wait_seconds):
             try:
-                self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
+                self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id, claim=self.item)
             except WorkLeaseLostError:
                 self.lease_lost.set()
                 return

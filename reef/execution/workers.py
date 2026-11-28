@@ -209,7 +209,7 @@ class QueueWorker(ServiceWorker):
 
     def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         """Commit the result. A worker can include its output writes in this transaction."""
-        self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result))
+        self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result), claim=item)
 
     def start(self) -> None:
         if self.thread is not None:
@@ -255,7 +255,7 @@ class QueueWorker(ServiceWorker):
             item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
             if item is not None and self.stopped.is_set():
                 # The stop began during the take: the item has not started, so another worker runs it at once.
-                self.queue.give_back(self.queue_name, item.id, self.worker_id, attempt=item.attempt_count)
+                self.queue.give_back(self.queue_name, item.id, self.worker_id, claim=item)
                 item = None
         except BaseException:
             self.free_slots.release()
@@ -289,7 +289,7 @@ class QueueWorker(ServiceWorker):
         """Run the item that this worker took, and end it."""
         try:
             with LeaseExtender(self.queue, item, self.worker_id) as extender:
-                self.queue.start(self.queue_name, item.id, self.worker_id)
+                self.queue.start(self.queue_name, item.id, self.worker_id, claim=item)
                 result = self.run_item(item, extender.lease_lost)
             self.finish_item(item, result)
         except WorkLeaseLostError:
@@ -297,7 +297,7 @@ class QueueWorker(ServiceWorker):
             return
         except WorkerStoppedError:
             try:
-                self.queue.give_back(self.queue_name, item.id, self.worker_id, attempt=item.attempt_count)
+                self.queue.give_back(self.queue_name, item.id, self.worker_id, claim=item)
             except WorkLeaseLostError:
                 logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
@@ -336,7 +336,7 @@ class QueueWorker(ServiceWorker):
                 available_at=time.time() + delay_seconds,
                 error=reason,
                 deferred=True,
-                attempt=item.attempt_count,
+                claim=item,
             )
         except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
@@ -347,9 +347,7 @@ class QueueWorker(ServiceWorker):
         and an exception's message can have them, so the worker strips ``error`` first."""
         error = error.strip() or "the work item failed"
         try:
-            failed = self.queue.fail(
-                self.queue_name, item.id, self.worker_id, error, retryable=retryable, attempt=item.attempt_count
-            )
+            failed = self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable, claim=item)
         except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return

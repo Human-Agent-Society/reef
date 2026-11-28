@@ -903,7 +903,7 @@ class TrainingJobWorker(QueueWorker):
                             self.worker_id,
                             checkpoint_json(stored),
                             number=progress_count,
-                            attempt=item.attempt_count,
+                            claim=item,
                         )
                     except WorkLeaseLostError:
                         backend.discard_content(content)
