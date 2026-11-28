@@ -329,11 +329,26 @@ def json_object(reply: str) -> dict[str, Any]:
 
 
 def slug_of(title: str) -> str:
-    """The slug of an item title: its letters and digits as lowercase ASCII, in groups joined by hyphens and cut to
-    ``MAX_SLUG_CHARS``; a title without any is named by the start of its SHA-256 digest."""
-    letters = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii").lower()
-    slug = "-".join(re.findall(r"[a-z0-9]+", letters))[:MAX_SLUG_CHARS].strip("-")
-    return slug or hashlib.sha256(title.encode("utf-8")).hexdigest()[:16]
+    """The slug of an item title, which names the item in the bank.
+
+    The words of a title are its groups of letters and digits, without case and accents. The ASCII form is the words
+    in lowercase ASCII, joined by hyphens. It drops each letter that has no ASCII form, such as a Chinese character,
+    and it can be longer than ``MAX_SLUG_CHARS``. Then titles with other words can have one ASCII form, so the slug is
+    a cut prefix of the ASCII form, a hyphen, and the start of the SHA-256 digest of the words. Otherwise the slug is
+    the ASCII form. A title without any ASCII letter or digit is named by the start of the SHA-256 digest of the title.
+    Two titles with an ASCII letter or digit that differ only in case, accents or punctuation have one slug.
+    """
+    unaccented = "".join(
+        char for char in unicodedata.normalize("NFKD", title) if not unicodedata.combining(char)
+    ).casefold()
+    slug = "-".join(re.findall(r"[a-z0-9]+", unaccented.encode("ascii", "ignore").decode("ascii")))
+    if not slug:
+        return hashlib.sha256(title.encode("utf-8")).hexdigest()[:16]
+    words = "-".join(re.findall(r"[^\W_]+", unaccented))
+    if slug == words and len(slug) <= MAX_SLUG_CHARS:
+        return slug
+    digest = hashlib.sha256(words.encode("utf-8")).hexdigest()[:8]
+    return f"{slug[: MAX_SLUG_CHARS - len(digest) - 1].rstrip('-')}-{digest}"
 
 
 __all__ = ["MemoryItem", "ReasoningBank", "ReasoningBankSettings"]
