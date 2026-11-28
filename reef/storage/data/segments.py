@@ -183,7 +183,7 @@ class LocalSegmentStore(SegmentStore):
 
     def write(self, partition: str, segment_id: str, data: bytes) -> None:
         target = self.path(partition, segment_id)
-        mkdir_durable(target.parent)
+        mkdir_durable(target.parent.resolve())
         staging = target.with_name(f".{segment_id}.partial")
         try:
             with staging.open("wb") as file:

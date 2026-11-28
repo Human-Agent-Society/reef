@@ -251,7 +251,8 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.scenario.commits": ("reef.core",),
         "reef.storage.data.tasks": ("reef.core",),
-        "reef.storage.data.segments": ("reef.core",),
+        "reef.storage.durable_files": (),
+        "reef.storage.data.segments": ("reef.core", "reef.storage.durable_files"),
         "reef.storage.scenario.samples": ("reef.core", "reef.storage.data.store", "reef.storage.data.tasks"),
         "reef.storage.data.item_kinds": ("reef.core", "reef.storage.data.tasks"),
         "reef.storage.data.job_data": ("reef.core", "reef.storage.data.segments"),
@@ -534,7 +535,7 @@ def test_storage_subpackages_import_in_one_direction() -> None:
     # ``coordination``.
     allowed = {
         "coordination": ("reef.storage.coordination",),
-        "data": ("reef.storage.coordination", "reef.storage.data"),
+        "data": ("reef.storage.coordination", "reef.storage.data", "reef.storage.durable_files"),
         "scenario": ("reef.storage.data", "reef.storage.scenario"),
         "sql": ("reef.storage",),
     }
