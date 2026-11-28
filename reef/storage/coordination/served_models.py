@@ -209,10 +209,13 @@ class ServedModelsWriter(ServedModels):
         """Queue completed current selections again after an inference owner takes over.
 
         ``owner`` is a held item of the inference-owner queue and kind, in the same attempt.
-        ``kept`` holds the routes whose engines still serve them (``InferenceRuntime.adopt``): they stay until the
-        queued selections replace them. Remove current selections' other routes and schedule cleanup after the
+        ``kept`` holds the routes that stay until the queued selections replace them: before the runtime opens, the
+        routes at a URL that it serves (``InferenceRuntime.handler_for``); after, the routes whose engines still serve
+        them (``InferenceRuntime.adopt``). Remove current selections' other routes and schedule cleanup after the
         finite, non-negative delay.
         Failed, unfinished, and withdrawn requests keep their state.
+        A later call queues a selection again only after its queued work completes, so the inference worker can call
+        it before and after it opens the runtime.
         """
 
 

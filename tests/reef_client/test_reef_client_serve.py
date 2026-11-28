@@ -293,6 +293,31 @@ def test_serve_force_non_stream_synthesizes_sse_for_streaming_clients() -> None:
 
 
 @pytest.mark.unit
+def test_serve_force_non_stream_gives_a_streaming_client_the_reasoning() -> None:
+    # An agent that never receives the reasoning cannot send it back: the model then reads its own turns as empty.
+    message = {**COMPLETION["choices"][0]["message"], "content": "", "reasoning": "think first"}
+    upstream = _Upstream({**COMPLETION, "choices": [{**COMPLETION["choices"][0], "message": message}]})
+    proxy = _Proxy(upstream.url, force_non_stream=True)
+    try:
+        status, body, _ = _post(
+            f"{proxy.url}/v1/chat/completions",
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+        assert status == 200
+        frames = [line[len("data: ") :] for line in body.decode().splitlines() if line.startswith("data: {")]
+        deltas = [choice["delta"] for frame in frames for choice in json.loads(frame)["choices"]]
+        assert {"reasoning": "think first"} in deltas
+
+        accumulator = SSEAccumulator()
+        accumulator.feed(body)
+        accumulator.finish()
+        assert accumulator.completion["choices"][0]["message"] == message
+    finally:
+        proxy.close()
+        upstream.close()
+
+
+@pytest.mark.unit
 def test_serve_reports_upstream_error_in_committed_stream() -> None:
     upstream = _Upstream(status=400)
     proxy = _Proxy(upstream.url, force_non_stream=True)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import shlex
 import shutil
 import subprocess
 import types
@@ -26,21 +27,36 @@ torch = pytest.importorskip("torch")
 
 pytestmark = pytest.mark.unit
 
-PATCH = Path(__file__).resolve().parents[2] / "docker" / "patch" / "slime_active_token_count.patch"
+DOCKER = Path(__file__).resolve().parents[2] / "docker"
+PATCH = DOCKER / "patch" / "slime_active_token_count.patch"
 LOSS = Path("slime/backends/megatron_utils/loss.py")
 METRICS = Path("slime/observability/train_metric_utils.py")
+
+
+def test_training_image_applies_the_active_token_patch() -> None:
+    dockerfile = (DOCKER / "Dockerfile.reef").read_text().replace("\\\n", " ")
+    commands = [
+        shlex.split(command)
+        for line in dockerfile.splitlines()
+        if line.startswith("RUN ")
+        for command in line[4:].split("&&")
+        if command.strip().startswith("git ")
+    ]
+    assert ["git", "-C", "$SLIME_SITE", "apply", f"$PWD/docker/patch/{PATCH.name}"] in commands
 
 
 @pytest.fixture
 def patched_slime(tmp_path) -> Path:
     """A directory with the two patched Slime files at their paths in the Slime package."""
-    if importlib.util.find_spec("slime") is None:
+    spec = importlib.util.find_spec("slime")
+    if spec is None:
         pytest.skip("Slime is not installed")
-    site = Path(importlib.util.find_spec("slime").origin).parents[1]
+    site = Path(spec.origin).parents[1]
     for path in (LOSS, METRICS):
         (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(site / path, tmp_path / path)
-    if "torch.clamp_min(loss_mask.sum(), 1)" in (tmp_path / LOSS).read_text():
+    applied = subprocess.run(["git", "apply", "--reverse", "--check", str(PATCH)], cwd=tmp_path, capture_output=True)
+    if applied.returncode:
         subprocess.run(["git", "apply", str(PATCH)], cwd=tmp_path, check=True)
     return tmp_path
 

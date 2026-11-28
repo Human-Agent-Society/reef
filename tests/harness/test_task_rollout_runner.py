@@ -18,6 +18,7 @@ from reef_client.serve import CapturedTurn
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
+from reef.execution.sandbox.prepared_images import PreparedImage, TaskImages
 from reef.execution.sandbox.task_environment import (
     HARBOR_E2B_ENVIRONMENT,
     HARBOR_MODAL_ENVIRONMENT,
@@ -609,6 +610,41 @@ def test_docker_rollouts_start_with_no_build_first(reef: StandInReef, tmp_path: 
     rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
     assert [rollout.reward for rollout in rollouts] == [1.0] * 3
     assert lab.builds == [], "Harbor builds one Docker image at a time"
+
+
+#: A synthetic prepared image of a task's environment, by digest.
+PREPARED = PreparedImage("environment", None, "registry.example/tasks/t1@sha256:" + "a" * 64, None, None, None)
+
+
+def test_a_task_with_prepared_images_starts_its_rollouts_from_them_with_no_build_first(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    prepared, plain = written_task(tmp_path / "tasks", "t1"), written_task(tmp_path / "tasks", "t2")
+    lab = StandInLab({"reward": 1.0})
+    images = TaskImages({str(prepared): (PREPARED,), str(plain): ()})
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b", task_images=images)
+    rollouts = running.run_rollouts(
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (prepared, plain) * 2]
+    )
+    assert [rollout.reward for rollout in rollouts] == [1.0] * 4
+    # A prepared image needs no build, so its rollouts wait for none; the other task builds once first, as before.
+    assert [build["task_path"] for build in lab.builds] == [plain]
+    environments = {call["task_path"].name: call["overrides"]["environment"] for call in lab.calls}
+    kwargs = {"prepared_images": [PREPARED.to_json()], "task_directory": str(prepared)}
+    assert environments == {"t1": {**E2B_CONFIG, "kwargs": kwargs}, "t2": E2B_CONFIG}
+
+
+def test_a_task_that_the_prepared_images_do_not_list_runs_no_rollout(reef: StandInReef, tmp_path: Path) -> None:
+    task = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    # The same task name in another directory is another task.
+    images = TaskImages({str(tmp_path / "other" / "t1"): (PREPARED,)})
+    running = runner(reef, tmp_path, lab, environment="e2b", task_images=images)
+    with pytest.raises(ValueError, match="list no task at"):
+        running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 2)
+    assert lab.calls == [] and lab.builds == []
+    with pytest.raises(TaskRolloutError, match="only an e2b runner starts prepared images"):
+        runner(reef, tmp_path, lab, environment="docker", task_images=images)
 
 
 def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(

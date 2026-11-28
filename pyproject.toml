@@ -28,7 +28,7 @@ dependencies = [
     # generator service play Harbor tasks with reef-eval.
     "harbor>=0.25,<0.26",
     "pyyaml",
-    "reef-client>=0.4.0",
+    "reef-client>=0.4.4",
     "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",
     "tenacity>=9.1.2",  # Harbor's retry policy in the E2B environment subclass.
