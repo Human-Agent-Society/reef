@@ -15,6 +15,7 @@ from typing import Any
 
 from reef.core.atif_payloads import (
     OPENAI_CHAT,
+    OPENAI_RESPONSES,
     atif_agent,
     canonical_json,
     folded_steps,
@@ -120,7 +121,7 @@ class TrajectoryBuilder:
         """Add the messages of ``record`` that the last record did not have, and its responses. The last agent step
         of the responses carries the ATIF ``metrics`` of the record's response (``response_metrics``): its token
         counts, and its token IDs and log probabilities when the response has them."""
-        provider = payload_provider(record.payload) or OPENAI_CHAT
+        provider = message_provider(record.payload)
         request, responses = exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(self.history, request, strict=False):
@@ -164,7 +165,7 @@ class TrajectoryBuilder:
         if isinstance(model, str):
             agent["model_name"] = model
         if "tools" in last.payload:
-            agent.update(atif_agent(last.payload["tools"], payload_provider(last.payload) or OPENAI_CHAT))
+            agent.update(atif_agent(last.payload["tools"], message_provider(last.payload)))
         reef: dict[str, Any] = {"source_agent_record_id": primary, "reward": reward, "feedback": feedback}
         if self.include_records:
             reef["records"] = list(self.kept)
@@ -226,6 +227,20 @@ def has_image_content(payload: Mapping[str, object]) -> bool:
                 for key in ("content", "output", "source", "message", "choices", "observation", "results")
             )
     return False
+
+
+def message_provider(payload: Mapping[str, Any]) -> str:
+    """The provider whose message forms the request and the response messages of ``payload`` take
+    (``exchange_messages``).
+
+    It is ``payload_provider`` for a payload with a message list. A Responses call may send its ``input`` as one
+    string, which has no message list; its response items are still Responses items, so the provider is
+    ``OPENAI_RESPONSES``. Any other payload is read as a Chat Completions call.
+    """
+    provider = payload_provider(payload)
+    if provider is not None:
+        return provider
+    return OPENAI_RESPONSES if isinstance(payload.get("input"), str) else OPENAI_CHAT
 
 
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:

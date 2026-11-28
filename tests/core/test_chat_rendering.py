@@ -32,6 +32,14 @@ def test_every_agent_turn_trains_and_the_turns_between_are_masked() -> None:
     assert rendered.loss_mask == [1, 1, 0, 0, 0, 1]
 
 
+def test_a_message_of_text_parts_trains_the_same_tokens_as_its_text() -> None:
+    # An imported ATIF document may keep a message as text parts; ATIF's own writer joins them with no separator.
+    parts = [{"type": "text", "text": "pa"}, {"type": "text", "text": "th"}]
+    (whole,) = render_trajectory(CharTemplate(), trajectory(step("user", "ls"), step("agent", "path")))
+    (split,) = render_trajectory(CharTemplate(), trajectory(step("user", "ls"), {"source": "agent", "message": parts}))
+    assert split.tokens == whole.tokens
+
+
 def test_copied_context_trains_nothing_and_the_steps_after_the_last_trained_turn_are_left_out() -> None:
     (rendered,) = render_trajectory(
         CharTemplate(),
