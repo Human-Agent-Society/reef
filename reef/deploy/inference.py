@@ -1,0 +1,417 @@
+"""Assemble external-provider or managed inference and their Reef HTTP process."""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import secrets
+import socket
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from reef.api.settings import ServiceSettings
+from reef.deploy.config_utils import DeployConfigError
+from reef.deploy.process import log_status
+from reef.deploy.service_config import service_config_from_mapping
+from reef.execution.executor.arguments import native_arguments
+from reef.execution.processes import http_readiness_command
+from reef.inference.http import PROVIDER_APIS
+from reef.inference.remote.config import RemoteInferenceSettings
+
+
+@dataclass(frozen=True)
+class InferenceCommand:
+    """Native command bindings and readiness for an OpenAI-compatible engine."""
+
+    command: tuple[str, ...]
+    health_path: str
+    reserved_options: tuple[str, ...] = ()
+
+
+INFERENCE_COMMANDS = {
+    "sglang": InferenceCommand(
+        command=(
+            "{python}",
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "{model_path}",
+            "--served-model-name",
+            "{served_model_name}",
+            "--host",
+            "{host}",
+            "--port",
+            "{port}",
+            "--tp",
+            "{tensor_parallel_size}",
+        ),
+        health_path="/health",
+        reserved_options=(
+            "model",
+            "tp-size",
+            "tensor-parallel-size",
+            "config",
+            "config-file",
+            "yaml-config",
+            "api-key",
+            "dp",
+            "dp-size",
+            "data-parallel-size",
+            "nnodes",
+            "node-rank",
+            "dist-init-addr",
+        ),
+    ),
+    "vllm": InferenceCommand(
+        command=(
+            "{python}",
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            "{model_path}",
+            "--served-model-name",
+            "{served_model_name}",
+            "--host",
+            "{host}",
+            "--port",
+            "{port}",
+            "--tensor-parallel-size",
+            "{tensor_parallel_size}",
+        ),
+        health_path="/health",
+        reserved_options=(
+            "tp",
+            "tp-size",
+            "api-key",
+            "dp",
+            "data-parallel-size",
+            "pp",
+            "pipeline-parallel-size",
+            "nnodes",
+            "node-rank",
+            "master-addr",
+            "master-port",
+            "headless",
+        ),
+    ),
+}
+
+
+def prepare_inference(config: dict[str, Any], settings: ServiceSettings) -> dict[str, Any]:
+    """Resolve launch choices once, before model downloads or service creation."""
+    backend = settings.inference_backend or "sglang"
+    definition = INFERENCE_COMMANDS.get(backend)
+    if definition is None:
+        raise DeployConfigError(f"managed local inference supports: {', '.join(sorted(INFERENCE_COMMANDS))}")
+    parallel_size = settings.tensor_parallel_size if settings.tensor_parallel_size is not None else 1
+    if parallel_size < 1:
+        raise DeployConfigError("--inference.tensor-parallel-size must be positive")
+    num_gpus = settings.inference_num_gpus if settings.inference_num_gpus is not None else parallel_size
+    if num_gpus != parallel_size:
+        raise DeployConfigError(
+            "standalone inference launches one engine; inference.num-gpus must equal inference.tensor-parallel-size"
+        )
+    if settings.upstream_url or settings.upstream_model or settings.upstream_api != "openai":
+        raise DeployConfigError("--inference.model-path cannot be combined with upstream provider selection")
+    reserved = {token[2:] for token in definition.command if token.startswith("--")}
+    extra_args = native_arguments(settings.inference_options, reserved=reserved | set(definition.reserved_options))
+    python = os.environ.get("REEF_PYTHON", sys.executable)
+    port = free_loopback_port(settings.port)
+    endpoint = f"http://127.0.0.1:{port}"
+    config["reef"].update(
+        inference_backend=backend,
+        tensor_parallel_size=parallel_size,
+        inference_num_gpus=num_gpus,
+        upstream_url=endpoint,
+        upstream_model=settings.model_path,
+        upstream_api_key=None,
+    )
+    bindings = {
+        "python": python,
+        "model_path": "${reef.model_path}",
+        "served_model_name": settings.model_path,
+        "host": "127.0.0.1",
+        "port": str(port),
+        "tensor_parallel_size": str(parallel_size),
+    }
+    return {
+        "name": backend,
+        "executor": "uni",
+        "endpoint": endpoint,
+        "command": [*(token.format_map(bindings) for token in definition.command), *extra_args],
+        "ready": http_readiness_command(python, endpoint + definition.health_path),
+        "ready_timeout": config.get("ready_timeout", 3600),
+    }
+
+
+def free_loopback_port(reserved: int) -> int:
+    """A free loopback port other than ``reserved``, the Reef HTTP service's port.
+
+    The HTTP child and the process that listens on the port share one
+    resolved endpoint. The actual server bind remains authoritative if another
+    process races it.
+    """
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        if port == reserved:
+            with socket.socket() as alternative:
+                alternative.bind(("127.0.0.1", 0))
+                port = alternative.getsockname()[1]
+    return port
+
+
+#: The service name of an inference component that ``reef serve`` starts on this host.
+INFERENCE_COMPONENT_SERVICE = "inference"
+
+
+def local_inference_component(config: dict[str, Any], settings: ServiceSettings) -> dict[str, Any]:
+    """Start an inference component on this host, and record its address as the ``inference.remote`` section.
+
+    The component (``python -m reef.inference.remote``) listens on a free
+    loopback port and may start only ``inference.backend`` engines. Its two
+    tokens are generated into this process's environment, unless set, so the
+    component and the HTTP service inherit them. It joins the Ray cluster of
+    the deployment (``RAY_ADDRESS``, which ``reef serve`` sets when the
+    training backend runs on Ray, or ``training.ray-address``), so its
+    engines and the training workers reserve separate GPUs; otherwise it
+    starts its own.
+    """
+    python = os.environ.get("REEF_PYTHON", sys.executable)
+    port = free_loopback_port(settings.port)
+    remote = RemoteInferenceSettings(url=f"http://127.0.0.1:{port}")
+    control_token = os.environ.setdefault(remote.control_token_env, secrets.token_urlsafe(32))
+    if os.environ.setdefault(remote.inference_token_env, secrets.token_urlsafe(32)) == control_token:
+        raise DeployConfigError(f"{remote.control_token_env} and {remote.inference_token_env} must differ")
+    config["reef"]["inference_remote"] = remote.to_dict()
+    command = [
+        python,
+        "-m",
+        "reef.inference.remote",
+        "--engine",
+        settings.inference_backend or "sglang",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--work-dir",
+        str(Path(config.get("run_dir", ".reef/run")) / INFERENCE_COMPONENT_SERVICE),
+    ]
+    if settings.ray_address:
+        command.extend(["--ray-address", settings.ray_address])
+    return {
+        "name": INFERENCE_COMPONENT_SERVICE,
+        "executor": "uni",
+        "endpoint": remote.url,
+        "command": command,
+        # The component answers only authenticated control calls, so readiness is an accepted connection.
+        "ready": [
+            python,
+            "-c",
+            "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5).close()",
+            str(port),
+        ],
+        "ready_timeout": settings.training_ready_timeout,
+    }
+
+
+# Only these environment fallbacks belong to configuration-free startup.
+# Existing files continue to opt in through their own environment references.
+#: The public fields command-line startup reads from the environment.
+_ENVIRONMENT_FIELDS = {
+    ("inference", "upstream-url"): "REEF_UPSTREAM_URL",
+    ("inference", "upstream-model"): "REEF_UPSTREAM_MODEL",
+    ("inference", "upstream-api-key"): "REEF_UPSTREAM_API_KEY",
+    ("reef", "token"): "REEF_TOKEN",
+}
+_CONFIGURED_FIELDS = {
+    "teacher_model_path",
+    "teacher_num_gpus",
+    "teacher_port",
+    "teacher_options",
+    "teacher_timeout",
+    "inference_url",
+    "inference_remote",
+    "inference_handler_factory",
+    "inference_handler_config",
+    "ray_address",
+    "ray_namespace",
+    "train_timeout_s",
+    "training_backend",
+    "training_ready_timeout",
+    "training_settings",
+    "training_backend_options",
+    "activation_settings",
+    "pipeline_settings",
+}
+
+
+def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
+    """The public layout that startup without a file begins from: only the environment fallbacks."""
+    config: dict[str, Any] = {}
+    for (section, name), variable in _ENVIRONMENT_FIELDS.items():
+        if environ.get(variable, "").strip():
+            config.setdefault(section, {})[name] = environ[variable]
+    return config
+
+
+def assemble_provider_services(config: dict[str, Any]) -> None:
+    """Validate typed inputs and add the owned HTTP process and readiness probe."""
+    unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
+    # The pipeline and activation sections belong to any recipe; the recipe reads them.
+    if unsupported or "training" in config:
+        raise DeployConfigError(
+            "select a weight-training recipe for training; Reef does not start custom process stacks"
+        )
+    settings = service_config_from_mapping(config)
+    if config.get("reef", {}).get("runtime"):
+        if not settings.host.strip() or not 1 <= settings.port <= 65535:
+            raise DeployConfigError("invalid reef.host or reef.port")
+        config["services"] = [http_service(config, settings)]
+        return
+    local_service = None
+    if settings.model_path:
+        # Validate the public bind and timeout before checking GPU dependencies.
+        if not 1 <= settings.port <= 65535 or settings.inference_timeout_s <= 0:
+            raise DeployConfigError("local inference requires a valid --reef.port and positive --inference.timeout-s")
+        local_service = prepare_inference(config, settings)
+        settings = service_config_from_mapping(config)
+    elif (
+        settings.inference_backend is not None
+        or settings.tensor_parallel_size is not None
+        or settings.inference_num_gpus is not None
+        or settings.inference_options
+    ):
+        raise DeployConfigError(
+            "--inference.backend and --inference.tensor-parallel-size require --inference.model-path"
+        )
+    if not settings.upstream_url or not settings.upstream_model:
+        raise DeployConfigError(
+            "provider startup requires --inference.upstream-url and --inference.upstream-model "
+            "(or their REEF_UPSTREAM_* variables).\n"
+            "  Example: reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model\n"
+            "  Or start local inference: reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct\n"
+            "  Alternatively pass -c <file>"
+        )
+    try:
+        upstream = urlsplit(settings.upstream_url)
+        valid_url = upstream.scheme in {"http", "https"} and bool(upstream.hostname)
+        if upstream.port is not None and not 1 <= upstream.port <= 65535:
+            valid_url = False
+    except ValueError:
+        valid_url = False
+    if not valid_url:
+        raise DeployConfigError("--inference.upstream-url must be an HTTP(S) URL with a valid host and port")
+    if not settings.host or not 1 <= settings.port <= 65535:
+        raise DeployConfigError(
+            "provider startup requires a non-empty --reef.host and --reef.port between 1 and 65535"
+        )
+    if settings.upstream_api not in PROVIDER_APIS:
+        raise DeployConfigError("--inference.upstream-api must be openai, responses, or anthropic")
+    if settings.inference_timeout_s <= 0:
+        raise DeployConfigError("--inference.timeout-s must be positive")
+    config["services"] = [http_service(config, settings)]
+    if local_service is not None:
+        config["services"][0]["depends_on"] = [local_service["name"]]
+        config["services"].insert(0, local_service)
+
+
+def local_service_url(settings: ServiceSettings) -> str:
+    """The Reef HTTP service's address on its own host: a wildcard bind is reached through loopback."""
+    if settings.host == "0.0.0.0":
+        host = "127.0.0.1"
+    elif settings.host == "::":
+        host = "::1"
+    else:
+        host = settings.host
+    host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"http://{host}:{settings.port}"
+
+
+def http_service(config: Mapping[str, Any], settings: ServiceSettings) -> dict[str, Any]:
+    """Build the standard local HTTP child and its readiness probe. Check authentication first."""
+    require_authentication(settings)
+    endpoint = local_service_url(settings)
+    python = os.environ.get("REEF_PYTHON", sys.executable)
+    return {
+        "name": "reef",
+        "executor": "uni",
+        "command": [python, "-m", "reef.deploy.service_process"],
+        "endpoint": endpoint,
+        "ready": http_readiness_command(python, f"{endpoint}/healthz"),
+        "ready_timeout": config.get("ready_timeout", 30),
+    }
+
+
+def require_authentication(settings: ServiceSettings) -> None:
+    """Refuse to serve without bearer tokens on an address that other machines can reach."""
+    if settings.tokens or settings.allow_unauthenticated or is_loopback_host(settings.host):
+        return
+    raise DeployConfigError(
+        f"reef.host {settings.host!r} accepts connections from other machines, but reef.tokens is empty. "
+        "Set reef.tokens, bind reef.host to 127.0.0.1, or set reef.allow-unauthenticated to true."
+    )
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return True when only this machine can connect to host."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def is_local_path(value: str) -> bool:
+    """True if the value is an existing local filesystem path, False if it's an HF repo ID."""
+    return Path(os.path.expanduser(value)).exists()
+
+
+def resolve_hf_snapshot(repo_id: str) -> str:
+    """Download an HF repo ID to a local snapshot and return the local path.
+
+    If the value is already a local path, return it unchanged.
+    """
+    value = os.path.expanduser(repo_id)
+    if is_local_path(repo_id):
+        return value
+    if "/" not in value or value.startswith(("/", "~")):
+        raise DeployConfigError(
+            f"model path is not a local directory and not a valid HF repo ID: {repo_id}\n"
+            f"  set reef.model_path to a local path or an HF repo ID like 'Qwen/Qwen2.5-1.5B-Instruct'"
+        )
+    try:
+        from reef.artifact.sources import download_huggingface_snapshot, parse_huggingface_source
+
+        snapshot = download_huggingface_snapshot(parse_huggingface_source(value))
+        return str(snapshot.local_path)
+    except Exception as exc:
+        if isinstance(exc, DeployConfigError):
+            raise
+        raise DeployConfigError(f"failed to download HF model {value}: {exc}") from exc
+
+
+def resolve_model_paths(config: dict[str, Any]) -> None:
+    """Download HF repo IDs for model paths and replace them with local snapshot paths.
+
+    Handles ``reef.model_path``, ``reef.teacher_model_path`` and ``training.megatron_checkpoint_path``.
+    """
+    reef_section = config.get("reef")
+    if isinstance(reef_section, dict):
+        for name in ("model_path", "teacher_model_path"):
+            if isinstance(reef_section.get(name), str):
+                resolved = resolve_hf_snapshot(reef_section[name])
+                if resolved != reef_section[name]:
+                    log_status(f"downloaded HF model {reef_section[name]} -> {resolved}")
+                    reef_section[name] = resolved
+    training_section = config.get("training")
+    if isinstance(training_section, dict) and isinstance(training_section.get("megatron_checkpoint_path"), str):
+        resolved = resolve_hf_snapshot(training_section["megatron_checkpoint_path"])
+        if resolved != training_section["megatron_checkpoint_path"]:
+            log_status(f"downloaded HF model {training_section['megatron_checkpoint_path']} -> {resolved}")
+            training_section["megatron_checkpoint_path"] = resolved

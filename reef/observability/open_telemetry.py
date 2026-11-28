@@ -36,8 +36,8 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import exchange_messages
 from reef.core.version import __version__
 from reef.observability.tracing import TracingSettings
-from reef.storage.commits import CommitRecord
-from reef.storage.observer import RecordObserver
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.observer import RecordObserver
 
 #: Instrumentation scope name reported with every span.
 INSTRUMENTATION_SCOPE = "reef"

@@ -5,7 +5,7 @@ artifacts holding a ``tinker-checkpoint.json`` manifest that names the
 immutable remote sampler; this module serves whatever sampler a frozen
 artifact names, through Tinker's SDK, as an OpenAI text chat endpoint. The
 service returns and records no training tensors (``provider_response`` of
-``reef.service.inference_service``). The sampling itself is
+``reef.api.inference_service``). The sampling itself is
 ``reef.tinker.sampling``, which the trainer's rollouts use too, with their
 training tensors;
 the manifest in the artifact is the whole contract about which sampler
@@ -29,6 +29,7 @@ from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.core.values import JsonValue
 from reef.inference.interfaces import (
     InferenceArtifact,
     InferenceHandler,
@@ -164,8 +165,11 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def serves_any_artifact(self) -> bool:
         return True
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
-        """``artifact``'s own sampler on the service: a call that names it samples that artifact's weights."""
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
+        """``artifact``'s own sampler on the service: a call that names it samples that artifact's weights. The
+        service has no engine field, so ``serving_config`` changes nothing."""
         try:
             return ServedArtifact(artifact.artifact_id, self.base_url, self.sampler_path(artifact) or self._model)
         except ValueError:
@@ -256,11 +260,14 @@ class TinkerInferenceHandler(InferenceHandler):
 
 
 def chat_stream(response: dict[str, Any], payload: dict[str, Any]) -> InferenceStream:
-    """Emit a completed response as buffered OpenAI SSE, keeping it as the record."""
+    """Emit a completed response as buffered OpenAI SSE, keeping it as the record. The stream carries every field
+    that a client of the whole response gets: all of it but the private ``training`` block, which the service keeps
+    from clients (``provider_response``)."""
     include_usage = bool((payload.get("stream_options") or {}).get("include_usage"))
+    sent = {field: value for field, value in response.items() if field != "training"}
 
     async def chunks() -> AsyncIterator[bytes]:
-        for event in synthesize_sse_events(response, include_usage=include_usage):
+        for event in synthesize_sse_events(sent, include_usage=include_usage):
             yield event.encode()
 
     return InferenceStream(

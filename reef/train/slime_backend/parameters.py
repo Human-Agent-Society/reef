@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.learning_rate import LEARNING_RATE_DECAY_STYLES, LearningRateSchedule
 from reef.train.slime_backend.dataset import DatasetSettings
 from reef.train.slime_backend.objectives import resolve_objective

@@ -22,14 +22,14 @@ from reef.core.job_data import TaskSample
 from reef.core.reports import ReportValidationError
 from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
-from reef.pipeline_context import PipelineContext
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.record2sample.traces import InferenceSamples, TraceSamples
-from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.storage.commits import CommitRecord
-from reef.storage.data import NewItem
-from reef.storage.samples import SampleStore, consumed_sample_id
+from reef.samples.context import PipelineContext
+from reef.samples.traces import InferenceSamples, TraceSamples
+from reef.storage.data.store import NewItem
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id
 from reef.train.pipeline import PipelineSettings, TrainingPipeline
+from reef.train.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.train.types import JobData
 
 
@@ -56,7 +56,7 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
 
 #: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
 INFERENCE_STAGES = {
-    "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
+    "record2sample": {"module": "reef.samples.traces:InferenceSamples"},
 }
 
 

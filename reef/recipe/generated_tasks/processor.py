@@ -12,7 +12,8 @@ The stage hands each train task of a complete generation to the pipeline
 tasks then train like any other sample: ``GeneratedTaskJobData`` makes one task job of the next job's
 tasks, and the commit that submits the job counts them trained. The training component rolls the
 tasks out on its own sampler and trains on their rollouts; Reef runs no rollout of them. When the job's end
-commits, the stage saves the result of each task that trained and has none, from the job's metrics; when
+commits, the stage saves the result of each task of that job, and of an earlier job that a new training start
+cancelled, that has none, from the job's metrics; a task of a later job gets its result at that job's end. When
 every train task of a generation has a result, the next job sends the generation's results to the generator.
 
 A train task waits until a committed job trains it, and is unfinished until it has a result. The first round
@@ -54,7 +55,6 @@ from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflictError, extend_split_by_source
 from reef.core.values import require_integer
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
-from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import (
     GeneratedTaskResult,
     GeneratorState,
@@ -80,13 +80,14 @@ from reef.recipe.generated_tasks.training import (
     task_items,
     train_task_names,
 )
-from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
-from reef.record2sample.generator.client import Generator, HttpGenerator
-from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.record2sample.reports import report_score
-from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.storage.samples import TrainerSamples
-from reef.storage.tasks import GenerationState, SplitName, TaskConflictError, TaskStore, TaskStoreError
+from reef.samples import Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.context import PipelineContext
+from reef.samples.generator.client import Generator, HttpGenerator
+from reef.samples.generator.inputs import TaskGenerationRequest
+from reef.samples.reports import report_score
+from reef.storage.data.tasks import GenerationState, SplitName, TaskConflictError, TaskStore, TaskStoreError
+from reef.storage.scenario.samples import TrainerSamples
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)
@@ -394,26 +395,46 @@ class GeneratedTaskSettings(PluginSettings):
     ``GeneratedTaskSamples`` takes its ``TaskTraining`` from it (``task_training``).
     """
 
-    rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
+    rounds: int = config_option(
+        0,
+        help=(
+            "The rounds of task generation; 0 generates nothing. A round counts when its generation "
+            "finishes or runs out of attempts."
+        ),
+    )
     jobs_per_round: int = config_option(
         DEFAULT_JOBS_PER_ROUND,
         help="The finished task jobs after which the next round starts; 0 starts it when the last round ends.",
     )
-    source_records_per_round: int = config_option(0, help="The source sessions that each round takes, at most.")
-    source_tag: str = config_option("", help="The name=value tag that marks a source session.")
+    source_records_per_round: int = config_option(
+        0, help="The source sessions that each round takes, at most; 0 generates from the description only."
+    )
+    source_tag: str = config_option(
+        "",
+        help=(
+            "The name=value tag that marks a source session: each of its model calls carries the header "
+            "x-reef-tag-<name>: <value>. Required when source-records-per-round is above 0."
+        ),
+    )
     refill_tasks: int | None = config_option(
         None,
-        help="Without a training pool, the next round starts only while fewer saved tasks than this wait to train; "
-        "default 1.",
+        help=(
+            "Without a training pool, the next round starts only while fewer saved tasks than this "
+            "wait to train; default 1. Startup refuses it when pool-capacity is above 0."
+        ),
     )
 
     generator: Mapping[str, Any] | None = config_option(
         None, help="The TaskGenerator class (module) and its config. Required with rounds."
     )
-    description: str = config_option("", help="What the tasks are about; every generation request carries it.")
-    generator_url: str = config_option("", help="The generator service, ${endpoints.generator}.")
+    description: str = config_option(
+        "", help="What the tasks are about; every generation request carries it. Required when rounds is above 0."
+    )
+    generator_url: str = config_option(
+        "", help="The generator service, ${endpoints.generator}. Required when rounds is above 0."
+    )
     eval_fraction: float = config_option(
-        DEFAULT_EVAL_FRACTION, help="The fraction of new source groups that go to the eval split."
+        DEFAULT_EVAL_FRACTION, help="The fraction of new source groups that go to the eval split, from 0 to 1."
     )
     split_seed: int = config_option(DEFAULT_SPLIT_SEED, help="The fixed seed of the task store's train/eval split.")
     generation_attempts: int = config_option(
@@ -427,20 +448,27 @@ class GeneratedTaskSettings(PluginSettings):
         0, help="Above 0, tasks train again, and rounds start only while fewer tasks than this are active."
     )
     review_interval: int | None = config_option(
-        None, help="The task jobs between two pool reviews; 0 reviews nothing; default 0."
+        None,
+        help=(
+            "The task jobs between two pool reviews; 0 reviews nothing; default 0. Every review key "
+            "needs pool-capacity above 0."
+        ),
     )
     review_window: int | None = config_option(
-        None, help="The most recent rewards of a task that a review reads; default 2."
+        None, help="The most recent rewards of a task that a review reads, at least 2; default 2."
     )
     review_band_low: float | None = config_option(
-        None, help="A review retires a task whose pass rate is below this; default 0."
+        None, help="A review retires a task whose pass rate is below this; from 0 to review-band-high; default 0."
     )
     review_band_high: float | None = config_option(
-        None, help="A review retires a task whose pass rate is above this; default 1."
+        None, help="A review retires a task whose pass rate is above this; from review-band-low to 1; default 1."
     )
     review_min_reward_std: float | None = config_option(
         None,
-        help="A review retires a task whose rewards have a smaller standard deviation; 0 turns this off; default 0.",
+        help=(
+            "A review retires a task whose rewards have a smaller population standard deviation; 0 "
+            "turns this off; default 0."
+        ),
     )
 
     def __post_init__(self) -> None:

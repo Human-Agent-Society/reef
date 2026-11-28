@@ -85,6 +85,8 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "user-guide/recipes/openclawrl.rst",
       "user-guide/recipes/gepa.rst",
       "user-guide/operate.rst",
+      "user-guide/split-services.rst",
+      "user-guide/storage.rst",
       "user-guide/troubleshooting.rst",
     ],
   },
@@ -92,14 +94,21 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     // Writing your own method against Reef's contracts.
     title: "Developer Guide",
     files: [
+      // The recipe guide: the overview, then one page for each service that runs a plug-in.
       "developer-guide/write-a-recipe.rst",
+      "developer-guide/recipe-samples-service.rst",
+      "developer-guide/task-generators.rst",
+      "developer-guide/recipe-control-service.rst",
+      "developer-guide/recipe-training-service.rst",
+      "developer-guide/loss-families.rst",
       "developer-guide/write-a-harness-method.rst",
+      "developer-guide/components.rst",
+      // Integrations beside a recipe.
+      "developer-guide/training-backends.rst",
       "developer-guide/harness-adapters.rst",
       "developer-guide/sandboxes.rst",
+      "developer-guide/serving-runtimes.rst",
       "developer-guide/executors.rst",
-      "developer-guide/loss-families.rst",
-      "developer-guide/components.rst",
-      "developer-guide/processors.rst",
     ],
   },
   {
@@ -107,12 +116,35 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     files: [
       "reference/cli.rst",
       "reference/configuration.rst",
+      "reference/configuration-settings.rst",
+      "reference/configuration-inference.rst",
+      "reference/configuration-training.rst",
+      "reference/configuration-recipe.rst",
+      "reference/configuration-harness.rst",
+      "reference/configuration-generated-tasks.rst",
+      "reference/configuration-routing.rst",
+      "reference/configuration-observability.rst",
     ],
   },
   {
     title: "API Reference",
     files: [
       "reference/http-api.rst",
+      "reference/http-api-inference.rst",
+      "reference/http-api-routing.rst",
+      "reference/http-api-records.rst",
+      "reference/http-api-data-items.rst",
+      "reference/http-api-data-upload.rst",
+      "reference/http-api-data-sets.rst",
+      "reference/http-api-scenarios.rst",
+      "reference/http-api-serving.rst",
+      "reference/http-api-artifacts.rst",
+      "reference/http-api-training.rst",
+      "reference/http-api-samples.rst",
+      "reference/http-api-evaluation.rst",
+      "reference/http-api-evaluation-calls.rst",
+      "reference/http-api-harness.rst",
+      "reference/http-api-status.rst",
       "reference/python-api.rst",
       "reference/glossary.rst",
     ],
@@ -127,9 +159,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     title: "Contributing",
     files: [
       "contributing/codebase-structure.rst",
-      "contributing/adding-components.rst",
       "contributing/development.rst",
-      "contributing/testing.rst",
     ],
   },
 ];
@@ -472,21 +502,21 @@ function tableOfContents(html: string) {
 // Pages without an authored summary continue to use their first paragraph.
 const docDescriptions: Partial<Record<string, string>> = {
   "getting-started/intro":
-    "Learn how Reef connects inference, feedback, and continual learning to evolve model weights or agent harnesses.",
+    "Train model weights or update an agent's harness from feedback.",
   "getting-started/installation":
-    "Install Reef for harness evolution on a laptop, GPU-based model training, or client-only access to an existing deployment.",
+    "Install the service, GPU training image, or client.",
   "getting-started/quickstart":
-    "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the snapshot history.",
+    "Send a model request and report a score using its receipt.",
   "getting-started/harness-tutorial":
-    "Start Reef, connect your coding agent, give feedback on a session, and see Reef evolve the agent's harness from it.",
+    "Use feedback from a pi session to update its rules.",
   "user-guide/recipes":
-    "Compare Reef recipes for model training and harness evolution. Choose a method based on your workload, feedback, and compute requirements.",
+    "Choose a recipe for your workload, feedback and compute budget.",
   "user-guide/evolve-your-harness":
-    "Evolve agent rules, prompts, skills, and configuration with Reef. Evaluate candidate changes and publish accepted harness versions without a GPU.",
+    "Propose, test and publish changes to an agent's harness.",
   "user-guide/evolve-your-model":
-    "Configure Reef to train model weights from feedback and serve accepted updates through the same inference endpoint.",
+    "Train model weights from feedback and serve selected checkpoints.",
   "reference/http-api":
-    "Use the Reef HTTP API to send inference requests, report feedback, inspect scenarios, and manage model and harness artifacts.",
+    "Find routes for inference, feedback, scenarios, data and artifacts.",
 };
 
 function loadDoc(sourcePath: string): Doc {

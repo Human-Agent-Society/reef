@@ -8,11 +8,11 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 
 import recipes.sao  # noqa: F401  (registers the sao objective and family)
+from reef.api.serving import serving_runtime_config
 from reef.core.errors import DeployConfigError, RuntimeConfigError
 from reef.core.weight_layout import ArtifactFormat
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
-from reef.service.deploy.serving import serving_runtime_config
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend.launch import SlimeDeployment, component_factory, slime_arguments
 

@@ -17,7 +17,7 @@ def test_owner_suites_and_fixture_trees_are_accepted(tmp_path: Path, policy: Mod
     (tmp_path / "recipes/beta/coral").mkdir(parents=True)
     paths = [
         Path("tests/inference/test_scheduler.py"),
-        Path("tests/reef_recipe/test_composite_recipe.py"),
+        Path("tests/recipe/test_composite_recipe.py"),
         Path("tests/reef_client/test_reef_client.py"),
         Path("tests/recipes/coral/test_reports.py"),
         Path("tests/harness/data/harness_goldens/native/test_task.py"),
