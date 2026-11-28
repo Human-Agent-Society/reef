@@ -2,7 +2,7 @@
 
 import time
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceBackend
 
 

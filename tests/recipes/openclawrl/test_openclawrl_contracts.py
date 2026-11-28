@@ -462,7 +462,7 @@ REQUEST = ({"role": "user", "content": "do my homework"},)
 
 
 def _judge_one_turn(judge):
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     context = PipelineContext("s")
 
@@ -516,7 +516,7 @@ def test_processor_attaches_teacher_candidates_that_the_component_renders() -> N
     from recipes.openclawrl import OpenClawRLJobData
     from recipes.openclawrl.turns import TurnJudgment
     from reef.core.records_types import AgentRecord, RequestType
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     class FakeWorker:
         def __init__(self) -> None:

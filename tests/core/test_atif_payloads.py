@@ -323,6 +323,54 @@ def test_a_trajectory_of_records_keeps_each_response_metrics_on_its_agent_step()
     Trajectory.model_validate(trajectory)
 
 
+READ_CALL = {"id": "r1", "type": "function", "function": {"name": "read", "arguments": '{"path": "a.txt"}'}}
+
+
+def test_a_chat_reply_gives_its_reasoning_field_as_the_reasoning_of_its_step() -> None:
+    # vLLM writes a reply's reasoning as ``reasoning``, not ``reasoning_content``.
+    message = {"role": "assistant", "content": "", "reasoning": "Read it first", "tool_calls": [READ_CALL]}
+    payload = {"messages": [{"role": "user", "content": "Read"}], "response": {"choices": [{"message": message}]}}
+    call = atif_call(payload)
+    assert call is not None
+    assert call.reply[0][0]["reasoning_content"] == "Read it first"
+    assert canonical_json(provider_payload(call)) == canonical_json(payload), "the patch restores the reply's field"
+    both = atif_call({**payload, "response": {"choices": [{"message": {**message, "reasoning_content": "Other"}}]}})
+    assert both is not None and both.reply[0][0]["reasoning_content"] == "Other"
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+def test_a_trajectory_holds_once_a_reply_that_the_agent_resends_with_its_reasoning(field: str) -> None:
+    question = {"role": "user", "content": "Read"}
+    first = {
+        "messages": [question],
+        "response": {
+            "choices": [
+                {"message": {"role": "assistant", "content": "", field: "Read it first", "tool_calls": [READ_CALL]}}
+            ]
+        },
+    }
+    second = {
+        "messages": [
+            question,
+            # An agent sends the reasoning back as ``reasoning_content``, whichever field the engine wrote.
+            {"role": "assistant", "content": "", "reasoning_content": "Read it first", "tool_calls": [READ_CALL]},
+            {"role": "tool", "tool_call_id": "r1", "content": "file"},
+        ],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "Done"}}]},
+    }
+    records = [
+        AgentRecord(f"r{index}", "s", RequestType.INFERENCE, payload, float(index))
+        for index, payload in enumerate((first, second))
+    ]
+    trajectory = make_trajectory(records).trajectory
+    agent = [step for step in trajectory["steps"] if step["source"] == "agent"]
+    assert [step["message"] for step in agent] == ["", "Done"]
+    assert not any(step.get("is_copied_context") for step in agent)
+    assert agent[0]["reasoning_content"] == "Read it first"
+    assert agent[0]["observation"]["results"][0]["content"] == "file"
+    Trajectory.model_validate(trajectory)
+
+
 IMAGE_URL = "data:image/png;base64,AAAA"
 ANTHROPIC_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
 

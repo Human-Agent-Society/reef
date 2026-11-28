@@ -3,7 +3,7 @@
 Slime trains in the HTTP service's process: the runtime factory builds a
 ``SlimeTrainingComponent`` that owns its Ray session and training workers.
 Serving is not Slime's: the deployment's ``inference`` section configures it
-(``reef.service.deploy.serving``), and an activated checkpoint reaches the
+(``reef.api.serving``), and an activated checkpoint reaches the
 serving engines as files. Each job runs in a driver of its own, which Slime
 places; Slime's native options in ``training.options`` reach it unread,
 including those of the rollout engines that a task job's rollouts call
@@ -23,7 +23,7 @@ from reef.core.errors import DeployConfigError, RuntimeConfigError
 from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.execution.executor.config import role_executor_settings, select_executor
 from reef.execution.processes import http_readiness_command
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.component import TrainingBackendFacts, TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import TrainingDeployment
 from reef.train.slime_backend.facts import SlimeFacts

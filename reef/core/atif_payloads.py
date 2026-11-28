@@ -241,6 +241,26 @@ def source_of(role: Any) -> str:
     return "system" if role in ("system", "developer") else "user"
 
 
+#: The fields of a Chat Completions assistant message that can hold its reasoning text, the preferred one first.
+#: Most engines write ``reasoning_content``; vLLM writes ``reasoning``.
+CHAT_REASONING_FIELDS = ("reasoning_content", "reasoning")
+
+
+def chat_reasoning(message: Mapping[str, Any]) -> str | None:
+    """The reasoning text of a Chat Completions assistant message: the first non-empty string among its
+    ``CHAT_REASONING_FIELDS``, or ``None`` when it has none.
+
+    An agent resends a reply's reasoning as ``reasoning_content`` whichever field the engine wrote. Reading both
+    fields gives the reply and the resent turn one ATIF form, so a trajectory holds the turn once
+    (``TrajectoryBuilder.add``). The element's patch restores the message's own field.
+    """
+    for name in CHAT_REASONING_FIELDS:
+        value = message.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def openai_chat_elements(message: Mapping[str, Any], *, copied: bool) -> list[dict[str, Any]]:
     role = message.get("role")
     if role == "tool":
@@ -253,13 +273,12 @@ def openai_chat_elements(message: Mapping[str, Any], *, copied: bool) -> list[di
         if isinstance(call, Mapping)
     ]
     source = source_of(role)
-    reasoning = message.get("reasoning_content") if source == "agent" else None
     return [
         step(
             source,
             atif_message(message.get("content")),
             copied=copied,
-            reasoning_content=reasoning if isinstance(reasoning, str) else None,
+            reasoning_content=chat_reasoning(message) if source == "agent" else None,
             tool_calls=calls if source == "agent" else None,
         )
     ]

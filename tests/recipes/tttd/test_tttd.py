@@ -18,7 +18,7 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.record2sample import NoSamples
+from reef.samples import NoSamples
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -320,7 +320,7 @@ def test_tttd_rejects_and_releases_a_step_spanning_artifact_ids(caplog) -> None:
 
 @pytest.mark.unit
 def test_tttd_caches_policy_samples_at_push(monkeypatch) -> None:
-    from reef.record2sample import assembly as reported_module
+    from reef.samples import assembly as reported_module
 
     calls = 0
     make_trajectory = reported_module.make_trajectory

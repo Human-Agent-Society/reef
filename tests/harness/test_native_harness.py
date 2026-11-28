@@ -31,6 +31,7 @@ from tests.support.harness_render import (
 )
 from tests.support.trajectories import recorded_trajectory
 
+from reef.control.scenario.live_objects import LiveObjects
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
 from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
@@ -61,7 +62,6 @@ from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, 
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.scenario.live_objects import LiveObjects
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState

@@ -349,3 +349,29 @@ def test_vllm_facade_requires_a_tool_parser_for_tool_requests() -> None:
                 "tools": [{"type": "function", "function": {"name": "read", "parameters": {}}}],
             },
         )
+
+
+@pytest.mark.unit
+def test_an_anthropic_stream_carries_the_token_ids_and_log_probs_that_the_whole_answer_holds() -> None:
+    async def run(base_url, received):
+        backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
+        stream = await backend.inference_stream(
+            live_artifact(),
+            "/v1/messages",
+            {
+                "model": "served-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 2,
+                "logprobs": True,
+                "return_token_ids": True,
+            },
+        )
+        frames = b"".join([frame async for frame in stream.chunks]).decode()
+        events = [json.loads(line[len("data: ") :]) for line in frames.splitlines() if line.startswith("data: ")]
+        [delta] = [event for event in events if event["type"] == "message_delta"]
+        assert {field: delta[field] for field in ("logprobs", "token_ids")} == {
+            field: stream.record_response[field] for field in ("logprobs", "token_ids")
+        }
+        assert delta["token_ids"] == [20, 21]
+
+    asyncio.run(serve(generate_response(), run))

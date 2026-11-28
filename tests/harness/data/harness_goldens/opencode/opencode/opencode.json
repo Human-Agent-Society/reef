@@ -1,4 +1,9 @@
 {
+  "agent": {
+    "title": {
+      "disable": true
+    }
+  },
   "autoupdate": false,
   "enabled_providers": [
     "reef"

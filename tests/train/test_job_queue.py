@@ -25,13 +25,15 @@ from reef.artifact import (
     RepositoryBackendFactory,
 )
 from reef.artifact.components import ComponentChecks
+from reef.artifact.repository import StoredFiles
+from reef.control.scenario.live_objects import RecipeChecks
+from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import RootSource, SnapshotRef
 from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ArtifactFormat
-from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.observability.base import (
     ExperimentRun,
     ExperimentTracker,
@@ -39,11 +41,10 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.recipe import Recipe
-from reef.scenario.live_objects import RecipeChecks
-from reef.storage.data import MemoryDataStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.tasks import LocalTaskFileStore
-from reef.storage.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.coordination.work_queue import NewWork, WorkLeaseLostError
+from reef.storage.data.store import MemoryDataStore
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.sql.coordination import memory_coordination
 from reef.train.component import (
     JobCheckPendingError,
     JobStatus,
@@ -65,6 +66,7 @@ from reef.train.job_queue import (
     TrainingCheckWorker,
     TrainingJobWorker,
     cancel_request_jobs,
+    checkpoint_content,
     checkpoint_json,
     discard_ended_content,
     job_from_item,
@@ -259,14 +261,16 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
     listed = job_json(queue.read(JOBS_QUEUE, "j1"))["checkpoints"][0]
     assert listed["changed_parts"] == ["step-1"]
     # The worker stored the files of each checkpoint, and the queue names the stored content and no directory.
-    assert [(saved.content, saved.artifact_path) for saved in status.checkpoints] == [("j1:1", None), ("j1:2", None)]
-    assert sorted(listed) == ["changed_parts", "content", "metrics", "path", "step"] and listed["content"] == "j1:1"
-    assert (worker.backends("s").materialize_content("j1:2") / "weights.txt").read_text() == "step 2"
+    first, second = status.checkpoints
+    assert first.artifact_path is None and second.artifact_path is None
+    assert sorted(listed) == ["changed_parts", "content", "metrics", "path", "step"]
+    assert listed["content"] == first.content
+    assert (worker.backends("s").materialize_content(second.content) / "weights.txt").read_text() == "step 2"
     # Control commits by that name, so it needs no directory of the training service.
     shutil.rmtree(component.jobs_root)
     state = JobLoopState("steps:base", (RunningJob("j1", "steps:base"),))
     publication = JobLoop(view, scenario="s").poll(state).result
-    assert (publication.artifact.content, publication.artifact.local_path) == ("j1:1", None)
+    assert (publication.artifact.content, publication.artifact.local_path) == (first.content, None)
     assert publication.changed_kinds == {"step-1"}
     with pytest.raises(KeyError):
         view.status("unknown")
@@ -464,6 +468,63 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
 
 
 @pytest.mark.unit
+def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(tmp_path, monkeypatch):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    backends = registered_backends(tmp_path / "artifacts")
+    backend = backends("s")
+    data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    first_stored = threading.Event()
+    resume_first = threading.Event()
+    store = backend.store_content
+
+    def store_content(name, directory):
+        store(name, directory)
+        if name != job_records_content("j1") and directory == tmp_path / "first" / "j1" / "step-1":
+            first_stored.set()
+            assert resume_first.wait(WAIT_SECONDS)
+
+    monkeypatch.setattr(backend, "store_content", store_content)
+    first = TrainingJobWorker(
+        StepComponent(tmp_path / "first"), queue, data_store, backends, checks=ACCEPT_ALL, worker_id="training-1"
+    )
+    replacement = TrainingJobWorker(
+        StepComponent(tmp_path / "replacement"),
+        queue,
+        data_store,
+        backends,
+        checks=ACCEPT_ALL,
+        worker_id="training-2",
+    )
+    first_thread = threading.Thread(target=first.run_once)
+    first_thread.start()
+    try:
+        assert first_stored.wait(WAIT_SECONDS)
+        (abandoned,) = queue.read(JOBS_QUEUE, "j1").metadata[STORED_CONTENT_KEY]
+        assert queue.requeue_expired(now=time.time() + 60)
+        assert replacement.run_once()
+        view = JobQueueComponent(StepFacts(), queue)
+        assert view.status("j1").state == "finished"
+    finally:
+        resume_first.set()
+        first_thread.join(WAIT_SECONDS)
+        first.stop()
+        replacement.stop()
+
+    assert not first_thread.is_alive()
+    state = JobLoopState("steps:base", (RunningJob("j1", "steps:base"),))
+    publication = JobLoop(view, scenario="s").poll(state).result
+    snapshot = backend.publish_stored(
+        StoredFiles(content=publication.artifact.content),
+        metadata={"artifact_id": "trained"},
+        expected_parent=backend.current(),
+    )
+    assert (backend.materialize(snapshot).local_path / "weights.txt").read_text() == "step 1"
+    with pytest.raises(ArtifactError):
+        backend.materialize_content(abandoned)
+
+
+@pytest.mark.unit
 def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
@@ -472,13 +533,13 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     queue.start(JOBS_QUEUE, "j1", "training-0")
     first = SavedCheckpoint(1, "/old/step-1", None, {"loss": 1.0}, content="j1:1")
     queue.append_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
-    # It had stored step 2 as well, and stopped before it recorded that checkpoint.
     backends = registered_backends(tmp_path / "artifacts")
-    unfinished = tmp_path / "unfinished"
-    unfinished.mkdir()
-    (unfinished / "weights.txt").write_text("half written")
-    (unfinished / "leftover.txt").write_text("")
-    backends("s").store_content("j1:2", unfinished)
+    backend = backends("s")
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "weights.txt").write_text("legacy step 1")
+    backend.store_content("j1:1", legacy)
+    queue.write_metadata(JOBS_QUEUE, "j1", STORED_CONTENT_KEY, ["j1:1"])
     queue.requeue_expired(now=time.time() + 60)
 
     worker = TrainingJobWorker(
@@ -493,12 +554,20 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     assert worker.run_once()
     item = queue.read(JOBS_QUEUE, "j1")
     assert item.state == "finished"
-    assert [(entry["step"], entry["content"]) for entry in item.progress] == [(1, "j1:1"), (2, "j1:2")]
-    # The step that was recorded is not stored again; the other is stored again under its one name.
-    with pytest.raises(ArtifactError):
-        backends("s").materialize_content("j1:1")
-    stored = backends("s").materialize_content("j1:2")
+    first_entry, second_entry = item.progress
+    assert (first_entry["step"], first_entry["content"], second_entry["step"]) == (1, "j1:1", 2)
+    stored = backend.materialize_content(second_entry["content"])
     assert {path.name: path.read_text() for path in stored.iterdir()} == {"weights.txt": "step 2"}
+
+    state = JobLoopState("steps:base", (RunningJob("j1", "steps:base"),))
+    view = JobQueueComponent(StepFacts(), queue)
+    publication = JobLoop(view, scenario="s").poll(state).result
+    snapshot = backend.publish_stored(
+        StoredFiles(content=publication.artifact.content),
+        metadata={"artifact_id": "trained"},
+        expected_parent=backend.current(),
+    )
+    assert (backend.materialize(snapshot).local_path / "weights.txt").read_text() == "legacy step 1"
     worker.stop()
 
 
@@ -552,11 +621,12 @@ def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fai
     item = queue.read(JOBS_QUEUE, "j1")
     assert item.state == "failed"
     assert item.error == "the scenario's check refused checkpoint 2 of job j1: the weights of step 2 are refused"
-    assert [entry["content"] for entry in item.progress] == ["j1:1"]
-    assert item.metadata[STORED_CONTENT_KEY] == ["j1:1"]
+    (entry,) = item.progress
+    assert entry["step"] == 1
+    assert item.metadata[STORED_CONTENT_KEY] == [entry["content"]]
     assert checks.seen == [("s", "w"), ("s", "w")]
     with pytest.raises(ArtifactError):
-        backends("s").materialize_content("j1:2")
+        backends("s").materialize_content(checkpoint_content("j1", 2, attempt=item.attempt_count))
     records = backends("s").materialize_content(job_records_content("j1"))
     assert (records / "weights.txt").read_text() == "step 1"
     component.release.set()
@@ -568,7 +638,7 @@ def test_control_reads_a_jobs_progress_and_records_from_the_store_and_asks_for_a
     """Control reads no directory of the training service: the worker copies the running job's progress into the
     job's item and stores the ended job's record files, and the training service archives its own directories."""
     queue = memory_coordination(lease_seconds=30).work_queue
-    component = StepComponent(tmp_path / "jobs")
+    component = HeldSteps(tmp_path / "jobs")
     component.progress["j1"] = {"phase": "proposing"}
     data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
     backends = registered_backends(tmp_path / "artifacts")
@@ -578,7 +648,10 @@ def test_control_reads_a_jobs_progress_and_records_from_the_store_and_asks_for_a
 
     def status_and_look(job_id: str) -> JobStatus:
         # What control reads while the job runs, after the worker's first look at the job.
-        seen.append(view.job_progress(job_id))
+        progress = view.job_progress(job_id)
+        seen.append(progress)
+        if progress is not None:
+            component.release.set()
         return status(job_id)
 
     component.status = status_and_look
@@ -610,16 +683,18 @@ def test_the_sweep_discards_the_stored_checkpoints_of_an_ended_job_that_no_commi
     queue, _component, worker = worked
     backend = worker.backends("s")
     view = JobQueueComponent(StepFacts(), queue)
+    contents = []
     for job_id in ("j1", "j2"):
         submit(view, job(job_id))
-        wait_for(lambda job_id=job_id: view.status(job_id), "finished")
+        status = wait_for(lambda job_id=job_id: view.status(job_id), "finished")
+        contents.extend(checkpoint.content for checkpoint in status.checkpoints)
     ended_at = queue.read(JOBS_QUEUE, "j2").ended_at
     # A commit took and discarded one checkpoint. The trainer got a new start, so nobody commits the others.
-    backend.discard_content("j1:1")
+    backend.discard_content(contents[0])
     assert discard_ended_content(queue, worker.backends, ended_before=0.0, give_up_before=0.0) == ()
-    assert backend.materialize_content("j1:2").is_dir()
+    assert backend.materialize_content(contents[1]).is_dir()
     assert discard_ended_content(queue, worker.backends, ended_before=ended_at + 1, give_up_before=0.0) == ()
-    for name in ("j1:1", "j1:2", "j2:1", "j2:2"):
+    for name in contents:
         with pytest.raises(ArtifactError):
             backend.materialize_content(name)
 
@@ -685,7 +760,7 @@ class LosingQueue:
     def __getattr__(self, name: str):
         return getattr(self.queue, name)
 
-    def append_progress(self, queue, item_id, worker_id, entry, *, number):
+    def append_progress(self, queue, item_id, worker_id, entry, *, number, attempt):
         self.queue.cancel(queue, item_id, "cancelled")
         raise WorkLeaseLostError(f"job {item_id} is no longer held by {worker_id}")
 
@@ -708,17 +783,18 @@ def test_content_that_a_worker_stored_and_could_not_record_goes_with_the_jobs_it
     )
     assert worker.run_once()
     item = queue.read(JOBS_QUEUE, "j1")
-    assert (item.state, item.progress, item.metadata[STORED_CONTENT_KEY]) == ("failed", (), ["j1:1"])
+    assert (item.state, item.progress) == ("failed", ())
+    (content,) = item.metadata[STORED_CONTENT_KEY]
     # The worker discarded what it could not record.
     with pytest.raises(ArtifactError):
-        backends("s").materialize_content("j1:1")
+        backends("s").materialize_content(content)
     # A worker that stopped hard between the store and the record discards nothing: the sweep finds the name.
     files = tmp_path / "files"
     files.mkdir()
-    backends("s").store_content("j1:1", files)
+    backends("s").store_content(content, files)
     assert discard_ended_content(queue, backends, ended_before=item.ended_at + 1, give_up_before=0.0) == ()
     with pytest.raises(ArtifactError):
-        backends("s").materialize_content("j1:1")
+        backends("s").materialize_content(content)
     worker.stop()
 
 

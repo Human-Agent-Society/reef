@@ -4,7 +4,7 @@
 recipe and runtime components; it does not discover or import components.
 
 Nothing here implements storage behavior or I/O. Record storage interfaces
-belong to ``reef.storage.records``; concrete record and artifact adapters build on the
+belong to ``reef.storage.scenario.records``; concrete record and artifact adapters build on the
 shared identities and wire types defined here.
 
 The admission bar is concrete: a type belongs here only when at least two
@@ -19,13 +19,13 @@ reasoning and its answer for ``reef.inference.chat`` and ``reef.tinker.sampling`
 ``reef.inference`` imports ``reef.tinker``, but the split is here because training
 imports ``reef.tinker`` and never ``reef.inference``.
 Anything with one consumer stays in that consumer — the ``x-reef-*`` header
-parsing and the HTTP report envelope live in ``service/wire.py`` — while the
+parsing and the HTTP report envelope live in ``reef/api/wire.py`` — while the
 typed report *body* is ``reports/`` here because four packages parse it.
 
 The boundary is directional: core imports nothing above it. In particular
 ``reef.core`` never imports ``reef.artifact`` — ``snapshot`` lives here
 so storage locators can be shared without pulling in backend implementations, and
-``artifacts/artifact.py`` re-exports it. Pinned by
+``reef/artifact/artifact.py`` re-exports it. Pinned by
 ``tests/contributing/test_dependency_boundaries.py``.
 """
 
