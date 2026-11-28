@@ -15,6 +15,7 @@ from typing import Any
 
 from reef.core.atif_payloads import (
     OPENAI_CHAT,
+    OPENAI_RESPONSES,
     atif_agent,
     canonical_json,
     folded_steps,
@@ -92,6 +93,34 @@ def recorded_payload(item: TrajectorySample) -> Mapping[str, Any]:
     return {**_project_exchange(item.trajectory), **last}
 
 
+def string_fields(value: Mapping[str, Any], *, nested: str | None = None) -> bool:
+    """Whether a plain dictionary has only string keys and string or null fields, except for one named field."""
+    return type(value) is dict and all(
+        type(key) is str and (key == nested or type(field) is str or field is None) for key, field in value.items()
+    )
+
+
+def simple_history_message(message: Mapping[str, Any]) -> bool:
+    """Recognize flat text messages and Chat Completions tool calls with JSON arguments in a string."""
+    if not string_fields(message, nested="tool_calls"):
+        return False
+    calls = message.get("tool_calls")
+    if calls is None:
+        return True
+    return type(calls) is list and all(
+        string_fields(call, nested="function") and string_fields(call.get("function")) for call in calls
+    )
+
+
+def same_history_message(previous: Mapping[str, Any], current: Mapping[str, Any], provider: str) -> bool:
+    # Python treats several numeric types as equal. Only use direct equality for the string/null wire shape.
+    if simple_history_message(previous) and simple_history_message(current) and previous == current:
+        return True
+    return value_bytes(previous) == value_bytes(current) or canonical_json(
+        atif_form(previous, provider)
+    ) == canonical_json(atif_form(current, provider))
+
+
 @dataclass
 class TrajectoryBuilder:
     """An ATIF trajectory that grows by one inference record at a time, oldest first.
@@ -120,15 +149,11 @@ class TrajectoryBuilder:
         """Add the messages of ``record`` that the last record did not have, and its responses. The last agent step
         of the responses carries the ATIF ``metrics`` of the record's response (``response_metrics``): its token
         counts, and its token IDs and log probabilities when the response has them."""
-        provider = payload_provider(record.payload) or OPENAI_CHAT
+        provider = message_provider(record.payload)
         request, responses = exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(self.history, request, strict=False):
-            # An agent resends most messages unchanged, and the same bytes mean the same message. Only a message
-            # with other bytes needs its ATIF form, which is equal for two spellings of one message.
-            if value_bytes(previous) != value_bytes(current) and canonical_json(
-                atif_form(previous, provider)
-            ) != canonical_json(atif_form(current, provider)):
+            if not same_history_message(previous, current, provider):
                 break
             shared += 1
         self.entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])
@@ -164,7 +189,7 @@ class TrajectoryBuilder:
         if isinstance(model, str):
             agent["model_name"] = model
         if "tools" in last.payload:
-            agent.update(atif_agent(last.payload["tools"], payload_provider(last.payload) or OPENAI_CHAT))
+            agent.update(atif_agent(last.payload["tools"], message_provider(last.payload)))
         reef: dict[str, Any] = {"source_agent_record_id": primary, "reward": reward, "feedback": feedback}
         if self.include_records:
             reef["records"] = list(self.kept)
@@ -226,6 +251,20 @@ def has_image_content(payload: Mapping[str, object]) -> bool:
                 for key in ("content", "output", "source", "message", "choices", "observation", "results")
             )
     return False
+
+
+def message_provider(payload: Mapping[str, Any]) -> str:
+    """The provider whose message forms the request and the response messages of ``payload`` take
+    (``exchange_messages``).
+
+    It is ``payload_provider`` for a payload with a message list. A Responses call may send its ``input`` as one
+    string, which has no message list; its response items are still Responses items, so the provider is
+    ``OPENAI_RESPONSES``. Any other payload is read as a Chat Completions call.
+    """
+    provider = payload_provider(payload)
+    if provider is not None:
+        return provider
+    return OPENAI_RESPONSES if isinstance(payload.get("input"), str) else OPENAI_CHAT
 
 
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:

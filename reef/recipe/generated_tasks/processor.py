@@ -382,6 +382,7 @@ class GeneratedTaskSettings(PluginSettings):
     * ``refill_tasks`` is a positive int, or None for ``DEFAULT_REFILL_TASKS``; it needs ``pool_capacity`` 0.
     * ``source_records_per_round`` is a non-negative int; above 0 it needs a ``source_tag`` of the form
       ``name=value``.
+    * ``min_source_records_per_round`` is an int from 0 to ``source_records_per_round``.
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
     * ``eval_fraction`` is a number in [0, 1]; ``split_seed`` an int.
     * ``generation_attempts`` and ``generation_deadline_seconds`` are positive.
@@ -408,6 +409,13 @@ class GeneratedTaskSettings(PluginSettings):
     )
     source_records_per_round: int = config_option(
         0, help="The source sessions that each round takes, at most; 0 generates from the description only."
+    )
+    min_source_records_per_round: int = config_option(
+        0,
+        help=(
+            "A round starts only when at least this many source sessions wait; 0 starts it with the sessions "
+            "that wait, or with none. At most source-records-per-round."
+        ),
     )
     source_tag: str = config_option(
         "",
@@ -482,6 +490,8 @@ class GeneratedTaskSettings(PluginSettings):
             raise ValueError("source_records_per_round must be non-negative")
         if self.source_records_per_round > 0 and not self.source_tag:
             raise ValueError("source_records_per_round needs a source_tag that marks the source sessions")
+        if not 0 <= self.min_source_records_per_round <= self.source_records_per_round:
+            raise ValueError("min_source_records_per_round must be from 0 to source_records_per_round")
         source_tag_of(self.source_tag)
         if self.rounds < 0:
             raise ValueError("rounds must be non-negative")
@@ -897,6 +907,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         super().__init__(context, self.source_grouping, exclusive_sources=True)
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
+        self.min_sources_per_round = settings.min_source_records_per_round
         self.running_round: TaskGenerationRound | None = None
         # The first round after a start is due at once.
         self.follow_at_once = True
@@ -1021,6 +1032,9 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     def round_due(self) -> bool:
         """Whether the next round should start now."""
         if self.rounds_stopped or self.running_round is not None:
+            return False
+        # A round that takes its sessions again after an incomplete generation does not wait for new ones.
+        if not self.retry_sources and len(self.waiting_sources) < self.min_sources_per_round:
             return False
         training = self.task_training
         # With no task that waits or trains, no job end comes to count toward the next round.

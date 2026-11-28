@@ -16,7 +16,6 @@ This module imports no store, so that each store and each kind's own module can 
 from __future__ import annotations
 
 import hashlib
-import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from typing import Any
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
+from reef.core.values import canonical_json
 from reef.storage.data.tasks import FILES_DIGEST_PATTERN, TaskFilesNotFoundError, TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
@@ -41,7 +41,7 @@ ARTIFACT_CONTENT_KEYS = frozenset({"source_uri", "kind", "component"})
 
 def json_digest(content: Mapping[str, Any]) -> str:
     """The SHA-256 of the canonical JSON of ``content``: sorted keys, no spaces, UTF-8."""
-    encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    encoded = canonical_json(content).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

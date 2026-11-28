@@ -566,6 +566,9 @@ Recipe selection, artifact activation and pipeline stages.
    ``pipeline.record2sample.config.source-records-per-round`` : integer : 0
        The source sessions that each round takes, at most; 0 generates from the description only.
 
+   ``pipeline.record2sample.config.min-source-records-per-round`` : integer : 0
+       A round starts only when at least this many source sessions wait; 0 starts it with the sessions that wait, or with none. At most source-records-per-round.
+
    ``pipeline.record2sample.config.source-tag`` : string : empty
        The name=value tag that marks a source session: each of its model calls carries the header x-reef-tag-<name>: <value>. Required when source-records-per-round is above 0.
 

@@ -34,6 +34,8 @@ from reef.evaluation.rollout_worker import (
     AGENT_TIMEOUT_ENV,
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    PREPARED_DIGEST_RESULT,
+    PREPARED_IMAGES_RESULT,
     TASK_TEMPLATE_KIND,
     TREE_AGENT_TIMEOUT_S,
     CandidateEndpoint,
@@ -1006,7 +1008,9 @@ def test_rollout_calls_name_a_service_failure_that_took_the_last_call_or_much_of
 
 
 @pytest.mark.unit
-def test_a_rollout_whose_inference_service_failed_its_last_call_gets_no_score_and_runs_again(tmp_path):
+def test_a_rollout_whose_inference_service_failed_its_last_call_gets_no_score_and_runs_again(tmp_path, monkeypatch):
+    # The endpoint sends a call again after a 502; a short wait keeps those tries fast.
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
     # The trial ends without an agent error, and its verifier writes 0, as a verifier does for work never done.
     lab = CallingLab(2, reward=0.0, fails_after_refusal=False)
     broken = (502, {"error": {"message": "the engine stopped"}}, {})
@@ -1583,6 +1587,110 @@ def test_the_trial_of_a_rollout_that_requires_prepared_templates_builds_no_templ
     assert ("builds_templates" in environment.get("kwargs", {})) == requires
     if requires:
         assert environment["kwargs"]["builds_templates"] is False
+    # A template item whose builder gave no images gives its trials none.
+    assert "prepared_images" not in environment.get("kwargs", {})
+
+
+#: The JSON object of a synthetic prepared image of a task's environment, which a builder verified.
+PREPARED_ENTRY: dict[str, str | None] = {
+    "directory": "environment",
+    "source_image": None,
+    "image": "registry.example/tasks/add@sha256:" + "f" * 64,
+    "template_id": None,
+    "start": None,
+    "ready": None,
+}
+#: The files digest of the task of ``e2b_rollout``, as its endpoints resolve it.
+TASK_DIGEST = "1" * 64
+
+
+class ImageBuilder(TaskTemplateBuilder):
+    """A builder that makes no template and gives ``images`` as the prepared images of each task version."""
+
+    def __init__(self, images: object) -> None:
+        self.images = images
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_version")
+
+    async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+        return self.images
+
+
+class DigestEndpoints(AnsweringEndpoints):
+    """``AnsweringEndpoints`` whose task directory has the files digest ``digest``, or an unknown one for None."""
+
+    def __init__(self, root: Path, digest: str | None) -> None:
+        super().__init__(root)
+        self.digest = digest
+
+    def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
+        return self.task_directory(rollout), self.digest
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requires", [False, True])
+def test_a_trial_starts_the_prepared_images_that_its_template_item_made_for_its_task_files(tmp_path, requires):
+    queue = memory_coordination().work_queue
+    value = replace(
+        e2b_rollout(),
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+        requires_prepared_templates=requires,
+    )
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    endpoints = DigestEndpoints(tmp_path / "tasks", TASK_DIGEST)
+    assert TaskTemplateWorker(queue, endpoints, ImageBuilder([PREPARED_ENTRY]), worker_id="t").run_once()
+    template = queue.read(EVALUATIONS_QUEUE, item_id)
+    # The item keeps the images with the task files that they were verified for.
+    assert template.state == "finished"
+    assert template.result == {PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: TASK_DIGEST}
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    assert ServedWorker(queue, endpoints, worker_id="w", lab=lab).run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "finished"
+    [environment] = lab.environments
+    assert environment["kwargs"]["prepared_images"] == [PREPARED_ENTRY]
+    assert environment["kwargs"]["task_directory"] == str(endpoints.task_directory(value))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("result", "resolved"),
+    [
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: "2" * 64}, TASK_DIGEST),
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: None}, TASK_DIGEST),
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: TASK_DIGEST}, None),
+        # The result of an item that an older Reef finished.
+        ({}, TASK_DIGEST),
+    ],
+    ids=["other-files", "unknown-template-files", "unknown-trial-files", "older-reef"],
+)
+def test_a_trial_starts_no_prepared_image_of_other_or_unknown_task_files(tmp_path, result, resolved):
+    queue = memory_coordination().work_queue
+    value = replace(e2b_rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == item_id
+    queue.finish(EVALUATIONS_QUEUE, item_id, "builder", result)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    assert ServedWorker(queue, DigestEndpoints(tmp_path / "tasks", resolved), worker_id="w", lab=lab).run_once()
+    [environment] = lab.environments
+    assert "prepared_images" not in environment.get("kwargs", {})
+
+
+@pytest.mark.unit
+def test_a_template_item_whose_builder_gives_forged_images_fails_as_retryable(tmp_path):
+    queue = memory_coordination().work_queue
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    forged = [{**PREPARED_ENTRY, "image": "registry.example/tasks/add:latest"}]
+    endpoints = DigestEndpoints(tmp_path / "tasks", TASK_DIGEST)
+    assert TaskTemplateWorker(queue, endpoints, ImageBuilder(forged), worker_id="t").run_once()
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert item.state == "queued" and "host/repository@sha256" in str(item.error)
 
 
 @pytest.mark.unit

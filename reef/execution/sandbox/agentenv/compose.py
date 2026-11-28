@@ -66,6 +66,10 @@ PROJECT_NAME = "aenv"
 MAIN_COMMAND = ("sh", "-c", "sleep infinity")
 #: The part of ``aenv compose up``'s error when the deployment has no image under a name of its own repository.
 IMAGE_NOT_FOUND_TEXT = "was not found"
+#: Safe Compose resource interpolation defaults when neither ``task.toml`` nor the host environment provides a value
+#: and the Compose project references bare ``${CPUS}`` or ``${MEMORY}`` without a file-level default.
+DEFAULT_COMPOSE_CPUS = 1
+DEFAULT_COMPOSE_MEMORY_MB = 2048
 #: The guest of ``aenv compose up`` has no bash, and the E2B SDK starts each command with ``/bin/bash -l -c``. This
 #: command writes a ``/bin/bash`` that runs the guest's ``sh`` with the same arguments, unless the guest has one.
 GUEST_BASH_COMMAND = (
@@ -149,24 +153,58 @@ def compose_project(compose_text: str, image: str, environment: Mapping[str, str
     return {**project, "services": {**services, MAIN_SERVICE_NAME: main}}
 
 
+def uses_bare_compose_variable(value: object, name: str) -> bool:
+    """Whether ``value`` (a parsed Compose YAML structure) contains a reference to ``name`` without a Compose default
+    (``${NAME}``, ``$NAME``, ``${NAME:?...}``, or ``${NAME?...}``), ignoring ``$$`` escapes and defaulted forms such
+    as ``${NAME:-default}`` or ``${NAME-default}``."""
+    pattern = re.compile(rf"\$(?:\{{{re.escape(name)}(?::?\?[^}}]*)?\}}|{re.escape(name)}(?![A-Za-z0-9_]))")
+
+    def _contains(node: object) -> bool:
+        if isinstance(node, str):
+            return pattern.search(node.replace("$$", "")) is not None
+        if isinstance(node, Mapping):
+            return any(_contains(key) or _contains(item) for key, item in node.items())
+        if isinstance(node, (list, tuple)):
+            return any(_contains(item) for item in node)
+        return False
+
+    return _contains(value)
+
+
 @contextlib.contextmanager
-def aenv_environment(templates: AgentEnvTemplates) -> Iterator[dict[str, str]]:
+def aenv_environment(
+    templates: AgentEnvTemplates, extra_env: Mapping[str, str | None] | None = None
+) -> Iterator[dict[str, str]]:
     """The process environment of an ``aenv`` command on ``templates``' deployment, for the time of the block.
-    ``aenv`` reads the deployment from a credentials file in a new configuration directory, which the block removes."""
+    ``aenv`` reads the deployment from a credentials file in a new configuration directory, which the block removes.
+    Each ``str`` entry in ``extra_env`` overrides the inherited host variable; each ``None`` entry unsets it.
+    ``XDG_CONFIG_HOME`` always points to the credentials directory."""
     with tempfile.TemporaryDirectory(prefix="reef-aenv-") as config_home:
         credentials = Path(config_home) / "aenv" / "credentials"
         credentials.parent.mkdir(mode=0o700)
         credentials.write_text(tomli_w.dumps({"url": templates.api_url, "api_key": templates.api_key}))
         credentials.chmod(0o600)
-        yield {**os.environ, "XDG_CONFIG_HOME": config_home}
+        environment = dict(os.environ)
+        for key, value in (extra_env or {}).items():
+            if value is None:
+                environment.pop(key, None)
+            else:
+                environment[key] = value
+        environment["XDG_CONFIG_HOME"] = config_home
+        yield environment
 
 
 async def run_aenv(
-    arguments: Sequence[str], templates: AgentEnvTemplates, standard_input: bytes = b""
+    arguments: Sequence[str],
+    templates: AgentEnvTemplates,
+    standard_input: bytes = b"",
+    *,
+    extra_env: Mapping[str, str | None] | None = None,
 ) -> tuple[int, str, str]:
-    """Run ``aenv`` with ``arguments`` on ``templates``' deployment, with ``standard_input`` as its input. Return its
-    exit code, its standard output and its standard error. A cancelled run kills the process."""
-    with aenv_environment(templates) as environment:
+    """Run ``aenv`` with ``arguments`` on ``templates``' deployment, with ``standard_input`` as its input and
+    ``extra_env`` applied to the process environment. Return its exit code, its standard output and its standard
+    error. A cancelled run kills the process."""
+    with aenv_environment(templates, extra_env=extra_env) as environment:
         process = await asyncio.create_subprocess_exec(
             "aenv",
             *arguments,
@@ -189,7 +227,10 @@ class ComposeSandbox:
     """One ``aenv compose up`` of a Compose project.
 
     Values: ``project`` is the project, with an image for each service (``compose_project``). ``cpu_count`` and
-    ``memory_mb`` are the sandbox's resources, None for AgentENV's default; all services share them.
+    ``memory_mb`` are positive integers for the sandbox's resources, or None for AgentENV's default; all services
+    share them. ``compose_environment`` resolves ``CPUS`` and ``MEMORY`` for ``aenv compose up`` interpolation in
+    precedence order: task explicit value, then non-empty host environment value, then ``DEFAULT_COMPOSE_CPUS`` /
+    ``DEFAULT_COMPOSE_MEMORY_MB`` when ``project`` references the bare variable without a file-level default.
     ``lifetime_seconds`` is the sandbox's lifetime once the services run, and ``startup_seconds`` the limit of the
     start: Docker's readiness, the registration of the images and the wait for the services. Both are at least 1.
     Purpose: ``KillOnTimeoutE2BEnvironment`` makes one for a trial of a task with a Compose file and starts it.
@@ -202,6 +243,10 @@ class ComposeSandbox:
     startup_seconds: int
 
     def __post_init__(self) -> None:
+        if self.cpu_count is not None and self.cpu_count < 1:
+            raise ValueError("a Compose sandbox cpu_count must be a positive integer or None")
+        if self.memory_mb is not None and self.memory_mb < 1:
+            raise ValueError("a Compose sandbox memory_mb must be a positive integer or None")
         if self.lifetime_seconds < 1 or self.startup_seconds < 1:
             raise ValueError("a Compose sandbox needs a lifetime and a startup limit of at least 1 s")
 
@@ -215,12 +260,42 @@ class ComposeSandbox:
             arguments += ["--memory", str(self.memory_mb)]
         return arguments
 
+    def compose_environment(self, host_environ: Mapping[str, str] | None = None) -> dict[str, str | None]:
+        """The ``CPUS`` and ``MEMORY`` overrides for ``aenv compose up`` interpolation.
+
+        Precedence per variable: explicit task resource, then non-empty value in ``host_environ`` (defaulting to
+        ``os.environ``), then ``DEFAULT_COMPOSE_CPUS`` / ``DEFAULT_COMPOSE_MEMORY_MB`` only when ``self.project``
+        references the variable bare without a file-level default; otherwise ``None`` so an empty host variable is
+        unset and file-level defaults such as ``${MEMORY:-8G}`` apply.
+        """
+        host = os.environ if host_environ is None else host_environ
+        overrides: dict[str, str | None] = {}
+        resources = (
+            ("CPUS", None if self.cpu_count is None else str(self.cpu_count), str(DEFAULT_COMPOSE_CPUS)),
+            ("MEMORY", None if self.memory_mb is None else f"{self.memory_mb}M", f"{DEFAULT_COMPOSE_MEMORY_MB}M"),
+        )
+        for name, explicit_value, default_value in resources:
+            if explicit_value is not None:
+                overrides[name] = explicit_value
+            elif host.get(name, "").strip():
+                overrides[name] = host[name].strip()
+            elif uses_bare_compose_variable(self.project, name):
+                overrides[name] = default_value
+            else:
+                overrides[name] = None
+        return overrides
+
     async def start(self, templates: AgentEnvTemplates) -> str:
         """Start the sandbox on ``templates``' deployment and return its ID, when every service runs. Raise
         ``ImageNotFoundError`` when the deployment has no image under a name of its own repository,
-        ``TransientStartError`` for a temporary API failure, and ``ComposeStartError`` for any other failure.
-        ``aenv`` deletes the sandbox of a start that fails."""
-        code, output, errors = await run_aenv(self.arguments(), templates, json.dumps(self.project).encode())
+        ``TransientStartError`` for a temporary API failure (``TRANSIENT_STATUSES``), and ``ComposeStartError`` for
+        any other failure. ``aenv`` deletes the sandbox of a start that fails."""
+        code, output, errors = await run_aenv(
+            self.arguments(),
+            templates,
+            json.dumps(self.project).encode(),
+            extra_env=self.compose_environment(),
+        )
         logger.debug("aenv compose up:\n%s", errors)
         if code == 0:
             # aenv prints only the sandbox ID on its standard output.
@@ -362,6 +437,8 @@ __all__ = [
     "COMPOSE_FILE",
     "COMPOSE_MODES",
     "COMPOSE_VARIABLE",
+    "DEFAULT_COMPOSE_CPUS",
+    "DEFAULT_COMPOSE_MEMORY_MB",
     "GUEST_BASH_COMMAND",
     "MAIN_COMMAND",
     "PROJECT_NAME",
@@ -377,4 +454,5 @@ __all__ = [
     "main_image",
     "prepare_guest",
     "run_aenv",
+    "uses_bare_compose_variable",
 ]

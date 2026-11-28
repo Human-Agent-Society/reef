@@ -231,11 +231,12 @@ _CONFIG_ENV = {
 
 
 # The examples whose docs give the training service PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True: the
-# AutoEnvScaling README and serve.yaml, and the docker-compose.yaml of SAO ceobench and SDFT skill_stream. The
-# others turn on no expandable segments.
+# AutoEnvScaling and continual-environments READMEs and serve.yaml files, and the docker-compose.yaml of SAO ceobench
+# and SDFT skill_stream. The others turn on no expandable segments.
 EXPANDABLE_SEGMENTS_EXAMPLES = frozenset(
     {
         "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
+        "recipes/beta/continual_envs/examples/terminalworld/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
     }
@@ -443,6 +444,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/beta/autoenvscaling/examples/recorded_sessions/serve-tinker.yaml",
         "recipes/beta/autoenvscaling/examples/tmax_seeds/serve-tinker.yaml",
         "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
+        "recipes/beta/continual_envs/examples/terminalworld/serve.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
         "recipes/beta/spade/examples/tinker/serve.yaml",
         "recipes/basic/local-sglang.yaml",

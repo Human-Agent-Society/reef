@@ -251,7 +251,8 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.scenario.commits": ("reef.core",),
         "reef.storage.data.tasks": ("reef.core",),
-        "reef.storage.data.segments": ("reef.core",),
+        "reef.storage.durable_files": (),
+        "reef.storage.data.segments": ("reef.core", "reef.storage.durable_files"),
         "reef.storage.scenario.samples": ("reef.core", "reef.storage.data.store", "reef.storage.data.tasks"),
         "reef.storage.data.item_kinds": ("reef.core", "reef.storage.data.tasks"),
         "reef.storage.data.job_data": ("reef.core", "reef.storage.data.segments"),
@@ -448,10 +449,36 @@ def test_the_agentenv_build_and_compose_helpers_load_without_the_e2b_package() -
         "sys.modules['e2b'] = None\n"
         "from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, dockerfile_build\n"
         "from reef.execution.sandbox.agentenv.compose import ComposeSandbox, TransientStartError, compose_mode\n"
+        "from reef.execution.sandbox.agentenv.images import ColdSandbox\n"
         "assert (dockerfile_build({}), compose_mode({})) == ('e2b', 'off')\n"
-        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError\n"
+        "assert AgentEnvTemplates and DockerfileBuild and ComposeSandbox and TransientStartError and ColdSandbox\n"
         "assert 'reef.execution.sandbox.e2b.trial' not in sys.modules\n"
     )
+
+
+def test_shared_trial_code_reads_prepared_images_without_a_provider_adapter() -> None:
+    # Evaluation, Harbor rollouts, training and the shared task environment config read prepared task images through
+    # their shared contract. Only a provider's trial environment imports the provider's adapter.
+    shared = [
+        path
+        for package in ("reef/evaluation", "reef/harness", "reef/train")
+        for path in sorted((REPO_ROOT / package).rglob("*.py"))
+    ]
+    shared += [REPO_ROOT / "reef/execution/sandbox/task_environment.py"]
+    offenders: list[str] = []
+    for path in shared:
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        offenders.extend(
+            f"{path.relative_to(REPO_ROOT)} -> {target}"
+            for target in _imports_of(imported, "reef.execution.sandbox.agentenv")
+        )
+    assert offenders == []
+    # The contract is plain data: it imports no provider, SDK, HTTP client or other part of Reef beyond its core.
+    contract = REPO_ROOT / "reef/execution/sandbox/prepared_images.py"
+    imported = _imported_modules(ast.parse(contract.read_text(encoding="utf-8")), package="reef.execution.sandbox")
+    assert [target for target in imported if target.startswith("reef.") and not target.startswith("reef.core.")] == []
+    assert [target for module in ("aiohttp", "e2b", "harbor") for target in _imports_of(imported, module)] == []
 
 
 def test_slime_training_component_import_does_not_load_megatron_stack() -> None:
@@ -508,7 +535,7 @@ def test_storage_subpackages_import_in_one_direction() -> None:
     # ``coordination``.
     allowed = {
         "coordination": ("reef.storage.coordination",),
-        "data": ("reef.storage.coordination", "reef.storage.data"),
+        "data": ("reef.storage.coordination", "reef.storage.data", "reef.storage.durable_files"),
         "scenario": ("reef.storage.data", "reef.storage.scenario"),
         "sql": ("reef.storage",),
     }
@@ -1045,3 +1072,13 @@ def test_only_configuration_writes_a_default_start() -> None:
             if defines and not node.name.endswith("Facts") and (relative, node.name) not in recipes:
                 others.append((relative, node.name))
     assert others == []
+
+
+def test_core_import_does_not_initialize_the_public_service_facade() -> None:
+    _assert_isolated_import(
+        "import sys; import reef.core.config; "
+        "assert not any(name in sys.modules for name in ('reef.control', 'reef.train', 'reef.storage')); "
+        "from reef import Dispatcher; from reef.control.dispatcher import Dispatcher as implementation; "
+        "assert Dispatcher is implementation; assert set(reef.__all__) <= set(dir(reef)); "
+        "from reef import *; assert set(reef.__all__) <= globals().keys()"
+    )

@@ -49,19 +49,35 @@ networks:
   agent_network: null
 """
 
-#: A fake ``aenv``: it records its arguments, its standard input and the credentials that it reads, then acts as
-#: FAKE_AENV_MODE says.
+#: A fake ``aenv``: it records its arguments, its standard input, its compose resource environment and the credentials
+#: that it reads, then acts as FAKE_AENV_MODE says.
 FAKE_AENV = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_AENV_LOG.args"
 cat > "$FAKE_AENV_LOG.input"
+printf 'CPUS=%s\\nMEMORY=%s\\n' "${CPUS-<unset>}" "${MEMORY-<unset>}" > "$FAKE_AENV_LOG.env"
 cp "$XDG_CONFIG_HOME/aenv/credentials" "$FAKE_AENV_LOG.credentials"
 echo 'Starting Compose sandbox; waiting for services to become ready...' >&2
 case "$FAKE_AENV_MODE" in
   ok) echo sandbox-1 ;;
+  resources)
+    if [ -z "$CPUS" ]; then
+      echo 'Error: invalid Compose project: strconv.ParseFloat: parsing "": invalid syntax' >&2
+      exit 1
+    fi
+    if [ -z "$MEMORY" ]; then
+      echo "Error: invalid Compose project: invalid size: ''" >&2
+      exit 1
+    fi
+    echo sandbox-1 ;;
   missing)
     echo "Error: HTTP 400: resolve attached drive 'compose_0' image 'aenv/t:latest': image tag 't:latest' was not found" >&2
     exit 1 ;;
+  rate_limit) echo 'Error: HTTP 429: too many requests' >&2; exit 1 ;;
   busy) echo 'Error: HTTP 503: no node can take the sandbox' >&2; exit 1 ;;
+  bad_gateway) echo 'Error: HTTP 502: Bad Gateway' >&2; exit 1 ;;
+  gateway_timeout) echo 'Error: HTTP 504: upstream timeout' >&2; exit 1 ;;
+  guest_eof) echo 'Error: start Compose services: sh: unexpected EOF while looking for matching quote' >&2; exit 1 ;;
+  eof) echo 'Error: reading content: unexpected EOF' >&2; exit 1 ;;
   *) echo 'Error: start Compose services: container aenv-target-1 is unhealthy' >&2; exit 1 ;;
 esac
 """
@@ -171,11 +187,78 @@ def test_a_start_gives_aenv_the_project_and_the_deployment_and_returns_the_sandb
 
 
 @pytest.mark.unit
+def test_a_compose_project_referencing_cpus_and_memory_receives_environment_values(
+    fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bare_compose = (
+        "services:\n"
+        "  main:\n"
+        "    deploy:\n"
+        "      resources:\n"
+        "        limits:\n"
+        "          cpus: '${CPUS}'\n"
+        "          memory: '${MEMORY}'\n"
+    )
+    defaulted_compose = (
+        "services:\n"
+        "  main:\n"
+        "    deploy:\n"
+        "      resources:\n"
+        "        limits:\n"
+        "          cpus: '${CPUS:-4}'\n"
+        "          memory: '${MEMORY:-8G}'\n"
+    )
+    bare_project = compose_project(bare_compose, "aenv/task:latest", {})
+    defaulted_project = compose_project(defaulted_compose, "aenv/task:latest", {})
+    monkeypatch.setenv("FAKE_AENV_MODE", "resources")
+
+    # Task explicit values win over host environment values.
+    monkeypatch.setenv("CPUS", "8")
+    monkeypatch.setenv("MEMORY", "16G")
+    explicit = ComposeSandbox(bare_project, cpu_count=2, memory_mb=4096, lifetime_seconds=60, startup_seconds=60)
+    assert asyncio.run(explicit.start(TEMPLATES)) == "sandbox-1"
+    assert Path(f"{fake_aenv}.env").read_text().splitlines() == ["CPUS=2", "MEMORY=4096M"]
+    assert json.loads(Path(f"{fake_aenv}.input").read_text())["services"]["main"]["deploy"] == {
+        "resources": {"limits": {"cpus": "${CPUS}", "memory": "${MEMORY}"}}
+    }
+
+    # When the task sets no resources, non-empty operator host values are preserved.
+    from_host = ComposeSandbox(bare_project, cpu_count=None, memory_mb=None, lifetime_seconds=60, startup_seconds=60)
+    assert asyncio.run(from_host.start(TEMPLATES)) == "sandbox-1"
+    assert Path(f"{fake_aenv}.env").read_text().splitlines() == ["CPUS=8", "MEMORY=16G"]
+
+    # When both task and host omit (or leave empty) the values, bare ${CPUS}/${MEMORY} receive safe defaults.
+    monkeypatch.setenv("CPUS", "")
+    monkeypatch.setenv("MEMORY", "")
+    defaults = ComposeSandbox(bare_project, cpu_count=None, memory_mb=None, lifetime_seconds=60, startup_seconds=60)
+    assert asyncio.run(defaults.start(TEMPLATES)) == "sandbox-1"
+    assert Path(f"{fake_aenv}.env").read_text().splitlines() == ["CPUS=1", "MEMORY=2048M"]
+    assert "--cpu" not in Path(f"{fake_aenv}.args").read_text()
+    assert "--memory" not in Path(f"{fake_aenv}.args").read_text()
+
+    # When the Compose file supplies its own defaults (${CPUS:-4}/${MEMORY:-8G}) and neither task nor host sets them,
+    # CPUS and MEMORY stay unset so Compose uses the file-level defaults.
+    monkeypatch.setenv("FAKE_AENV_MODE", "ok")
+    monkeypatch.delenv("CPUS", raising=False)
+    monkeypatch.delenv("MEMORY", raising=False)
+    file_defaults = ComposeSandbox(
+        defaulted_project, cpu_count=None, memory_mb=None, lifetime_seconds=60, startup_seconds=60
+    )
+    assert asyncio.run(file_defaults.start(TEMPLATES)) == "sandbox-1"
+    assert Path(f"{fake_aenv}.env").read_text().splitlines() == ["CPUS=<unset>", "MEMORY=<unset>"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("mode", "error", "text"),
     [
         ("missing", ImageNotFoundError, "image tag 't:latest' was not found"),
+        ("rate_limit", TransientStartError, "HTTP 429"),
         ("busy", TransientStartError, "HTTP 503"),
+        ("bad_gateway", TransientStartError, "HTTP 502"),
+        ("gateway_timeout", TransientStartError, "HTTP 504"),
+        ("guest_eof", ComposeStartError, "unexpected EOF while looking for matching quote"),
+        ("eof", ComposeStartError, "unexpected EOF"),
         ("unhealthy", ComposeStartError, "aenv-target-1 is unhealthy"),
     ],
 )

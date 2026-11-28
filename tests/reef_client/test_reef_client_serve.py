@@ -42,7 +42,21 @@ COMPLETION: dict[str, Any] = {
 
 @pytest.mark.unit
 def test_sse_accumulator_round_trip_with_synthesized_events() -> None:
-    events = synthesize_sse_events(COMPLETION, include_usage=True, agent_record_id="receipt-1")
+    original = {
+        **COMPLETION,
+        "training": {
+            "tokens": [1, 2, 3, 7, 8],
+            "loss_mask": [1, 1],
+            "rollout_log_probs": [-0.1, -0.2],
+            "prompt_length": 3,
+            "response_length": 2,
+            "runtime_load_id": "tinker:start",
+            "request_messages": [{"role": "user", "content": "solve add"}],
+            "response_message": COMPLETION["choices"][0]["message"],
+            "finish_reason": "tool_calls",
+        },
+    }
+    events = synthesize_sse_events(original, include_usage=True, agent_record_id="receipt-1")
     payload = "".join(events).encode()
     accumulator = SSEAccumulator()
     # Feed in awkward 7-byte slices to split multi-byte UTF-8 and SSE lines.
@@ -53,6 +67,7 @@ def test_sse_accumulator_round_trip_with_synthesized_events() -> None:
     assert accumulator.done
     completion = accumulator.completion
     assert completion is not None
+    assert completion["training"] == original["training"]
     assert completion["choices"][0]["message"] == COMPLETION["choices"][0]["message"]
     assert completion["choices"][0]["finish_reason"] == "tool_calls"
     assert completion["usage"] == COMPLETION["usage"]

@@ -758,3 +758,40 @@ def test_budgeted_binding_keeps_model_metadata() -> None:
     binding = ModelBinding("http://up", "served", api="responses", metadata=ModelMetadata(640_000, True))
     budgeted = BudgetedBinding(binding, JobCalls(0, []))
     assert budgeted.config_overlays(get_adapter("codex")) == binding.config_overlays(get_adapter("codex"))
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_status"),
+    [
+        ("502", 502),
+        ("503", 503),
+        ("504", 504),
+        ("url_error", None),
+        ("connection_reset", None),
+    ],
+)
+def test_complete_sends_once_so_artifact_endpoint_owns_retries(
+    monkeypatch: pytest.MonkeyPatch, failure_kind: str, expected_status: int | None
+) -> None:
+    import urllib.error
+
+    from reef.harness.tasks.model_binding import ModelBindingError
+
+    attempts = 0
+
+    def urlopen(request: Request, timeout: float | None = None) -> io.BytesIO:
+        nonlocal attempts
+        attempts += 1
+        if failure_kind.isdigit():
+            code = int(failure_kind)
+            raise urllib.error.HTTPError(request.full_url, code, "err", {}, io.BytesIO(b"upstream error"))
+        if failure_kind == "url_error":
+            raise urllib.error.URLError("upstream reset")
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    binding = ModelBinding("http://up", "m", api_key="k")
+    with pytest.raises(ModelBindingError) as raised:
+        binding.complete({"messages": [{"role": "user", "content": "u"}]})
+    assert attempts == 1
+    assert raised.value.status == expected_status

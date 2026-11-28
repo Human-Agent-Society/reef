@@ -210,6 +210,15 @@ stages in its `pipeline` section, and the built-in generated-task recipe runs
 the tasks and trains on them. With `designer: prompt`, the generator service's
 one-reply prompt Designer rebuilds the same sessions as the baseline.
 
+[Continual environments](beta/continual_envs/README.md) are beta under
+`recipes/beta/continual_envs/`. A task generator sends the failed sessions of
+each window of live traffic to a generation service. The service mines
+environments from them, builds and reviews Harbor tasks, and keeps what its
+reviews learn about building tasks. The built-in generated-task recipe trains
+the policy on the tasks, and the next window is the traffic of the trained
+policy. A round starts only when a whole window of sessions waits
+(`min_source_records_per_round`).
+
 [Reefine](beta/reefine/README.md) is beta under `recipes/beta/reefine/`. It
 turns a plain-language request into a harness update: skills, rules, agent
 commands, or pi extensions. The served model, or a pi coding agent where the

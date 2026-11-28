@@ -27,9 +27,8 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Literal
 
-from reef.core.atif_payloads import canonical_json
 from reef.core.job_data import TaskSample
-from reef.core.values import require_integer, require_text
+from reef.core.values import canonical_json, require_integer, require_text
 from reef.recipe.generated_tasks.generator import check_rewards
 from reef.recipe.generated_tasks.training import (
     USE_KEY_PREFIX,

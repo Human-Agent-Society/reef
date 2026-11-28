@@ -35,7 +35,8 @@ Beta recipes
 Beta methods lack complete, reproducible learning results:
 `CORAL TTT <../../recipes/beta/coral/README.md>`__,
 `SPADE <../../recipes/beta/spade/README.md>`__,
-`AutoEnvScaling <../../recipes/beta/autoenvscaling/README.md>`__ and
+`AutoEnvScaling <../../recipes/beta/autoenvscaling/README.md>`__,
+`continual environments <../../recipes/beta/continual_envs/README.md>`__ and
 `Reefine <../../recipes/beta/reefine/README.md>`__.
 Their READMEs contain setup, results and limits. Integration tests do not establish
 learning quality.

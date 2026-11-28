@@ -1475,6 +1475,8 @@ def test_the_workers_runtime_env_carries_the_e2b_services_endpoints_as_this_proc
         "E2B_API_URL": "https://api.agentenv.example",
         "E2B_SANDBOX_URL": "https://sandbox.agentenv.example",
         "E2B_DOMAIN": "agentenv.example",
+        # The deployment's file of the job's prepared task images; the rollout manager reads the same file.
+        "REEF_AGENTENV_TASK_IMAGES": "/run/task-images/images.json",
     }
     assert startup.job_runtime_env({**e2b_settings, "OTHER": "x"}) == {"env_vars": {**defaults, **e2b_settings}}
     # An endpoint that is set but empty stays empty, so a worker cannot keep another value of its own.

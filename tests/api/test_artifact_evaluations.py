@@ -516,8 +516,11 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapsh
 
             store.query, store.read_many = spied_query, spied_read_many
             try:
-                for route in (rollouts_route, calls_route):
-                    assert (await client.get(route, headers=AUTH)).status == 200
+                # Every rollout ended, and the read above added up their calls: a second read reads no call, and
+                # answers the same totals.
+                again = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+                assert again == rollouts and reads == []
+                assert (await client.get(calls_route, headers=AUTH)).status == 200
             finally:
                 del store.query, store.read_many
             assert reads and set(reads) == {("query", False)}
@@ -1790,7 +1793,210 @@ def test_a_retry_runs_the_rollouts_without_a_score_again_and_ends_the_evaluation
     asyncio.run(run())
 
 
-def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts_end(tmp_path: Path) -> None:
+def test_retry_expected_attempts_keeps_peers_and_does_not_repeat_later_failures(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            accepted = await (
+                await client.post(
+                    "/reef/scenarios/s/evaluations",
+                    headers=AUTH,
+                    json={"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
+                )
+            ).json()
+            evaluation_id = accepted["evaluation_id"]
+            failed = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            peer = queue.take(EVALUATIONS_QUEUE, "peer", [EVALUATION_ROLLOUT_KIND])
+            queue.fail(EVALUATIONS_QUEUE, failed.id, "w", "provider unavailable", retryable=False)
+            expected = {failed.id: failed.attempt_count}
+            retried = evaluations.retry("s", evaluation_id, expected_attempts=expected)
+            assert retried.evaluation_id == evaluation_id
+            assert queue.read(EVALUATIONS_QUEUE, peer.id) == peer
+            attempt = queue.take(EVALUATIONS_QUEUE, "replacement", [EVALUATION_ROLLOUT_KIND])
+            assert attempt.id == failed.id
+            queue.fail(EVALUATIONS_QUEUE, attempt.id, "replacement", "failed again", retryable=False)
+            queue.fail(EVALUATIONS_QUEUE, peer.id, "peer", "a later failure", retryable=False)
+            before = queue.items(EVALUATIONS_QUEUE, scenario="s")
+            evaluations.retry("s", evaluation_id, expected_attempts=expected)
+            assert queue.items(EVALUATIONS_QUEUE, scenario="s") == before
+            with pytest.raises(ValueError):
+                evaluations.retry("s", evaluation_id, expected_attempts={"other-evaluation:0:0": 1})
+            assert queue.items(EVALUATIONS_QUEUE, scenario="s") == before
+
+    asyncio.run(run())
+
+
+def test_a_retried_evaluation_rollout_gets_a_fresh_deferral_budget_and_keeps_attempt_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution import workers as execution_workers
+    from reef.execution.workers import ItemDeferredError, QueueWorker
+
+    class DeferringRolloutWorker(QueueWorker):
+        """A ``QueueWorker`` that defers every item it takes.
+
+        Values: those of ``QueueWorker``; it adds no state.
+        Purpose: this test makes one to give a rollout more deferrals than the old limit.
+        ``run_item``: for every item it raises ``ItemDeferredError`` and returns nothing.
+        """
+
+        def run_item(self, item: WorkItem, lease_lost) -> Mapping[str, Any]:
+            raise ItemDeferredError("waiting for sandbox capacity")
+
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(execution_workers.time, "time", lambda: clock["wall"])
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            accepted = await (
+                await client.post(
+                    "/reef/scenarios/s/evaluations",
+                    headers=AUTH,
+                    json={"artifact_id": artifact_id, "harness": {"name": "terminus-2"}},
+                )
+            ).json()
+            evaluation_id = accepted["evaluation_id"]
+            worker = DeferringRolloutWorker(queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id="w")
+            # Simulate a rollout that already deferred 25 times (past the old max_deferrals=24) and then failed.
+            for _ in range(25):
+                assert worker.run_once()
+                deferred = queue.items(EVALUATIONS_QUEUE, scenario="s")[0]
+                assert deferred.state == "queued"
+                clock["wall"] = deferred.available_at
+            taken = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND], now=clock["wall"])
+            assert taken is not None and taken.deferred_attempt_count == 25
+            queue.fail(EVALUATIONS_QUEUE, taken.id, "w", "sandbox exited", retryable=False, now=clock["wall"])
+            failed = queue.read(EVALUATIONS_QUEUE, taken.id)
+            assert failed is not None and failed.state == "failed" and failed.attempt_count == 26
+
+            evaluations.retry("s", evaluation_id)
+            retried = queue.read(EVALUATIONS_QUEUE, taken.id)
+            assert retried is not None
+            assert (retried.state, retried.attempt_count, retried.deferred_attempt_count) == ("queued", 26, 0)
+
+            # On the first capacity deferral after retry, the rollout backs off from the initial 30s delay instead of
+            # failing or inheriting the 600s cap.
+            assert worker.run_once()
+            after = queue.read(EVALUATIONS_QUEUE, taken.id)
+            assert after is not None and after.state == "queued"
+            assert after.available_at == clock["wall"] + execution_workers.QueueWorker.first_deferral_seconds
+            assert (after.attempt_count, after.deferred_attempt_count) == (27, 1)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("initial_pin", "initial_prepared", "next_pin", "next_prepared"),
+    [
+        (False, False, True, True),
+        (True, True, False, False),
+    ],
+    ids=["unpinned-to-pinned", "pinned-to-unpinned"],
+)
+def test_an_in_flight_evaluation_preserves_its_recorded_task_mode_across_rolling_deploy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_pin: bool,
+    initial_prepared: bool,
+    next_pin: bool,
+    next_prepared: bool,
+) -> None:
+    from reef.execution import workers as execution_workers
+    from reef.execution.workers import ItemDeferredError, QueueWorker
+
+    class TransientReconcileWorker(QueueWorker):
+        """A ``QueueWorker`` that defers a fixed number of items and then scores each item 1.0.
+
+        Values: those of ``QueueWorker`` and ``remaining``, an integer of at least 0: the number of items that the
+        worker still defers. The constructor raises ``ValueError`` for a ``deferrals`` that is not such an integer.
+        Purpose: this test makes one with the deferrals of a task mode that waits for reconciliation.
+        ``run_item``: when ``remaining`` is above 0, it lowers ``remaining`` by 1 and raises ``ItemDeferredError``.
+        When ``remaining`` is 0, it returns a result with the score 1.0 and leaves ``remaining`` at 0.
+        """
+
+        def __init__(self, *args: Any, deferrals: int, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            if isinstance(deferrals, bool) or not isinstance(deferrals, int) or deferrals < 0:
+                raise ValueError("deferrals is an integer of at least 0")
+            self.remaining = deferrals
+
+        def run_item(self, item: WorkItem, lease_lost) -> Mapping[str, Any]:
+            if self.remaining > 0:
+                self.remaining -= 1
+                raise ItemDeferredError("Evaluation task mode requires reconciliation")
+            return {"score": RolloutScore(1.0).to_json()}
+
+    clock = {"wall": 2000.0}
+    monkeypatch.setattr(execution_workers.time, "time", lambda: clock["wall"])
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    old_control = ArtifactEvaluations(
+        dispatcher, pin_task_files=initial_pin, requires_prepared_templates=initial_prepared
+    )
+    new_control = ArtifactEvaluations(dispatcher, pin_task_files=next_pin, requires_prepared_templates=next_prepared)
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=old_control))) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            accepted = await (
+                await client.post(
+                    "/reef/scenarios/s/evaluations",
+                    headers=AUTH,
+                    json={
+                        "artifact_id": artifact_id,
+                        "harness": {"name": "terminus-2"},
+                        "max_concurrent_rollouts": 1,
+                    },
+                )
+            ).json()
+            evaluation_id = accepted["evaluation_id"]
+
+            # The first rollout survives repeated reconciliation deferrals during a rolling deploy (>24 times) and
+            # finishes instead of failing permanently.
+            first_item = queue.items(EVALUATIONS_QUEUE, scenario="s")[0]
+            first_rollout = EvaluationRollout.from_item(first_item)
+            assert (first_rollout.task_digest is not None) is initial_pin
+            worker = TransientReconcileWorker(
+                queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id="w", deferrals=26
+            )
+            for _ in range(26):
+                assert worker.run_once()
+                deferred = queue.read(EVALUATIONS_QUEUE, first_item.id)
+                assert deferred is not None and deferred.state == "queued"
+                clock["wall"] = deferred.available_at
+            assert worker.run_once()
+            done_first = queue.read(EVALUATIONS_QUEUE, first_item.id)
+            assert done_first is not None and done_first.state == "finished"
+
+            # After rolling deploy switches task-mode settings, new_control settles the next rollout using the
+            # evaluation's recorded task mode rather than the new deployment's default.
+            new_control.results.settle("s", evaluation_id)
+            items = queue.items(EVALUATIONS_QUEUE, scenario="s")
+            assert len(items) == 2
+            second_rollout = EvaluationRollout.from_item(items[1])
+            assert (second_rollout.task_digest is not None) is initial_pin
+            assert second_rollout.requires_prepared_templates is first_rollout.requires_prepared_templates
+
+            assert worker.run_once()
+            new_control.results.settle("s", evaluation_id)
+            stored = new_control.get("s", evaluation_id)
+            assert stored is not None and stored.state == "finished" and stored.mean_score == 1.0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fixed_selection", [False, True])
+def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts_end(
+    tmp_path: Path, fixed_selection: bool
+) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -1823,7 +2029,15 @@ def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts
             assert (await finished(client, accepted["evaluation_id"]))["progress"]["failed"] == 4
 
             # Two rollouts go back to the queue; the other two wait, and no rollout counts as ended.
-            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            if fixed_selection:
+                expected = {item.id: item.attempt_count for item in queue.items(EVALUATIONS_QUEUE, scenario="s")}
+                evaluations = ArtifactEvaluations(dispatcher)
+                evaluations.retry("s", accepted["evaluation_id"], expected_attempts=expected)
+                before = queue.items(EVALUATIONS_QUEUE, scenario="s")
+                evaluations.retry("s", accepted["evaluation_id"], expected_attempts=expected)
+                assert queue.items(EVALUATIONS_QUEUE, scenario="s") == before
+            else:
+                assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
             listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
             assert [(row["state"], row["attempt_count"], row["error"]) for row in listed] == [
                 ("queued", 1, "agent setup timed out"),
@@ -1848,7 +2062,11 @@ def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts
     asyncio.run(run())
 
 
-def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(tmp_path: Path) -> None:
+def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reads of every rollout take the calls of the evaluation in one pass, as for a large evaluation.
+    monkeypatch.setattr("reef.control.operations.artifact_evaluations.SINGLE_ROLLOUT_READS", 0)
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -1876,7 +2094,21 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
             # The first rollout fails in its sandbox, the cancel stops the second in its run, and two never start.
             first = await taken()
+
+            def keep_call(attempt: int) -> None:
+                summary = EvaluationCallSummary(
+                    0, 0, attempt, 0, "/v1/chat/completions", 200, 5.0, 0.1, 3, 1, "stop", 0
+                )
+                call = EvaluationCall(summary, {"messages": []}, {"choices": []})
+                dispatcher.add_evaluation_call("s", accepted["evaluation_id"], artifact_id, call)
+
+            async def first_calls() -> int:
+                rows = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
+                return rows[0]["calls"]["count"]
+
+            keep_call(1)
             queue.fail(EVALUATIONS_QUEUE, first.id, "w", "the sandbox stopped", retryable=False)
+            assert await first_calls() == 1
             second = await taken()
             queue.start(EVALUATIONS_QUEUE, second.id, "w")
             assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
@@ -1889,7 +2121,10 @@ def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_un
             assert (await (await client.post(f"{route}/retry", headers=AUTH)).json())["state"] == "running"
             item = await taken()
             assert (item.id, item.attempt_count) == (first.id, 2)
+            keep_call(2)
             queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            # The totals of the rollout's first end do not hide the call of its second attempt.
+            assert await first_calls() == 2
             answer = await finished(client, accepted["evaluation_id"])
             assert (answer["state"], answer["error"]) == ("failed", CANCELLED_ERROR)
             progress = answer["progress"]
@@ -2597,6 +2832,21 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
             assert activated == [], "a score with a harness from an item activates nothing"
+            # The reads of the rollouts read no payload, which holds the tree, and answer as before.
+            route = f"/reef/scenarios/s/evaluations/{answer['evaluation_id']}"
+            for query in ("", "?calls=false", "?limit=10", "?limit=10&state=failed", "?limit=10&sort=score"):
+                rollouts = await client.get(f"{route}/rollouts{query}", headers=AUTH)
+                assert rollouts.status == 200, await rollouts.text()
+                rows = (await rollouts.json())["rollouts"]
+                assert [(row["task"], row["task_index"], row["repeat"]) for row in rows] == (
+                    [] if "failed" in query else [("add", 0, 0)]
+                )
+            status = await (await client.get(f"{route}?score_levels=true", headers=AUTH)).json()
+            assert status["progress"]["score_levels"]["full"] == 1
+            [stored_rollout] = evaluations.results.rollouts(answer["evaluation_id"], "s")
+            [read_rollout] = evaluations.results.rollouts(answer["evaluation_id"], "s", payload=False)
+            assert stored_rollout.payload["tree"] is not None
+            assert read_rollout == replace(stored_rollout, payload={})
 
         assert answer["state"] == "finished", answer
         assert answer["request"]["harness"] == harness
@@ -2707,6 +2957,102 @@ def test_an_item_of_another_owner_and_automatic_settings_are_refused(tmp_path: P
     asyncio.run(run())
 
 
+def test_retention_after_read_preserves_legacy_rollout_names_and_scores(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    try:
+        dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
+        results = ArtifactEvaluations(dispatcher).results
+        queue = dispatcher.queue
+        request = ArtifactEvaluationRequest("a1", "weights", harness={"name": "terminus-2"})
+        with dispatcher.locked_scenario("s") as current:
+            current.store.evaluations.create(evaluation_id="eval", owner="test", request=request, created_at=0.0)
+        for index, name in enumerate(("add", "sort")):
+            rollout = EvaluationRollout(
+                "s", "eval", "a1", "weights", index, name, 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+            )
+            queue.append(rollout_work(rollout))
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.start(EVALUATIONS_QUEUE, item.id, "w")
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(float(index)).to_json()})
+        items = queue.items
+
+        def expire_after_read(*args, **kwargs):
+            rows = items(*args, **kwargs)
+            queue.delete_final(finished_before=time.time() + 1)
+            return rows
+
+        monkeypatch.setattr(queue, "items", expire_after_read)
+        results.settle("s", "eval")
+        with dispatcher.locked_scenario("s") as current:
+            result = current.store.evaluations.read("eval").result
+            assert result.scores.to_json() == [{"task": "add", "scores": [0.0]}, {"task": "sort", "scores": [1.0]}]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("environment", ["docker", "e2b"])
+def test_settlement_reads_scores_only_after_the_failure_check_can_stop_the_run(
+    tmp_path: Path, monkeypatch, environment: str
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    try:
+        dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
+        results = ArtifactEvaluations(dispatcher).results
+        queue = dispatcher.queue
+        request = ArtifactEvaluationRequest(
+            "a1",
+            "weights",
+            harness={"name": "terminus-2"},
+            task_names=("add",),
+            rollouts_per_task=12,
+            environment=environment,
+            max_failed_fraction=0.5,
+        )
+        with dispatcher.locked_scenario("s") as current:
+            current.store.evaluations.create(
+                evaluation_id="eval", owner="test", request=request, created_at=time.time()
+            )
+        for repeat in range(request.rollouts_per_task):
+            rollout = EvaluationRollout(
+                "s",
+                "eval",
+                "a1",
+                "weights",
+                0,
+                "add",
+                repeat,
+                PolicyModel("m"),
+                {"name": "terminus-2"},
+                environment,
+                {},
+            )
+            queue.append(rollout_work(rollout))
+        bulk_reads: list[tuple[int, bool]] = []
+        items = queue.items
+
+        def read_items(*args, **kwargs):
+            rows = items(*args, **kwargs)
+            bulk_reads.append((len(rows), kwargs.get("payload", True)))
+            return rows
+
+        monkeypatch.setattr(queue, "items", read_items)
+        for ended in range(1, FAILURE_CHECK_ROLLOUTS + 1):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.start(EVALUATIONS_QUEUE, item.id, "w")
+            if ended == 1:
+                results.settle("s", "eval")
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(None).to_json()})
+            results.settle("s", "eval")
+            if ended < FAILURE_CHECK_ROLLOUTS:
+                assert bulk_reads == []
+        with dispatcher.locked_scenario("s") as current:
+            assert current.store.evaluations.read("eval").state == "failed"
+        assert any(size == 12 for size, _ in bulk_reads)
+        assert all(not payload for _, payload in bulk_reads)
+    finally:
+        dispatcher.close()
+
+
 def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_reports_its_progress(
     tmp_path: Path,
 ) -> None:
@@ -2804,7 +3150,7 @@ def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
     read_rollouts = evaluations.results.rollouts
     reads: list[str] = []
 
-    def counted_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+    def counted_rollouts(evaluation_id: str, scenario: str, *, payload: bool = True) -> tuple[WorkItem, ...]:
         reads.append(evaluation_id)
         return read_rollouts(evaluation_id, scenario)
 
@@ -2980,7 +3326,7 @@ def test_the_list_reads_an_ended_evaluation_without_rollouts_once(
     evaluations = ArtifactEvaluations(dispatcher)
     reads: list[str] = []
 
-    def no_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+    def no_rollouts(evaluation_id: str, scenario: str, *, payload: bool = True) -> tuple[WorkItem, ...]:
         reads.append(evaluation_id)
         return ()
 

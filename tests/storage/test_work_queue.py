@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import math
 import threading
@@ -167,6 +168,22 @@ def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_co
         queue.items("jobs", id_prefix="")
 
 
+@pytest.mark.unit
+def test_a_read_without_payload_gives_items_with_an_empty_payload(open_coordination):
+    queue = open_coordination().queue
+    first = queue.append(NewWork("jobs", "rollout:e1:0", "s", "rollout", {"tree": {"files": {"a.md": "x" * 1000}}}))
+    second = queue.append(NewWork("jobs", "rollout:e1:1", "s", "rollout", {"task_index": 4}))
+    # Only the payload differs from the stored items.
+    empty = (dataclasses.replace(first, payload={}), dataclasses.replace(second, payload={}))
+
+    assert queue.items("jobs", id_prefix="rollout:e1:", payload=False) == empty
+    assert queue.items("jobs", id_prefix="rollout:e1:") == (first, second)
+    ids = ["rollout:e1:1", "missing", "rollout:e1:0"]
+    assert queue.read_items("jobs", ids, payload=False) == empty[::-1]
+    assert WorkQueue.read_items(queue, "jobs", ids, payload=False) == empty[::-1]
+    assert queue.read_items("jobs", ids) == (second, first)
+
+
 def job(
     item_id: str, *, scenario: str = "s", kind: str = "training_job:tinker", serial_key: str | None = "s"
 ) -> NewWork:
@@ -239,7 +256,6 @@ def test_a_deferred_give_back_counts_apart_and_only_for_the_attempt_that_holds_t
     # A late refusal at the retry cutoff must also leave the new lease with its worker.
     monkeypatch.setattr(workers.time, "time", lambda: 102.0)
     worker = FailingWorker(queue, ItemDeferredError("waiting for capacity"))
-    worker.max_deferrals = 1
     worker.defer(expired, "waiting for capacity")
     held = queue.read("jobs", "a")
     assert (held.state, held.attempt_count) == ("assigned", newer.attempt_count)
@@ -697,10 +713,10 @@ def test_a_worker_gives_an_item_without_capacity_back_and_waits_longer_each_time
     # The test sets the clock that the queue reads too.
     queue.append(job("a"), now=0)
     worker = FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity"))
-    worker.max_deferrals = 2
     clock = {"wall": 1000.0}
     monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
-    for delay_seconds in (30, 60):
+    # The wait doubles up to ``max_deferral_seconds``, and the item never fails for want of capacity.
+    for delay_seconds in (30, 60, 120, 240, 480, *[600] * 30):
         assert worker.run_once()
         item = queue.read("jobs", "a")
         assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
@@ -708,11 +724,52 @@ def test_a_worker_gives_an_item_without_capacity_back_and_waits_longer_each_time
         # No worker takes the item while it waits.
         assert not worker.run_once()
         clock["wall"] += delay_seconds
-    # The give-backs did not use the item's attempts; after ``max_deferrals`` of them the error counts as a failure.
-    assert worker.run_once()
-    item = queue.read("jobs", "a")
-    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (3, 2, 2)
-    assert item.state == "queued" and item.error == "waiting for sandbox capacity (given back 2 times)"
+    # The give-backs did not use the item's attempts.
+    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (35, 35, 35)
+    assert queue.has_attempts_left(item)
+
+
+@pytest.mark.unit
+def test_a_capacity_refusal_whose_message_ends_with_a_newline_still_gives_the_item_back():
+    # AgentENV's 503 answer ends with a newline, and the refusal's message carries it: the give-back must not raise,
+    # or the item stays held until its lease expires and uses an attempt.
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.append(job("a"))
+        refusal = 'waiting for sandbox capacity: AgentENV refused a sandbox (HTTP 503): {"code":503}\n'
+        assert FailingWorker(queue, ItemDeferredError(refusal)).run_once()
+        item = queue.read("jobs", "a")
+        assert (item.state, item.error) == ("queued", refusal.strip())
+        assert (item.worker_id, item.deferred_attempt_count) == (None, 1)
+        assert queue.has_attempts_left(item)
+
+
+@pytest.mark.unit
+def test_a_retried_item_waits_for_capacity_as_a_new_item_does(monkeypatch):
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.append(job("a"))
+        queue.write_metadata("jobs", "a", "run", "r1")
+        refused = FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity"))
+        for delay_seconds in (30, 60):
+            assert refused.run_once()
+            clock["wall"] += delay_seconds
+        # An attempt that found capacity fails the item for another reason.
+        assert FailingWorker(queue, ItemFailedError("the sandbox stopped")).run_once()
+        failed = queue.read("jobs", "a")
+        assert (failed.state, failed.deferred_attempt_count) == ("failed", 2)
+
+        again = queue.retry("jobs", "a")
+        # The retry keeps the attempt counts and the other metadata, and counts the refusals from zero.
+        assert (again.attempt_count, again.stopped_attempt_count, again.deferred_attempt_count) == (3, 2, 0)
+        assert again.metadata == {"run": "r1"}
+        assert refused.run_once()
+        item = queue.read("jobs", "a")
+        assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
+        assert item.available_at == clock["wall"] + 30
+        assert (item.stopped_attempt_count, item.deferred_attempt_count) == (3, 1)
 
 
 @pytest.mark.unit

@@ -1,111 +1,100 @@
 HTTP API: inference and feedback
 ================================
 
-Send model requests, track startup, and report feedback using response receipts. See `HTTP API <http-api.rst>`__ for routes and headers.
+See `HTTP API <http-api.rst>`__ for routes and authentication.
 
 Startup status
 --------------
 
-``GET /reef/scenarios/{scenario}/inference/status`` describes the selected
-artifact, independently of any older route still answering requests.
-``model`` defaults to ``active``; served artifact IDs also work.
-Unknown names return 404; unreadable state returns 503.
+``GET /reef/scenarios/{scenario}/inference/status`` accepts ``model`` as
+``active`` (default) or a served artifact ID. Unknown names return 404.
+Unreadable state returns 503. Reads start no work and are not health checks.
+Published routes stay ready while other artifacts start.
 
-- ``state``: ``pending`` (queued), ``starting``, ``ready`` (route published),
-  or ``failed`` with ``error``. Creation and activation return before readiness.
-- ``startup``: ``steps`` and ``estimate_seconds``, or null when unreported.
-  Steps follow ``prepare`` → ``start`` → ``load``. Each has ``phase``,
-  epoch-second ``started_at``/``ended_at``, and optional ``detail``.
-  The current step has no end time.
-- ``engine``: ``warm``, ``starting`` or ``idle``; null outside ready routes
-  or when unreported. An idle engine starts on the next request.
-- ``engine_replicas``: serving/starting counts and optional individual replicas.
-  Each has ``id``, ``state``, ``started_at``, ``startup`` and ``load``.
-  Serving load reports ``running_requests``, ``waiting_requests``,
-  ``output_tokens_per_second`` and epoch-second ``measured_at``; otherwise null.
-  ``engine_detail`` and top-level startup can describe an additional starting replica.
+.. code:: mermaid
 
-Without a usable route, inference returns 503: ``inference_starting`` with
-``Retry-After: 30``, or ``inference_start_failed``.
-Failed startup retries after 60 seconds, doubling to one hour.
-Resend the complete ``served`` mapping to retry immediately.
+   flowchart TB
+       accTitle: Inference startup and retries
+       accDescr: A worker takes pending work and starts the route. The route becomes ready on publication. After final failure, a new startup request returns it to pending.
+       pending["pending"] -->|Worker starts| starting["starting"]
+       starting -->|"Route<br/>published"| ready(["ready"])
+       starting -->|"Final<br/>failure"| failed["failed"]
+       failed -.->|"New<br/>request"| pending
 
-``POST /reef/scenarios/{scenario}/redeploy`` restarts served engines without
-changing artifact selection, returning ``{scenario}``. It also replaces pending startup.
-Status reads start no work and are not health checks.
+Worker retries stay ``starting``. Failed work exposes ``error`` and retries
+after 60 seconds, doubling to one hour. Resend the complete ``served`` mapping
+for an immediate retry.
+
+- ``startup``: ``{steps, estimate_seconds}``, or null when unreported.
+  Phases run from ``prepare`` through ``start`` to ``load``. Steps contain ``phase``,
+  ``started_at``, ``ended_at`` and optional ``detail``. The current step has no end time.
+- ``engine``: ``warm``, ``starting`` or ``idle``. Null unless ready and reported.
+  Idle engines start on request.
+- ``engine_replicas``: serving/starting counts and replicas with ``id``, ``state``,
+  ``started_at``, ``startup``, ``load``. Serving load reports ``running_requests``,
+  ``waiting_requests``, ``output_tokens_per_second`` and ``measured_at``. Otherwise, ``load`` is null.
+  ``engine_detail``/``startup`` can describe additional starting replicas.
+
+Timestamps use epoch seconds. Until a route is ready, inference returns 503.
+``inference_starting`` includes ``Retry-After: 30``. A failed startup returns ``inference_start_failed``.
+``POST /reef/scenarios/{scenario}/redeploy`` replaces pending startup and restarts
+served engines without changing selections, returning ``{scenario}``.
 
 Request
 -------
 
-Send the provider's body; Reef preserves sampling parameters. Artifacts add no fields. Set ``"stream": true`` for SSE.
+Provider bodies retain sampling parameters. Scenario-prefixed routes replace scenario headers.
+Set ``"stream": true`` for SSE. See `serving <http-api-serving.rst>`__ for artifact
+selection and traffic splits. Requests keep their route through activation.
+Weight handlers replace ``lora_path`` with the served adapter.
 
-Reef selects a serving route:
+One retry follows a non-streaming abort or model rejection before output.
+Explicit artifacts and splits retain their target, returning 503 with ``Retry-After``
+if unserved. Others can reach a new active artifact.
 
-- ``model`` selects a named served artifact, otherwise the active artifact or a `traffic split <http-api-serving.rst#traffic-split>`__ selection.
-- The request keeps this route through activations. Reef uses its engine URL/model name and records its artifact snapshot.
-- To require a specific artifact, use ``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/chat/completions``.
-- ``/reef/scenarios/{scenario}/v1/{route}`` equals ``/v1/{route}`` with a scenario header. Client model bindings use it.
-- Weight-serving handlers replace the body's ``lora_path`` with the served adapter.
+Providers' ``logprobs``/``top_logprobs`` pass through. For SGLang/vLLM, set
+``logprobs: true`` and/or ``return_token_ids: true``.
 
-`Run the services in separate processes <../user-guide/split-services.rst>`__ gives the status codes of an inference request.
+- **Chat Completions** returns ``choices[0].logprobs.content``, ``prompt_token_ids`` and ``choices[0].token_ids``.
+  Streams send log probabilities with text and token IDs in the last chunk.
+- **Messages** returns ``logprobs.content``, ``prompt_token_ids`` and ``token_ids`` as Reef extensions.
+  Streams send them in ``message_delta``.
 
-Reef retries once after an aborted non-streaming answer or model rejection before output. It rereads the route. Artifact routes, artifact IDs in ``model``, and traffic splits keep their artifact; if no longer served, they return 503 with ``Retry-After``. Other retries may reach a new active artifact.
+Sampled tokens follow output order. Records retain these fields. Token IDs require the flag.
+Each ``top_logprobs`` contains only its sampled token. SGLang alternatives appear in
+``choices[0].meta_info.output_top_logprobs``, using its format, in the last streaming
+chunk. vLLM supplies no alternatives.
 
-Log probabilities depend on what answers the request:
+**Record receipts**
 
-- **Provider/routed target:** forwards ``logprobs``/``top_logprobs`` and preserves returned values in responses and records.
-- **SGLang/vLLM Chat Completions:** ``"logprobs": true`` returns sampled tokens in ``choices[0].logprobs.content``, in output order. Streams send entries with text; records retain them. ``top_logprobs`` includes only the sampled token. SGLang alternatives use its format in ``choices[0].meta_info.output_top_logprobs``, in the last streaming chunk. vLLM returns no alternatives.
-- **SGLang/vLLM Messages:** ``"logprobs": true`` returns top-level ``logprobs: {"content": [...]}``, a Reef extension; streams carry it in ``message_delta``.
+- Non-streaming: ``x-reef-agent-record-id`` header.
+- OpenAI SSE: ``reef.agent_record_id`` in an empty-``choices`` chunk before ``[DONE]``.
+- Anthropic SSE: ``reef.agent_record_id`` on ``message_stop``.
 
-To receive token IDs from Reef's SGLang or vLLM backend, set ``"return_token_ids": true``:
-
-- Chat Completions returns the rendered prompt in ``prompt_token_ids`` and sampled IDs in ``choices[0].token_ids``. Streams send both in the last chunk.
-- Messages returns top-level ``prompt_token_ids`` and ``token_ids``, or carries them in ``message_delta`` when streaming.
-- Records retain the same fields. Without the flag, responses contain no token IDs.
-
-The receipt identifies the stored record:
-
-+---------------+-----------------------------------------------------------+
-| Response kind | Where the receipt is                                      |
-+===============+===========================================================+
-| non-streaming | the ``x-reef-agent-record-id`` response header            |
-+---------------+-----------------------------------------------------------+
-| OpenAI SSE    | ``reef.agent_record_id`` in a final empty-``choices``     |
-|               | chunk, immediately before ``data: [DONE]``                |
-+---------------+-----------------------------------------------------------+
-| Anthropic SSE | the same field on ``message_stop``                        |
-+---------------+-----------------------------------------------------------+
-
-Stream receipts follow record storage; incomplete streams have none and never train.
-Engine/transport failures, timeouts and missing terminal events close the connection
-without a terminal event, causing an SDK transport error. Aborted SGLang/vLLM
-streams may keep a terminal event but are still incomplete. Streams cannot restart
-once frames have been sent. See also `routed streams <http-api-routing.rst#routed-external-model-requests>`__.
-
-Served Reef artifacts return ``x-reef-artifact-id``; routed external models do not. Clients find harness updates through `harness routes <http-api-harness.rst#harness-artifacts>`__.
+Receipts follow storage. Incomplete streams have no receipt and never train.
+On engine failure, timeout or an incomplete upstream stream, clients can receive an SDK transport error.
+An aborted SGLang/vLLM stream can still send a terminal event. Reef cannot restart a stream after sending a frame.
+Only served Reef artifacts return ``x-reef-artifact-id``.
 
 Evaluation routes
 -----------------
 
-Use ``/reef/scenarios/{scenario}/evaluation/v1/{route}``, or ``.../components/{component}/evaluation/v1/{route}`` for composed snapshot components.
-
-- Routes use the active model, store no record and return no ``training`` block.
-- An unknown scenario or a scenario without a served model returns 404.
-- Authenticated recipes use an evaluation-only startup token, renewed on restart.
+``/reef/scenarios/{scenario}/evaluation/v1/{route}`` uses the active model without
+records or ``training`` blocks. Composed snapshots also accept
+``.../components/{component}/evaluation/v1/{route}``.
+Unknown scenarios or absent served models return 404.
+Recipe evaluation tokens renew on restart and authorize only these routes.
 
 Report
 ------
 
-``POST /reef/report`` stores four fields and drops other top-level keys. Put harness-specific data inside ``metadata`` or ``feedback``.
+``POST /reef/report`` stores these optional fields and drops other payload keys.
 
-- ``score``: finite number, excluding booleans.
-- ``feedback``: string or object interpreted by the recipe.
-- ``references``: last inference receipt of each scored trajectory in this scenario.
-  Reef expands each to the trajectory's calls. Reported-feedback recipes require references.
-- ``metadata``: recipe-defined object. ``task`` or ``harbor.task_name`` can identify
-  the Harbor task. ``training.eligible`` is forbidden.
-
-It answers ``{agent_record_id, scenario, request_type}``.
+- ``score``: finite number. Booleans are rejected.
+- ``feedback``: recipe-interpreted string/object.
+- ``references``: each scored trajectory's last inference receipt in this scenario.
+  Reef expands trajectories. Reported-feedback recipes require references.
+- ``metadata``: recipe object. ``task`` or ``harbor.task_name`` identifies Harbor tasks.
 
 .. code:: python
 
@@ -116,8 +105,11 @@ It answers ``{agent_record_id, scenario, request_type}``.
        "metadata": {"harbor": {"trial_id": "run42:7"}},
    })
 
-Optional ``agent_record_id`` is the report's idempotency key. Identical retries return the stored report; different content returns 409. Put inference receipts in ``references``.
+Returns ``{agent_record_id, scenario, request_type}``.
+Optional ``agent_record_id`` makes identical retries idempotent, even after
+reference cleanup. Changed content returns 409. Retries never restart training.
 
-Recipe report schemas, such as `tttd's <../user-guide/recipes/tttd.rst#the-report-contract>`__, validate declared ``score``/``metadata`` fields at ingress; violations return 400. ``feedback`` and undeclared metadata pass through. ``metadata.training.eligible`` always returns 400: reports cannot opt out of training.
-
-Missing, foreign, non-inference, duplicate or overlapping references return 400 without storing a report. Reference each trajectory's last call; wait for pending records before resubmitting. Identical retries remain idempotent after reference cleanup and never restart training.
+Reef returns 400 for schema violations, ``metadata.training.eligible``,
+or missing, foreign, non-inference, duplicate or overlapping references. It stores no report.
+Wait for pending inference records before resubmitting. Recipes validate declared
+``score``/``metadata`` fields. Feedback and undeclared metadata pass through.

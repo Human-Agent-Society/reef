@@ -39,6 +39,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    Select,
     String,
     Table,
     Text,
@@ -49,6 +50,7 @@ from sqlalchemy import (
     exists,
     func,
     insert,
+    literal,
     not_,
     select,
     update,
@@ -61,7 +63,7 @@ from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.core.values import require_text
+from reef.core.values import canonical_json, require_text
 from reef.storage.coordination.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination.served_models import (
     AUTOMATIC_RETRIES,
@@ -231,10 +233,6 @@ def coordination_tables(metadata: MetaData, *, sqlite: bool) -> CoordinationTabl
 WORK_SEQUENCE = 1
 #: The counter row that numbers the changes of ``served_models`` and its scheduled stops.
 SERVED_SEQUENCE = 2
-
-
-def canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 class CoordinationDatabase(CoordinationResource):
@@ -945,6 +943,15 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
+def item_columns(table: Table, payload: bool) -> Select[tuple[object, ...]]:
+    """The read of the columns of ``table`` that ``item_from_row`` reads. Without ``payload``, the read gives an
+    empty JSON object for each payload, so the database does not read the stored payloads."""
+    if payload:
+        return select(*table.c)
+    others = (column for column in table.c if column.name != "payload_json")
+    return select(*others, literal("{}").label("payload_json"))
+
+
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -1330,8 +1337,19 @@ class SQLWorkQueue(WorkQueue):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or not item.final:
                 return item
+            # The retry waits for capacity as a new item does: an item that failed after its last deferral would
+            # otherwise fail again at the first refusal.
+            metadata = {name: value for name, value in item.metadata.items() if name != DEFERRED_ATTEMPTS}
             return self.write_item(
-                connection, counter, item, moment, state="queued", result=None, ended_at=None, available_at=moment
+                connection,
+                counter,
+                item,
+                moment,
+                state="queued",
+                result=None,
+                ended_at=None,
+                available_at=moment,
+                metadata_json=canonical_json(metadata),
             )
 
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
@@ -1407,11 +1425,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
-    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+    def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         if not item_ids:
             return ()
         found = {}
-        query = select(self.table).where(self.table.c.queue == queue)
+        query = item_columns(self.table, payload).where(self.table.c.queue == queue)
         with self.database.read() as connection:
             for batch in batches(dict.fromkeys(item_ids)):
                 rows = connection.execute(query.where(self.table.c.item_id.in_(batch))).mappings()
@@ -1431,7 +1449,13 @@ class SQLWorkQueue(WorkQueue):
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
     def items(
-        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+        self,
+        queue: str,
+        *,
+        scenario: str | None = None,
+        kind: str | None = None,
+        id_prefix: str | None = None,
+        payload: bool = True,
     ) -> tuple[WorkItem, ...]:
         conditions = [self.table.c.queue == queue]
         if scenario is not None:
@@ -1441,7 +1465,7 @@ class SQLWorkQueue(WorkQueue):
         if id_prefix is not None:
             check_id_prefix(id_prefix)
             conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
-        query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
+        query = item_columns(self.table, payload).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
