@@ -936,6 +936,20 @@ def test_a_recorded_trajectory_renders_with_the_models_chat_template(tmp_path, s
 
 
 @pytest.mark.unit
+def test_sft_fails_when_every_trajectory_exceeds_its_render_limit(tmp_path, stacks) -> None:
+    stack = stacks(tmp_path)
+    stack.component.template = CharTemplate()
+    steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
+    sample = TrajectorySample(
+        {"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps, "extra": {"reef": {"max_tokens": 1}}}
+    )
+    status = stack.run("sft", step=0, batch=JobData("too-long", (sample,)))
+    assert status.state == "failed"
+    assert "none of the 1 trajectories could render" in status.error
+    assert not status.checkpoints and not stack.group.train_calls
+
+
+@pytest.mark.unit
 def test_sft_trains_a_demonstration_that_records_no_reward(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     stack.component.template = CharTemplate()
