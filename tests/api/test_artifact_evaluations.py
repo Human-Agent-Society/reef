@@ -1793,7 +1793,47 @@ def test_a_retry_runs_the_rollouts_without_a_score_again_and_ends_the_evaluation
     asyncio.run(run())
 
 
-def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts_end(tmp_path: Path) -> None:
+def test_retry_expected_attempts_keeps_peers_and_does_not_repeat_later_failures(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            accepted = await (
+                await client.post(
+                    "/reef/scenarios/s/evaluations",
+                    headers=AUTH,
+                    json={"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
+                )
+            ).json()
+            evaluation_id = accepted["evaluation_id"]
+            failed = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            peer = queue.take(EVALUATIONS_QUEUE, "peer", [EVALUATION_ROLLOUT_KIND])
+            queue.fail(EVALUATIONS_QUEUE, failed.id, "w", "provider unavailable", retryable=False)
+            expected = {failed.id: failed.attempt_count}
+            retried = evaluations.retry("s", evaluation_id, expected_attempts=expected)
+            assert retried.evaluation_id == evaluation_id
+            assert queue.read(EVALUATIONS_QUEUE, peer.id) == peer
+            attempt = queue.take(EVALUATIONS_QUEUE, "replacement", [EVALUATION_ROLLOUT_KIND])
+            assert attempt.id == failed.id
+            queue.fail(EVALUATIONS_QUEUE, attempt.id, "replacement", "failed again", retryable=False)
+            queue.fail(EVALUATIONS_QUEUE, peer.id, "peer", "a later failure", retryable=False)
+            before = queue.items(EVALUATIONS_QUEUE, scenario="s")
+            evaluations.retry("s", evaluation_id, expected_attempts=expected)
+            assert queue.items(EVALUATIONS_QUEUE, scenario="s") == before
+            with pytest.raises(ValueError):
+                evaluations.retry("s", evaluation_id, expected_attempts={"other-evaluation:0:0": 1})
+            assert queue.items(EVALUATIONS_QUEUE, scenario="s") == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fixed_selection", [False, True])
+def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts_end(
+    tmp_path: Path, fixed_selection: bool
+) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
@@ -1826,7 +1866,15 @@ def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts
             assert (await finished(client, accepted["evaluation_id"]))["progress"]["failed"] == 4
 
             # Two rollouts go back to the queue; the other two wait, and no rollout counts as ended.
-            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            if fixed_selection:
+                expected = {item.id: item.attempt_count for item in queue.items(EVALUATIONS_QUEUE, scenario="s")}
+                evaluations = ArtifactEvaluations(dispatcher)
+                evaluations.retry("s", accepted["evaluation_id"], expected_attempts=expected)
+                before = queue.items(EVALUATIONS_QUEUE, scenario="s")
+                evaluations.retry("s", accepted["evaluation_id"], expected_attempts=expected)
+                assert queue.items(EVALUATIONS_QUEUE, scenario="s") == before
+            else:
+                assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
             listed = (await (await client.get(f"{route}/rollouts", headers=AUTH)).json())["rollouts"]
             assert [(row["state"], row["attempt_count"], row["error"]) for row in listed] == [
                 ("queued", 1, "agent setup timed out"),

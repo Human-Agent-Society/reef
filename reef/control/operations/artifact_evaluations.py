@@ -1275,7 +1275,12 @@ class ArtifactEvaluations:
         return cancelled
 
     def retry(
-        self, scenario: str, evaluation_id: str, changes: Mapping[str, object] | None = None
+        self,
+        scenario: str,
+        evaluation_id: str,
+        changes: Mapping[str, object] | None = None,
+        *,
+        expected_attempts: Mapping[str, int] | None = None,
     ) -> StoredEvaluation | None:
         """Run the failed rollouts of the evaluation ``evaluation_id`` of ``scenario`` once more, and return the
         evaluation, which runs (RFC #1340); None when the scenario has no such evaluation.
@@ -1285,10 +1290,16 @@ class ArtifactEvaluations:
         (``rollout_cancelled``): a retry leaves it, and the rollouts that never started, to ``resume``. After a retry
         of a cancelled or stopped evaluation, the evaluation fails with that error again once the failed rollouts end.
 
-        ``EvaluationStateConflictError`` for an evaluation with no failed rollout. ``run_again`` gives the rest,
-        and what ``changes`` can hold.
+        ``expected_attempts`` optionally maps rollout IDs to their attempt counts when the caller selected them.
+        Only those failed attempts run again. Replays leave queued, running, waiting, and later attempts unchanged.
+        Each ID must belong to this evaluation. Each count must be a non-negative int and cannot exceed its stored count.
+        The mapping must not be empty. These checks precede every change.
+
+        ``EvaluationStateConflictError`` for an unbounded retry with no failed rollout. ``run_again`` gives the rest.
         """
-        return self.run_again(scenario, evaluation_id, resumes=False, changes=changes)
+        return self.run_again(
+            scenario, evaluation_id, resumes=False, changes=changes, expected_attempts=expected_attempts
+        )
 
     def resume(
         self, scenario: str, evaluation_id: str, changes: Mapping[str, object] | None = None
@@ -1312,6 +1323,7 @@ class ArtifactEvaluations:
         *,
         resumes: bool,
         changes: Mapping[str, object] | None = None,
+        expected_attempts: Mapping[str, int] | None = None,
     ) -> StoredEvaluation | None:
         """Run once more the rollouts of the evaluation ``evaluation_id`` of ``scenario`` that ``resume`` (when
         ``resumes``) or ``retry`` chooses, and return the evaluation, which runs; None when the scenario has no such
@@ -1338,6 +1350,16 @@ class ArtifactEvaluations:
         changes = {} if changes is None else changes
         if set(changes) - {"max_concurrent_rollouts"}:
             raise ValueError("a retry or a resume of an evaluation can change only max_concurrent_rollouts")
+        if expected_attempts is not None and (
+            resumes
+            or not isinstance(expected_attempts, Mapping)
+            or not expected_attempts
+            or any(
+                not isinstance(key, str) or type(count) is not int or count < 0
+                for key, count in expected_attempts.items()
+            )
+        ):
+            raise ValueError("expected_attempts must name failed rollout attempts for a retry")
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.read(evaluation_id)
             if stored is None:
@@ -1404,6 +1426,21 @@ class ArtifactEvaluations:
                     for item in items
                     if rollout_ended(item) and rollout_failed(item) and not rollout_cancelled(item)
                 ]
+                if expected_attempts is not None:
+                    by_id = {item.id: item for item in items}
+                    if any(
+                        key not in by_id
+                        or by_id[key].attempt_count < count
+                        or (
+                            by_id[key].attempt_count == count and rollout_ended(by_id[key]) and by_id[key] not in again
+                        )
+                        for key, count in expected_attempts.items()
+                    ):
+                        raise ValueError("the expected attempts must belong to failed rollouts of this evaluation")
+                    again = [item for item in again if expected_attempts.get(item.id) == item.attempt_count]
+                    if not again:
+                        self.results.settle_changed(scenario, evaluation_id)
+                        return stored
                 if not again:
                     raise EvaluationStateConflictError(f"evaluation {evaluation_id!r} has no failed rollout")
             if request.max_concurrent_rollouts != stored.request.max_concurrent_rollouts:
