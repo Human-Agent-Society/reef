@@ -77,6 +77,30 @@ def test_leading_whitespace_preserves_reasoning_and_literal_answer_text(reply, e
         assert (reasoning, answer) == expected, offset
 
 
+def test_a_plain_answer_streams_before_it_finishes():
+    splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)
+    assert splitter.feed("Hello") == [("text", "Hello")]
+    assert splitter.feed(" world") == [("text", " world")]
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("Use <think> literally.", ("", "Use <think> literally.")),
+        ("<think>plan<tool_call>args</think>end", ("plan", "<tool_call>args</think>end")),
+        ("answer<tool_call>{}", ("", "answer<tool_call>{}")),
+    ],
+)
+def test_reasoning_boundaries_agree_for_every_chunk_split(reply, expected):
+    assert split_reasoning(reply, pre_opened=False) == expected
+    for offset in range(len(reply) + 1):
+        splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)
+        parts = splitter.feed(reply[:offset]) + splitter.feed(reply[offset:]) + splitter.finish()
+        reasoning = "".join(value for kind, value in parts if kind == "thinking").strip()
+        answer = "".join(value for kind, value in parts if kind == "text")
+        assert (reasoning, answer) == expected, offset
+
+
 @pytest.mark.unit
 def test_an_opening_reasoning_tag_split_after_whitespace_leaks_no_answer_text() -> None:
     splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)

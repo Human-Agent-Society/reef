@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,6 +24,39 @@ def require_integer(value: object, name: str, *, minimum: int = 0) -> None:
         raise ValueError(f"{name} is an integer from {minimum}")
 
 
+def strict_json_object(data: bytes) -> dict[str, object]:
+    """Decode one JSON object, refusing repeated keys and non-finite numbers.
+
+    Raises:
+        ValueError: The data is not such an object, is not valid text, or nests too deeply to decode.
+    """
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("JSON object repeats a key")
+        return result
+
+    def finite_number(text: str) -> float:
+        value = float(text)
+        if not math.isfinite(value):
+            raise ValueError("JSON number is not finite")
+        return value
+
+    def no_constant(name: str) -> float:
+        raise ValueError(f"JSON constant {name} is not allowed")
+
+    try:
+        value = json.loads(
+            data, object_pairs_hook=unique_object, parse_float=finite_number, parse_constant=no_constant
+        )
+    except RecursionError as exc:
+        raise ValueError("JSON nests too deeply") from exc
+    if not isinstance(value, dict):
+        raise ValueError("JSON value is not an object")
+    return value
+
+
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
     """``base`` with ``overlay`` merged in: nested objects merge key by key, every other value of ``overlay`` wins."""
     merged = dict(base)
@@ -31,4 +66,4 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-__all__ = ["JsonValue", "deep_merge", "require_integer", "require_text"]
+__all__ = ["JsonValue", "deep_merge", "require_integer", "require_text", "strict_json_object"]

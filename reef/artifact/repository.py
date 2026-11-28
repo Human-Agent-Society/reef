@@ -97,6 +97,8 @@ StoredTree = StoredFiles | Mapping[str, StoredFiles]
 class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository.
 
+    A backend shares no snapshot between scenarios.
+
     Besides its snapshots, the repository holds stored content: named file trees with no parent, no metadata and
     no artifact ID, which no head moves to. The process that has a checkpoint's files stores them
     (``store_content``), and another process commits them as a snapshot by name (``publish_stored``, whose
@@ -189,7 +191,8 @@ class RepositoryBackend(ArtifactRepository):
     ) -> SnapshotRef:
         """The backend's part of ``publish_stored``, which has checked the head once: store the snapshot of
         ``parts`` and move the head for ``advance_head``. ``parts`` has the one key None for a flat snapshot,
-        else the directory of each component."""
+        else the directory of each component. Make the snapshot inside the storage, for example with a server-side
+        copy, so that the calling process downloads no file."""
 
     def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
         """The metadata that the stored snapshot ``ref`` was published or registered with.
@@ -244,7 +247,8 @@ class RepositoryBackend(ArtifactRepository):
         """Bind ``artifact_id`` to the stored snapshot ``ref`` unless it is bound already.
 
         Return the snapshot that ``artifact_id`` was bound to before, or None when this call bound it. A binding
-        never changes.
+        never changes. The backend stores it with the snapshot, so the ID names the same files and metadata after a
+        restart.
         """
 
     @abstractmethod
@@ -349,6 +353,11 @@ class StagedSnapshotRepositoryBackend(RepositoryBackend):
 
 
 class RepositoryBackendFactory(ABC):
+    """Gives the ``RepositoryBackend`` of each scenario: a call with a scenario name returns that scenario's backend.
+
+    Reef calls no close method on a factory.
+    """
+
     @abstractmethod
     def __call__(self, scenario: str) -> RepositoryBackend: ...
 
@@ -375,11 +384,23 @@ class RepositoryBackendFactory(ABC):
 
 
 class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
+    """A factory that finds a stored scenario without making its backend.
+
+    ``has_registration(scenario)`` is true when the store holds the registration of ``scenario``, which
+    ``RepositoryBackend.register`` writes.
+    """
+
     @abstractmethod
     def has_registration(self, scenario: str) -> bool: ...
 
 
 class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
+    """A factory that lists the stored scenarios.
+
+    ``list_registrations()`` gives the name of each scenario whose registration the store holds. Control loads these
+    scenarios when it starts.
+    """
+
     @abstractmethod
     def list_registrations(self) -> tuple[str, ...]: ...
 

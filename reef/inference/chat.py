@@ -154,7 +154,7 @@ def _new_call_id() -> str:
 class StreamedToolCall:
     """One tool argument delta supplied by a native parser adapter to the chat relay.
 
-    ``index`` is the parser's integer call position. ``name`` is a nonempty tool name or None when omitted.
+    ``index`` is the parser's nonnegative integer call position. ``name`` is a nonempty tool name or None when omitted.
     ``arguments`` is the argument fragment, which may be empty. The relay checks the position and name across deltas.
     """
 
@@ -163,6 +163,9 @@ class StreamedToolCall:
     arguments: str
 
     def __post_init__(self) -> None:
+        require_integer(self.index, "the streamed tool-call index")
+        if not isinstance(self.arguments, str):
+            raise ValueError("a streamed tool-call argument fragment must be a string")
         if self.name is not None and (not isinstance(self.name, str) or not self.name):
             raise ValueError("a streamed tool-call name must be a nonempty string or None")
 
@@ -317,6 +320,10 @@ class _OpenAIChunkWriter(_StreamWriter):
         return frames
 
 
+#: The fields of a Messages answer that Reef adds when a call asks for them (``anthropic.TOKEN_REQUEST_KEYS``).
+ANTHROPIC_TOKEN_FIELDS = ("logprobs", "token_ids", "prompt_token_ids")
+
+
 class _AnthropicEventWriter(_StreamWriter):
     """Encode one Anthropic Messages stream for ``ChatStreamRelay``.
 
@@ -405,6 +412,7 @@ class _AnthropicEventWriter(_StreamWriter):
                     "type": "message_delta",
                     "delta": {"stop_reason": response["stop_reason"], "stop_sequence": response["stop_sequence"]},
                     "usage": {"output_tokens": output_tokens},
+                    **{field: response[field] for field in ANTHROPIC_TOKEN_FIELDS if field in response},
                 }
             ),
             _sse_event({"type": "message_stop"}),
@@ -602,8 +610,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     clients that requested a stream still receive a valid one.
     """
 
-    # A harness that parses raw thinking tags itself opts out by overriding
-    # this class attribute.
+    #: A harness that parses raw thinking tags itself opts out by overriding
+    #: this class attribute with False, which keeps the tags in the content.
     SPLIT_REASONING = True
     # Set when the chat template pre-opens ``<think>``: the sample then
     # carries only the closing tag, so a sample with no ``</think>`` is

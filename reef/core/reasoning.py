@@ -31,6 +31,7 @@ def is_reasoning_pre_opened(prompt_tail: str) -> bool:
     return prompt_tail.rstrip().endswith(THINK_START)
 
 
+REASONING_BOUNDARY = re.compile(f"{re.escape(THINK_END)}|{re.escape(TOOL_CALL_START)}")
 LEADING_THINK_TAG = re.compile(rf"\s*{re.escape(THINK_START)}")
 
 
@@ -45,22 +46,20 @@ def leading_think_tags_end(text: str) -> int:
 def split_reasoning(text: str, *, pre_opened: bool) -> tuple[str, str]:
     """The reasoning and the answer of the sampled reply ``text``; the reasoning is "" when the reply has none.
 
-    ``pre_opened`` holds when the prompt ended with an open ``<think>``. Without it, a reply with no ``<think>`` and
-    no ``</think>`` is all answer. Leading ``<think>`` tags and whitespace before them drop. The first
-    ``</think>`` ends the reasoning and drops the newlines after it. Without a closing tag, a ``<tool_call>`` ends
-    reasoning. With no closing tag or tool call, a reply that starts in reasoning remains in reasoning. The reasoning has no leading or
-    trailing whitespace.
+    The reply starts in reasoning when the prompt pre-opened it or when the reply begins with opening tags.
+    An unmarked prefix also counts as reasoning if the first boundary is a closing tag. A tool call ends known
+    reasoning, and otherwise belongs to the answer. Opening tags inside visible text are literal.
     """
-    if not (pre_opened or THINK_START in text or THINK_END in text):
-        return "", text
-    body = text[leading_think_tags_end(text) :]
-    reasoning, separator, answer = body.partition(THINK_END)
-    if separator:
-        return reasoning.strip(), answer.lstrip("\n")
-    tool_start = body.find(TOOL_CALL_START)
-    if tool_start != -1:
-        return body[:tool_start].strip(), body[tool_start:]
-    return body.strip(), ""
+    start = leading_think_tags_end(text)
+    body = text[start:]
+    boundary = REASONING_BOUNDARY.search(body)
+    if boundary is None:
+        return (body.strip(), "") if pre_opened or start else ("", text)
+    if boundary.group() == THINK_END:
+        return body[: boundary.start()].strip(), body[boundary.end() :].lstrip("\n")
+    if pre_opened or start:
+        return body[: boundary.start()].strip(), body[boundary.start() :]
+    return "", text
 
 
 class ReasoningStreamSplitter:
@@ -75,6 +74,7 @@ class ReasoningStreamSplitter:
     While ``at_start`` is true, ``leading_whitespace`` holds nonempty whitespace fragments in their input order.
     ``buffer`` can hold a partial opening tag after those fragments. A complete opening tag discards them.
     Other text or the end of the reply releases them in order. After ``at_start``, ``buffer`` holds only a tag suffix.
+    Unmarked answer text streams immediately. A later closing tag cannot reclassify text already sent.
     One splitter reads one reply; the streaming chat handlers make it and read its pieces.
     """
 
@@ -124,8 +124,6 @@ class ReasoningStreamSplitter:
                 return []
             self.at_start = False
             self.restore_leading_whitespace()
-        if any(tag.startswith(self.buffer) and tag != self.buffer for tag in (THINK_END, TOOL_CALL_START)):
-            return []
         if not self.in_reasoning:
             value, self.buffer = self.buffer, ""
             if self.strip_answer_newlines:
@@ -133,22 +131,21 @@ class ReasoningStreamSplitter:
                 self.strip_answer_newlines = not value
             return [("text", value)] if value else []
 
-        before, separator, after = self.buffer.partition(THINK_END)
-        if separator:
+        boundary = REASONING_BOUNDARY.search(self.buffer)
+        if boundary is not None:
+            before = self.buffer[: boundary.start()]
+            if boundary.group() == THINK_END:
+                parts = [("thinking", before)] if before else []
+                visible = self.buffer[boundary.end() :].lstrip("\n")
+                self.strip_answer_newlines = not visible
+            else:
+                parts = [("thinking", before)] if before else []
+                visible = self.buffer[boundary.start() :]
             self.buffer = ""
             self.in_reasoning = False
-            parts = [("thinking", before)] if before else []
-            visible = after.lstrip("\n")
-            self.strip_answer_newlines = not visible
             if visible:
                 parts.append(("text", visible))
             return parts
-        tool_start = self.buffer.find(TOOL_CALL_START)
-        if tool_start != -1:
-            before, after = self.buffer[:tool_start], self.buffer[tool_start:]
-            self.buffer = ""
-            self.in_reasoning = False
-            return [("thinking", before), ("text", after)] if before else [("text", after)]
         held = max(self.held_suffix_length(self.buffer, tag) for tag in (THINK_END, TOOL_CALL_START))
         if held:
             value = self.buffer[:-held]

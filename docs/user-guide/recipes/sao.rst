@@ -1,210 +1,41 @@
 SAO: learn from individual rollouts
 ===================================
 
-Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
-<https://arxiv.org/abs/2607.07508>`__) samples one rollout per prompt and
-grades each on its own. A scored rollout joins the next optimizer step
-without waiting for siblings, and the next attempt runs on the weights that
-step produced.
-
-+-------------+------------------------------------------------------------+
-| Evolves     | model weights                                              |
-+-------------+------------------------------------------------------------+
-| Signal      | one report with a finite ``score`` per rollout             |
-+-------------+------------------------------------------------------------+
-| Loss family | ``sao``                                                    |
-+-------------+------------------------------------------------------------+
-| Package     | ``recipes/sao/``                                           |
-+-------------+------------------------------------------------------------+
-| Pipeline    | reported feedback, singleton                               |
-+-------------+------------------------------------------------------------+
-| Needs       | GPUs and the Slime training backend                        |
-+-------------+------------------------------------------------------------+
-| Example     | ``recipes/sao/examples/imo_answerbench/``                  |
-+-------------+------------------------------------------------------------+
-
-What it does
-------------
-
-SAO has no comparison group. A rollout is accepted as soon as its score
-arrives, without waiting for siblings and without a barrier, and
-``job_samples`` accepted rollouts, from as many prompts, form one training
-job of one optimizer step. It can be used
-for a stream of tasks where each attempt gets its own score.
-
-.. container:: flow
-
-   Rollout
-       one attempt at a task
-
-   Feedback
-       a score reported against the rollout's receipt
-
-   **Step**
-       train once ``job_samples`` scored rollouts have accumulated
-
-   Version
-       publish the updated weights to the engine
-
-   :Loop: the next attempt runs on the updated weights
-
-How Reef implements it
-----------------------
-
-The record-to-sample stage turns every eligible ``ScoredRolloutReport`` into one
-``TrajectorySample``. "Single rollout" means one rollout per prompt, with no
-comparison group. ``pipeline.sample2job.config.job_samples`` such rollouts,
-from different prompts, form one job. Slime's ``--global-batch-size`` is the
-rollouts of one optimizer step; with the same value, one job is one step. The
-paper uses 128. Setting both to 1 makes
-every sample its own training step, which is convenient for a smoke run but
-is not the paper's estimator: the value model needs a full optimizer batch per step to
-learn, and without it the single-sample advantages are noise. The ``sao``
-loss family runs Slime's ``policy_loss`` with
-SAO's per-token primitive and a critic that shares the actor's GPUs. The
-critic supplies the values, and skip-observation GAE builds the advantages
-inside the training backend.
-
-The DIS ratio compares the current policy against the old-policy
-log-probabilities. Serving records no log-probabilities, so the training
-component renders each rollout with the model's chat template and the actor
-computes them with the weights of the job's start. The ratio is exact for
-``max_artifact_lag: 0``. Above 0 it measures the drift within the job, not the
-gap to the weights that sampled the rollout. Give the component the serving
-engine's chat template arguments (`Chat template arguments
-<../../reference/configuration.rst#chat-template-arguments>`__).
-
-The value model carries the paper's cold-start mitigations: it trains at its
-own, higher learning rate (``--critic-lr``) and the first
-``--num-critic-only-steps`` optimizer steps fit the zero-initialized value head
-before any policy update. Warmup steps still commit one training snapshot per
-step; the policy's weights first move after the warmup. An MoE value model
-trains its experts, layer norms, and value head while its self-attention stays
-frozen (paper Section 4). A dense value model trains every parameter unless
-``--sao-freeze-critic-attention`` applies the same freeze to it.
-
-Configuration
--------------
-
-SAO's pipeline has two stages: ``SAOSamples`` and ``SAOJobData``. The
-deployment's ``pipeline`` section configures them. ``SAOSamples`` trains each
-report by itself. SAO updates asynchronously, so a rollout may train while the
-scenario serves a later artifact. Set that lag bound in the record-to-sample
-stage, the job size in the sample-to-job stage, and the optimizer batch in the
-training config:
-
-.. code:: yaml
-
-   recipe:
-     implementation: recipes.sao.recipe:SAORecipe
-   pipeline:
-     record2sample:
-       config:
-         max_artifact_lag: 18
-     sample2job:
-       config:
-         job_samples: ${training.config.global_batch_size}
-   training:
-     config:
-       global_batch_size: 8
-
-.. container:: config
-
-   ``pipeline.sample2job.config.job_samples`` : required
-       rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
-
-   ``training.config.global_batch_size``
-       rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
-
-   ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
-       true trains every call of a report's trajectory, every reply; false trains only the reply of the trajectory's last call, with the earlier turns as context.
-
-   ``pipeline.record2sample.config.max_artifact_lag`` : 0
-       the artifacts that the scenario may have served after the one that sampled a rollout, for the rollout to train; a non-negative int. 0 trains only rollouts of the served artifact. The samples service marks a rollout beyond the bound stale.
-
-A ``batch-size`` key in ``recipe.config`` or in
-``pipeline.sample2job.config`` is an unknown key: the recipe or the scenario's
-pipeline refuses it.
+Use Single-Rollout Asynchronous Optimization
+(`SAO <https://arxiv.org/abs/2607.07508>`__) when each attempt has its own
+score. It trains from a rollout stream without comparison groups.
+Reef's implementation requires Slime and GPUs.
 
 Run the example
 ---------------
 
-The `example <../../../recipes/sao/examples/imo_answerbench>`__ runs three IMOAnswerBench
-problems in order on a two-GPU stack. For each problem the agent makes six
-attempts through Reef, extracts the ``\boxed{}`` answer, then checks it against
-the gold answer for a binary reward and finally reports the result against its
-receipt. The next problem is served by the weights the previous one produced.
+The `IMOAnswerBench example
+<../../../recipes/sao/examples/imo_answerbench/README.md>`__ needs two GPUs,
+Docker, and the Slime training environment:
 
 .. code:: bash
 
    cd recipes/sao/examples/imo_answerbench
-   pip install -e .
+   uv pip install -e .
    hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
    ./run.sh
 
-``run.sh`` starts the stack that ``serve.yaml`` describes: one Megatron actor
-that shares its GPU with the critic, and one SGLang serving engine. The smoke
-config sets ``training.config.global_batch_size`` to 1, so each scored
-rollout adds one ``training`` entry to the scenario's version chain:
+It runs three problems with six attempts each. The actor and critic share
+one GPU; serving uses the other. Batch size 1 checks the workflow.
+Each scored rollout adds a training entry to the artifact history.
 
-.. code:: bash
+Training requirements
+---------------------
 
-   curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/sao-smoke/artifacts
-   # {"scenario": "sao-smoke", "artifacts": [{"operation": "training", "active": true, ...}, ...]}
+Report a finite ``score`` per rollout. Match
+``pipeline.sample2job.config.job_samples`` to the optimizer batch size for
+one update per job.
 
-The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
-critic ``grad_norm``, and the asynchrony metrics
-``sao/producing_artifacts`` (how many artifacts produced the job's samples),
-``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
+``pipeline.record2sample.config.max_artifact_lag`` defaults to 0: only the
+served artifact trains. Larger values permit older rollouts. The DIS ratio
+then measures drift within the job, not from the policy that generated them.
 
-CEO-Bench
-~~~~~~~~~
-
-The `CEO-Bench example <../../../recipes/sao/examples/ceobench>`__ trains the
-same recipe on `CEO-Bench <https://ceobench.com>`__, a 500-day simulated
-startup. The harness is the benchmark's own bash agent run from the host,
-its prompt, tools, and tool executor taken from the pinned checkout in the
-task image and its model calls served by Reef; the two simulator roles stay
-outside Reef, and the verifier reads final cash, survival days, and bankruptcy
-from the run's ``world.nmdb``. The reward is weekly and online: when the
-next week's dashboard appears, the finished week's decision turns (the tool
-calls that changed the company) are reported with the week's credit, its
-change in company value (cash plus the engine's subscription run-rate over
-the weeks left) and the discounted changes of the weeks after it, scaled
-against the weeks before, so the recipe trains while the rollout runs. The
-example's README records the reward-shaping choices and the recorded rollouts.
-
-.. code:: bash
-
-   cd recipes/sao/examples/ceobench
-   hf download Qwen/Qwen3.6-27B --local-dir ~/models/Qwen3.6-27B
-   export ANTHROPIC_API_KEY=...        # the simulator roles' provider
-   CEOBENCH_DAYS=500 CEOBENCH_SEED=42 ./run.sh
-
-Results
--------
-
-The example's README records the batch-128 comparison on
-Qwen3-30B-A3B-Thinking-2507: SAO and a GRPO(+DIS) control trained from the
-same public checkpoint on a DeepMath pool, without tools, and evaluated on
-held-out AIME 2025, HMMT February 2025 and IMO-AnswerBench. The control is
-a reported baseline, not a shipped recipe. SAO trained
-stably for 99 steps and gained 2 to 4 points on AIME and IMO-AnswerBench,
-within per-checkpoint intervals. GRPO(+DIS) matched it through step 40, then
-shortened its responses and fell 5 to 13 points below SAO by step 80 and to
-a fraction of the base rate by step 140. The README lists the numbers and the
-distance from the paper's tool-integrated setting.
-
-.. image:: ../../assets/sao/learning-curve.png
-   :alt: Held-out accuracy and training dynamics of SAO and GRPO(+DIS) against optimizer step
-
-Related guides
---------------
-
-- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
-  learn the request, receipt, and report workflow.
-- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
-  set up the GPU stack and inspect published updates.
-- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
-  and query feedback, scenarios, and artifacts.
+The README records a batch-128 comparison without tools; it does not
+reproduce the paper's tool setting. For long conversations, use the
+`CEO-Bench example <../../../recipes/sao/examples/ceobench/README.md>`__, which
+assigns weekly credit to decision turns.

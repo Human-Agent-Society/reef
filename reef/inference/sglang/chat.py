@@ -227,6 +227,10 @@ class NativeStreamCapture:
         """The text received so far."""
         return "".join(self.text_fragments)
 
+    @text.setter
+    def text(self, value: str) -> None:
+        self.text_fragments = [value]
+
     def accept(self, event: Mapping[str, Any]) -> str:
         meta = event.get("meta_info")
         if not isinstance(meta, Mapping):

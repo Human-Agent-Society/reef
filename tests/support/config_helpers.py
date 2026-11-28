@@ -4,9 +4,9 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from reef.service.assembly import connect_weight_objects
-from reef.service.deploy.config_utils import load_config
-from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.api.assembly import connect_weight_objects
+from reef.deploy.config_utils import load_config
+from reef.deploy.orchestrator import resolve_deployment_config
 
 
 def load_deployment(path):

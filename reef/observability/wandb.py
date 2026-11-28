@@ -13,13 +13,14 @@ import math
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.config import config_metadata, config_option
 from reef.observability.base import (
     ExperimentLogger,
     ExperimentRun,
@@ -55,15 +56,34 @@ class WandbSettings:
     Purpose: ``from_mapping`` parses it from the section; ``WandbExperimentTracker`` reads it.
     """
 
-    enabled: bool = False
-    project: str = "reef"
-    entity: str | None = None
-    group_prefix: str | None = None
-    name_prefix: str | None = None
-    tags: tuple[str, ...] = ()
-    mode: WandbMode = "disabled"
-    directory: str | None = None
-    upload_checkpoints: bool = False
+    enabled: bool = config_option(False, help="Turn on W&B experiment tracking.")
+    project: str = config_option("reef", help="W&B project of the runs.")
+    entity: str | None = config_option(
+        None, help="W&B entity (user or team) of the runs. Reef needs it to give the URL of an offline run."
+    )
+    group_prefix: str | None = config_option(
+        None,
+        help=(
+            "Prefix of each scenario's W&B group. The group is <group_prefix>/<scenario>; without a prefix it "
+            "is the scenario name."
+        ),
+    )
+    name_prefix: str | None = config_option(
+        None,
+        help="Start of each run name in place of the scenario name. A run is named <name_prefix>-segment-<N>.",
+    )
+    tags: tuple[str, ...] = config_option((), help="W&B tags of every run.")
+    mode: WandbMode = field(
+        default="disabled",
+        metadata=config_metadata(
+            "W&B mode: online, offline (local files for a later wandb sync) or disabled. A section without "
+            "it is online when enabled is true."
+        ),
+    )
+    directory: str | None = config_option(None, help="Directory of the local W&B run files. Reef creates it.")
+    upload_checkpoints: bool = config_option(
+        False, help="Upload the files of each committed checkpoint as a W&B artifact."
+    )
 
     def __post_init__(self) -> None:
         _boolean(self.enabled, "observability.wandb.enabled")
