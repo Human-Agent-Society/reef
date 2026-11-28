@@ -20,6 +20,7 @@ import json
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -192,6 +193,7 @@ class InferenceStream:
 
     ``chunks`` must end only after capture finalization and transport validation. When
     ``record_response_pending`` is true, a successful stream supplies ``record_response`` before that end.
+    Reef records ``record_response`` in place of the forwarded bytes, and records those bytes when it is None.
     A terminal frame alone is not successful completion. ``close`` releases transport resources.
     """
 
@@ -259,6 +261,109 @@ class InferenceArtifact:
 #: yet, ``idle`` runs no engine, and a request starts one.
 EngineState = Literal["warm", "starting", "idle"]
 
+
+#: The state of one replica behind a route: ``serving`` answers now, ``starting`` runs but does not answer yet.
+EngineReplicaState = Literal["serving", "starting"]
+
+
+@dataclass(frozen=True)
+class EngineReplicaLoad:
+    """The work of one serving replica, as the replica measured it last.
+
+    Values: ``running_requests`` and ``waiting_requests`` are integers of at least 0: the requests that the engine
+    runs now, and those that wait in its queue. ``output_tokens_per_second`` is a number of at least 0: the output
+    tokens that it generated each second over its last interval. ``measured_at`` is when it measured them, in epoch
+    seconds of at least 0."""
+
+    running_requests: int
+    waiting_requests: int
+    output_tokens_per_second: float
+    measured_at: float
+
+    def __post_init__(self) -> None:
+        for count in (self.running_requests, self.waiting_requests):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("an engine replica's request counts are integers of at least 0")
+        for value in (self.output_tokens_per_second, self.measured_at):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < float("inf"):
+                raise ValueError("an engine replica's token rate and measure time are finite numbers of at least 0")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "running_requests": self.running_requests,
+            "waiting_requests": self.waiting_requests,
+            "output_tokens_per_second": self.output_tokens_per_second,
+            "measured_at": self.measured_at,
+        }
+
+
+@dataclass(frozen=True)
+class EngineReplica:
+    """One replica behind a route, such as one container of a server that scales.
+
+    Values: ``id`` is the replica's non-empty name, such as its container ID. ``state`` is an ``EngineReplicaState``.
+    ``started_at`` is when the replica started, in epoch seconds, or None. ``startup`` is its own ``start`` and
+    ``load`` phases while it starts (``StartupSteps``), or None. ``load`` is the work of a ``serving`` replica
+    (``EngineReplicaLoad``), or None when the handler cannot tell. A ``starting`` replica has no ``load``."""
+
+    id: str
+    state: EngineReplicaState
+    started_at: float | None = None
+    startup: StartupSteps | None = None
+    load: EngineReplicaLoad | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("an engine replica has a non-empty id")
+        if self.state not in ("serving", "starting"):
+            raise ValueError("an engine replica is serving or starting")
+        started = self.started_at
+        if started is not None and (isinstance(started, bool) or not isinstance(started, (int, float)) or started < 0):
+            raise ValueError("an engine replica's start time is epoch seconds of at least 0, or None")
+        if self.startup is not None and not isinstance(self.startup, StartupSteps):
+            raise ValueError("an engine replica's startup is StartupSteps, or None")
+        if self.load is not None and (not isinstance(self.load, EngineReplicaLoad) or self.state != "serving"):
+            raise ValueError("an engine replica's load is EngineReplicaLoad of a serving replica, or None")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "state": self.state,
+            "started_at": self.started_at,
+            "startup": None if self.startup is None else self.startup.to_json(),
+            "load": None if self.load is None else self.load.to_json(),
+        }
+
+
+@dataclass(frozen=True)
+class EngineReplicas:
+    """The engine replicas behind a route, such as the containers of a server that scales: ``serving`` answer now,
+    and ``starting`` run but do not answer yet. Both are integers of at least 0. ``replicas`` names each one
+    (``EngineReplica``), as many as the two counts and in any order, or is empty when the handler gives only the
+    counts. ``InferenceHandler.engine_replicas`` gives them, and the inference status shows them (``to_json``)."""
+
+    serving: int
+    starting: int
+    replicas: tuple[EngineReplica, ...] = ()
+
+    def __post_init__(self) -> None:
+        for value in (self.serving, self.starting):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("engine replicas are integers of at least 0")
+        if not all(isinstance(replica, EngineReplica) for replica in self.replicas):
+            raise ValueError("engine replicas name each replica with an EngineReplica")
+        states = [replica.state for replica in self.replicas]
+        if states and (states.count("serving"), states.count("starting")) != (self.serving, self.starting):
+            raise ValueError("the named engine replicas must match the serving and starting counts")
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "serving": self.serving,
+            "starting": self.starting,
+            "replicas": [replica.to_json() for replica in self.replicas],
+        }
+
+
 #: The phases of an artifact's startup, in their order (RFC #1283): ``prepare`` (the serving work waits, deploys the
 #: engine, and converts or quantizes the weights), ``start`` (a machine and the weights) and ``load`` (GPU memory,
 #: kernels, CUDA graphs and warm-up). ``reef.inference.startup`` reports them.
@@ -324,6 +429,13 @@ class StartupSteps:
         return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
 
 
+#: The session key of the model call that runs in this context, or None. All calls of one conversation have the same
+#: key, and calls of other conversations have other keys. A handler can send the calls of one key to the same engine
+#: replica, so that each turn reuses the prefix cache of the turns before it. An evaluation's ``ArtifactEndpoint`` sets
+#: it to its rollout. A service can set it from the ``x-reef-session-key`` header of a request.
+REQUEST_SESSION_KEY: ContextVar[str | None] = ContextVar("REQUEST_SESSION_KEY", default=None)
+
+
 class InferenceHandler(Plugin, ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
@@ -336,7 +448,10 @@ class InferenceHandler(Plugin, ABC):
         timeout_s: float,
         **config: Any,
     ) -> InferenceHandler:
-        """Construct a configured handler; direct injection needs only inference()."""
+        """Construct a configured handler; direct injection needs only inference().
+
+        Reef passes the options of ``inference.handler-config`` in ``config``.
+        """
         raise ValueError(f"{cls.__name__} does not support deployment configuration")
 
     @abstractmethod
@@ -381,16 +496,23 @@ class InferenceHandler(Plugin, ABC):
         """
         return None
 
+    def engine_replicas(self, served: ServedArtifact) -> EngineReplicas | None:
+        """The engine replicas that answer at ``served`` (``EngineReplicas``), or None when the handler cannot tell,
+        the default. It must not start an engine. It may block: the inference service calls it in a thread, for the
+        status of a ready artifact, in every ``engine_state``."""
+        return None
+
     def engine_detail(self, served: ServedArtifact) -> str | None:
         """What the starting engine at ``served`` does now, as one short line for a person, such as "Loading weights
         · 0:42"; None when the handler cannot tell, the default. Reef asks it only while ``engine_state`` is
-        ``starting``, under the same rules."""
+        ``starting``, or while ``engine_replicas`` has replicas that start, under the same rules."""
         return None
 
     def engine_steps(self, served: ServedArtifact) -> StartupSteps | None:
         """The ``start`` and ``load`` phases of the starting engine at ``served`` (RFC #1283), when a ready artifact's
-        engine starts again from zero; None when the handler cannot tell, the default. Reef asks it only while
-        ``engine_state`` is ``starting``, under the same rules."""
+        engine starts again from zero, or of a replica that starts beside one that answers; None when the handler
+        cannot tell, the default. Reef asks it only while ``engine_state`` is ``starting``, or while
+        ``engine_replicas`` has replicas that start, under the same rules."""
         return None
 
     async def inference_stream(
@@ -498,7 +620,9 @@ class InferenceRuntime(ABC):
         A separate inference service calls it for the URL of each ``served_models`` row, and reaches a URL with no
         handler as a plain proxy. The default gives ``inference_handler`` for ``base_url`` and None for any other
         URL. A runtime that serves artifacts at several URLs, or whose engines need credentials or retries that a
-        plain proxy does not send, gives a handler for each of them.
+        plain proxy does not send, gives a handler for each of them. The inference worker also calls it when it
+        takes over the runtime, before ``open``: it removes each row at a URL with no handler, and offers ``adopt``
+        only the other rows.
         """
         return self.inference_handler if url == self.base_url else None
 
@@ -585,9 +709,8 @@ class InferenceRuntime(ABC):
     def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
         """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
         engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
-        set takes the deployment's value again. The inference worker calls it before each activation and each
-        ``serve_artifact``, and when only the override changed, so a second call with the same values changes
-        nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
+        set takes the deployment's value again. The inference worker calls it before each activation, and when only
+        the override changed, so a second call with the same values changes nothing. After it, the worker reads the scenario's route again (``served_artifact``), so a runtime may move
         the scenario to another engine. The default has no engine field and does nothing; the handler applies
         request fields to each request."""
         return
@@ -608,13 +731,17 @@ class InferenceRuntime(ABC):
         runtime existed (an inference worker restart), and return whether the engine still serves it. Then the route
         stays while the new owner serves the scenario again, and the next activation of the same artifact loads
         nothing. The default can tell nothing about the engine: it returns False, so the route goes until the
-        scenario serves again, and the next activation loads."""
+        scenario serves again, and the next activation loads.
+
+        The inference worker calls it after ``open``, and only for a row at a URL that ``handler_for`` gives a
+        handler for. A row at another URL goes before the open, and its requests get ``inference_starting`` until
+        the scenario serves again."""
         return False
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds
-        for it. A value the runtime does not know is no error. The default holds nothing per value: a runtime that
-        loads full weights in place replaced them at the next activation."""
+        for it. The engines may stay allocated. A value the runtime does not know is no error. The default holds
+        nothing per value: a runtime that loads full weights in place replaced them at the next activation."""
         return
 
     def release_unreferenced_artifacts(self, retained: Collection[ServedArtifact]) -> None:
@@ -626,8 +753,9 @@ class InferenceRuntime(ABC):
         its model name, whatever its artifact ID is (as ``ServedModels.is_referenced``). So the call releases only
         what a serving work loaded and did not publish, because the work failed or stopped, and what waits for its
         scheduled stop stays. Only the inference worker that owns the runtime calls it, between two serving works,
-        while none runs. A release that fails raises, and the next call tries it again. The call adds no way to
-        serve an artifact that is not deployed (``serves_any_artifact``).
+        while none runs. A runtime with more than one serving slot (``serving_slots``) gets no call. A release that
+        fails raises, and the next call tries it again. The call adds no way to serve an artifact that is not
+        deployed (``serves_any_artifact``).
         """
         return
 
@@ -707,10 +835,16 @@ class InferenceRuntime(ABC):
         """
         raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
-    def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact | None:
+    def serve_artifact(
+        self, artifact: Artifact, *, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> ServedArtifact | None:
         """Make an engine answer for ``artifact`` of ``scenario``, and return the value that reaches it: the engine's
         URL and the model name that samples that artifact. None when the engine has no address that another process
-        can call. The inference worker applies ``scenario``'s serving config (``apply_serving_config``) first.
+        can call.
+
+        ``serving_config`` is the override that the engine of ``artifact`` starts with, as ``serving_config``
+        accepted it: the inference worker gives the config of the scenario's newest serving request. The call reads
+        no other config, and it does not change the config of what serves the scenario now (``apply_serving_config``).
 
         Return only when the engine is ready. A second call for a served artifact starts nothing. Only the inference
         owner calls it, one call at a time.

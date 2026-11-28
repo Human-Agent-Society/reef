@@ -8,10 +8,10 @@
 that the trainer gives records to and takes job data from. A recipe writes the
 stages; it does not subclass the pipeline:
 
-* the record-to-sample stage (:class:`~reef.record2sample.Record2Sample`)
+* the record-to-sample stage (:class:`~reef.samples.Record2Sample`)
   decides which records train, in which record sets and units, and turns each
   record set into samples;
-* the sample-to-job stage (:class:`~reef.sample2job.Sample2Job`) bounds
+* the sample-to-job stage (:class:`~reef.train.sample2job.Sample2Job`) bounds
   the size of a job and shapes its samples into the job's data.
 
 The pipeline owns what is the same for every recipe: it routes records, saves the samples of each
@@ -58,13 +58,13 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
-from reef.record2sample.service import Selection
-from reef.record2sample.staleness import ServedArtifacts
-from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.data import MAX_QUERY_LIMIT
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, StoredSample, consumed_sample_id, memory_samples
+from reef.samples import NoSamples, Record2Sample, RecordSetUnit
+from reef.samples.context import PipelineContext
+from reef.samples.service import Selection
+from reef.samples.staleness import ServedArtifacts
+from reef.storage.data.store import MAX_QUERY_LIMIT
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, StoredSample, consumed_sample_id, memory_samples
+from reef.train.sample2job import NoJobData, Sample2Job
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.

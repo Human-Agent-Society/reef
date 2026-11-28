@@ -7,7 +7,9 @@ from tests.support.harness_jobs import configured_live, evolution_config
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
+from reef.control.operations.harness import harness_manifest
+from reef.control.scenario.live_objects import LiveObjects
 from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
@@ -15,10 +17,8 @@ from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.deployment import harness_adapter
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.scenario.live_objects import LiveObjects
-from reef.service.app import RequestService
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.settings import EvolutionSettings
 
 #: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its package and empty configs.
@@ -41,7 +41,7 @@ class _HarnessRecipe(Recipe):
         return DefaultStart(files={} if self.rules is None else {"rules.md": self.rules})
 
 
-def _service(tmp_path, *, recipe, live: LiveObjects | None = None) -> RequestService:
+def _dispatcher(tmp_path, *, recipe, live: LiveObjects | None = None) -> Dispatcher:
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
@@ -51,46 +51,44 @@ def _service(tmp_path, *, recipe, live: LiveObjects | None = None) -> RequestSer
         coordination=memory_coordination(),
     )
     dispatcher.get_or_create_scenario("delivery")
-    return RequestService(dispatcher)
+    return dispatcher
 
 
 def test_the_manifest_serves_the_artifact_rendered_or_as_its_source_tree(tmp_path) -> None:
-    service = _service(tmp_path, recipe=_HarnessRecipe(rules="rule"))
-    rendered = service.harness_manifest({"x-reef-scenario": "delivery"})
+    dispatcher = _dispatcher(tmp_path, recipe=_HarnessRecipe(rules="rule"))
+    rendered = harness_manifest(dispatcher, "delivery")
     assert rendered["files"] == PI_RULES_RENDER
     assert rendered["artifact_id"]
     assert not {"release_id", "parent_release_id", "content_id"} & rendered.keys()
-    source = service.harness_manifest({"x-reef-scenario": "delivery"}, form="source")
+    source = harness_manifest(dispatcher, "delivery", form="source")
     assert source["files"] == {"rules.md": "rule"} and source["artifact_id"] == rendered["artifact_id"]
     with pytest.raises(ValueError, match="form must be 'rendered', 'source' or 'client'"):
-        service.harness_manifest({"x-reef-scenario": "delivery"}, form="tree")
+        harness_manifest(dispatcher, "delivery", form="tree")
 
 
 def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path, monkeypatch) -> None:
-    service = _service(tmp_path, recipe=Recipe())
+    dispatcher = _dispatcher(tmp_path, recipe=Recipe())
 
     def fail_materialize(ref):
         raise AssertionError("weights artifact must not be materialized for a files read")
 
-    monkeypatch.setattr(
-        service.dispatcher.get_or_create_scenario("delivery").repository, "materialize", fail_materialize
-    )
+    monkeypatch.setattr(dispatcher.get_or_create_scenario("delivery").repository, "materialize", fail_materialize)
     with pytest.raises(ArtifactNotFoundError, match="the deployment's recipe declares no harness component"):
-        service.harness_manifest({"x-reef-scenario": "delivery"})
+        harness_manifest(dispatcher, "delivery")
 
 
 def test_current_files_never_creates_a_scenario(tmp_path) -> None:
-    service = _service(tmp_path, recipe=_HarnessRecipe(rules="x"))
+    dispatcher = _dispatcher(tmp_path, recipe=_HarnessRecipe(rules="x"))
     with pytest.raises(ArtifactNotFoundError):
-        service.harness_manifest({"x-reef-scenario": "unknown"})
+        harness_manifest(dispatcher, "unknown")
 
 
 def test_manifest_error_distinguishes_a_scenario_without_a_published_tree(tmp_path) -> None:
     # A scenario exists and its recipe has a harness components, but its snapshot holds no tree yet. The message must
     # tell the operator that nothing has been published, not that the components is missing.
-    service = _service(tmp_path, recipe=_HarnessRecipe(rules=None))
+    dispatcher = _dispatcher(tmp_path, recipe=_HarnessRecipe(rules=None))
     with pytest.raises(ArtifactNotFoundError, match="holds no harness tree"):
-        service.harness_manifest({"x-reef-scenario": "delivery"})
+        harness_manifest(dispatcher, "delivery")
 
 
 def test_harness_components_render_the_source_tree_for_their_adapter(tmp_path) -> None:
@@ -128,8 +126,8 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     claude = load_recipe(
         HarnessEvolutionRecipe, {"model": {"path": "small"}, **evolution_config(adapter="claude")}, {}
     )
-    harness = _service(tmp_path / "harness", recipe=claude, live=configured_live(claude)).dispatcher
-    weights = _service(tmp_path / "weights", recipe=Recipe()).dispatcher
+    harness = _dispatcher(tmp_path / "harness", recipe=claude, live=configured_live(claude))
+    weights = _dispatcher(tmp_path / "weights", recipe=Recipe())
     assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
     assert all("adapter" not in row for row in weights.list_scenarios())
     # A registered scenario that is not in memory, as while it loads or after its preload failed, names it too.

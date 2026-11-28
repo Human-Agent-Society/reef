@@ -21,7 +21,9 @@ class EvaluationTrial:
     Values: ``scenario`` and ``evaluation_id`` name the evaluation; ``task_index``, ``task_name`` and ``repeat`` name
     the rollout, as in ``EvaluationRollout``; ``attempt`` is the 1-based attempt of the rollout's work item;
     ``directory`` is the trial directory on this host, or None when Harbor made none; ``error`` is the error text of
-    the trial, or "" when the trial had no error.
+    the trial, or "" when the trial had no error; ``deferred`` is True when the sandbox service refused a sandbox of
+    the trial for want of capacity. A deferred attempt does not count: the rollout waits in the queue and runs again
+    (``WorkItem.deferred_attempt_count``).
 
     Purpose: the evaluation worker gives it to the deployment's ``TrialObserver``.
     """
@@ -34,6 +36,7 @@ class EvaluationTrial:
     attempt: int
     directory: Path | None
     error: str
+    deferred: bool = False
 
 
 class TrialObserver(ConfiguredPlugin, ABC):

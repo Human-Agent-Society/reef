@@ -135,7 +135,7 @@ export default function Home() {
           <div>
             <p className="section-label">Quickstart</p>
             <h2>Start a local stack</h2>
-            <p>Start a stack, send a provider-native request, grade the receipt Reef returns.</p>
+            <p>Run SGLang on a GPU, or follow the quickstart with a hosted model.</p>
             <div className="home-actions">
               <Link className="primary-action" href="/docs/getting-started/quickstart">Open the quickstart <ArrowRight size={16} /></Link>
             </div>
