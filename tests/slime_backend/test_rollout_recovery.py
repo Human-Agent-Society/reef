@@ -373,6 +373,38 @@ def test_dp_packaging_splices_reef_step_sizes_with_a_partial_tail(monkeypatch: p
 
 
 @pytest.mark.unit
+def test_packing_many_steps_visits_each_rollout_row_a_bounded_number_of_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RolloutIds(list[int]):
+        """An ordered list of integer rollout IDs, with repeats allowed.
+
+        Each instance starts with zero visits. Each iterator yields IDs in list order and increments
+        the same instance counter once per ID yielded, including on repeated or partial traversals.
+        """
+
+        visits = 0
+
+        def __iter__(self):
+            for rollout_id in super().__iter__():
+                self.visits += 1
+                yield rollout_id
+
+    # The second row of each rollout comes after all the first rows.
+    rollouts = RolloutIds([*range(64), *range(64)])
+    processor = _manager_for_schedule(monkeypatch, global_batch_size=2)
+    ranks = processor.prepare_external_train_data(
+        {
+            "tokens": [[index] for index in range(len(rollouts))],
+            "rollout_ids": rollouts,
+            "external_step_sizes": [2] * 32,
+        }
+    )
+
+    assert ranks[0]["partition"] == [row for index in range(0, 64, 2) for row in (index, index + 64)]
+    assert ranks[1]["partition"] == [row for index in range(1, 64, 2) for row in (index, index + 64)]
+    assert rollouts.visits <= 4 * len(rollouts)
+
+
+@pytest.mark.unit
 def test_dp_packaging_trains_a_partial_last_step(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _manager_for_schedule(monkeypatch, global_batch_size=2)
     data = {"tokens": [[1], [2], [3], [4], [5]], "rollout_ids": [0, 1, 2, 3, 4]}

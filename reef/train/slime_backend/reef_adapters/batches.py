@@ -146,15 +146,19 @@ class TrainingBatchProcessor:
         rollout_ids = data["rollout_ids"]
         total_lengths = data["total_lengths"]
         rollout_order = list(dict.fromkeys(rollout_ids))
+        step_of: dict[int, int] = {}
+        cursor = 0
+        for step, size in enumerate(step_sizes):
+            step_of.update(dict.fromkeys(rollout_order[cursor : cursor + size], step))
+            cursor += size
+        indices_by_step: list[list[int]] = [[] for _ in step_sizes]
+        for index, rollout in enumerate(rollout_ids):
+            indices_by_step[step_of[rollout]].append(index)
         partitions: list[list[int]] = [[] for _ in range(dp_size)]
         micro_batch_indices: list[list[list[int]]] = [[] for _ in range(dp_size)]
         num_microbatches: list[int] = []
         global_batch_sizes: list[int] = []
-        cursor = 0
-        for size in step_sizes:
-            step_rollouts = set(rollout_order[cursor : cursor + size])
-            cursor += size
-            sample_indices = [index for index, rollout in enumerate(rollout_ids) if rollout in step_rollouts]
+        for size, sample_indices in zip(step_sizes, indices_by_step, strict=True):
             step_partitions, step_micro_batches, step_num_microbatches, step_batch_sizes = build_dp_schedule(
                 self.args,
                 self.train_parallel_config,
