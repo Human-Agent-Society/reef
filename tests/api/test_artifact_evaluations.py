@@ -2746,6 +2746,39 @@ def test_an_item_of_another_owner_and_automatic_settings_are_refused(tmp_path: P
     asyncio.run(run())
 
 
+def test_retention_after_read_preserves_legacy_rollout_names_and_scores(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    try:
+        dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
+        results = ArtifactEvaluations(dispatcher).results
+        queue = dispatcher.queue
+        request = ArtifactEvaluationRequest("a1", "weights", harness={"name": "terminus-2"})
+        with dispatcher.locked_scenario("s") as current:
+            current.store.evaluations.create(evaluation_id="eval", owner="test", request=request, created_at=0.0)
+        for index, name in enumerate(("add", "sort")):
+            rollout = EvaluationRollout(
+                "s", "eval", "a1", "weights", index, name, 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+            )
+            queue.append(rollout_work(rollout))
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.start(EVALUATIONS_QUEUE, item.id, "w")
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(float(index)).to_json()})
+        items = queue.items
+
+        def expire_after_read(*args, **kwargs):
+            rows = items(*args, **kwargs)
+            queue.delete_final(finished_before=time.time() + 1)
+            return rows
+
+        monkeypatch.setattr(queue, "items", expire_after_read)
+        results.settle("s", "eval")
+        with dispatcher.locked_scenario("s") as current:
+            result = current.store.evaluations.read("eval").result
+            assert result.scores.to_json() == [{"task": "add", "scores": [0.0]}, {"task": "sort", "scores": [1.0]}]
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.parametrize("environment", ["docker", "e2b"])
 def test_settlement_reads_scores_only_after_the_failure_check_can_stop_the_run(
     tmp_path: Path, monkeypatch, environment: str

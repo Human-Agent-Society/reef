@@ -905,9 +905,12 @@ class EvaluationResults:
             request = stored.request
             # Only the shared rollout inputs need a payload. Retention can remove the first item, in which case
             # the first remaining rollout or template supplies those inputs as before.
-            seed = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, 0, 0))
-            if seed is None and request.environment == "e2b":
-                seed = self.queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 0))
+            # Older requests can lack task names. Read those names and their scores from the same queue rows.
+            seed = None
+            if request.task_names:
+                seed = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, 0, 0))
+                if seed is None and request.environment == "e2b":
+                    seed = self.queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 0))
             items = self.rollouts(evaluation_id, scenario, payload=seed is None)
             templates = (
                 self.templates(evaluation_id, scenario, payload=seed is None) if request.environment == "e2b" else {}
@@ -1003,8 +1006,7 @@ class EvaluationResults:
             names = list(dict.fromkeys(request.task_names[rollout_position(item.id)[0]] for item in items))
         else:
             # An evaluation without accepted task names gets them from the retained rollout payloads.
-            named_items = self.rollouts(evaluation_id, scenario) if seed is not None else items
-            names = list(dict.fromkeys(EvaluationRollout.from_item(item).task_name for item in named_items))
+            names = list(dict.fromkeys(EvaluationRollout.from_item(item).task_name for item in items))
         scores = [
             (
                 RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
