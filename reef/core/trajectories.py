@@ -24,7 +24,7 @@ from reef.core.atif_payloads import (
 )
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
-from reef.core.trajectory_index import atif_form
+from reef.core.trajectory_index import atif_form, value_bytes
 
 
 def source_record_id(item: TrajectorySample) -> str:
@@ -124,7 +124,11 @@ class TrajectoryBuilder:
         request, responses = exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(self.history, request, strict=False):
-            if canonical_json(atif_form(previous, provider)) != canonical_json(atif_form(current, provider)):
+            # An agent resends most messages unchanged, and the same bytes mean the same message. Only a message
+            # with other bytes needs its ATIF form, which is equal for two spellings of one message.
+            if value_bytes(previous) != value_bytes(current) and canonical_json(
+                atif_form(previous, provider)
+            ) != canonical_json(atif_form(current, provider)):
                 break
             shared += 1
         self.entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])

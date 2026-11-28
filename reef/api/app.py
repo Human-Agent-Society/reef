@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -137,18 +138,24 @@ class RoutingPublication(RoutingPublisher):
 
 def maintain_data_store(app: web.Application, dispatcher: Dispatcher) -> None:
     """While ``app`` runs, call ``DataStore.maintain`` every ``DATA_STORE_MAINTENANCE_SECONDS``, when ``dispatcher``
-    runs the data service and has a data store. A failed call is logged, and the next call tries again."""
+    runs the data service and has a data store. A failed call is logged, and the next call tries again.
+
+    Every call runs on one thread that only the maintenance uses. The C allocator keeps the memory that a thread
+    frees for the next allocation of that thread. So calls on the threads that answer the routes would keep the
+    memory of a call once for each of those threads."""
     data_store = dispatcher.data_store
     if not dispatcher.services.runs_data or data_store is None:
         return
 
     async def maintain(app: web.Application):
         stopped = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        maintenance_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-data-maintenance")
 
         async def run() -> None:
             while not stopped.is_set():
                 try:
-                    await asyncio.to_thread(data_store.maintain)
+                    await loop.run_in_executor(maintenance_thread, data_store.maintain)
                 except Exception:
                     logger.exception("data store maintenance failed; will retry on the next run")
                 try:
@@ -163,6 +170,7 @@ def maintain_data_store(app: web.Application, dispatcher: Dispatcher) -> None:
             # Let a running call finish before the dispatcher closes the data store.
             stopped.set()
             await task
+            maintenance_thread.shutdown()
 
     app.cleanup_ctx.append(maintain)
 
