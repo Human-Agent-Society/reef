@@ -163,6 +163,8 @@ def test_the_start_reservation_and_work_share_the_evaluation_transaction(storage
             evaluations.create(evaluation_id="e2", **parameters)
         assert evaluations.read("e2") is None
         assert other.evaluations.read_started(start.start_id, start.fingerprint) is None
+        assert evaluations.start_ids(["e1", "e2"]) == {"e1": "start-1"}
+        assert other.evaluations.start_ids(["e1"]) == {}
         separate_start = replace(start, first_work_json='{"scenario": "other"}')
         separate = other.evaluations.create(
             evaluation_id="e1",

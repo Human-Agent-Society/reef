@@ -113,6 +113,8 @@ On the list, ``summary=true`` gives each evaluation without its large parts:
 ``policy_evaluation`` keeps only ``harness``. ``tasks_digest`` is the SHA-256 of the
 compact JSON of ``[task_names, collection name, collection benchmarks, collection average]``
 with sorted keys. Evaluations with the same digest ran the same tasks with the same averaging.
+``start_id`` is the ``start_id`` of the request that started the evaluation, or null. A client
+uses it to find the evaluation of a start whose answer it does not have yet.
 
 ``score_levels=true`` adds ``full`` (≥1), ``part`` (0 < score < 1), ``zero`` (≤0),
 ``failed`` and ``pending`` counts. Shared tasks count in every containing benchmark.
