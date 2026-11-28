@@ -978,6 +978,20 @@ def test_rollout_calls_keep_recovered_transient_429s_and_ignore_trailing_auxilia
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("with_tools", [True, False])
+def test_a_stream_error_after_http_200_counts_as_a_service_failure(with_tools, monkeypatch):
+    endpoints = UnreachableEndpoints()
+    calls = RolloutCalls(endpoints, rollout(), 1)
+    partial = replace(timed_turn(200, 1000.0, 0.3, with_tools=with_tools), client_stream=True)
+    monkeypatch.setattr(partial, "stream_failed", True, raising=False)
+    calls.call_captured(partial)
+    calls.close()
+    assert calls.answered == 0
+    assert "the last one among them" in (calls.service_failure() or "")
+    assert endpoints.calls[0].summary.status == 200
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("turns", "failure"),
     [

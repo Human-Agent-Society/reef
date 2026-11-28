@@ -145,8 +145,9 @@ Calls that the provider answers with 502, 503 or 504, or whose answer ends
 before its first byte, retry up to four attempts under the same limits.
 Final rate/payment refusals leave null scores. Auxiliary title calls cannot
 mask main-loop refusals; a refused trailing auxiliary call fails only an errored trial.
-HTTP 5xx failures invalidate an attempt when the last call fails or failed calls
-consume at least 5% of the first-to-last-call interval. Normal attempt retries apply.
+A failed call can return HTTP 5xx or report a stream error after HTTP 200.
+An attempt fails if the last call failed or failed calls consumed at least 5% of the first-to-last-call interval.
+Normal attempt retries apply. A Harbor rollout with a stream error and no answered call publishes no reward.
 
 Cancel, retry and resume
 ------------------------

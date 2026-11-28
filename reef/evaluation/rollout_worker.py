@@ -742,13 +742,13 @@ class RolloutCalls(CaptureObserver):
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
-    the index of the next call. ``all_answered`` counts calls that answered 200 and ``all_last_refusal`` holds the
+    the index of the next call. ``all_answered`` counts successful HTTP 200 calls. ``all_last_refusal`` holds the
     ``ModelCallRefusal`` of the call captured last, or None. ``tool_calls_seen`` is True once a call carried a
     non-empty ``tools`` field (``has_tools``); ``tool_answered`` and ``tool_last_refusal`` track those tool-bearing
     calls alone. ``answered`` and ``last_refusal`` read the tool-bearing counters when ``tool_calls_seen`` is True,
     else the all-call counters, so auxiliary calls without tools (such as title generation) neither mask a main-loop
     refusal nor fail a completed main loop. ``service_failures`` is the number of calls that the inference service
-    failed (an HTTP status of 500 or more), ``service_failure_seconds`` their total duration, and ``last_failed``
+    failed with HTTP 5xx or a stream error, ``service_failure_seconds`` their total duration, and ``last_failed``
     whether the call captured last was one. ``first_started_at`` and ``last_ended_at`` bound the calls in wall-clock
     seconds; both are None before the first.
 
@@ -794,20 +794,23 @@ class RolloutCalls(CaptureObserver):
         if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
             wait = None
         refusal = None if limit is None else ModelCallRefusal(limit, turn.status, wait)
+        # Older reef-client versions only report the HTTP status.
+        stream_failed = getattr(turn, "stream_failed", False)
+        answered = turn.status == 200 and not stream_failed
         is_tool_call = isinstance(turn.request, dict) and has_tools(turn.request) and bool(turn.request["tools"])
         with self.lock:
             index = self.next_index
             self.next_index += 1
-            self.all_answered += turn.status == 200
+            self.all_answered += answered
             self.all_last_refusal = refusal
             if is_tool_call:
                 self.tool_calls_seen = True
-                self.tool_answered += turn.status == 200
+                self.tool_answered += answered
                 self.tool_last_refusal = refusal
             started = turn.at - turn.duration_s
             self.first_started_at = started if self.first_started_at is None else min(self.first_started_at, started)
             self.last_ended_at = turn.at if self.last_ended_at is None else max(self.last_ended_at, turn.at)
-            self.last_failed = turn.status >= 500
+            self.last_failed = turn.status >= 500 or stream_failed
             if self.last_failed:
                 self.service_failures += 1
                 self.service_failure_seconds += turn.duration_s
