@@ -94,7 +94,7 @@ def post(agent: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, Any
 class AgentLab(TaskLab):
     """Calls the model ``turns`` times through the agent's api_base and gives the task's reward."""
 
-    def __init__(self, *, reward: float = 1.0, error: str = "", turns: int = 1, build_error: str = "") -> None:
+    def __init__(self, *, reward: float | None = 1.0, error: str = "", turns: int = 1, build_error: str = "") -> None:
         self.reward = reward
         self.error = error
         self.turns = turns
@@ -110,7 +110,7 @@ class AgentLab(TaskLab):
         for _ in range(self.turns):
             answer = post(agent, messages)
             messages += [answer["choices"][0]["message"], {"role": "user", "content": "next"}]
-        return RolloutRow(rewards={"reward": self.reward})
+        return RolloutRow(rewards={"reward": self.reward} if self.reward is not None else {})
 
     async def build_environment(self, task_path, *, overrides) -> str:
         self.builds.append(task_path.name)
@@ -217,6 +217,7 @@ def test_score_centering_gets_a_head_per_response_token_with_a_uniform_head_wher
 @pytest.mark.parametrize(
     ("lab", "answer", "reward", "error"),
     [
+        (AgentLab(reward=None), (200, GENERATED), None, "no finite primary reward"),
         (AgentLab(error="the sandbox did not start"), (200, GENERATED), None, "the sandbox did not start"),
         # The verifier scored the rollout, but the agent made no call: the sample cannot train, and the reward reports.
         (AgentLab(reward=1.0, turns=0), (200, GENERATED), 1.0, "no model call"),

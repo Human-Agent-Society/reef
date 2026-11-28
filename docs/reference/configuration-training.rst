@@ -58,9 +58,9 @@ Use these training and recipe options:
 - Use the ``slime`` loss family for the deployment and objective. It accepts task and dataset jobs.
 - Each job runs ``ceil(tasks / rollout-batch-size)`` rollout iterations. The last batch repeats tasks to fill it. ``save_interval`` counts iterations.
 - Engines accept system, user and assistant text only. Slime controls temperature, top-p, top-k and maximum response length.
+- If an iteration has no trainable group, the job fails with its first rollout error. Score centering records the top ``score-centering-top-k`` log probabilities per sampled token.
 - Reef uses the mean of the iteration's verifier scores for ``rollout/raw_reward`` and ``best_reward`` checkpoint retention.
   A scored zero counts in this mean. An unscored trial contributes no score.
-- If an iteration has no trainable group, the job fails with its first rollout error. Score centering records the top ``score-centering-top-k`` log probabilities per sampled token.
 - Install Harbor and the selected environment on the Ray actor's host. Set ``agent_host`` for sandboxed agents.
   The actor inherits E2B credentials, API and sandbox URLs, domain, and Modal credentials from the training service.
 

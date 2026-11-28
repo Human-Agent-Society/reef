@@ -469,11 +469,14 @@ class HarborRolloutSession:
             return self.finish(task, group_index, removed_fields(f"the rollout raised: {exc!r}", self.top_k), None)
         if rollout.is_infrastructure_failure:
             return self.finish(task, group_index, removed_fields(rollout.error, self.top_k), None)
-        reward = 0.0 if rollout.reward is None else rollout.reward
+        reward = rollout.reward
         sample = rollout_sample(rollout, task, self.assembly, self.source.job_id)
         fields = None if sample is None else assembled_fields(rollout, sample, self.top_k)
         if fields is None:
-            error = rollout.error or "the rollout's model calls do not assemble into a sample"
+            if reward is None:
+                error = "the verifier returned no finite primary reward"
+            else:
+                error = rollout.error or "the rollout's model calls do not assemble into a sample"
             return self.finish(task, group_index, removed_fields(error, self.top_k), reward)
         return self.finish(task, group_index, fields, reward)
 
