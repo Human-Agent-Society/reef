@@ -284,12 +284,11 @@ def test_a_call_that_a_rate_limit_refused_is_sent_again_unchanged_until_it_is_an
         (refused(402), 402, "payment_required", None),
         (refused(403), 403, None, None),
         (refused(401), 401, None, None),
-        # A 5xx keeps the provider's wait in its body, but no Retry-After header tells the agent to wait.
-        (refused(503, retry_after_seconds=7.0), 503, None, 7),
+        # A 500 keeps the provider's wait in its body, but no Retry-After header tells the agent to wait.
+        (refused(500, retry_after_seconds=7.0), 500, None, 7),
         # A limit on a status that names none is no limit.
-        (refused(503, limit=UpstreamLimit.RATE), 503, None, None),
+        (refused(500, limit=UpstreamLimit.RATE), 500, None, None),
         (TimeoutError("the provider took too long"), 502, None, None),
-        (ConnectionResetError("the provider closed the connection"), 502, None, None),
     ],
 )
 def test_no_other_failure_is_sent_again_and_a_refusal_keeps_its_status_limit_and_wait(
@@ -302,6 +301,260 @@ def test_no_other_failure_is_sent_again_and_a_refusal_keeps_its_status_limit_and
     assert (answer_status, body["error"].get("code"), retry_after) == (status, code, header)
     assert body["error"].get("retry_after_seconds") == wait_seconds
     assert len(handler.payloads) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["502", "503", "504", "payload_eof", "server_disconnected", "connection_reset", "eof", "incomplete_read"],
+)
+def test_transient_upstream_and_eof_errors_retry_with_backoff_and_recover(
+    monkeypatch: pytest.MonkeyPatch, failure_kind: str
+) -> None:
+    from http.client import IncompleteRead
+
+    import aiohttp
+
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
+    failures: dict[str, BaseException] = {
+        "502": refused(502),
+        "503": refused(503, retry_after_seconds=0.0),
+        "504": refused(504),
+        "payload_eof": aiohttp.ClientPayloadError("Error reading content: unexpected EOF"),
+        "server_disconnected": aiohttp.ServerDisconnectedError("server disconnected"),
+        "connection_reset": ConnectionResetError("connection reset by peer"),
+        "eof": EOFError("Error reading content: unexpected EOF"),
+        "incomplete_read": IncompleteRead(b"partial"),
+    }
+    cooldowns = ProviderCooldowns()
+    runtime, handler = scripted(failures[failure_kind], failures[failure_kind], REPLY)
+    with ArtifactEndpoint(runtime, ARTIFACT, cooldowns=cooldowns) as endpoint:
+        assert answered(endpoint.url, CHAT) == (200, REPLY, None)
+    assert handler.payloads == [CHAT, CHAT, CHAT]
+    assert cooldowns.resume_at(handler, "") == 0.0, "transient failures do not hold peer rollouts"
+    assert runtime.inference_admission_status == {"open": True, "active": 0}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_status", "expected_wait"),
+    [
+        ("502", 502, None),
+        ("503", 503, 1),
+        ("504", 504, None),
+        ("payload_eof", 502, None),
+        ("connection_reset", 502, None),
+    ],
+)
+def test_transient_errors_surface_clear_error_when_retry_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch, failure_kind: str, expected_status: int, expected_wait: int | None
+) -> None:
+    import aiohttp
+
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
+    failures: dict[str, BaseException] = {
+        "502": refused(502),
+        "503": refused(503, retry_after_seconds=0.1),
+        "504": refused(504),
+        "payload_eof": aiohttp.ClientPayloadError("Error reading content: unexpected EOF"),
+        "connection_reset": ConnectionResetError("connection reset"),
+    }
+    runtime, handler = scripted(failures[failure_kind])
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        status, body, retry_after = answered(endpoint.url, CHAT)
+    assert (status, retry_after) == (expected_status, None)
+    assert body["error"].get("retry_after_seconds") == expected_wait
+    assert len(handler.payloads) == artifact_endpoint.TRANSIENT_ERROR_TRIES
+    assert f"{artifact_endpoint.TRANSIENT_ERROR_TRIES} attempts" in body["error"]["message"]
+    assert runtime.inference_admission_status == {"open": True, "active": 0}
+
+
+@pytest.mark.unit
+def test_a_streaming_call_retries_when_first_chunk_hits_unexpected_eof(monkeypatch: pytest.MonkeyPatch) -> None:
+    import aiohttp
+
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
+
+    class FailingFirstChunkHandler(StreamingHandler):
+        async def inference_stream(
+            self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+        ) -> InferenceStream:
+            self.payloads.append(payload)
+            if len(self.payloads) == 1:
+
+                async def failing_chunks():
+                    if False:
+                        yield b""
+                    raise aiohttp.ClientPayloadError("Error reading content: unexpected EOF")
+
+                async def close() -> None:
+                    self.closed += 1
+
+                return InferenceStream(
+                    status=200,
+                    headers={"Content-Type": "text/event-stream"},
+                    chunks=failing_chunks(),
+                    close=close,
+                )
+            self.payloads.pop()
+            return await super().inference_stream(artifact, path, payload)
+
+    runtime = Runtime(any_artifact=True)
+    runtime.handler = handler = FailingFirstChunkHandler(ENGINE_STREAM)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
+        proxy.start()
+        try:
+            stream = streamed(proxy)
+            turns = proxy.drain()
+        finally:
+            proxy.stop()
+    assert len(handler.payloads) == 2
+    assert stream == b"".join(ENGINE_STREAM)
+    assert handler.closed == 2 and runtime.inference_admission_status["active"] == 0
+    assert [turn["status"] for turn in turns] == [200]
+
+
+@pytest.mark.unit
+def test_transient_retry_stops_when_endpoint_closes_or_timeout_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 30.0)
+    # Timeout too short for backoff: exits immediately after 1 try.
+    runtime, handler = scripted(refused(502), REPLY, inference_timeout_s=0.5)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        status, _, _ = answered(endpoint.url, CHAT)
+    assert (status, len(handler.payloads)) == (502, 1)
+
+    # Endpoint closes during backoff: answers immediately with last failure.
+    runtime, handler = scripted(refused(504), REPLY)
+    with ThreadPoolExecutor(1) as pool:
+        with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+            pending = pool.submit(answered, endpoint.url, CHAT)
+            wait_until(lambda: len(handler.payloads) == 1)
+            closed_at = time.monotonic()
+        status, _, _ = pending.result(5)
+    assert status == 504 and len(handler.payloads) == 1 and time.monotonic() - closed_at < 5
+
+
+@pytest.mark.unit
+def test_transient_503_honors_retry_after_and_answers_at_once_past_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
+    # A 503 with Retry-After waits at least that long before resending.
+    runtime, handler = scripted(refused(503, retry_after_seconds=0.25), REPLY)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        assert answered(endpoint.url, CHAT) == (200, REPLY, None)
+    assert len(handler.sent_at) == 2 and handler.sent_at[1] - handler.sent_at[0] >= 0.23
+
+    # A 503 whose Retry-After passes inference_timeout_s answers at once without sleeping or resending.
+    runtime, handler = scripted(refused(503, retry_after_seconds=30.0), REPLY, inference_timeout_s=1.0)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        started = time.monotonic()
+        status, body, retry_after = answered(endpoint.url, CHAT)
+    assert (status, retry_after, body["error"]["retry_after_seconds"], len(handler.payloads)) == (503, None, 30, 1)
+    assert time.monotonic() - started < 0.5
+
+    # A 503 whose Retry-After passes TRANSIENT_RETRY_SECONDS (60 s) answers at once even within a 300 s timeout.
+    runtime, handler = scripted(refused(503, retry_after_seconds=120.0), REPLY, inference_timeout_s=300.0)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        started = time.monotonic()
+        status, body, retry_after = answered(endpoint.url, CHAT)
+    assert (status, retry_after, body["error"]["retry_after_seconds"], len(handler.payloads)) == (503, None, 120, 1)
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.unit
+def test_malformed_2xx_and_non_disconnect_client_errors_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ssl
+
+    import aiohttp
+    from aiohttp.client_reqrep import ConnectionKey
+
+    from reef.core.errors import MalformedUpstreamResponseError
+
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
+    key = ConnectionKey("api.example", 443, True, None, None, None, None)
+    non_transient: list[tuple[BaseException, int]] = [
+        (MalformedUpstreamResponseError("inference provider returned a body that is not JSON"), 502),
+        (aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad cert")), 502),
+        (aiohttp.ClientConnectorDNSError(key, OSError("dns failed")), 502),
+        (aiohttp.ServerTimeoutError("server timed out"), 502),
+    ]
+    for error, expected_status in non_transient:
+        runtime, handler = scripted(error, REPLY)
+        with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+            status, _, _ = answered(endpoint.url, CHAT)
+        assert (status, len(handler.payloads)) == (expected_status, 1), f"{type(error).__name__} must not retry"
+
+
+@pytest.mark.unit
+def test_transient_retry_timeout_preserves_original_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_MIN_RETRY_WINDOW_SECONDS", 0.2)
+    # Try 2 starts with enough window, then times out: return the original 503 and its wait, not a generic 502.
+    runtime, handler = scripted(
+        refused(503, retry_after_seconds=0.05),
+        REPLY,
+        delays=(0.0, 5.0),
+        inference_timeout_s=0.4,
+    )
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        status, body, _ = answered(endpoint.url, CHAT)
+    assert (status, len(handler.payloads)) == (503, 2)
+    assert "503" in body["error"]["message"]
+    assert body["error"]["retry_after_seconds"] is not None
+
+    # When less than TRANSIENT_MIN_RETRY_WINDOW_SECONDS remains after backoff, skip the retry and return the 503.
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_MIN_RETRY_WINDOW_SECONDS", 1.0)
+    runtime, handler = scripted(refused(503, retry_after_seconds=0.1), REPLY, inference_timeout_s=0.5)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        status, body, _ = answered(endpoint.url, CHAT)
+    assert (status, len(handler.payloads)) == (503, 1)
+    assert "503" in body["error"]["message"]
+
+
+@pytest.mark.unit
+def test_opened_stream_prefetch_preserves_stream_object_and_recording_fields() -> None:
+    from reef.evaluation.artifact_endpoint import OpenedStream
+    from reef.inference.interfaces import InferenceAdmissionHandle
+
+    async def non_empty() -> object:
+        yield b"first"
+        yield b"second"
+
+    async def empty() -> object:
+        if False:
+            yield b""
+
+    async def run() -> None:
+        admission = InferenceAdmissionHandle(lambda: None)
+        stream = InferenceStream(
+            status=200,
+            headers={"Content-Type": "text/event-stream"},
+            chunks=non_empty(),
+            record_response={"id": "r1"},
+            record_response_pending=True,
+        )
+        opened = OpenedStream(stream, admission)
+        prefetched = await opened.prefetch_first_chunk(None)
+        assert prefetched.stream is stream
+        assert prefetched.stream.record_response == {"id": "r1"}
+        assert prefetched.stream.record_response_pending is True
+        assert [chunk async for chunk in prefetched.stream.chunks] == [b"first", b"second"]
+
+        empty_stream = InferenceStream(
+            status=200,
+            headers={"Content-Type": "text/event-stream"},
+            chunks=empty(),
+            record_response={"id": "r2"},
+            record_response_pending=True,
+        )
+        empty_opened = OpenedStream(empty_stream, admission)
+        empty_prefetched = await empty_opened.prefetch_first_chunk(None)
+        assert empty_prefetched.stream is empty_stream
+        assert empty_prefetched.stream.record_response == {"id": "r2"}
+        assert empty_prefetched.stream.record_response_pending is True
+        assert [chunk async for chunk in empty_prefetched.stream.chunks] == []
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit

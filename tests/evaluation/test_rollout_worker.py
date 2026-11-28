@@ -1008,7 +1008,9 @@ def test_rollout_calls_name_a_service_failure_that_took_the_last_call_or_much_of
 
 
 @pytest.mark.unit
-def test_a_rollout_whose_inference_service_failed_its_last_call_gets_no_score_and_runs_again(tmp_path):
+def test_a_rollout_whose_inference_service_failed_its_last_call_gets_no_score_and_runs_again(tmp_path, monkeypatch):
+    # The endpoint sends a call again after a 502; a short wait keeps those tries fast.
+    monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
     # The trial ends without an agent error, and its verifier writes 0, as a verifier does for work never done.
     lab = CallingLab(2, reward=0.0, fails_after_refusal=False)
     broken = (502, {"error": {"message": "the engine stopped"}}, {})

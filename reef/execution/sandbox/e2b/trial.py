@@ -43,7 +43,14 @@ from harbor.models.task.config import EnvironmentConfig, NetworkMode
 from harbor.models.task.task import Task
 from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
 from harbor.models.trial.paths import TrialPaths
-from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    wait_random,
+)
 
 from reef.core.errors import InternalError
 from reef.execution.sandbox.agentenv.build import (
@@ -357,12 +364,12 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost, PreparedImageHost
     @retry(
         retry=retry_if_exception_type(TransientStartError),
         stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        wait=wait_exponential(multiplier=2, min=2, max=30) + wait_random(0, 2),
         reraise=True,
     )
     async def start_compose_sandbox(self, sandbox: ComposeSandbox, templates: AgentEnvTemplates) -> str:
         """``sandbox.start(templates)``, run again after a temporary failure of the AgentENV API, four times at
-        most."""
+        most, with jittered exponential backoff."""
         return await sandbox.start(templates)
 
     @override
@@ -556,7 +563,8 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost, PreparedImageHost
     # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The decorator
     # preserves Harbor's retry for transient failures. Bad requests and capacity refusals fail immediately:
     # verifiers already wait for capacity inside this method, and agent rollouts defer in the queue. A failed cold
-    # start fails immediately too: its sandbox can exist after an answer that did not come.
+    # start fails immediately too (``ColdSandbox.create`` retries only HTTP 503 in place, and every other answer is
+    # sent once because a sandbox can still start after an unreadable or gateway-timed-out answer).
     # The create call, in create_from_template, is Harbor's call with one more argument.
     # When Harbor adds an argument to the call, add it there too: the parity test in
     # tests/sandbox/test_task_environment.py compares the two calls. A refusal for want of capacity becomes

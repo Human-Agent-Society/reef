@@ -19,7 +19,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
-from reef.core.errors import UpstreamLimit, UpstreamStatusError
+from reef.core.errors import MalformedUpstreamResponseError, UpstreamLimit, UpstreamStatusError
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import (
     FULL_WEIGHT_NAME_PREFIX,
@@ -207,7 +207,8 @@ class HttpInferenceHandler(InferenceHandler):
     ``inference`` returns the provider's JSON object. A provider status of 400 or more raises
     ``UpstreamStatusError`` with that status, the provider's ``Retry-After`` wait (``retry_after_seconds``) and the
     limit that its reply names (``upstream_limit``); the handler sends each request once. A successful status
-    whose body is not one JSON object raises it with status 502, since the provider failed and not the caller.
+    whose body is not one JSON object raises ``MalformedUpstreamResponseError`` (status 502), since the provider
+    failed and not the caller.
     ``inference_stream`` owns its provider session until it returns: on any failure or cancellation before then it
     closes the session and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close``
     releases it.
@@ -285,9 +286,9 @@ class HttpInferenceHandler(InferenceHandler):
                 value = await response.json()
             except (ContentTypeError, ValueError) as exc:
                 # A successful status with an unreadable body is the provider's failure, not the caller's.
-                raise UpstreamStatusError(f"{self._error_label} returned a body that is not JSON", status=502) from exc
+                raise MalformedUpstreamResponseError(f"{self._error_label} returned a body that is not JSON") from exc
         if not isinstance(value, dict):
-            raise UpstreamStatusError(f"{self._error_label} response must be a JSON object", status=502)
+            raise MalformedUpstreamResponseError(f"{self._error_label} response must be a JSON object")
         return value
 
     async def inference_stream(

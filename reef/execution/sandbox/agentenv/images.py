@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import math
+import random
 import re
 import time
 from abc import ABC, abstractmethod
@@ -43,8 +44,14 @@ DEFAULT_READY_SECONDS = 20.0
 TEMPLATE_STATUS_WAIT_SECONDS = 5.0
 #: The statuses with which AgentENV refuses a cold start for want of a free worker now (429, 503): it made no
 #: sandbox, and a later start can pass. Any other failure can leave a sandbox that still starts, such as a gateway's
-#: 502 or 504, or has a lasting cause, so the start is not sent again.
+#: 502 or 504, a lost connection, or a payload error while reading a 201 body, or has a lasting cause, so the start
+#: is sent once.
 CAPACITY_STATUSES = (429, 503)
+#: Bounded in-place retries and jittered exponential backoff limits when AgentENV refuses a cold start with HTTP 503
+#: (no free worker now, proving no sandbox was created).
+COLD_START_MAX_ATTEMPTS = 3
+COLD_START_FIRST_WAIT_SECONDS = 2.0
+COLD_START_MAX_WAIT_SECONDS = 30.0
 #: The names of E2B's network options (``SandboxNetworkOpts`` of the E2B SDK) in AgentENV's sandbox request.
 NETWORK_FIELDS = {
     "allow_out": "allowOut",
@@ -128,41 +135,72 @@ class ColdSandbox:
         return body
 
     async def create(self, templates: AgentEnvTemplates, wait_seconds: float) -> str:
-        """Send the request once to ``templates``' deployment, wait at most ``wait_seconds``, a positive number, for
-        the answer, and return the ID of the new sandbox (HTTP 201).
+        """Send the request to ``templates``' deployment within ``wait_seconds``, a positive number, and return the ID
+        of the new sandbox (HTTP 201).
 
-        Raise ``SandboxCapacityError`` for a status of ``CAPACITY_STATUSES``, and ``SandboxRequestError`` for HTTP
-        400. Raise ``ColdSandboxError`` for any other answer, such as 401, 403, 500, or a gateway's 502 or 504, and
-        when no answer came in time or the connection was lost. After those, AgentENV can still start the sandbox,
-        whose ID the caller does not know; AgentENV deletes it at the end of its lifetime. A redirect is such an
-        answer too: the request is not sent again, to the same host or another one, with the API key."""
-        try:
-            async with (
-                aiohttp.ClientSession(
-                    headers={"X-API-Key": templates.api_key}, timeout=aiohttp.ClientTimeout(total=wait_seconds)
-                ) as session,
-                session.post(
-                    f"{templates.api_url}/sandboxes-cold", json=self.body(), allow_redirects=False
-                ) as response,
-            ):
-                if response.status == 201:
-                    answer = await response.json()
-                    sandbox_id = answer.get("sandboxID") if isinstance(answer, dict) else None
-                    if not isinstance(sandbox_id, str) or not sandbox_id:
-                        raise ColdSandboxError(f"AgentENV started a sandbox of {self.image} and named no sandbox ID")
-                    return sandbox_id
-                status = response.status
-                text = (await response.text())[-BUILD_OUTPUT_TAIL_CHARS:].strip()
-        except TimeoutError as error:
-            raise ColdSandboxError(f"AgentENV did not answer the cold start of {self.image} in time") from error
-        except (aiohttp.ClientError, json.JSONDecodeError) as error:
-            raise ColdSandboxError(f"the cold start of {self.image} lost its answer: {error!r}") from error
-        message = f"AgentENV refused a sandbox of {self.image} (HTTP {status}): {text}"
-        if status in CAPACITY_STATUSES:
-            raise SandboxCapacityError(message)
-        if status == 400:
-            raise SandboxRequestError(message)
-        raise ColdSandboxError(message)
+        Raise ``SandboxCapacityError`` for a status of ``CAPACITY_STATUSES`` (429 immediately; 503 retries in place
+        up to ``COLD_START_MAX_ATTEMPTS`` times with jittered exponential backoff within ``wait_seconds`` because
+        AgentENV created no sandbox), and ``SandboxRequestError`` immediately for HTTP 400. Raise ``ColdSandboxError``
+        immediately after a single send for any other answer, such as 401, 403, 500, or a gateway's 502 or 504, and
+        when no answer came in time, the connection was lost, or reading the response body failed. After those,
+        AgentENV can still start the sandbox, whose ID the caller does not know; AgentENV deletes it at the end of its
+        lifetime. A redirect is such an answer too: the request is not sent again, to the same host or another one,
+        with the API key."""
+        deadline = time.monotonic() + wait_seconds
+        backoff_seconds = COLD_START_FIRST_WAIT_SECONDS
+        attempt = 0
+        while True:
+            attempt += 1
+            remaining = wait_seconds if attempt == 1 else max(deadline - time.monotonic(), 0.01)
+            try:
+                async with (
+                    aiohttp.ClientSession(
+                        headers={"X-API-Key": templates.api_key}, timeout=aiohttp.ClientTimeout(total=remaining)
+                    ) as session,
+                    session.post(
+                        f"{templates.api_url}/sandboxes-cold", json=self.body(), allow_redirects=False
+                    ) as response,
+                ):
+                    if response.status == 201:
+                        answer = await response.json()
+                        sandbox_id = answer.get("sandboxID") if isinstance(answer, dict) else None
+                        if not isinstance(sandbox_id, str) or not sandbox_id:
+                            raise ColdSandboxError(
+                                f"AgentENV started a sandbox of {self.image} and named no sandbox ID"
+                            )
+                        return sandbox_id
+                    status = response.status
+                    text = (await response.text())[-BUILD_OUTPUT_TAIL_CHARS:].strip()
+            except TimeoutError as error:
+                raise ColdSandboxError(f"AgentENV did not answer the cold start of {self.image} in time") from error
+            except (aiohttp.ClientError, json.JSONDecodeError) as error:
+                raise ColdSandboxError(f"the cold start of {self.image} lost its answer: {error!r}") from error
+            message = f"AgentENV refused a sandbox of {self.image} (HTTP {status}): {text}"
+            if status not in CAPACITY_STATUSES:
+                if status == 400:
+                    raise SandboxRequestError(message)
+                raise ColdSandboxError(message)
+            if status == 429:
+                raise SandboxCapacityError(message)
+            # HTTP 503 proves AgentENV allocated no sandbox; retry in place with bounded jittered backoff.
+            exhausted_message = (
+                f"AgentENV cold start of {self.image} failed after {attempt} attempts (HTTP 503): {text}"
+            )
+            if attempt >= COLD_START_MAX_ATTEMPTS:
+                raise SandboxCapacityError(exhausted_message)
+            delay_seconds = min(backoff_seconds, COLD_START_MAX_WAIT_SECONDS) * random.uniform(0.5, 1.0)
+            if time.monotonic() + delay_seconds >= deadline:
+                raise SandboxCapacityError(exhausted_message)
+            logger.warning(
+                "AgentENV cold start of %s received HTTP 503 on attempt %d/%d (%s); retrying in %.2f s",
+                self.image,
+                attempt,
+                COLD_START_MAX_ATTEMPTS,
+                text,
+                delay_seconds,
+            )
+            await asyncio.sleep(delay_seconds)
+            backoff_seconds = min(backoff_seconds * 2.0, COLD_START_MAX_WAIT_SECONDS)
 
 
 class PreparedImageHost(ABC):
@@ -221,10 +259,10 @@ async def start_prepared_image(
     a refusal for want of capacity waits, and no cold start follows another answer, another template's answer, or an
     answer that did not come.
 
-    The cold start (``ColdSandbox``) waits for its answer until ``deadline``, and is sent once. Then the image's start
-    runs (``run_image_start``). When the start fails after AgentENV made the sandbox, also when it is cancelled, the
-    host deletes the sandbox before this raises. Raise what ``ColdSandbox.create`` raises, and ``ColdSandboxError``
-    for a later failure.
+    The cold start (``ColdSandbox``) waits for its answer until ``deadline``, retrying only HTTP 503 in place and
+    sending every other answer once. Then the image's start runs (``run_image_start``). When the start fails after
+    AgentENV made the sandbox, also when it is cancelled, the host deletes the sandbox before this raises. Raise what
+    ``ColdSandbox.create`` raises, and ``ColdSandboxError`` for a later failure.
     """
     if prepared.template_id is not None and await template_is_ready(templates, prepared.template_id, deadline):
         if await host.start_from_template(prepared.template_id):
@@ -313,6 +351,9 @@ async def run_image_start(host: PreparedImageHost, prepared: PreparedImage, dead
 
 __all__ = [
     "CAPACITY_STATUSES",
+    "COLD_START_FIRST_WAIT_SECONDS",
+    "COLD_START_MAX_ATTEMPTS",
+    "COLD_START_MAX_WAIT_SECONDS",
     "DEFAULT_READY_SECONDS",
     "NETWORK_FIELDS",
     "READY_LIMIT_SECONDS",

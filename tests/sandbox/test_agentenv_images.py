@@ -97,16 +97,104 @@ def test_a_cold_start_refuses_a_network_option_that_it_cannot_send() -> None:
 
 
 @pytest.mark.unit
+def test_a_cold_start_retries_503_with_backoff_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reef.execution.sandbox.agentenv import images as agentenv_images
+
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        if seconds == 0:
+            await real_sleep(0)
+            return
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(agentenv_images.asyncio, "sleep", fake_sleep)
+    busy = (503, {"message": "no nodes available"})
+    api = FakeAgentEnvApi([busy, busy, (201, {"sandboxID": "sandbox-recovered"})])
+    assert cold_start(api) == "sandbox-recovered"
+    assert len(api.cold_bodies) == 3
+    assert len(sleeps) == 2 and all(delay > 0 for delay in sleeps)
+
+
+@pytest.mark.unit
+def test_a_cold_start_surfaces_capacity_error_when_503_budget_exhausts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reef.execution.sandbox.agentenv import images as agentenv_images
+
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        if seconds == 0:
+            await real_sleep(0)
+            return
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(agentenv_images.asyncio, "sleep", fake_sleep)
+    api = FakeAgentEnvApi([(503, {"message": "no nodes available"})])
+    with pytest.raises(SandboxCapacityError, match="HTTP 503") as raised:
+        cold_start(api)
+    assert len(api.cold_bodies) == agentenv_images.COLD_START_MAX_ATTEMPTS
+    assert len(sleeps) == agentenv_images.COLD_START_MAX_ATTEMPTS - 1
+    assert f"{agentenv_images.COLD_START_MAX_ATTEMPTS} attempts" in str(raised.value)
+
+
+@pytest.mark.unit
+def test_a_cold_start_stops_retrying_503_when_wait_budget_is_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reef.execution.sandbox.agentenv import images as agentenv_images
+
+    monkeypatch.setattr(agentenv_images, "COLD_START_FIRST_WAIT_SECONDS", 10.0)
+    api = FakeAgentEnvApi([(503, {"message": "no nodes available"})])
+    with pytest.raises(SandboxCapacityError, match="HTTP 503"):
+        cold_start(api, wait_seconds=0.5)
+    assert len(api.cold_bodies) == 1
+
+
+@pytest.mark.unit
+def test_a_cold_start_does_not_resend_after_payload_error_on_201() -> None:
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates
+
+    requests = 0
+
+    async def truncated_201(request: web.Request) -> web.StreamResponse:
+        nonlocal requests
+        requests += 1
+        response = web.StreamResponse(status=201, headers={"Content-Length": "100"})
+        await response.prepare(request)
+        await response.write(b'{"sandboxID": "s')
+        assert request.transport is not None
+        request.transport.close()
+        return response
+
+    async def run() -> None:
+        app = web.Application()
+        app.router.add_post("/sandboxes-cold", truncated_201)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            templates = AgentEnvTemplates(str(server.make_url("")).rstrip("/"), "key")
+            with pytest.raises(ColdSandboxError, match="lost its answer"):
+                await cold_sandbox().create(templates, 30.0)
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+    assert requests == 1
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("answer", "raised", "match"),
     [
-        # No worker has room now, and AgentENV made no sandbox: the rollout waits for capacity, as for a template's
-        # start.
-        ((503, {"message": "no nodes available"}), SandboxCapacityError, "HTTP 503"),
         ((429, {"message": "too many requests"}), SandboxCapacityError, "HTTP 429"),
         ((400, {"message": "cpuCount must be at most 16"}), SandboxRequestError, "at most 16"),
-        # A gateway or a proxy stopped waiting, or no answer came: AgentENV can still start the sandbox, so the
-        # caller does not ask for another one.
+        # A gateway or proxy stopped waiting, or the connection dropped: AgentENV can still start the sandbox, so the
+        # caller sends the request once and raises ColdSandboxError instead of leaking another sandbox or deferring
+        # forever.
+        ((502, "<html>502 Bad Gateway</html>"), ColdSandboxError, "HTTP 502"),
         ((504, "<html>Gateway Time-out</html>"), ColdSandboxError, "HTTP 504"),
         ((500, "<html>Internal Server Error</html>"), ColdSandboxError, "HTTP 500"),
         ("slow", ColdSandboxError, "in time"),
@@ -120,11 +208,11 @@ def test_a_cold_start_refuses_a_network_option_that_it_cannot_send() -> None:
         ((500, {"message": "image pull failed"}), ColdSandboxError, "image pull failed"),
     ],
     ids=[
-        "busy",
         "rate",
         "bad-request",
+        "bad-gateway",
         "gateway",
-        "proxy",
+        "proxy-500",
         "slow",
         "dropped",
         "no-id",

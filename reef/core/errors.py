@@ -123,6 +123,19 @@ class UpstreamStatusError(ReefError):
         self.limit = limit
 
 
+class MalformedUpstreamResponseError(UpstreamStatusError):
+    """An upstream service answered an inference request with a 2xx status whose body was not a valid JSON object.
+
+    Values: an ``UpstreamStatusError`` with ``status=502``, ``retry_after_seconds=None``, and ``limit=None``.
+    Purpose: ``HttpInferenceHandler.post_json`` raises it so downstream callers map the failure to HTTP 502 while
+    knowing the upstream already processed (and may have billed) the request, so it must not be retried as a
+    transient provider 502.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, status=502)
+
+
 class RuntimeConfigError(ConfigError):
     """A ``runtime`` section or a training component config is invalid or misses a required key."""
 

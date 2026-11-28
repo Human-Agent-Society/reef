@@ -1830,6 +1830,151 @@ def test_retry_expected_attempts_keeps_peers_and_does_not_repeat_later_failures(
     asyncio.run(run())
 
 
+def test_a_retried_evaluation_rollout_gets_a_fresh_deferral_budget_and_keeps_attempt_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution import workers as execution_workers
+    from reef.execution.workers import ItemDeferredError, QueueWorker
+
+    class DeferringRolloutWorker(QueueWorker):
+        def run_item(self, item: WorkItem, lease_lost) -> Mapping[str, Any]:
+            raise ItemDeferredError("waiting for sandbox capacity")
+
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(execution_workers.time, "time", lambda: clock["wall"])
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    evaluations = ArtifactEvaluations(dispatcher)
+    queue = dispatcher.queue
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            accepted = await (
+                await client.post(
+                    "/reef/scenarios/s/evaluations",
+                    headers=AUTH,
+                    json={"artifact_id": artifact_id, "harness": {"name": "terminus-2"}},
+                )
+            ).json()
+            evaluation_id = accepted["evaluation_id"]
+            worker = DeferringRolloutWorker(queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id="w")
+            # Simulate a rollout that already deferred 25 times (past the old max_deferrals=24) and then failed.
+            for _ in range(25):
+                assert worker.run_once()
+                deferred = queue.items(EVALUATIONS_QUEUE, scenario="s")[0]
+                assert deferred.state == "queued"
+                clock["wall"] = deferred.available_at
+            taken = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND], now=clock["wall"])
+            assert taken is not None and taken.deferred_attempt_count == 25
+            queue.fail(EVALUATIONS_QUEUE, taken.id, "w", "sandbox exited", retryable=False, now=clock["wall"])
+            failed = queue.read(EVALUATIONS_QUEUE, taken.id)
+            assert failed is not None and failed.state == "failed" and failed.attempt_count == 26
+
+            evaluations.retry("s", evaluation_id)
+            retried = queue.read(EVALUATIONS_QUEUE, taken.id)
+            assert retried is not None
+            assert (retried.state, retried.attempt_count, retried.deferred_attempt_count) == ("queued", 26, 0)
+
+            # On the first capacity deferral after retry, the rollout backs off from the initial 30s delay instead of
+            # failing or inheriting the 600s cap.
+            assert worker.run_once()
+            after = queue.read(EVALUATIONS_QUEUE, taken.id)
+            assert after is not None and after.state == "queued"
+            assert after.available_at == clock["wall"] + execution_workers.QueueWorker.first_deferral_seconds
+            assert (after.attempt_count, after.deferred_attempt_count) == (27, 1)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("initial_pin", "initial_prepared", "next_pin", "next_prepared"),
+    [
+        (False, False, True, True),
+        (True, True, False, False),
+    ],
+    ids=["unpinned-to-pinned", "pinned-to-unpinned"],
+)
+def test_an_in_flight_evaluation_preserves_its_recorded_task_mode_across_rolling_deploy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_pin: bool,
+    initial_prepared: bool,
+    next_pin: bool,
+    next_prepared: bool,
+) -> None:
+    from reef.execution import workers as execution_workers
+    from reef.execution.workers import ItemDeferredError, QueueWorker
+
+    class TransientReconcileWorker(QueueWorker):
+        def __init__(self, *args: Any, deferrals: int, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.remaining = deferrals
+
+        def run_item(self, item: WorkItem, lease_lost) -> Mapping[str, Any]:
+            if self.remaining > 0:
+                self.remaining -= 1
+                raise ItemDeferredError("Evaluation task mode requires reconciliation")
+            return {"score": RolloutScore(1.0).to_json()}
+
+    clock = {"wall": 2000.0}
+    monkeypatch.setattr(execution_workers.time, "time", lambda: clock["wall"])
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    old_control = ArtifactEvaluations(
+        dispatcher, pin_task_files=initial_pin, requires_prepared_templates=initial_prepared
+    )
+    new_control = ArtifactEvaluations(dispatcher, pin_task_files=next_pin, requires_prepared_templates=next_prepared)
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=old_control))) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            accepted = await (
+                await client.post(
+                    "/reef/scenarios/s/evaluations",
+                    headers=AUTH,
+                    json={
+                        "artifact_id": artifact_id,
+                        "harness": {"name": "terminus-2"},
+                        "max_concurrent_rollouts": 1,
+                    },
+                )
+            ).json()
+            evaluation_id = accepted["evaluation_id"]
+
+            # The first rollout survives repeated reconciliation deferrals during a rolling deploy (>24 times) and
+            # finishes instead of failing permanently.
+            first_item = queue.items(EVALUATIONS_QUEUE, scenario="s")[0]
+            first_rollout = EvaluationRollout.from_item(first_item)
+            assert (first_rollout.task_digest is not None) is initial_pin
+            worker = TransientReconcileWorker(
+                queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id="w", deferrals=26
+            )
+            for _ in range(26):
+                assert worker.run_once()
+                deferred = queue.read(EVALUATIONS_QUEUE, first_item.id)
+                assert deferred is not None and deferred.state == "queued"
+                clock["wall"] = deferred.available_at
+            assert worker.run_once()
+            done_first = queue.read(EVALUATIONS_QUEUE, first_item.id)
+            assert done_first is not None and done_first.state == "finished"
+
+            # After rolling deploy switches task-mode settings, new_control settles the next rollout using the
+            # evaluation's recorded task mode rather than the new deployment's default.
+            new_control.results.settle("s", evaluation_id)
+            items = queue.items(EVALUATIONS_QUEUE, scenario="s")
+            assert len(items) == 2
+            second_rollout = EvaluationRollout.from_item(items[1])
+            assert (second_rollout.task_digest is not None) is initial_pin
+            assert second_rollout.requires_prepared_templates is first_rollout.requires_prepared_templates
+
+            assert worker.run_once()
+            new_control.results.settle("s", evaluation_id)
+            stored = new_control.get("s", evaluation_id)
+            assert stored is not None and stored.state == "finished" and stored.mean_score == 1.0
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("fixed_selection", [False, True])
 def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts_end(
     tmp_path: Path, fixed_selection: bool
