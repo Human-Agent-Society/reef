@@ -109,7 +109,12 @@ class QueueStartupReporter(StartupReporter):
         with self.lock:
             try:
                 self.queue.append_progress(
-                    self.item.queue, self.item.id, self.worker_id, {PROGRESS_KEY: dict(entry)}, number=self.number
+                    self.item.queue,
+                    self.item.id,
+                    self.worker_id,
+                    {PROGRESS_KEY: dict(entry)},
+                    number=self.number,
+                    claim=self.item,
                 )
                 self.number += 1
             except Exception:
@@ -194,7 +199,7 @@ class ServingWorker(QueueWorker):
             finally:
                 self.owner.stop()
             with contextlib.suppress(WorkLeaseLostError):
-                self.queue.finish(INFERENCE_OWNER_QUEUE, self.owner.item.id, self.worker_id, {})
+                self.queue.finish(INFERENCE_OWNER_QUEUE, self.owner.item.id, self.worker_id, {}, claim=self.owner.item)
             logger.info("inference worker %s released runtime ownership", self.worker_id)
             self.owner = None
         self.repositories.clear()
@@ -211,7 +216,7 @@ class ServingWorker(QueueWorker):
             item = self.queue.take(INFERENCE_OWNER_QUEUE, self.worker_id, [INFERENCE_OWNER_QUEUE])
             if item is None:
                 return False
-            self.queue.start(INFERENCE_OWNER_QUEUE, item.id, self.worker_id)
+            self.queue.start(INFERENCE_OWNER_QUEUE, item.id, self.worker_id, claim=item)
             self.owner = ServingLease(self.queue, item, self.worker_id, runtime, self.stopped)
             self.owner.__enter__()
             logger.info("inference worker %s holds runtime ownership", self.worker_id)

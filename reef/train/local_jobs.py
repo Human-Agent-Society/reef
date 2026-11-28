@@ -11,15 +11,19 @@ job that has not ended. A subclass trains one job in :meth:`run`.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import threading
+import uuid
 from abc import abstractmethod
 from collections import deque
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from reef.storage.data.job_data import JobDataRef, LocalJobData
-from reef.storage.durable_files import read_json, write_json
+from reef.storage.durable_files import fsync_dir, read_json, write_json
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 
 logger = logging.getLogger(__name__)
@@ -74,6 +78,24 @@ class LocalJobComponent(TrainingComponent):
         self.job_thread: threading.Thread | None = None
         #: The threads of the jobs that a component with ``concurrent_jobs`` runs beside its job thread.
         self.concurrent_threads: list[threading.Thread] = []
+
+    @property
+    def run_scope(self) -> str:
+        """The UUID of the directory that holds this component's job and cancellation files.
+
+        Workers that mount the same jobs directory read the same value, including across hosts and restarts.
+        The first hard link publishes a complete value even when two processes open the directory together.
+        """
+        marker = self.jobs_root / ".run-scope"
+        if not marker.exists():
+            with tempfile.NamedTemporaryFile(dir=self.jobs_root, mode="w", encoding="ascii") as candidate:
+                candidate.write(uuid.uuid4().hex)
+                candidate.flush()
+                os.fsync(candidate.fileno())
+                with suppress(FileExistsError):
+                    os.link(candidate.name, marker)
+                fsync_dir(self.jobs_root)
+        return uuid.UUID(marker.read_text(encoding="ascii")).hex
 
     def start_jobs(self) -> None:
         """Run the jobs that have not ended, in submission order: those a previous process left and those submitted.

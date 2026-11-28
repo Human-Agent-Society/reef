@@ -468,19 +468,27 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
 
 
 @pytest.mark.unit
-def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("paused", ["checkpoint", "recreated-checkpoint", "records"])
+def test_replacement_outputs_survive_when_the_first_worker_resumes(tmp_path, monkeypatch, paused):
     queue = memory_coordination(lease_seconds=30).work_queue
     backends = registered_backends(tmp_path / "artifacts")
     backend = backends("s")
     data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
-    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    work = NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")))
+    original = queue.append(work)
     first_stored = threading.Event()
     resume_first = threading.Event()
     store = backend.store_content
 
+    paused_content = None
+
     def store_content(name, directory):
         store(name, directory)
-        if name != job_records_content("j1") and directory == tmp_path / "first" / "j1" / "step-1":
+        nonlocal paused_content
+        if (name == job_records_content("j1")) == (
+            paused == "records"
+        ) and directory == tmp_path / "first" / "j1" / "step-1":
+            paused_content = name
             first_stored.set()
             assert resume_first.wait(WAIT_SECONDS)
 
@@ -500,8 +508,12 @@ def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(
     first_thread.start()
     try:
         assert first_stored.wait(WAIT_SECONDS)
-        (abandoned,) = queue.read(JOBS_QUEUE, "j1").metadata[STORED_CONTENT_KEY]
-        assert queue.requeue_expired(now=time.time() + 60)
+        if paused == "recreated-checkpoint":
+            queue.cancel(JOBS_QUEUE, "j1", "cancelled")
+            queue.delete_final(finished_before=time.time() + 1)
+            assert queue.append(work).created_sequence != original.created_sequence
+        else:
+            assert queue.requeue_expired(now=time.time() + 60)
         assert replacement.run_once()
         view = JobQueueComponent(StepFacts(), queue)
         assert view.status("j1").state == "finished"
@@ -520,8 +532,10 @@ def test_replacement_checkpoint_can_be_published_after_the_first_worker_resumes(
         expected_parent=backend.current(),
     )
     assert (backend.materialize(snapshot).local_path / "weights.txt").read_text() == "step 1"
-    with pytest.raises(ArtifactError):
-        backend.materialize_content(abandoned)
+    assert (backend.materialize_content(job_records_content("j1")) / "weights.txt").read_text() == "step 1"
+    if paused != "records":
+        with pytest.raises(ArtifactError):
+            backend.materialize_content(paused_content)
 
 
 @pytest.mark.unit
@@ -598,6 +612,139 @@ class HeldSteps(StepComponent):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("takeover", ["cancel", "same-worker", "shared-directory"])
+def test_only_a_control_cancellation_stops_the_current_local_run(tmp_path, monkeypatch, takeover):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    component = HeldSteps(tmp_path / "jobs")
+    backends = registered_backends(tmp_path / "artifacts")
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "tasks")),
+        backends,
+        checks=ACCEPT_ALL,
+        worker_id="training",
+        poll_seconds=0.01,
+        slots=2,
+    )
+    original = queue.take(JOBS_QUEUE, "training", [job_kind("steps")])
+    taken = []
+    # The other service mounts the same jobs directory through a different path.
+    alias = tmp_path / "mount"
+    alias.symlink_to(tmp_path / "jobs", target_is_directory=True)
+    other = HeldSteps(alias) if takeover == "shared-directory" else None
+
+    def progress_after_takeover(job_id):
+        if takeover == "cancel":
+            queue.cancel(JOBS_QUEUE, job_id, "cancelled")
+        elif not taken:
+            assert queue.requeue_expired(now=time.time() + 60)
+            worker_id = "other" if other is not None else "training"
+            scope = other.run_scope if other is not None else component.run_scope
+            taken.append(queue.take(JOBS_QUEUE, worker_id, [job_kind("steps")], run_scope=scope))
+        return {"step": 1}
+
+    monkeypatch.setattr(component, "job_progress", progress_after_takeover)
+    try:
+        worker.run_taken(original)
+        if takeover == "cancel":
+            assert component.status("j1").error == "cancelled"
+            return
+        assert component.status("j1").state == "running"
+        component.release.set()
+        if other is not None:
+            assert other.status("j1").state != "failed"
+            other_worker = TrainingJobWorker(
+                other, queue, worker.data_store, backends, checks=ACCEPT_ALL, worker_id="other"
+            )
+            other_worker.run_taken(taken[0])
+        else:
+            worker.run_taken(taken[0])
+        assert queue.read(JOBS_QUEUE, "j1").state == "finished"
+        assert (backends("s").materialize_content(job_records_content("j1")) / "weights.txt").is_file()
+    finally:
+        component.release.set()
+        worker.stop()
+        if other is not None:
+            other.release.set()
+            other.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("claim_later", [False, True])
+def test_a_remote_takeover_stops_only_the_run_in_the_first_jobs_directory(tmp_path, monkeypatch, claim_later):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    first = HeldSteps(tmp_path / "first")
+    replacement = StepComponent(tmp_path / "replacement")
+    store = MemoryDataStore(LocalTaskFileStore(tmp_path / "tasks"))
+    backends = registered_backends(tmp_path / "artifacts")
+    old_worker = TrainingJobWorker(first, queue, store, backends, checks=ACCEPT_ALL, worker_id="first")
+    new_worker = TrainingJobWorker(replacement, queue, store, backends, checks=ACCEPT_ALL, worker_id="replacement")
+
+    def take_remotely(job_id):
+        assert queue.requeue_expired(now=time.time() + 60)
+        if not claim_later:
+            assert new_worker.run_once()
+        return {"step": 1}
+
+    monkeypatch.setattr(first, "job_progress", take_remotely)
+    try:
+        assert old_worker.run_once()
+        if claim_later:
+            assert first.status("j1").state == "running"
+            assert new_worker.run_once()
+            assert not old_worker.run_once()
+        assert first.status("j1").error == "cancelled"
+        assert replacement.status("j1").state == "finished"
+        assert queue.read(JOBS_QUEUE, "j1").state == "finished"
+    finally:
+        first.release.set()
+        old_worker.stop()
+        new_worker.stop()
+
+
+@pytest.mark.unit
+def test_cancel_during_the_first_record_upload_discards_its_files(tmp_path, monkeypatch):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    backends = registered_backends(tmp_path / "artifacts")
+    backend = backends("s")
+    store = backend.store_content
+    component = StepComponent(tmp_path / "jobs")
+    # Let the component finish before the worker first polls it, so no checkpoint has been published.
+    submit = component.submit
+
+    def submit_and_finish(job):
+        submit(job)
+        wait_for(lambda: component.status(job.job_id), "finished")
+
+    def store_and_cancel(name, directory):
+        store(name, directory)
+        if name == job_records_content("j1"):
+            queue.cancel(JOBS_QUEUE, "j1", "cancelled")
+
+    monkeypatch.setattr(backend, "store_content", store_and_cancel)
+    monkeypatch.setattr(component, "submit", submit_and_finish)
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "tasks")),
+        backends,
+        checks=ACCEPT_ALL,
+        worker_id="first",
+    )
+    try:
+        assert worker.run_once()
+        assert queue.read(JOBS_QUEUE, "j1").error == "cancelled"
+        with pytest.raises(ArtifactError):
+            backend.materialize_content(job_records_content("j1"))
+    finally:
+        worker.stop()
+
+
+@pytest.mark.unit
 def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fails_the_job(tmp_path):
     """The training service runs the scenario's check on the checkpoint's own directory, so no other process
     fetches a checkpoint to check it. A refused checkpoint is not stored, and its job fails for good with the
@@ -626,7 +773,9 @@ def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fai
     assert item.metadata[STORED_CONTENT_KEY] == [entry["content"]]
     assert checks.seen == [("s", "w"), ("s", "w")]
     with pytest.raises(ArtifactError):
-        backends("s").materialize_content(checkpoint_content("j1", 2, attempt=item.attempt_count))
+        backends("s").materialize_content(
+            checkpoint_content("j1", 2, attempt=item.attempt_count, created_sequence=item.created_sequence)
+        )
     records = backends("s").materialize_content(job_records_content("j1"))
     assert (records / "weights.txt").read_text() == "step 1"
     component.release.set()
@@ -700,7 +849,10 @@ def test_the_sweep_discards_the_stored_checkpoints_of_an_ended_job_that_no_commi
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("deleted", ["before the worker takes the job", "while the worker stores"])
+@pytest.mark.parametrize(
+    "deleted",
+    ["before the worker takes the job", "while the worker stores", "while a different scenario reuses the ID"],
+)
 def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
     deleted: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -724,6 +876,12 @@ def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
             super().store_content(name, directory)
             if control.has_registration("s"):
                 control.archive_registration("s")
+                if deleted == "while a different scenario reuses the ID":
+                    queue.cancel(JOBS_QUEUE, "j1", SCENARIO_DELETED_ERROR)
+                    queue.delete_final(finished_before=time.time() + 1)
+                    control("other").register(Artifact.local(root), metadata={})
+                    new_job = replace(job("j1"), scenario="other")
+                    queue.append(NewWork(JOBS_QUEUE, "j1", "other", job_kind("steps"), job_payload(new_job)))
 
     backend_type = GitLFSRepositoryBackend if deleted.startswith("before") else DeletedWhileStoring
     backends = backend_type.factory(remote, work_dir=tmp_path / "training", cache_dir=tmp_path / "t-cache")
@@ -739,7 +897,10 @@ def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
     assert worker.run_once()
 
     item = queue.read(JOBS_QUEUE, "j1")
-    assert (item.state, item.error, item.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
+    if deleted == "while a different scenario reuses the ID":
+        assert (item.scenario, item.state, item.error) == ("other", "queued", None)
+    else:
+        assert (item.state, item.error, item.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
     assert (
         "/contents/"
         not in subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True, text=True).stdout
@@ -749,6 +910,21 @@ def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
         with pytest.raises(KeyError):
             component.status("j1")
     worker.stop()
+    if deleted == "while a different scenario reuses the ID":
+        replacement = TrainingJobWorker(
+            StepComponent(tmp_path / "replacement"),
+            queue,
+            data_store,
+            backends,
+            checks=ACCEPT_ALL,
+            worker_id="replacement",
+            poll_seconds=0.02,
+        )
+        try:
+            assert replacement.run_once()
+            assert queue.read(JOBS_QUEUE, "j1").state == "finished"
+        finally:
+            replacement.stop()
 
 
 class LosingQueue:
@@ -760,7 +936,7 @@ class LosingQueue:
     def __getattr__(self, name: str):
         return getattr(self.queue, name)
 
-    def append_progress(self, queue, item_id, worker_id, entry, *, number, attempt):
+    def append_progress(self, queue, item_id, worker_id, entry, *, number, claim):
         self.queue.cancel(queue, item_id, "cancelled")
         raise WorkLeaseLostError(f"job {item_id} is no longer held by {worker_id}")
 

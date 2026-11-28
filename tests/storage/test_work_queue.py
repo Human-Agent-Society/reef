@@ -29,6 +29,7 @@ from reef.storage.coordination.served_models import (
 from reef.storage.coordination.work_queue import (
     DEFERRED_ATTEMPTS,
     LEASE_RETRY_MAX_SECONDS,
+    RUN_SCOPE,
     LeaseExtender,
     NewWork,
     WorkConflictError,
@@ -263,6 +264,21 @@ def test_a_deferred_give_back_counts_apart_and_only_for_the_attempt_that_holds_t
 
 
 @pytest.mark.unit
+def test_assignment_records_the_current_attempts_run_scope(open_coordination):
+    queue = open_coordination().queue
+    queue.append(job("a"), now=0)
+    scoped = queue.take("jobs", "w", ["training_job:tinker"], now=1, run_scope="directory")
+    assert scoped.run_scope == "directory"
+    with pytest.raises(ValueError, match="reserved"):
+        queue.write_metadata("jobs", "a", RUN_SCOPE, "other")
+    queue.give_back("jobs", "a", "w", now=2)
+    unscoped = queue.take("jobs", "w", ["training_job:tinker"], now=3)
+    assert unscoped.run_scope is None
+    # A worker from a release without run scopes leaves the previous metadata in place on take.
+    assert dataclasses.replace(unscoped, metadata=scoped.metadata).run_scope is None
+
+
+@pytest.mark.unit
 def test_a_worker_takes_the_oldest_item_it_accepts_and_finishes_it_under_its_lease(open_coordination):
     queue = open_coordination().queue
     queue.append(job("a"), now=0)
@@ -346,13 +362,15 @@ class FlakyLeaseWorkQueue(SQLWorkQueue):
         self.success_count = 0
         self.lock = threading.Lock()
 
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def extend_lease(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         with self.lock:
             self.call_count += 1
             outcome = self.outcomes.pop(0) if self.outcomes else None
         if outcome is not None:
             raise outcome
-        extended = super().extend_lease(queue, item_id, worker_id, now=now)
+        extended = super().extend_lease(queue, item_id, worker_id, claim=claim, now=now)
         with self.lock:
             self.success_count += 1
         return extended
@@ -1222,7 +1240,8 @@ def test_a_new_owner_keeps_the_routes_whose_engines_still_serve_until_it_serves_
 
 
 @pytest.mark.unit
-def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_coordination):
+@pytest.mark.parametrize("recreate_owner", [False, True])
+def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_coordination, recreate_owner):
     stores = open_coordination()
     lease = stores.lease.acquire("control", now=0)
     table, queue = stores.served, stores.queue
@@ -1237,7 +1256,12 @@ def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_c
             startup, "worker", {"active": served}, owner=owner, serving_config={}, stop_delay_seconds=10, now=11
         )
     assert table.read_scenario("s") == {} and table.current_request("s").state == "assigned"
-    queue.requeue_expired(now=11)
+    if recreate_owner:
+        queue.cancel(INFERENCE_OWNER_QUEUE, "owner", "shutdown")
+        queue.delete_final(finished_before=time.time() + 1)
+        queue.append(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=11)
+    else:
+        queue.requeue_expired(now=11)
     current_owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=12)
     with pytest.raises(WorkLeaseLostError, match="later attempt"):
         table.complete_request(
@@ -1298,7 +1322,7 @@ def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coor
 
     queue = open_coordination().queue
     queue.append(job("a"), now=0)
-    queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    claim = queue.take("jobs", "w", ["training_job:tinker"], now=1)
     queue.append_log("jobs", "a", 1, [WorkLogLine(n, 1.0 + n, "INFO", "reef.test", f"line {n}") for n in range(3)])
     queue.append_log("jobs", "a", 2, [WorkLogLine(0, 9.0, "ERROR", "reef.test", "second attempt")])
 
@@ -1311,6 +1335,8 @@ def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coor
 
     queue.finish("jobs", "a", "w", {}, now=2)
     assert queue.delete_final(finished_before=3) == 1
+    queue.append(job("a"), now=4)
+    queue.append_log("jobs", "a", 1, first, created_sequence=claim.created_sequence)
     assert queue.read_log("jobs", "a", 1) == ()
 
 
@@ -1341,3 +1367,30 @@ def test_a_producer_queues_a_final_item_again_and_it_gets_one_more_attempt(open_
     # An item that is not final stays as it is, and an unknown item is None.
     assert queue.retry("jobs", "b", now=11) == rerun
     assert queue.retry("jobs", "missing") is None
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_old_claim_cannot_mutate_an_item_retaken_by_the_same_worker(open_coordination, recreate, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 6)
+    queue = open_coordination().queue
+    work = NewWork("jobs", "j", "s", "train", {})
+    queue.append(work, now=0)
+    old = queue.take("jobs", "worker", ["train"], now=1)
+    if recreate:
+        queue.finish("jobs", "j", "worker", {}, claim=old, now=2)
+        queue.delete_final(finished_before=3)
+        queue.append(work, now=4)
+    else:
+        queue.give_back("jobs", "j", "worker", claim=old, now=2)
+    current = queue.take("jobs", "worker", ["train"], now=5)
+    for mutation in (queue.start, queue.extend_lease):
+        with pytest.raises(WorkLeaseLostError):
+            mutation("jobs", "j", "worker", claim=old, now=6)
+    with pytest.raises(WorkLeaseLostError):
+        queue.finish("jobs", "j", "worker", {}, claim=old, now=6)
+    with pytest.raises(WorkLeaseLostError):
+        queue.write_metadata("jobs", "j", "progress", 1, lease=old)
+    with pytest.raises(WorkLeaseLostError):
+        queue.give_back("jobs", "j", "worker", claim=current, attempt=current.attempt_count + 1, now=6)
+    assert queue.read("jobs", "j") == current
+    assert queue.finish("jobs", "j", "worker", {}, claim=current, now=6).state == "finished"

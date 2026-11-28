@@ -120,7 +120,9 @@ class DataImport(DataJob):
         numbers = itertools.count()
 
         def report_stored(stored: int) -> None:
-            data.queue.append_progress(DATA_QUEUE, item.id, worker_id, {"items": stored}, number=next(numbers))
+            data.queue.append_progress(
+                DATA_QUEUE, item.id, worker_id, {"items": stored}, number=next(numbers), claim=item
+            )
 
         return run_import(data, self.sources, item.payload, report_stored)
 

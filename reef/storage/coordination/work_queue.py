@@ -23,7 +23,8 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -41,6 +42,8 @@ HELD_STATES: frozenset[str] = frozenset({"assigned", "running"})
 #: needs (``WorkQueue.give_back`` with ``deferred``): the number of such give-backs, a positive int. An item without
 #: the key, such as one that an earlier Reef gave back, has the count 0.
 DEFERRED_ATTEMPTS = "deferred_attempts"
+#: The local run scope and attempt that recorded it in take.
+RUN_SCOPE = "reef_worker_run_scope"
 
 
 class WorkConflictError(ReefError):
@@ -73,11 +76,9 @@ class WorkItem:
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
-    - ``metadata`` is a JSON object of facts about the item that are not inputs of the work, so no worker's work
-      reads it. A reader of the item records one after the item exists (``WorkQueue.write_metadata``), such as the
-      experiment run that records a training job. A store can record one when it adds the item, such as the automatic
-      retry count of a serving request (``ServedModelsWriter.request``), or when a worker gives it back for want of
-      capacity (``DEFERRED_ATTEMPTS``).
+    - The item's metadata holds facts outside its input payload. Readers can add annotations with write_metadata,
+      such as the experiment run for a training job. The store records retry counts for serving requests,
+      deferrals for lack of capacity, and the optional run scope of the current attempt.
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
       change except lease-only extensions (``WorkQueue.extend_lease``).
 
@@ -150,6 +151,16 @@ class WorkItem:
         """Whether the item finished or failed. After that only its ``metadata`` changes, until its producer queues
         it again (``WorkQueue.retry``)."""
         return self.state in FINAL_STATES
+
+    @property
+    def run_scope(self) -> str | None:
+        """The local run scope recorded for this attempt, or None when its worker supplied none."""
+        recorded = self.metadata.get(RUN_SCOPE)
+        if isinstance(recorded, dict) and recorded.get("attempt") == self.attempt_count:
+            scope = recorded.get("scope")
+            if isinstance(scope, str) and scope:
+                return scope
+        return None
 
     @property
     def deferred_attempt_count(self) -> int:
@@ -241,6 +252,12 @@ class WorkQueue(ABC):
     fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``read``)
     and record facts about it (``write_metadata``); a producer queues a final item again (``retry``); control deletes
     old final items (``delete_final``).
+
+    A held mutation requires an assigned or running item held by the given worker through the operation's time.
+    With ``claim=None``, only the worker's lease and any supplied ``attempt`` constrain the mutation.
+    With the item returned by ``take`` as ``claim``, its creation sequence and attempt must also match.
+    When an operation accepts both ``claim`` and ``attempt``, both constraints apply. The queue checks them under
+    the write lock. A missing item, invalid lease, or mismatch raises ``WorkLeaseLostError`` without mutation.
     """
 
     def __init__(
@@ -307,23 +324,36 @@ class WorkQueue(ABC):
         """
 
     @abstractmethod
-    def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
+    def take(
+        self,
+        queue: str,
+        worker_id: str,
+        kinds: Sequence[str],
+        *,
+        now: float | None = None,
+        run_scope: str | None = None,
+    ) -> WorkItem | None:
         """Assign the queued item of ``queue`` that ``worker_id`` can take with the lowest ``created_sequence`` and
         return it, or None when there is none.
 
         A worker can take an item when its ``kind`` is in ``kinds``, its ``available_at`` is not after ``now``,
         and every item with the same ``serial_key`` and a lower ``created_sequence`` is final. The item becomes
         ``assigned``, with ``worker_id``, ``lease_expires_at = now + lease_seconds``, and one more attempt. Its
-        ``started_at`` becomes ``now`` when it has none, so it stays the time of the first take.
+        ``started_at`` becomes ``now`` when it has none, so it stays the time of the first take. A nonempty run_scope
+        identifies the worker's local runs in this assignment (WorkItem.run_scope).
         """
 
     @abstractmethod
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def extend_lease(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item, without changing
         ``changed_sequence``; else raise ``WorkLeaseLostError``."""
 
     @abstractmethod
-    def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def start(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         """Change the held item from ``assigned`` to ``running``; ``WorkLeaseLostError`` when ``worker_id`` does not
         hold it. A running item stays running."""
 
@@ -337,6 +367,7 @@ class WorkQueue(ABC):
         *,
         number: int,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
         now: float | None = None,
     ) -> WorkItem:
         """Append ``progress`` as progress number ``number`` (0-based) of the held item. Adding a number that the
@@ -346,7 +377,14 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def finish(
-        self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        result: Mapping[str, JsonValue],
+        *,
+        claim: WorkItem | None = None,
+        now: float | None = None,
     ) -> WorkItem:
         """Make the held item ``finished`` with ``result``, ended at ``now``; ``WorkLeaseLostError`` when ``worker_id``
         does not hold it."""
@@ -362,6 +400,7 @@ class WorkQueue(ABC):
         retryable: bool,
         now: float | None = None,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         """End the held attempt with ``error``: the item becomes ``queued`` when ``retryable`` and it has attempts
         left, else ``failed``, ended at ``now``. Raise ``WorkLeaseLostError`` unless ``worker_id`` holds the item
@@ -379,6 +418,7 @@ class WorkQueue(ABC):
         error: str = "the worker stopped",
         deferred: bool = False,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         """End the held attempt without a result: the item becomes ``queued`` with ``error``, a non-empty text, and one
         more ``stopped_attempt_count``. A worker takes it again from ``available_at``, a finite time, or at once when
@@ -407,23 +447,34 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def write_metadata(
-        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: tuple[str, int] | None = None
+        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: WorkItem | tuple[str, int] | None = None
     ) -> WorkItem | None:
         """Set ``metadata[name]`` of the item to ``value``, whatever the item's state, and return the item; None
         when it does not exist.
 
         A reader of the item uses it to record a fact about the work that it learns after the item exists, such as
         the experiment run that records a training job (``reef.train.job_queue``). If ``lease`` specifies a worker ID
-        and attempt count, raise ``WorkLeaseLostError`` unless that attempt holds the item. The state, payload,
+        and attempt count, or the claimed work item, raise ``WorkLeaseLostError`` unless that attempt holds the item. The state, payload,
         progress, result, error and times do not change. When ``metadata[name]`` already equals
         ``value``, nothing changes; otherwise the change gets the next change sequence. ``name`` is a non-empty
         string.
+
+        The queue reserves RUN_SCOPE for take. Setting it here raises ValueError.
         """
 
     @abstractmethod
-    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+    def append_log(
+        self,
+        queue: str,
+        item_id: str,
+        attempt: int,
+        lines: Sequence[WorkLogLine],
+        *,
+        created_sequence: int | None = None,
+    ) -> None:
         """Keep ``lines`` as log lines of attempt ``attempt`` (from 1) of the item. Each line's number is new in the
-        attempt. No lease is needed: the worker of the attempt is the only writer."""
+        attempt. A flush can follow completion. With a creation sequence, discard lines for a deleted or replaced item.
+        """
 
     @abstractmethod
     def read_log(
@@ -440,6 +491,25 @@ class WorkQueue(ABC):
     @abstractmethod
     def read(self, queue: str, item_id: str) -> WorkItem | None:
         """The item, or None."""
+
+    @abstractmethod
+    @contextmanager
+    def locked_item(self, queue: str, item_id: str) -> Iterator[WorkItem | None]:
+        """Yield the current item or None. An existing row cannot change until the block exits.
+
+        The caller may act on local state after checking the current item. The block must not call the queue.
+        """
+
+    @contextmanager
+    def locked_attempt(self, claim: WorkItem) -> Iterator[WorkItem]:
+        """Yield the current item of the same creation and attempt. Raise WorkLeaseLostError if it is gone or replaced."""
+        with self.locked_item(claim.queue, claim.id) as current:
+            if current is None or (current.created_sequence, current.attempt_count) != (
+                claim.created_sequence,
+                claim.attempt_count,
+            ):
+                raise WorkLeaseLostError(f"the attempt no longer owns {claim.queue}/{claim.id}")
+            yield current
 
     def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         """The items in ``queue`` in the order of ``item_ids``.
@@ -597,7 +667,7 @@ class LeaseExtender:
         wait_seconds = normal_wait_seconds
         while not self.done.wait(wait_seconds):
             try:
-                self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
+                self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id, claim=self.item)
             except WorkLeaseLostError:
                 self.lease_lost.set()
                 return
@@ -615,6 +685,7 @@ __all__ = [
     "LEASE_RETRY_MAX_SECONDS",
     "MAX_LOG_LINES",
     "MAX_LOG_MESSAGE",
+    "RUN_SCOPE",
     "WORK_STATES",
     "JsonValue",
     "LeaseExtender",

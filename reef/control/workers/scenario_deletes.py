@@ -171,7 +171,7 @@ class DeletedScenarioCleanup:
                 try:
                     with LeaseExtender(self.queue, item, self.worker_id):
                         result = self.clean_up_scenario(item.scenario)
-                    self.queue.finish(DELETES_QUEUE, item.id, self.worker_id, result)
+                    self.queue.finish(DELETES_QUEUE, item.id, self.worker_id, result, claim=item)
                 except WorkLeaseLostError:
                     # Another control instance continues the item.
                     continue
@@ -180,7 +180,7 @@ class DeletedScenarioCleanup:
                         "could not clean up the deleted scenario %r; the next sweep tries again", item.scenario
                     )
                     with contextlib.suppress(WorkLeaseLostError):
-                        self.queue.fail(DELETES_QUEUE, item.id, self.worker_id, repr(exc), retryable=False)
+                        self.queue.fail(DELETES_QUEUE, item.id, self.worker_id, repr(exc), retryable=False, claim=item)
                     continue
                 cleaned += 1 if result["deleted"] else 0
         return cleaned

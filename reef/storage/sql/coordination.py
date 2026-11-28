@@ -82,6 +82,7 @@ from reef.storage.coordination.work_queue import (
     DEFERRED_ATTEMPTS,
     FINAL_STATES,
     HELD_STATES,
+    RUN_SCOPE,
     WORK_STATES,
     JsonValue,
     NewWork,
@@ -623,9 +624,7 @@ class SQLServedModels(ServedModelsWriter):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             if owner is not None:
                 self.checked_owner(connection, owner, worker_id, moment)
-            held = self.work.held(connection, item.queue, item.id, worker_id, moment)
-            if held.attempt_count != item.attempt_count:
-                raise WorkLeaseLostError("a later attempt holds this serving request")
+            held = self.work.held(connection, item.queue, item.id, worker_id, moment, claim=item)
             current = self.request_in(connection, item.scenario)
             result: dict[str, JsonValue] = {}
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
@@ -664,9 +663,7 @@ class SQLServedModels(ServedModelsWriter):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             if owner is not None:
                 self.checked_owner(connection, owner, worker_id, moment)
-            held = self.work.held(connection, item.queue, item.id, worker_id, moment)
-            if held.attempt_count != item.attempt_count:
-                raise WorkLeaseLostError("a later attempt holds this serving cleanup")
+            held = self.work.held(connection, item.queue, item.id, worker_id, moment, claim=item)
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
                 deleted = connection.execute(
                     delete(self.tables.scheduled_stop).where(
@@ -691,9 +688,7 @@ class SQLServedModels(ServedModelsWriter):
         """Check the inference owner's lease and attempt inside the serving transaction."""
         if owner.queue != INFERENCE_OWNER_QUEUE or owner.kind != INFERENCE_OWNER_QUEUE:
             raise ValueError("the inference owner must hold an inference-owner item")
-        held = self.work.held(connection, owner.queue, owner.id, worker_id, now)
-        if held.attempt_count != owner.attempt_count:
-            raise WorkLeaseLostError("a later attempt holds the inference runtime")
+        self.work.held(connection, owner.queue, owner.id, worker_id, now, claim=owner)
 
     def recover_completed(
         self,
@@ -1027,7 +1022,14 @@ class SQLWorkQueue(WorkQueue):
         return saved
 
     def held(
-        self, connection: Connection, queue: str, item_id: str, worker_id: str, now: float, attempt: int | None = None
+        self,
+        connection: Connection,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        now: float,
+        attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         item = self.row(connection, queue, item_id, lock=True)
         if (
@@ -1038,6 +1040,11 @@ class SQLWorkQueue(WorkQueue):
             or (item.lease_expires_at is not None and item.lease_expires_at < now)
         ):
             raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
+        if claim is not None and (claim.created_sequence, claim.attempt_count) != (
+            item.created_sequence,
+            item.attempt_count,
+        ):
+            raise WorkLeaseLostError(f"a later attempt holds {queue}/{item_id}")
         return item
 
     def append(self, work: NewWork, *, now: float | None = None) -> WorkItem:
@@ -1154,8 +1161,18 @@ class SQLWorkQueue(WorkQueue):
             connection.execute(orphan_lines)
             return deleted
 
-    def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
+    def take(
+        self,
+        queue: str,
+        worker_id: str,
+        kinds: Sequence[str],
+        *,
+        now: float | None = None,
+        run_scope: str | None = None,
+    ) -> WorkItem | None:
         require_text(worker_id, "worker_id")
+        if run_scope is not None:
+            require_text(run_scope, "run_scope")
         if not kinds:
             return None
         moment = clock(now)
@@ -1193,6 +1210,11 @@ class SQLWorkQueue(WorkQueue):
             if found is None:
                 return None
             chosen = item_from_row(found)
+            metadata = dict(chosen.metadata)
+            if run_scope is not None:
+                metadata[RUN_SCOPE] = {"attempt": chosen.attempt_count + 1, "scope": run_scope}
+            else:
+                metadata.pop(RUN_SCOPE, None)
             return self.write_item(
                 connection,
                 counter,
@@ -1202,26 +1224,31 @@ class SQLWorkQueue(WorkQueue):
                 worker_id=worker_id,
                 lease_expires_at=moment + self.lease_seconds,
                 attempt_count=chosen.attempt_count + 1,
+                metadata_json=canonical_json(metadata),
                 started_at=moment if chosen.started_at is None else chosen.started_at,
                 error=None,
             )
 
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def extend_lease(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         moment = clock(now)
         lease_expires_at = moment + self.lease_seconds
         # A lease extension numbers no change, so it takes no counter. ``held`` locks the item's row (PostgreSQL) or
         # the database (SQLite), so no other write changes the item between the check and the update.
         with self.database.connection(write=True) as connection:
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, claim=claim)
             connection.execute(
                 update(self.table).where(*self.key(item.queue, item.id)).values(lease_expires_at=lease_expires_at)
             )
             return replace(item, lease_expires_at=lease_expires_at)
 
-    def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+    def start(
+        self, queue: str, item_id: str, worker_id: str, *, claim: WorkItem | None = None, now: float | None = None
+    ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, claim=claim)
             return (
                 item
                 if item.state == "running"
@@ -1237,11 +1264,12 @@ class SQLWorkQueue(WorkQueue):
         *,
         number: int,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
         now: float | None = None,
     ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt, claim)
             if number < len(item.progress):
                 return item
             if number != len(item.progress):
@@ -1249,11 +1277,18 @@ class SQLWorkQueue(WorkQueue):
             return self.write_item(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
 
     def finish(
-        self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
+        self,
+        queue: str,
+        item_id: str,
+        worker_id: str,
+        result: Mapping[str, JsonValue],
+        *,
+        claim: WorkItem | None = None,
+        now: float | None = None,
     ) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, claim=claim)
             return self.write_item(
                 connection,
                 counter,
@@ -1276,11 +1311,12 @@ class SQLWorkQueue(WorkQueue):
         retryable: bool,
         now: float | None = None,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt, claim)
             again = retryable and self.has_attempts_left(item)
             return self.write_item(
                 connection,
@@ -1305,13 +1341,14 @@ class SQLWorkQueue(WorkQueue):
         error: str = "the worker stopped",
         deferred: bool = False,
         attempt: int | None = None,
+        claim: WorkItem | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         if available_at is not None and not is_finite_time(available_at):
             raise ValueError("available_at is a finite time or None")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt, claim)
             # The count grows from the stored row in the give-back's own change, so a deferral counts once, and an
             # attempt that no longer holds the item counts none.
             metadata = dict(item.metadata)
@@ -1372,13 +1409,19 @@ class SQLWorkQueue(WorkQueue):
             )
 
     def write_metadata(
-        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: tuple[str, int] | None = None
+        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: WorkItem | tuple[str, int] | None = None
     ) -> WorkItem | None:
         require_text(name, "name")
+        if name == RUN_SCOPE:
+            raise ValueError(f"{name} is reserved for queue assignments")
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             moment = time.time()
             if lease is None:
                 item = self.row(connection, queue, item_id, lock=True)
+            elif isinstance(lease, WorkItem):
+                if lease.worker_id is None:
+                    raise WorkLeaseLostError(f"no worker holds the claim for {queue}/{item_id}")
+                item = self.held(connection, queue, item_id, lease.worker_id, moment, claim=lease)
             else:
                 worker_id, attempt = lease
                 item = self.held(connection, queue, item_id, worker_id, moment, attempt)
@@ -1424,6 +1467,11 @@ class SQLWorkQueue(WorkQueue):
     def read(self, queue: str, item_id: str) -> WorkItem | None:
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
+
+    @contextmanager
+    def locked_item(self, queue: str, item_id: str) -> Iterator[WorkItem | None]:
+        with self.database.connection(write=True) as connection:
+            yield self.row(connection, queue, item_id, lock=True)
 
     def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         if not item_ids:
@@ -1529,7 +1577,15 @@ class SQLWorkQueue(WorkQueue):
             counts.update(connection.execute(query).tuples().all())
         return counts
 
-    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+    def append_log(
+        self,
+        queue: str,
+        item_id: str,
+        attempt: int,
+        lines: Sequence[WorkLogLine],
+        *,
+        created_sequence: int | None = None,
+    ) -> None:
         if not lines:
             return
         log = self.database.tables.work_log
@@ -1547,6 +1603,12 @@ class SQLWorkQueue(WorkQueue):
             for line in lines
         ]
         with self.database.connection(write=True) as connection:
+            if created_sequence is not None:
+                current = connection.scalar(
+                    select(self.table.c.created_sequence).where(*self.key(queue, item_id)).with_for_update(read=True)
+                )
+                if current != created_sequence:
+                    return
             connection.execute(insert(log), rows)
 
     def read_log(

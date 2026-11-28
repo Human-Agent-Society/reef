@@ -68,7 +68,13 @@ class AttemptLog:
         if not lines:
             return
         try:
-            self.queue.append_log(self.item.queue, self.item.id, self.item.attempt_count, lines)
+            self.queue.append_log(
+                self.item.queue,
+                self.item.id,
+                self.item.attempt_count,
+                lines,
+                created_sequence=self.item.created_sequence,
+            )
         except Exception:
             logger.exception("could not keep the log of %s", self.item.id)
             with self.lock:
