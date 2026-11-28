@@ -125,9 +125,24 @@ def test_the_slime_family_serves_the_dataset_and_leaves_the_advantages_to_slime(
     assert args.data_source_path == DATASET_SOURCE_PATH
     with pytest.raises(ValueError, match="remove --data-source-path"):
         family.configure_backend_args(Namespace(data_source_path="my.source.Source"))
-    family.validate_specific_args(Namespace(compute_advantages_and_returns=True), "test")
+    family.validate_specific_args(
+        Namespace(compute_advantages_and_returns=True, advantage_estimator="grpo", use_critic=False), "test"
+    )
     with pytest.raises(RuntimeError, match="needs Slime's advantages"):
         family.validate_specific_args(Namespace(compute_advantages_and_returns=False), "test")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("estimator", "use_critic"), [("ppo", False), ("ppo", True), ("grpo", True)])
+def test_native_job_options_reject_a_critic(estimator, use_critic) -> None:
+    args = Namespace(
+        loss_type="policy_loss",
+        compute_advantages_and_returns=True,
+        advantage_estimator=estimator,
+        use_critic=use_critic,
+    )
+    with pytest.raises(RuntimeError, match=r"cannot train a critic.*--advantage-estimator grpo"):
+        SlimeNativeAlgorithm().validate_backend_args(args, recipe="dataset")
 
 
 @pytest.mark.unit
