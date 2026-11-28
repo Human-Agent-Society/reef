@@ -31,9 +31,13 @@ from reef.core.snapshot import SnapshotRef
 from reef.evaluation import artifact_endpoint
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
+    AGENT_TIMEOUT_ENV,
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    PREPARED_DIGEST_RESULT,
+    PREPARED_IMAGES_RESULT,
     TASK_TEMPLATE_KIND,
+    TREE_AGENT_TIMEOUT_S,
     CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
@@ -43,6 +47,7 @@ from reef.evaluation.rollout_worker import (
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
+    agent_timeout_seconds,
     check_finish_timeout,
     evaluation_call,
     reply_summary,
@@ -54,6 +59,7 @@ from reef.evaluation.rollout_worker import (
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
 from reef.execution.sandbox.agentenv.build import AgentEnvBuildError
+from reef.execution.sandbox.task_environment import environment_config
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.inference.http import HttpInferenceHandler
@@ -279,11 +285,15 @@ def test_the_error_that_ended_a_trial_decides_whether_its_rollout_waits_fails_or
     queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     reason = "the service's reason"
     lab = SandboxErrorLab(tmp_path / "t", exception_type, reason)
-    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    observer = ReadingObserver()
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab, trial_observer=observer)
     assert worker.run_once()
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert (item.state, item.result, item.error) == (state, None, error.format(reason=reason))
     assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (1, given_back, given_back)
+    # The trial observer learns whether the attempt was given back for want of capacity, so its logs can show it.
+    [(trial, _)] = observer.trials
+    assert trial.deferred == bool(given_back)
 
 
 class AnsweringEndpoints(OpenEndpoints):
@@ -1712,6 +1722,110 @@ def test_the_trial_of_a_rollout_that_requires_prepared_templates_builds_no_templ
     assert ("builds_templates" in environment.get("kwargs", {})) == requires
     if requires:
         assert environment["kwargs"]["builds_templates"] is False
+    # A template item whose builder gave no images gives its trials none.
+    assert "prepared_images" not in environment.get("kwargs", {})
+
+
+#: The JSON object of a synthetic prepared image of a task's environment, which a builder verified.
+PREPARED_ENTRY: dict[str, str | None] = {
+    "directory": "environment",
+    "source_image": None,
+    "image": "registry.example/tasks/add@sha256:" + "f" * 64,
+    "template_id": None,
+    "start": None,
+    "ready": None,
+}
+#: The files digest of the task of ``e2b_rollout``, as its endpoints resolve it.
+TASK_DIGEST = "1" * 64
+
+
+class ImageBuilder(TaskTemplateBuilder):
+    """A builder that makes no template and gives ``images`` as the prepared images of each task version."""
+
+    def __init__(self, images: object) -> None:
+        self.images = images
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_version")
+
+    async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+        return self.images
+
+
+class DigestEndpoints(AnsweringEndpoints):
+    """``AnsweringEndpoints`` whose task directory has the files digest ``digest``, or an unknown one for None."""
+
+    def __init__(self, root: Path, digest: str | None) -> None:
+        super().__init__(root)
+        self.digest = digest
+
+    def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
+        return self.task_directory(rollout), self.digest
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requires", [False, True])
+def test_a_trial_starts_the_prepared_images_that_its_template_item_made_for_its_task_files(tmp_path, requires):
+    queue = memory_coordination().work_queue
+    value = replace(
+        e2b_rollout(),
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+        requires_prepared_templates=requires,
+    )
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    endpoints = DigestEndpoints(tmp_path / "tasks", TASK_DIGEST)
+    assert TaskTemplateWorker(queue, endpoints, ImageBuilder([PREPARED_ENTRY]), worker_id="t").run_once()
+    template = queue.read(EVALUATIONS_QUEUE, item_id)
+    # The item keeps the images with the task files that they were verified for.
+    assert template.state == "finished"
+    assert template.result == {PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: TASK_DIGEST}
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    assert ServedWorker(queue, endpoints, worker_id="w", lab=lab).run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "finished"
+    [environment] = lab.environments
+    assert environment["kwargs"]["prepared_images"] == [PREPARED_ENTRY]
+    assert environment["kwargs"]["task_directory"] == str(endpoints.task_directory(value))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("result", "resolved"),
+    [
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: "2" * 64}, TASK_DIGEST),
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: None}, TASK_DIGEST),
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: TASK_DIGEST}, None),
+        # The result of an item that an older Reef finished.
+        ({}, TASK_DIGEST),
+    ],
+    ids=["other-files", "unknown-template-files", "unknown-trial-files", "older-reef"],
+)
+def test_a_trial_starts_no_prepared_image_of_other_or_unknown_task_files(tmp_path, result, resolved):
+    queue = memory_coordination().work_queue
+    value = replace(e2b_rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == item_id
+    queue.finish(EVALUATIONS_QUEUE, item_id, "builder", result)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    assert ServedWorker(queue, DigestEndpoints(tmp_path / "tasks", resolved), worker_id="w", lab=lab).run_once()
+    [environment] = lab.environments
+    assert "prepared_images" not in environment.get("kwargs", {})
+
+
+@pytest.mark.unit
+def test_a_template_item_whose_builder_gives_forged_images_fails_as_retryable(tmp_path):
+    queue = memory_coordination().work_queue
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    forged = [{**PREPARED_ENTRY, "image": "registry.example/tasks/add:latest"}]
+    endpoints = DigestEndpoints(tmp_path / "tasks", TASK_DIGEST)
+    assert TaskTemplateWorker(queue, endpoints, ImageBuilder(forged), worker_id="t").run_once()
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert item.state == "queued" and "host/repository@sha256" in str(item.error)
 
 
 @pytest.mark.unit
@@ -1994,3 +2108,159 @@ def test_the_longest_finish_timeout_is_a_wait_that_the_timer_can_keep():
     with pytest.raises(OverflowError):
         threading.Lock().acquire(timeout=2 * threading.TIMEOUT_MAX)
     check_finish_timeout("finish", threading.TIMEOUT_MAX)
+
+
+@pytest.mark.unit
+def test_tree_harness_agent_timeout_env_caps_agent_and_sandbox_timeouts(tmp_path: Path) -> None:
+    """When ``REEF_AGENT_TIMEOUT_SECONDS`` is unset, ``TreeHarness.agent`` preserves ``TREE_AGENT_TIMEOUT_S`` and sets
+    no ``override_timeout_sec``. When set, it overrides unbounded tasks, caps longer task timeouts, preserves shorter
+    task timeouts, and bounds the E2B ``sandbox_timeout_secs``."""
+    unbounded_task = tmp_path / "unbounded"
+    unbounded_task.mkdir()
+    (unbounded_task / "task.toml").write_text("", encoding="utf-8")
+
+    long_task = tmp_path / "long"
+    long_task.mkdir()
+    (long_task / "task.toml").write_text("[agent]\ntimeout_sec = 7200\n", encoding="utf-8")
+
+    short_task = tmp_path / "short"
+    short_task.mkdir()
+    (short_task / "task.toml").write_text("[agent]\ntimeout_sec = 600\n", encoding="utf-8")
+
+    string_short_task = tmp_path / "string-short"
+    string_short_task.mkdir()
+    (string_short_task / "task.toml").write_text('[agent]\ntimeout_sec = "600"\n', encoding="utf-8")
+
+    default_tree = TreeHarness("opencode", "openai-chat", {})
+    default_agent = default_tree.agent(tmp_path / "default", task_directory=unbounded_task)
+    assert "override_timeout_sec" not in default_agent
+    assert cast(Mapping[str, object], default_agent["kwargs"])["timeout_s"] == TREE_AGENT_TIMEOUT_S
+    default_env = environment_config("e2b", unbounded_task, default_agent)
+    assert "sandbox_timeout_secs" not in default_env.get("kwargs", {})
+
+    capped_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "1800"})
+    unbounded_agent = capped_tree.agent(tmp_path / "capped-unbounded", task_directory=unbounded_task)
+    assert unbounded_agent["override_timeout_sec"] == 1800.0
+    assert cast(Mapping[str, object], unbounded_agent["kwargs"])["timeout_s"] == 1800.0
+    bounded_env = environment_config("e2b", unbounded_task, unbounded_agent)
+    sandbox_timeout = bounded_env["kwargs"]["sandbox_timeout_secs"]
+    assert isinstance(sandbox_timeout, int) and 1800 < sandbox_timeout < 86400
+
+    long_agent = capped_tree.agent(tmp_path / "capped-long", task_directory=long_task)
+    assert long_agent["override_timeout_sec"] == 1800.0
+    assert cast(Mapping[str, object], long_agent["kwargs"])["timeout_s"] == 1800.0
+
+    short_agent = capped_tree.agent(tmp_path / "capped-short", task_directory=short_task)
+    assert short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], short_agent["kwargs"])["timeout_s"] == 600.0
+
+    string_short_agent = capped_tree.agent(tmp_path / "capped-string-short", task_directory=string_short_task)
+    assert string_short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], string_short_agent["kwargs"])["timeout_s"] == 600.0
+
+    subsecond_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "0.5"})
+    subsecond_agent = subsecond_tree.agent(tmp_path / "subsecond", task_directory=unbounded_task)
+    assert subsecond_agent["override_timeout_sec"] == 0.5
+    assert cast(Mapping[str, object], subsecond_agent["kwargs"])["timeout_s"] == 1.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["", " ", "0", "-5", "abc", "nan", "inf", "-inf"])
+def test_tree_harness_refuses_invalid_agent_timeout_env(raw: str) -> None:
+    """``agent_timeout_seconds`` and ``TreeHarness`` reject non-positive, non-finite, or non-numeric values of
+    ``REEF_AGENT_TIMEOUT_SECONDS``."""
+    with pytest.raises(ValueError, match=AGENT_TIMEOUT_ENV):
+        agent_timeout_seconds({AGENT_TIMEOUT_ENV: raw})
+    with pytest.raises(ValueError, match=AGENT_TIMEOUT_ENV):
+        TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: raw})
+
+
+class RecordingAgentLab(TaskLab):
+    """A ``TaskLab`` double that records the agent and environment overrides passed to ``run`` and returns no calls.
+
+    Values hold ``recorded``, a list of ``(agent, overrides)`` pairs collected in call order, initially empty.
+    ``run`` appends ``(dict(agent), dict(overrides))`` and returns a failed ``RolloutRow`` with no rewards.
+    ``build_environment`` returns an empty string without external side effects.
+    """
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    async def run(
+        self,
+        task_path: Path,
+        agent: Mapping[str, object],
+        *,
+        key: str,
+        tags: Mapping[str, str],
+        overrides: Mapping[str, object],
+    ) -> RolloutRow:
+        self.recorded.append((dict(agent), dict(overrides)))
+        return RolloutRow(rewards={}, error="recorded")
+
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        return ""
+
+
+class TimedTaskEndpoints(CandidateEndpoints):
+    """Test ``CandidateEndpoints`` whose task directory declares ``[agent].timeout_sec`` in ``task.toml``.
+
+    Values hold ``root`` (``Path``), ``task_timeout_sec`` (``float | None``), and ``calls`` / ``trajectories`` lists
+    (initially empty). ``task_directory`` creates ``root / rollout.task_name``, writes
+    ``[agent]\\ntimeout_sec = <value>\\n`` when ``task_timeout_sec`` is not None (or an empty ``task.toml``
+    otherwise), and returns that directory. ``open`` yields ``CandidateEndpoint("http://127.0.0.1:9", None)`` without
+    starting a server. ``add_call`` and ``add_trajectory`` append to ``calls`` and ``trajectories``.
+    """
+
+    def __init__(self, root: Path, task_timeout_sec: float | None) -> None:
+        self.root = root
+        self.task_timeout_sec = task_timeout_sec
+        self.calls: list[EvaluationCall] = []
+        self.trajectories: list[EvaluationTrajectory] = []
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        content = f"[agent]\ntimeout_sec = {self.task_timeout_sec}\n" if self.task_timeout_sec is not None else ""
+        (task / "task.toml").write_text(content, encoding="utf-8")
+        return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        self.calls.append(call)
+
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        self.trajectories.append(trajectory)
+
+
+@pytest.mark.unit
+def test_rollout_worker_applies_agent_timeout_cap_with_task_directory(tmp_path: Path) -> None:
+    """``EvaluationRolloutWorker.score`` passes ``task_directory`` into ``TreeHarness.agent`` so
+    ``REEF_AGENT_TIMEOUT_SECONDS`` caps the task's timeout and bounds E2B ``sandbox_timeout_secs``."""
+    lab = RecordingAgentLab()
+    endpoints = TimedTaskEndpoints(tmp_path / "tasks", task_timeout_sec=3600.0)
+    worker = ServedWorker(memory_coordination().work_queue, endpoints, worker_id="w", lab=lab)
+    capped_rollout = replace(
+        rollout(),
+        agent=None,
+        environment="e2b",
+        tree=TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "1200"}),
+    )
+    with pytest.raises(ReefError, match="recorded"):
+        worker.score(capped_rollout, threading.Event(), 1)
+    [(recorded_agent, recorded_overrides)] = lab.recorded
+    assert recorded_agent["override_timeout_sec"] == 1200.0
+    assert cast(Mapping[str, object], recorded_agent["kwargs"])["timeout_s"] == 1200.0
+    env_override = cast(Mapping[str, object], recorded_overrides["environment"])
+    env_kwargs = cast(Mapping[str, object], env_override["kwargs"])
+    task_dir = tmp_path / "tasks" / capped_rollout.task_name
+    uncapped_timeout = environment_config("e2b", task_dir, {})["kwargs"]["sandbox_timeout_secs"]
+    expected_timeout = environment_config("e2b", task_dir, {"override_timeout_sec": 1200.0})["kwargs"][
+        "sandbox_timeout_secs"
+    ]
+    assert env_kwargs["sandbox_timeout_secs"] == expected_timeout
+    assert isinstance(expected_timeout, int) and isinstance(uncapped_timeout, int)
+    assert expected_timeout < uncapped_timeout

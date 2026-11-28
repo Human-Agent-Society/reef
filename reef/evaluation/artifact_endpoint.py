@@ -32,7 +32,14 @@ from reef.core.errors import InferenceUnavailableError, ReefError, UpstreamLimit
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import upstream_limit
-from reef.inference.interfaces import REQUEST_SESSION_KEY, InferenceArtifact, InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import (
+    REQUEST_SESSION_KEY,
+    InferenceAdmissionHandle,
+    InferenceArtifact,
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +148,27 @@ class ProviderCooldowns:
                 self.until[key] = (weakref.ref(handler), until)
 
 
+class OpenedStream:
+    """An answer of the candidate's engine that the endpoint relays as it comes.
+
+    Values: ``stream`` is the handler's open stream, and ``admission`` the runtime's inference admission that the call
+    holds until the stream ends. Purpose: ``ArtifactEndpoint.answer`` gives one for a call that asks for a stream, and
+    the endpoint's server relays its chunks and then closes it, which ends the stream and releases the admission.
+    """
+
+    def __init__(self, stream: InferenceStream, admission: InferenceAdmissionHandle) -> None:
+        self.stream = stream
+        self.admission: InferenceAdmissionHandle | None = admission
+
+    async def close(self) -> None:
+        try:
+            await self.stream.close()
+        finally:
+            if self.admission is not None:
+                self.admission.release()
+                self.admission = None
+
+
 class ArtifactEndpoint:
     """An OpenAI endpoint on loopback that answers every call from ``artifact`` with ``runtime``'s handler.
 
@@ -148,8 +176,10 @@ class ArtifactEndpoint:
     the materialized artifact that every call samples. ``served`` is the value that reaches an engine that answers
     for the artifact, or None for the runtime's own handler. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
     body that is not a JSON object 400, a runtime that admits no call 503, a handler refusal its own status, and
-    any other handler failure 502 with the reason. A call that a rate limit refused is sent again (``answer``). With
-    ``log_probs``, each call asks the engine for log probabilities and token IDs (``log_prob_request``); the engine
+    any other handler failure 502 with the reason. A call that a rate limit refused is sent again (``answer``). A call
+    whose body asks for a stream (``"stream": true``) gets the engine's own stream as it comes, its bytes unchanged
+    (``InferenceHandler.inference_stream``); a handler with no stream of its own gives its JSON answer as one piece.
+    With ``log_probs``, each call asks the engine for log probabilities and token IDs (``log_prob_request``); the engine
     must accept those fields, as Reef's token-native handlers and SGLang's and vLLM's OpenAI servers do.
     ``cooldowns`` holds the rate-limit waits that this endpoint shares with others, or its own when None.
     ``session_key`` is the session key of every call, which the handler reads (``REQUEST_SESSION_KEY``), or None. ``closed`` is
@@ -181,8 +211,9 @@ class ArtifactEndpoint:
         self.url = ""
         self.closed = threading.Event()
 
-    async def answer(self, path: str, payload: dict[str, Any]) -> tuple[int, Mapping[str, Any]]:
-        """The status and the body that answer the call ``payload`` to ``path``.
+    async def answer(self, path: str, payload: dict[str, Any]) -> tuple[int, Mapping[str, Any] | OpenedStream]:
+        """The status and the body that answer the call ``payload`` to ``path``: for a call that asks for a stream,
+        an ``OpenedStream`` with status 200, which the caller relays and closes.
 
         Each try waits first for its route (``ProviderCooldowns``). A call that a rate limit refused
         (``UpstreamLimit.RATE``) is sent again unchanged, after a jittered wait that doubles from
@@ -196,6 +227,7 @@ class ArtifactEndpoint:
         """
         if self.log_probs:
             payload = log_prob_request(path, payload)
+        streams = payload.get("stream") is True
         try:
             handler, sent = self.route(payload)
         except ValueError as exc:
@@ -227,7 +259,7 @@ class ArtifactEndpoint:
             tries += 1
             bounds = None if plain_first_try else (latest_start, deadline)
             try:
-                reply = await self.call_handler(handler, path, sent, bounds)
+                reply = await self.call_handler(handler, path, sent, bounds, streams=streams)
             except InferenceUnavailableError as exc:
                 return 503, {"error": {"message": str(exc)}}
             except UpstreamStatusError as exc:
@@ -271,14 +303,22 @@ class ArtifactEndpoint:
         return reached, reached.address_model(body, self.served.model_name)
 
     async def call_handler(
-        self, handler: InferenceHandler, path: str, payload: dict[str, Any], bounds: tuple[float, float] | None
-    ) -> dict[str, Any] | None:
+        self,
+        handler: InferenceHandler,
+        path: str,
+        payload: dict[str, Any],
+        bounds: tuple[float, float] | None,
+        *,
+        streams: bool = False,
+    ) -> dict[str, Any] | OpenedStream | None:
         """One try: the answer of ``handler`` to ``payload`` at ``path``, under one inference admission of the runtime.
+        With ``streams``, the answer is the handler's open stream (``OpenedStream``), which keeps the admission until
+        it is closed.
 
         ``bounds`` is None for a first try without a wait, which keeps the handler's own timeout. A try after a wait
         gives its latest start and its deadline, ``time.monotonic()`` times: it waits for its admission until the
-        deadline, and its call ends by then. None, with no call, when the rollout ended or a bound passed before the
-        admission came. Raise as the admission and the handler do."""
+        deadline, and its call ends by then; a stream must open by then. None, with no call, when the rollout ended or
+        a bound passed before the admission came. Raise as the admission and the handler do."""
         if bounds is None:
             admission = await self.runtime.acquire_inference()
         else:
@@ -286,6 +326,7 @@ class ArtifactEndpoint:
                 admission = await asyncio.wait_for(self.runtime.acquire_inference(), bounds[1] - time.monotonic())
             except TimeoutError:
                 return None
+        held: InferenceAdmissionHandle | None = admission
         try:
             now = time.monotonic()
             if self.closed.is_set() or (bounds is not None and (now > bounds[0] or now >= bounds[1])):
@@ -293,12 +334,19 @@ class ArtifactEndpoint:
             # The handler reads the key in this task, or in a copy of its context.
             session = REQUEST_SESSION_KEY.set(self.session_key)
             try:
-                call = handler.inference(InferenceArtifact.from_artifact(self.artifact), path, payload)
-                return await (call if bounds is None else asyncio.wait_for(call, bounds[1] - now))
+                artifact = InferenceArtifact.from_artifact(self.artifact)
+                if not streams:
+                    call = handler.inference(artifact, path, payload)
+                    return await (call if bounds is None else asyncio.wait_for(call, bounds[1] - now))
+                opening = handler.inference_stream(artifact, path, payload)
+                stream = await (opening if bounds is None else asyncio.wait_for(opening, bounds[1] - now))
+                held = None
+                return OpenedStream(stream, admission)
             finally:
                 REQUEST_SESSION_KEY.reset(session)
         finally:
-            admission.release()
+            if held is not None:
+                held.release()
 
     def refused(
         self,
@@ -343,8 +391,46 @@ class ArtifactEndpoint:
                 if not isinstance(payload, dict):
                     self.reply(400, {"error": {"message": "the request is not a JSON object"}})
                     return
-                # Each call runs on its own server thread, so it runs the handler in its own event loop.
-                self.reply(*asyncio.run(endpoint.answer(self.path, payload)))
+                # Each call runs on its own server thread, so it runs the handler in its own event loop, which also
+                # reads the chunks of a stream: they belong to that loop.
+                asyncio.run(self.answer(payload))
+
+            async def answer(self, payload: dict[str, Any]) -> None:
+                status, body = await endpoint.answer(self.path, payload)
+                if not isinstance(body, OpenedStream):
+                    self.reply(status, body)
+                    return
+                try:
+                    await self.relay(body.stream)
+                finally:
+                    await body.close()
+
+            async def relay(self, stream: InferenceStream) -> None:
+                """Send ``stream`` as it comes: the engine's content type and bytes, unchanged. The answer has no length, so
+                it ends when the connection closes, as an HTTP/1.0 answer does. A chunk that the client cannot take,
+                or a rollout that ended, ends it early; so does a stream that fails, which the client reads as a cut
+                answer."""
+                self.send_response(stream.status)
+                headers = {name.lower(): value for name, value in stream.headers.items()}
+                self.send_header("Content-Type", headers.get("content-type", "text/event-stream"))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                session = REQUEST_SESSION_KEY.set(endpoint.session_key)
+                try:
+                    async for chunk in stream.chunks:
+                        if endpoint.closed.is_set():
+                            return
+                        self.wfile.write(chunk)
+                except Exception as exc:
+                    # The client already has the head: a failure can only end the answer.
+                    logger.warning(
+                        "a stream of artifact %s ended early: %s: %s",
+                        endpoint.artifact.artifact_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+                finally:
+                    REQUEST_SESSION_KEY.reset(session)
 
             def reply(self, status: int, body: Mapping[str, Any]) -> None:
                 data = json.dumps(body).encode()

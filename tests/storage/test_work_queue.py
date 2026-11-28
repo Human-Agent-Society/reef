@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import math
 import threading
@@ -165,6 +166,22 @@ def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_co
     assert [item.id for item in queue.items("jobs", scenario="other", id_prefix="rollout:e1:")] == []
     with pytest.raises(ValueError, match="id_prefix"):
         queue.items("jobs", id_prefix="")
+
+
+@pytest.mark.unit
+def test_a_read_without_payload_gives_items_with_an_empty_payload(open_coordination):
+    queue = open_coordination().queue
+    first = queue.append(NewWork("jobs", "rollout:e1:0", "s", "rollout", {"tree": {"files": {"a.md": "x" * 1000}}}))
+    second = queue.append(NewWork("jobs", "rollout:e1:1", "s", "rollout", {"task_index": 4}))
+    # Only the payload differs from the stored items.
+    empty = (dataclasses.replace(first, payload={}), dataclasses.replace(second, payload={}))
+
+    assert queue.items("jobs", id_prefix="rollout:e1:", payload=False) == empty
+    assert queue.items("jobs", id_prefix="rollout:e1:") == (first, second)
+    ids = ["rollout:e1:1", "missing", "rollout:e1:0"]
+    assert queue.read_items("jobs", ids, payload=False) == empty[::-1]
+    assert WorkQueue.read_items(queue, "jobs", ids, payload=False) == empty[::-1]
+    assert queue.read_items("jobs", ids) == (second, first)
 
 
 def job(
