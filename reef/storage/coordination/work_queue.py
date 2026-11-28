@@ -25,7 +25,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import ClassVar, Literal
 
 from reef.core.errors import ReefError
 from reef.core.values import JsonValue, require_text
@@ -242,6 +242,9 @@ class WorkQueue(ABC):
     and record facts about it (``write_metadata``); a producer queues a final item again (``retry``); control deletes
     old final items (``delete_final``).
     """
+
+    #: Store access failures that can also prevent cleanup after a queue operation failed.
+    unavailable_errors: ClassVar[tuple[type[Exception], ...]] = (OSError,)
 
     def __init__(
         self,

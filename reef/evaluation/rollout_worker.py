@@ -1019,6 +1019,7 @@ class EvaluationRolloutWorker(QueueWorker):
         self.queue.append(
             NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload, serial_key=serial_key)
         )
+        item = None
         deadline = time.monotonic() + SERVE_WAIT_S
         try:
             while time.monotonic() < deadline:
@@ -1034,13 +1035,15 @@ class EvaluationRolloutWorker(QueueWorker):
                     return None if served is None else ServedArtifact.from_json(served)
                 time.sleep(SERVE_POLL_S)
             raise ReefError(f"inference did not serve artifact {rollout.artifact_id} in {SERVE_WAIT_S:.0f} s")
-        except Exception:
-            # A queue read can also end this wait. Preserve its error if the cleanup reaches the same outage.
-            try:
-                self.queue.cancel(SERVING_QUEUE, item_id, "the evaluation rollout stopped waiting for the candidate")
-            except Exception:
-                logger.exception("could not cancel abandoned candidate serving item %s", item_id)
-            raise
+        finally:
+            if item is None or not item.final:
+                try:
+                    self.queue.cancel(
+                        SERVING_QUEUE, item_id, "the evaluation rollout stopped waiting for the candidate"
+                    )
+                except self.queue.unavailable_errors:
+                    # The outage that ended the wait can also prevent cancellation. Keep the wait's error.
+                    logger.exception("could not cancel abandoned candidate serving item %s", item_id)
 
     def score(
         self, rollout: EvaluationRollout, lease_lost: threading.Event, attempt: int

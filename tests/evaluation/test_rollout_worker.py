@@ -21,6 +21,7 @@ from unittest.mock import Mock
 
 import pytest
 from reef_client.serve import CapturedTurn
+from sqlalchemy.exc import OperationalError
 from tests.support.polling import wait_until
 
 from reef.artifact.artifact import Artifact
@@ -509,7 +510,10 @@ class ToolTaskEndpoints(OpenEndpoints):
 
 
 @pytest.mark.unit
-def test_a_failed_candidate_queue_read_leaves_no_claimable_serving_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "cancel_error", [None, OperationalError("cancel", {}, OSError("disconnected")), ValueError("bad cancel")]
+)
+def test_cleanup_after_a_failed_candidate_read(tmp_path, monkeypatch, cancel_error):
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None))
     worker = EvaluationRolloutWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="evaluation")
 
@@ -517,10 +521,17 @@ def test_a_failed_candidate_queue_read_leaves_no_claimable_serving_work(tmp_path
         raise OSError("temporary queue read failure")
 
     monkeypatch.setattr(queue, "read", unavailable)
-    with pytest.raises(OSError, match="temporary queue read failure"):
-        worker.served_candidate(rollout(), threading.Event())
-
-    assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
+    if cancel_error is not None:
+        monkeypatch.setattr(queue, "cancel", Mock(side_effect=cancel_error))
+    if isinstance(cancel_error, ValueError):
+        with pytest.raises(ValueError, match="bad cancel") as caught:
+            worker.served_candidate(rollout(), threading.Event())
+        assert isinstance(caught.value.__context__, OSError)
+    else:
+        with pytest.raises(OSError, match="temporary queue read failure"):
+            worker.served_candidate(rollout(), threading.Event())
+    if cancel_error is None:
+        assert queue.take(SERVING_QUEUE, "inference", [SERVE_ARTIFACT_KIND]) is None
 
 
 @pytest.mark.unit

@@ -57,7 +57,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Engine, RowMapping
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 
@@ -989,6 +990,8 @@ class SQLWorkQueue(WorkQueue):
     two workers that take at once never get the same item. Lease-only extensions (``extend_lease``) lock only the
     item row and take no counter. ``take`` selects the oldest item that the worker can take.
     """
+
+    unavailable_errors = (*WorkQueue.unavailable_errors, OperationalError, InterfaceError, PoolTimeoutError)
 
     def __init__(
         self,
