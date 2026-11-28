@@ -31,13 +31,7 @@ from typing import Any
 import aiohttp
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import (
-    InferenceUnavailableError,
-    MalformedUpstreamResponseError,
-    ReefError,
-    UpstreamLimit,
-    UpstreamStatusError,
-)
+from reef.core.errors import InferenceUnavailableError, ReefError, UpstreamLimit, UpstreamStatusError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import upstream_limit
@@ -268,7 +262,7 @@ class ArtifactEndpoint:
         holds the route. Rate-limit tries start at most ``RATE_LIMIT_TRIES`` times, within ``RATE_LIMIT_SECONDS`` and
         the runtime's ``inference_timeout_s`` of the call's arrival; a try after a wait gets only the time left, also
         when its admission comes late (``call_handler``). A transient upstream status in ``TRANSIENT_HTTP_STATUSES``
-        (502, 503, 504, excluding ``MalformedUpstreamResponseError``) or a body-read EOF/disconnect in
+        (502, 503, 504, except an ``is_unusable_answer`` error) or a body-read EOF/disconnect in
         ``TRANSIENT_TRANSPORT_ERRORS`` before any bytes reach the caller retries at most ``TRANSIENT_ERROR_TRIES``
         times after ``max(retry_after_seconds or 0.0, backoff_seconds)``, within ``TRANSIENT_RETRY_SECONDS`` and
         ``inference_timeout_s`` (skipping a retry that would leave less than ``TRANSIENT_MIN_RETRY_WINDOW_SECONDS``),
@@ -366,9 +360,7 @@ class ArtifactEndpoint:
                     break
                 continue
             is_transient_status = (
-                refusal is not None
-                and not isinstance(refusal, MalformedUpstreamResponseError)
-                and refusal.status in TRANSIENT_HTTP_STATUSES
+                refusal is not None and not refusal.is_unusable_answer and refusal.status in TRANSIENT_HTTP_STATUSES
             )
             if is_transient_status or transport_error is not None:
                 transient_tries += 1

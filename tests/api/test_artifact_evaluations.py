@@ -1837,6 +1837,13 @@ def test_a_retried_evaluation_rollout_gets_a_fresh_deferral_budget_and_keeps_att
     from reef.execution.workers import ItemDeferredError, QueueWorker
 
     class DeferringRolloutWorker(QueueWorker):
+        """A ``QueueWorker`` that defers every item it takes.
+
+        Values: those of ``QueueWorker``; it adds no state.
+        Purpose: this test makes one to give a rollout more deferrals than the old limit.
+        ``run_item``: for every item it raises ``ItemDeferredError`` and returns nothing.
+        """
+
         def run_item(self, item: WorkItem, lease_lost) -> Mapping[str, Any]:
             raise ItemDeferredError("waiting for sandbox capacity")
 
@@ -1906,8 +1913,19 @@ def test_an_in_flight_evaluation_preserves_its_recorded_task_mode_across_rolling
     from reef.execution.workers import ItemDeferredError, QueueWorker
 
     class TransientReconcileWorker(QueueWorker):
+        """A ``QueueWorker`` that defers a fixed number of items and then scores each item 1.0.
+
+        Values: those of ``QueueWorker`` and ``remaining``, an integer of at least 0: the number of items that the
+        worker still defers. The constructor raises ``ValueError`` for a ``deferrals`` that is not such an integer.
+        Purpose: this test makes one with the deferrals of a task mode that waits for reconciliation.
+        ``run_item``: when ``remaining`` is above 0, it lowers ``remaining`` by 1 and raises ``ItemDeferredError``.
+        When ``remaining`` is 0, it returns a result with the score 1.0 and leaves ``remaining`` at 0.
+        """
+
         def __init__(self, *args: Any, deferrals: int, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
+            if isinstance(deferrals, bool) or not isinstance(deferrals, int) or deferrals < 0:
+                raise ValueError("deferrals is an integer of at least 0")
             self.remaining = deferrals
 
         def run_item(self, item: WorkItem, lease_lost) -> Mapping[str, Any]:

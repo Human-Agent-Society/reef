@@ -376,6 +376,15 @@ def test_a_streaming_call_retries_when_first_chunk_hits_unexpected_eof(monkeypat
     monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
 
     class FailingFirstChunkHandler(StreamingHandler):
+        """A ``StreamingHandler`` whose first stream ends with a body-read error before its first chunk.
+
+        Values: those of ``StreamingHandler``. ``payloads`` holds one entry per stream that the handler opened.
+        Purpose: this test makes one and reads ``payloads`` and ``closed`` to count the tries of one call.
+        ``inference_stream``: when ``payloads`` is empty, it returns a stream with status 200 whose ``chunks`` raise
+        ``aiohttp.ClientPayloadError`` at the first read and whose ``close`` adds 1 to ``closed``. Otherwise it
+        returns the stream of ``StreamingHandler``. Either way ``payloads`` grows by ``payload``.
+        """
+
         async def inference_stream(
             self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
         ) -> InferenceStream:
@@ -468,12 +477,15 @@ def test_malformed_2xx_and_non_disconnect_client_errors_are_not_retried(monkeypa
     import aiohttp
     from aiohttp.client_reqrep import ConnectionKey
 
-    from reef.core.errors import MalformedUpstreamResponseError
-
     monkeypatch.setattr(artifact_endpoint, "TRANSIENT_FIRST_WAIT_SECONDS", 0.01)
     key = ConnectionKey("api.example", 443, True, None, None, None, None)
     non_transient: list[tuple[BaseException, int]] = [
-        (MalformedUpstreamResponseError("inference provider returned a body that is not JSON"), 502),
+        (
+            UpstreamStatusError(
+                "inference provider returned a body that is not JSON", status=502, is_unusable_answer=True
+            ),
+            502,
+        ),
         (aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad cert")), 502),
         (aiohttp.ClientConnectorDNSError(key, OSError("dns failed")), 502),
         (aiohttp.ServerTimeoutError("server timed out"), 502),

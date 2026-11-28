@@ -140,7 +140,7 @@ class ColdSandbox:
 
         Raise ``SandboxCapacityError`` for a status of ``CAPACITY_STATUSES`` (429 immediately; 503 retries in place
         up to ``COLD_START_MAX_ATTEMPTS`` times with jittered exponential backoff within ``wait_seconds`` because
-        AgentENV created no sandbox), and ``SandboxRequestError`` immediately for HTTP 400. Raise ``ColdSandboxError``
+        AgentENV created no sandbox; no request is sent after ``wait_seconds``, also when a wait ends late), and ``SandboxRequestError`` immediately for HTTP 400. Raise ``ColdSandboxError``
         immediately after a single send for any other answer, such as 401, 403, 500, or a gateway's 502 or 504, and
         when no answer came in time, the connection was lost, or reading the response body failed. After those,
         AgentENV can still start the sandbox, whose ID the caller does not know; AgentENV deletes it at the end of its
@@ -149,9 +149,13 @@ class ColdSandbox:
         deadline = time.monotonic() + wait_seconds
         backoff_seconds = COLD_START_FIRST_WAIT_SECONDS
         attempt = 0
+        exhausted_message = ""
         while True:
+            remaining = deadline - time.monotonic()
+            if attempt > 0 and remaining <= 0:
+                # The wait ended later than asked. No time is left, so the last 503 stands and nothing is sent.
+                raise SandboxCapacityError(exhausted_message)
             attempt += 1
-            remaining = wait_seconds if attempt == 1 else max(deadline - time.monotonic(), 0.01)
             try:
                 async with (
                     aiohttp.ClientSession(

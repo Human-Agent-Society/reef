@@ -12,7 +12,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.core.errors import MalformedUpstreamResponseError, UpstreamLimit, UpstreamStatusError
+from reef.core.errors import UpstreamLimit, UpstreamStatusError
 from reef.inference.http import HttpInferenceHandler, retry_after_seconds
 from reef.inference.interfaces import InferenceArtifact
 
@@ -122,10 +122,10 @@ def test_a_successful_status_with_an_unusable_body_is_a_provider_failure(body: b
 
         async with provider(CHAT_PATH, answer) as server:
             handler = HttpInferenceHandler(str(server.make_url("")), timeout_s=5)
-            with pytest.raises(MalformedUpstreamResponseError) as error:
+            with pytest.raises(UpstreamStatusError) as error:
                 await handler.inference(ARTIFACT, CHAT_PATH, {"model": "student"})
             # 502: the provider failed on its own account, so the caller's request is not blamed.
-            assert isinstance(error.value, UpstreamStatusError) and error.value.status == 502
+            assert error.value.status == 502 and error.value.is_unusable_answer
 
     asyncio.run(run())
 

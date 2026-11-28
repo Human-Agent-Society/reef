@@ -151,6 +151,27 @@ def test_a_cold_start_stops_retrying_503_when_wait_budget_is_exhausted(monkeypat
 
 
 @pytest.mark.unit
+def test_a_cold_start_sends_no_503_retry_when_its_wait_ends_after_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reef.execution.sandbox.agentenv import images as agentenv_images
+
+    real_sleep = asyncio.sleep
+
+    async def late_sleep(seconds: float) -> None:
+        # A stalled event loop: the wait ends after the deadline of the start.
+        await real_sleep(0.4 if seconds else 0)
+
+    monkeypatch.setattr(agentenv_images, "COLD_START_FIRST_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(agentenv_images.asyncio, "sleep", late_sleep)
+    api = FakeAgentEnvApi([(503, {"message": "no nodes available"}), (201, {"sandboxID": "sandbox-late"})])
+    # The capacity error keeps the rollout on its deferral path; a late request could time out as ColdSandboxError.
+    with pytest.raises(SandboxCapacityError, match="after 1 attempts"):
+        cold_start(api, wait_seconds=0.3)
+    assert len(api.cold_bodies) == 1
+
+
+@pytest.mark.unit
 def test_a_cold_start_does_not_resend_after_payload_error_on_201() -> None:
     from aiohttp import web
     from aiohttp.test_utils import TestServer
