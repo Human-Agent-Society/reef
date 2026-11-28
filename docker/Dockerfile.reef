@@ -84,6 +84,7 @@ RUN pip uninstall -y slime && \
     pip install --no-cache-dir -e .
 
 # Count only active loss tokens in Slime's optimizer step. An empty step reports zero loss.
+# tests/slime_backend/test_slime_active_token_count.py checks the patch.
 RUN SLIME_SITE=$(python -c "from importlib.metadata import distribution; print(distribution('slime').locate_file(''))") && \
     git -C "$SLIME_SITE" apply "$PWD/docker/patch/slime_active_token_count.patch"
 
