@@ -699,9 +699,10 @@ class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
     A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``write_new_items``
-    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
-    operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
-    inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
+    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``.
+    Item changes and their scenario uses commit together. A job directory's first use commits before publication.
+    A failed publication can leave a use record and files. Expiration removes both after their last use.
+    ``create`` inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
     ``ItemConflictError``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for
     the scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
     set of scenarios in this process share one transaction (a group commit), because only one of them can hold
