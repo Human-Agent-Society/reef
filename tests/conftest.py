@@ -19,7 +19,7 @@ from argparse import Namespace
 
 import pytest
 
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
 from reef.train.slime_backend.objectives import resolve_objective

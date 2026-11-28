@@ -17,9 +17,9 @@ from reef.artifact import (
     StagedSnapshotRepositoryBackend,
 )
 from reef.artifact.repository import StoredFiles
-from reef.dispatcher import build_default_dispatcher
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.control.dispatcher import build_default_dispatcher
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class BasicBackend(RepositoryBackend):

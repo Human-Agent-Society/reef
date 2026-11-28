@@ -30,15 +30,15 @@ remains in the recipe package.
 
 Tests and deployment configuration stay at repository level, never inside an
 integration subtree: ``tests/slime_backend/`` for runtime internals,
-``tests/plugin_contracts/`` for package boundaries, ``tests/reef_service/``
+``tests/plugin_contracts/`` for package boundaries, ``tests/api/``
 for service-facing contracts, with runnable examples owned by their method
 packages.
 """
 
-from reef.pipeline_context import PipelineContext
-from reef.sample2job import Sample2Job
+from reef.samples.context import PipelineContext
 from reef.train.backend import PreparedHarnessJob
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import JobData, Sample, TaskSample, TrainingCommit, TrajectorySample
 

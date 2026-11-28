@@ -1,6 +1,7 @@
 # AutoEnvScaling on Slime from seed tasks: Qwen3.5-9B trains all its weights on TMax seed tasks, and Claude Code writes a
 # harder or simpler variant of each seed the model solves too often or too rarely. The generated-task recipe trains them.
 # The tasks, the Designer and the agent are those of serve-tinker.yaml beside this file; Slime's own GRPO loop trains.
+# Each optimizer step trains 8 tasks of 32 rollouts with Slime's own Qwen3.5 loss.
 # One Linux node with 8 GPUs of 80 GB (H100): 4 for the Megatron actor (TP2 with sequence parallelism, CP2), 3 for Slime's
 # rollout engines, and 1 for Reef's serving engine. Run it in the Reef image (docker/README.md).
 # Supply REEF_TOKEN, E2B_API_KEY and CLAUDE_CODE_OAUTH_TOKEN (made with `claude setup-token`) through the shell.
@@ -37,7 +38,7 @@ generator:
   # The agent of the calibration rollouts: the training rollouts' agent, so both measure the same thing.
   agent:
     # A training rollout whose context fills ends and is scored; terminus-2 gives it no reward, which trains as 0.
-    import_path: reef.record2sample.generator.terminus:VerifiedTerminus2
+    import_path: reef.samples.generator.terminus:VerifiedTerminus2
     model_name: openai/{model}
     kwargs:
       api_base: "{base_url}/v1"
@@ -70,7 +71,7 @@ recipe:
         scaffold_tolerance: 8
         # The Reasoning Agent: the same agent as generator.agent.
         agent:
-          import_path: reef.record2sample.generator.terminus:VerifiedTerminus2
+          import_path: reef.samples.generator.terminus:VerifiedTerminus2
           model_name: openai/{model}
           kwargs:
             api_base: "{base_url}/v1"
@@ -129,10 +130,12 @@ pipeline:
           # Solver-Guided Calibration with upstream's band and rollout counts: keep a variant only when the current
           # policy solves it sometimes. A refused variant is not sent back for revision, as upstream does.
           calibration: refuse
-  # One task job holds up to buffer_size saved tasks: one Slime rollout, one optimizer step.
+  # One task job holds exactly 8 saved tasks: one Slime rollout, one optimizer step. A job of fewer tasks than
+  # rollout-batch-size would fill its rollout with its first tasks again, and they would train more than once.
   sample2job:
     config:
-      buffer_size: 16
+      buffer_size: 8
+      job_samples: 8
 training:
   backend: slime
   ready-timeout: 3600
@@ -154,9 +157,9 @@ training:
     save: ${training.config.checkpoint_dir}/megatron
     save-hf: ${training.config.checkpoint_dir}/hf/{rollout_id}
     num-rollout: "100000000"
-    # One Slime rollout per job: 16 tasks x 16 rollouts, trained as one optimizer step.
-    rollout-batch-size: "16"
-    n-samples-per-prompt: "16"
+    # One Slime rollout per job: 8 tasks x 32 rollouts, trained as one optimizer step, as TMax trains.
+    rollout-batch-size: "8"
+    n-samples-per-prompt: "32"
     global-batch-size: "256"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "4"
@@ -221,6 +224,21 @@ training:
     advantage-estimator: grpo
     disable-grpo-std-normalization: true
     loss-type: policy_loss
+    # Slime's own Qwen3.5 loss (examples/fully_async/run-qwen3.5-9B-fully_async.sh at the pinned Slime). REINFORCE on
+    # the log-prob of each sampled token, with no PPO ratio; score centering requires it.
+    pg-loss-type: reinforce
+    # Truncated importance sampling: each token's weight is p_train / p_rollout, clipped to [0, 2], against the
+    # log-probs that the rollout engines recorded for each Harbor rollout.
+    use-tis: true
+    tis-clip: "2"
+    tis-clip-low: "0"
+    # Score centering with the engines' 128 most likely tokens at each sampled token, which the Harbor rollouts record
+    # when this is on. Slime's default top-p 1 and top-k -1 make the engines sample from the distribution they record.
+    use-score-centering: true
+    score-centering-top-k: "128"
+    # Each token weighs the same in the loss, not the mean over each sample's tokens.
+    calculate-per-token-loss: true
+    # get-mismatch-metrics is left out: Slime refuses it with use-score-centering, and use-tis logs the mismatch.
 storage:
   artifact-repository: ${REEF_AUTOENVSCALING_STATE_DIR}/artifacts.git
   artifact-work-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/artifact-work

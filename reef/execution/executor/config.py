@@ -16,8 +16,20 @@ from reef.execution.executor.requirements import ExecutionRequirements
 class WorkerResources:
     """Optional per-worker requests; None preserves component defaults."""
 
-    cpus_per_worker: float | None = config_option(None, help="CPU allocation per worker.")
-    gpus_per_worker: float | None = config_option(None, help="GPU allocation per worker.")
+    cpus_per_worker: float | None = config_option(
+        None,
+        help=(
+            "CPU allocation per worker, a finite number of at least 0. Omitted keeps the component's "
+            "default, normally 1."
+        ),
+    )
+    gpus_per_worker: float | None = config_option(
+        None,
+        help=(
+            "GPU allocation per worker, a finite number of at least 0 and not below the component's "
+            "declared need. Omitted keeps the component's default, normally 0."
+        ),
+    )
 
     def __post_init__(self) -> None:
         ExecutionRequirements(
@@ -28,11 +40,23 @@ class WorkerResources:
 
 @dataclass(frozen=True)
 class ExecutorSettings:
-    backend: str = config_option("auto", help="Built-in executor, package.module:ClassName, or named profile.")
+    backend: str = config_option(
+        "auto",
+        help=(
+            "Built-in executor (auto, uni, mp or ray) or package.module:ClassName. With Slime, "
+            "execution.training accepts only auto or ray."
+        ),
+    )
     options: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Backend-owned executor options.")
     )
-    workers: int | None = config_option(None, help="Number of workers; omitted uses the component requirement.")
+    workers: int | None = config_option(
+        None,
+        help=(
+            "Number of workers, a positive integer; omitted uses the component requirement. Only "
+            "execution.evolution takes more than 1: training and rollout refuse it."
+        ),
+    )
     resources: WorkerResources = field(default_factory=WorkerResources)
 
     def __post_init__(self) -> None:

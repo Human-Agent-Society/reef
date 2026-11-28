@@ -13,6 +13,7 @@ from recipes.beta.reefine import ReefineMethod, ReefineRecipe
 from recipes.beta.reefine.multimodal import MultimodalSettings
 from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
+from reef.control.scenario.live_objects import LiveObjects
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
@@ -23,7 +24,6 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
-from reef.scenario.live_objects import LiveObjects
 
 HEALTH = "[health] Run `echo reef-ok` and reply with its output."
 

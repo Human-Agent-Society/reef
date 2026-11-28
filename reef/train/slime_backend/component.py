@@ -58,8 +58,8 @@ from reef.core.errors import InternalError
 from reef.core.job_data import TaskSample
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor import resolve
+from reef.storage.data.job_data import JobDataKind
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import (
     LearningRateScheduleState,

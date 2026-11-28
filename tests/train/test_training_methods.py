@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
+from tests.recipe.test_recipe_config_fields import StagedRecipe
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, live_objects
 from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobOutcome, TaskFiles, TaskSample
-from reef.storage.samples import SampleKind
+from reef.storage.scenario.samples import SampleKind
 from reef.train.component import job_id_for
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.learning_rate import (

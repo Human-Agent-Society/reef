@@ -21,7 +21,7 @@ class AnyComponentReport(ReportBase):
     ``ReportValidationError`` when none does; the message names each contract with its refusal.
 
     Purpose: the scenario factory binds it as the ingress contract of a scenario whose components declare
-    different contracts (``reef.scenario.factory.scenario_report_type``). Each trainer parses with its own
+    different contracts (``reef.control.scenario.factory.scenario_report_type``). Each trainer parses with its own
     component's contract, so ingress refuses only a report that no component takes.
     """
 

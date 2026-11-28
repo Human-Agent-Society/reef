@@ -25,7 +25,7 @@ from typing import Any
 import recipes.tttd  # noqa: F401  (registration side effect)
 from recipes.beta.coral.processor import CoralJobData, CoralSamples
 from reef.recipe.base import WeightTrainingRecipe
-from reef.storage.samples import SAMPLE_KINDS, SampleKind
+from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
