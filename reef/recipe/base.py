@@ -15,12 +15,12 @@ from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 

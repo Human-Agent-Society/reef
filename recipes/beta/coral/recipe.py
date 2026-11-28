@@ -24,8 +24,8 @@ from typing import Any
 # package registers the objective that this recipe binds, on each backend.
 import recipes.tttd  # noqa: F401  (registration side effect)
 from recipes.beta.coral.processor import CoralJobData, CoralSamples
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.recipe.base import WeightTrainingRecipe
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 

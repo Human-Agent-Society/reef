@@ -12,10 +12,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.storage.data.tasks import TaskStorage
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
+from reef.storage.scenario.samples import TrainerSamples
 
 
 @dataclass(frozen=True)

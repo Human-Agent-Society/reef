@@ -63,7 +63,7 @@ from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.core.values import require_text
+from reef.core.values import canonical_json, require_text
 from reef.storage.coordination.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination.served_models import (
     AUTOMATIC_RETRIES,
@@ -233,10 +233,6 @@ def coordination_tables(metadata: MetaData, *, sqlite: bool) -> CoordinationTabl
 WORK_SEQUENCE = 1
 #: The counter row that numbers the changes of ``served_models`` and its scheduled stops.
 SERVED_SEQUENCE = 2
-
-
-def canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 class CoordinationDatabase(CoordinationResource):

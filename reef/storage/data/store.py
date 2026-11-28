@@ -25,14 +25,13 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
-from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCallSummary
 from reef.core.job_data import JobData, TaskFiles
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
-from reef.core.values import require_integer
+from reef.core.values import canonical_json, require_integer
 from reef.storage.data.item_kinds import ITEM_KIND_RULES, TaskFilesReference, task_partition
 from reef.storage.data.job_data import (
     JOB_DATA_PREFIX,

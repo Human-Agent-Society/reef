@@ -28,6 +28,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.values import canonical_json
+
 #: The providers whose payload shapes this module knows.
 OPENAI_CHAT = "openai-chat"
 ANTHROPIC = "anthropic"
@@ -35,11 +37,6 @@ OPENAI_RESPONSES = "openai-responses"
 
 #: The media types that an ATIF image part can name.
 ATIF_IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
-
-
-def canonical_json(value: object) -> str:
-    """The JSON of ``value`` with sorted keys, compact separators and non-ASCII characters kept."""
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def patch_of(original: Any, rendered: Any) -> dict[str, Any] | None:

@@ -21,9 +21,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import batched
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
-from reef.core.job_data import Sample, TaskSample, TrajectorySample
+from reef.core.job_data import SAMPLE_KINDS, Sample, SampleKind, TaskSample, TrajectorySample
 from reef.storage.data.store import (
     MAX_QUERY_LIMIT,
     DataStore,
@@ -44,9 +44,6 @@ ENDED_RECORD_PREFIX = "ended:"
 JUDGED_KEY_PREFIX = "judged:"
 #: The metadata key with which the samples service marks a sample that a stage made as stale.
 STALE_KEY = "stale"
-
-SampleKind = Literal["trajectory", "task"]
-SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
 
 
 def consumed_sample_id(sample_id: str) -> str:
