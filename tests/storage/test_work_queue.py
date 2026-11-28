@@ -29,6 +29,7 @@ from reef.storage.coordination.served_models import (
 from reef.storage.coordination.work_queue import (
     DEFERRED_ATTEMPTS,
     LEASE_RETRY_MAX_SECONDS,
+    RUN_SCOPE,
     LeaseExtender,
     NewWork,
     WorkConflictError,
@@ -261,6 +262,21 @@ def test_a_deferred_give_back_counts_apart_and_only_for_the_attempt_that_holds_t
     held = queue.read("jobs", "a")
     assert (held.state, held.attempt_count) == ("assigned", newer.attempt_count)
     assert (held.stopped_attempt_count, held.deferred_attempt_count) == (2, 1)
+
+
+@pytest.mark.unit
+def test_assignment_records_the_current_attempts_run_scope(open_coordination):
+    queue = open_coordination().queue
+    queue.append(job("a"), now=0)
+    scoped = queue.take("jobs", "w", ["training_job:tinker"], now=1, run_scope="directory")
+    assert scoped.run_scope == "directory"
+    with pytest.raises(ValueError, match="reserved"):
+        queue.write_metadata("jobs", "a", RUN_SCOPE, "other")
+    queue.give_back("jobs", "a", "w", now=2)
+    unscoped = queue.take("jobs", "w", ["training_job:tinker"], now=3)
+    assert unscoped.run_scope is None
+    # A worker from a release without run scopes leaves the previous metadata in place on take.
+    assert dataclasses.replace(unscoped, metadata=scoped.metadata).run_scope is None
 
 
 @pytest.mark.unit

@@ -55,6 +55,11 @@ Reported artifacts are immutable. ``step`` is nonnegative within the job;
 metrics must encode as JSON.
 ``LocalJobComponent`` supplies persistence and background execution; implement ``check_job`` and ``run``.
 
+After a queue takeover, the old worker can cancel its local run when the replacement uses a different
+``run_scope``. Components that can cancel the same run must return the same scope across workers and restarts.
+Return a different nonempty string only for independent runs. The default, ``None``, preserves runs whose ownership
+the component cannot distinguish. ``LocalJobComponent`` supplies a persistent scope for its jobs directory.
+
 Backend facts
 -------------
 

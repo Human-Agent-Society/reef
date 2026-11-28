@@ -528,6 +528,14 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
+    @property
+    def run_scope(self) -> str | None:
+        """Identify the runs reached by cancel. Different scopes must have disjoint runs for each job ID.
+
+        The default is None when the component cannot prove that two workers reach independent runs.
+        """
+        return None
+
     def root_start(self, root: ScenarioRoot) -> str:
         """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 

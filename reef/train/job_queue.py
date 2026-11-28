@@ -240,8 +240,14 @@ def scenario_checks_key(scenario: str) -> str:
     return f"scenario:{scenario}"
 
 
-def checkpoint_content(job_id: str, step: int, *, attempt: int | None = None) -> str:
-    """Name the stored checkpoint for this step and attempt. Omit the attempt for the legacy name."""
+def checkpoint_content(
+    job_id: str, step: int, *, attempt: int | None = None, created_sequence: int | None = None
+) -> str:
+    """Name a checkpoint of one job creation and attempt. Omitted identities select the earlier name formats."""
+    if created_sequence is not None:
+        if attempt is None:
+            raise ValueError("a checkpoint of a job creation requires its attempt")
+        return f"{job_id}:{step}:{created_sequence}:{attempt}:claimed-checkpoint"
     if attempt is None:
         return f"{job_id}:{step}"
     return f"{job_id}:{step}:{attempt}:checkpoint"
@@ -777,9 +783,9 @@ class TrainingJobWorker(QueueWorker):
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
     closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
-    the lease; then the component cancels its local run, and the worker that takes the job next continues it from
-    the job's checkpoints. A job that the component reports failed fails for good. A job whose scenario was
-    deleted does not run on (``refuses_deleted_scenario``).
+    the lease. Cancellation stops the local run. A replacement sharing the same job directory can continue that
+    run. The old worker stops its run when the replacement has independent runs. A component failure is final.
+    A job whose scenario was deleted does not run on (``refuses_deleted_scenario``).
     """
 
     def __init__(
@@ -803,6 +809,9 @@ class TrainingJobWorker(QueueWorker):
             queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds, slots=slots
         )
         self.component = component
+        self.run_scope = component.run_scope
+        self.lost_runs: set[tuple[str, int, int]] = set()
+        self.lost_runs_lock = threading.Lock()
         self.data_store = data_store
         self.backends = backends
         self.checks = checks
@@ -820,6 +829,37 @@ class TrainingJobWorker(QueueWorker):
         super().stop()
         self.component.close()
 
+    def run_once(self) -> bool:
+        self.check_lost_runs()
+        return super().run_once()
+
+    def check_lost_runs(self, lost: WorkItem | None = None) -> None:
+        """Stop cancelled or independently retaken local runs. Recheck an expired run until its next assignment.
+
+        The queue row stays locked through cancellation so another attempt cannot adopt this directory in between.
+        Both the worker's idle rounds and the polls of active jobs check for reassignment.
+        """
+        with self.lost_runs_lock:
+            if lost is not None:
+                self.lost_runs.add((lost.id, lost.created_sequence, lost.attempt_count))
+            for job_id, creation, attempt in tuple(self.lost_runs):
+                with self.queue.locked_item(JOBS_QUEUE, job_id) as current:
+                    if current is not None:
+                        same_attempt = (current.created_sequence, current.attempt_count) == (creation, attempt)
+                        if (same_attempt and current.state == "failed") or (
+                            self.run_scope is not None
+                            and current.run_scope is not None
+                            and self.run_scope != current.run_scope
+                        ):
+                            self.component.cancel(job_id)
+                        elif (
+                            self.run_scope is not None
+                            and not current.final
+                            and (same_attempt or current.state == "queued")
+                        ):
+                            continue
+                self.lost_runs.remove((job_id, creation, attempt))
+
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         """Run the job of ``item`` on the component, and store and record its checkpoints, by step.
 
@@ -834,8 +874,8 @@ class TrainingJobWorker(QueueWorker):
         the component's ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
         (``job_records``) under ``job_records_content`` when the job ends. At each poll the worker
         reads the item. When control cancels this attempt, the component cancels its local run.
-        After takeover, the replacement worker continues the run keyed by the job ID. A worker that continues a job reports only the checkpoints
-        whose step the item does not hold yet. When the worker stops, the job goes back to the queue, so another
+        After takeover, the worker cancels its local run if the replacement has a distinct run scope. A worker
+        that continues a job reports only the steps absent from the item. When the worker stops, the job goes back to the queue, so another
         worker continues it at once: the component keeps running it, and that worker's ``submit`` continues from
         the job's latest checkpoint. Before the component gets the job, and after each store, the worker checks
         that the job's scenario still exists (``refuses_deleted_scenario``).
@@ -853,6 +893,7 @@ class TrainingJobWorker(QueueWorker):
         written_progress: Mapping[str, JsonValue] | None = None
         try:
             while True:
+                self.check_lost_runs()
                 job_progress = self.component.job_progress(job.job_id)
                 status = self.component.status(job.job_id)
                 if status.state != "running":
@@ -880,7 +921,9 @@ class TrainingJobWorker(QueueWorker):
                         raise ItemFailedError(
                             f"the scenario's check refused checkpoint {checkpoint.step} of job {job.job_id}: {exc}"
                         ) from exc
-                    content = checkpoint_content(item.id, checkpoint.step, attempt=item.attempt_count)
+                    content = checkpoint_content(
+                        item.id, checkpoint.step, attempt=item.attempt_count, created_sequence=item.created_sequence
+                    )
                     stored_names.append(content)
                     self.queue.write_metadata(
                         JOBS_QUEUE,
@@ -928,9 +971,7 @@ class TrainingJobWorker(QueueWorker):
                     raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
                 self.check_job_claim(item, self.queue.read(JOBS_QUEUE, item.id))
         except WorkLeaseLostError:
-            with self.queue.locked_attempt(item) as current:
-                if current.state == "failed":
-                    self.component.cancel(item.id)
+            self.check_lost_runs(item)
             raise
 
     def check_job_claim(self, item: WorkItem, current: WorkItem | None) -> None:
@@ -947,7 +988,8 @@ class TrainingJobWorker(QueueWorker):
     def store_records(self, item: WorkItem, job: TrainingJob) -> None:
         """Store the record files of the ended ``job`` of ``item`` (``TrainingComponent.job_records``) as the content
         ``job_records_content(item.id)``; nothing when the component kept none. Raise ``WorkLeaseLostError`` on loss
-        of the claim. The record name is shared by all attempts, so its cleanup belongs to job retention."""
+        of the claim. Discard a cancelled upload when this attempt published no checkpoint. A replacement attempt
+        or a committed step may still read the shared record name."""
         records = self.component.job_records(job.job_id)
         if records is None:
             return
@@ -956,7 +998,10 @@ class TrainingJobWorker(QueueWorker):
         backend.store_content(job_records_content(item.id), records)
         if self.refuses_deleted_scenario(item):
             raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
-        self.check_job_claim(item, self.queue.read(JOBS_QUEUE, item.id))
+        with self.queue.locked_attempt(item) as current:
+            if current.state == "failed" and not current.progress:
+                backend.discard_content(job_records_content(item.id))
+            self.check_job_claim(item, current)
 
     def refuses_deleted_scenario(self, item: WorkItem) -> bool:
         """Whether the scenario of the job ``item`` has no registration in the artifact store

@@ -82,6 +82,7 @@ from reef.storage.coordination.work_queue import (
     DEFERRED_ATTEMPTS,
     FINAL_STATES,
     HELD_STATES,
+    RUN_SCOPE,
     WORK_STATES,
     JsonValue,
     NewWork,
@@ -1164,8 +1165,18 @@ class SQLWorkQueue(WorkQueue):
             connection.execute(orphan_lines)
             return deleted
 
-    def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
+    def take(
+        self,
+        queue: str,
+        worker_id: str,
+        kinds: Sequence[str],
+        *,
+        now: float | None = None,
+        run_scope: str | None = None,
+    ) -> WorkItem | None:
         require_text(worker_id, "worker_id")
+        if run_scope is not None:
+            require_text(run_scope, "run_scope")
         if not kinds:
             return None
         moment = clock(now)
@@ -1203,6 +1214,11 @@ class SQLWorkQueue(WorkQueue):
             if found is None:
                 return None
             chosen = item_from_row(found)
+            metadata = dict(chosen.metadata)
+            if run_scope is not None:
+                metadata[RUN_SCOPE] = {"attempt": chosen.attempt_count + 1, "scope": run_scope}
+            else:
+                metadata.pop(RUN_SCOPE, None)
             return self.write_item(
                 connection,
                 counter,
@@ -1212,6 +1228,7 @@ class SQLWorkQueue(WorkQueue):
                 worker_id=worker_id,
                 lease_expires_at=moment + self.lease_seconds,
                 attempt_count=chosen.attempt_count + 1,
+                metadata_json=canonical_json(metadata),
                 started_at=moment if chosen.started_at is None else chosen.started_at,
                 error=None,
             )
@@ -1388,6 +1405,8 @@ class SQLWorkQueue(WorkQueue):
         self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: WorkItem | tuple[str, int] | None = None
     ) -> WorkItem | None:
         require_text(name, "name")
+        if name == RUN_SCOPE:
+            raise ValueError(f"{name} is reserved for queue assignments")
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             moment = time.time()
             if lease is None:
@@ -1443,15 +1462,9 @@ class SQLWorkQueue(WorkQueue):
             return self.row(connection, queue, item_id)
 
     @contextmanager
-    def locked_attempt(self, claim: WorkItem) -> Iterator[WorkItem]:
+    def locked_item(self, queue: str, item_id: str) -> Iterator[WorkItem | None]:
         with self.database.connection(write=True) as connection:
-            current = self.row(connection, claim.queue, claim.id, lock=True)
-            if current is None or (current.created_sequence, current.attempt_count) != (
-                claim.created_sequence,
-                claim.attempt_count,
-            ):
-                raise WorkLeaseLostError(f"the attempt no longer owns {claim.queue}/{claim.id}")
-            yield current
+            yield self.row(connection, queue, item_id, lock=True)
 
     def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         if not item_ids:

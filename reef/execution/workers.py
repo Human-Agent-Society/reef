@@ -164,6 +164,8 @@ class QueueWorker(ServiceWorker):
     (``reef.execution.work_logs``).
     """
 
+    #: An optional identifier shared by workers that can cancel the same local runs.
+    run_scope: str | None = None
     permanent_errors: tuple[type[Exception], ...] = (ValueError,)
     keeps_log = False
     first_deferral_seconds = 30.0
@@ -252,7 +254,10 @@ class QueueWorker(ServiceWorker):
             return False
         try:
             self.requeue_expired()
-            item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
+            if self.run_scope is None:
+                item = self.queue.take(self.queue_name, self.worker_id, self.kinds)
+            else:
+                item = self.queue.take(self.queue_name, self.worker_id, self.kinds, run_scope=self.run_scope)
             if item is not None and self.stopped.is_set():
                 # The stop began during the take: the item has not started, so another worker runs it at once.
                 self.queue.give_back(self.queue_name, item.id, self.worker_id, claim=item)
