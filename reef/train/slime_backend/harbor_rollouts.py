@@ -47,6 +47,7 @@ from reef.train.task_rollouts import (
     RolloutChat,
     rollout_assembly,
     rollout_sample,
+    training_rollout,
 )
 
 logger = logging.getLogger(__name__)
@@ -266,13 +267,12 @@ def assembled_fields(rollout: TaskRollout, sample: TrajectorySample, top_k: int)
     """The Slime fields of a rollout's assembled ``sample``, or None when it has no trained token or lacks a head.
 
     The assembly already follows Slime's multi-turn shape: the prompt of the first call is the prompt, and each later
-    call's new prompt tokens are response tokens with mask 0 and log-prob 0.0. A rollout that ran without a reward
-    scores 0.
+    call's new prompt tokens are response tokens with mask 0 and log-prob 0.0. An unscored rollout produces no fields.
     """
     training = sample.training
     loss_mask = tuple(training["loss_mask"])
     log_probs = tuple(training["rollout_log_probs"])
-    if not any(loss_mask) or len(log_probs) != len(loss_mask):
+    if rollout.reward is None or not any(loss_mask) or len(log_probs) != len(loss_mask):
         return None
     topk_ids: tuple[tuple[int, ...], ...] | None = None
     topk_values: tuple[tuple[float, ...], ...] | None = None
@@ -289,7 +289,7 @@ def assembled_fields(rollout: TaskRollout, sample: TrajectorySample, top_k: int)
         response_length=len(loss_mask),
         loss_mask=loss_mask,
         rollout_log_probs=log_probs,
-        reward=0.0 if rollout.reward is None else rollout.reward,
+        reward=rollout.reward,
         status="truncated" if captures[-1].get("finish_reason") == "length" else "completed",
         remove_sample=False,
         response=captures[-1]["response_message"]["content"],
@@ -462,14 +462,14 @@ class HarborRolloutSession:
     async def rollout(self, task: str, task_path: Path, group_index: int) -> SampleFields:
         """Run and assemble one rollout on this thread's own loop."""
         try:
-            rollout = await self.runner.run_async(task_path)
+            rollout = training_rollout(await self.runner.run_async(task_path))
         # Harbor and the agent raise their own types, and one rollout must not stop the Slime rollout's other samples.
         except Exception as exc:
             logger.warning("a rollout of task %s failed", task, exc_info=True)
             return self.finish(task, group_index, removed_fields(f"the rollout raised: {exc!r}", self.top_k), None)
-        if rollout.is_infrastructure_failure:
+        if rollout.reward is None:
             return self.finish(task, group_index, removed_fields(rollout.error, self.top_k), None)
-        reward = 0.0 if rollout.reward is None else rollout.reward
+        reward = rollout.reward
         sample = rollout_sample(rollout, task, self.assembly, self.source.job_id)
         fields = None if sample is None else assembled_fields(rollout, sample, self.top_k)
         if fields is None:

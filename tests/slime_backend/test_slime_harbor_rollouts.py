@@ -10,7 +10,9 @@ import asyncio
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -774,3 +776,40 @@ def test_slime_gives_a_lone_rollout_of_a_group_no_advantage() -> None:
     builder = slime_builder()
     samples = slime_samples([assembled(1.0), removed_fields("a", 0), removed_fields("b", 0)])
     assert builder.convert(samples)["rewards"] == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("final_status", [200, 402, 503])
+def test_an_answer_followed_by_a_terminal_refusal_or_service_failure_does_not_train(
+    tmp_path: Path, final_status: int
+) -> None:
+    class TwoCallLab(AgentLab):
+        """Make two model calls and return a verifier score of zero."""
+
+        async def run(self, task_path: Path, agent, *, key: str, tags, overrides) -> RolloutRow:
+            messages = [{"role": "user", "content": "first"}]
+            answer = post(agent, messages)
+            try:
+                post(agent, [*messages, answer["choices"][0]["message"], {"role": "user", "content": "next"}])
+            except urllib.error.HTTPError as exc:
+                assert exc.code == final_status
+            return RolloutRow(rewards={"reward": 0.0})
+
+    class TwoCallChat(Chat):
+        """Answer the first call and use the chosen HTTP status for the second."""
+
+        def generate(self, body: Mapping[str, object]):
+            reply = super().generate(body)
+            return reply if len(self.bodies) == 1 or final_status == 200 else (final_status, "unavailable")
+
+    source = source_of(tmp_path)
+    chat = TwoCallChat((200, GENERATED))
+    session = HarborRolloutSession(source, chat=chat, model="m", top_k=0, lab=TwoCallLab())
+    try:
+        fields = run_one(session, source)
+    finally:
+        session.close()
+    (result,) = read_task_rollout_results(Path(source.job_directory))
+    assert fields.remove_sample == (final_status != 200)
+    assert task_job_metrics([result.task], [result])["rollout_rewards"][result.task] == (
+        [0.0] if final_status == 200 else []
+    )

@@ -294,13 +294,23 @@ def task_name(task: TaskSample) -> str:
     return task.task_path.name
 
 
+def training_rollout(rollout: TaskRollout) -> TaskRollout:
+    """Keep a verifier score only if the last model call could run, including an actual zero score."""
+    status = rollout.last_model_status
+    if status is not None and (status in (401, 402, 429) or status >= 500):
+        return replace(rollout, reward=None, error=rollout.error or f"the final model call returned HTTP {status}")
+    if rollout.reward is None and not rollout.error:
+        return replace(rollout, error="the verifier returned no finite primary reward")
+    return rollout
+
+
 def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, start: str) -> TrajectorySample | None:
     """The sample of one rollout in ``group``, or None when it has no calls, an aborted call, or does not assemble.
 
     Each call sampled the weights ``start``, so each turn's record names ``start`` as its ``artifact_id``: the
-    turns of one rollout are one policy. A rollout that ran without a reward scores 0.
+    turns of one rollout are one policy. A rollout without a reward produces no sample.
     """
-    if not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
+    if rollout.reward is None or not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
         return None
     inferences = tuple(
         AgentRecord.create(
@@ -312,7 +322,7 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
         for turn in rollout.turns
     )
     try:
-        sample = assembly.assemble(inferences, rollout.reward or 0.0, source_id=rollout.rollout_id)
+        sample = assembly.assemble(inferences, rollout.reward, source_id=rollout.rollout_id)
     except ValueError:
         logger.warning("rollout %s of task %s does not assemble into a sample", rollout.rollout_id, group)
         return None
@@ -371,13 +381,14 @@ def run_train_tasks(
             model_adapter=model_adapter,
             task_images=task_images,
         )
-        rollouts = runner.run_rollouts(
+        completed = runner.run_rollouts(
             [
                 RolloutRequest(runner.harness, runner.policy_model, str(task.task_path))
                 for task in tasks
                 for _ in range(settings.rollouts_per_task)
             ]
         )
+    rollouts = [training_rollout(rollout) for rollout in completed]
     samples: list[TrajectorySample] = []
     tokens: list[RolloutTokens] = []
     left_out = 0
