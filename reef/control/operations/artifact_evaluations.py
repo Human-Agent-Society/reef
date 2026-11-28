@@ -125,7 +125,7 @@ MAX_STOPPED_EVALUATIONS = 1000
 #: The metadata of a rollout that a retry or a resume runs again once ``max_concurrent_rollouts`` lets it
 #: (``rollout_waits``).
 RETRY_WAIT_METADATA = "waits_for_retry"
-#: Marks a retry of a failure stop that left unstarted rollouts but no cancelled items.
+#: Number of rollouts left unstarted by a failure stop without cancelled items.
 RETRY_STOP_METADATA = "retry_stopped"
 #: The seconds between two reads of the queue's changes when nothing changed.
 RESULT_POLL_SECONDS = 0.2
@@ -865,7 +865,7 @@ class EvaluationResults:
         positions = range(held, min(total, held + free))
         if positions:
             item = self.queue.read(EVALUATIONS_QUEUE, first_id)
-            if item is None or item.metadata.get(RETRY_STOP_METADATA) is True:
+            if item is None or item.metadata.get(RETRY_STOP_METADATA):
                 return None
             first = EvaluationRollout.from_item(item)
             for position in positions:
@@ -905,8 +905,15 @@ class EvaluationResults:
             request = stored.request
             templates = self.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
             cancelled = [item for item in items if rollout_cancelled(item)]
-            retry_stopped = any(item.metadata.get(RETRY_STOP_METADATA) is True for item in items)
-            waits_for_resume = bool(cancelled) or retry_stopped
+            unstarted_at_stop = next(
+                (
+                    cast(int, item.metadata[RETRY_STOP_METADATA])
+                    for item in items
+                    if item.metadata.get(RETRY_STOP_METADATA)
+                ),
+                0,
+            )
+            waits_for_resume = bool(cancelled or unstarted_at_stop)
             ended = [item for item in items if rollout_ended(item) and not rollout_cancelled(item)]
             failed = sum(rollout_failed(item) for item in ended)
             total = len(request.task_names) * request.rollouts_per_task
@@ -933,7 +940,7 @@ class EvaluationResults:
             per_task = request.rollouts_per_task
             held = {(cast(int, item.payload["task_index"]), cast(int, item.payload["repeat"])) for item in items}
             missing = [position for position in range(total) if divmod(position, per_task) not in held]
-            waiting = 0 if retry_stopped else len(missing)
+            waiting = 0 if unstarted_at_stop else len(missing)
             retry_waiting = [item for item in items if rollout_waits(item)]
             if waiting > 0 or retry_waiting:
                 # An evaluation on e2b can have template items and no rollout yet; the task's first rollout is the
@@ -992,8 +999,10 @@ class EvaluationResults:
                 error = f"{FAILURE_STOP_PREFIX} the stop ended {len(cancelled)} rollouts, which wait for a resume"
             self.end(scenario, evaluation_id, request, result=None, error=error)
             return
-        if retry_stopped:
-            error = f"{FAILURE_STOP_PREFIX} {len(missing)} unstarted rollouts wait for a resume"
+        if unstarted_at_stop:
+            # An older marker was true and kept no count.
+            count = len(missing) if unstarted_at_stop is True else unstarted_at_stop
+            error = f"{FAILURE_STOP_PREFIX} {count} unstarted rollouts wait for a resume"
             self.end(scenario, evaluation_id, request, result=None, error=error)
             return
         rollouts = [EvaluationRollout.from_item(item) for item in items]
@@ -1425,7 +1434,7 @@ class ArtifactEvaluations:
                 )
             if resumes:
                 for item in items:
-                    if item.metadata.get(RETRY_STOP_METADATA) is True:
+                    if item.metadata.get(RETRY_STOP_METADATA):
                         self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_STOP_METADATA, False)
             elif (
                 stored.error is not None
@@ -1433,9 +1442,10 @@ class ArtifactEvaluations:
                 and len(items) < total
                 and not any(rollout_cancelled(item) for item in items)
             ):
-                # The first retained rollout carries the stop across reopening. The prefix scheduler
-                # reads this same item before admitting any unstarted rollout.
-                self.queue.write_metadata(EVALUATIONS_QUEUE, items[0].id, RETRY_STOP_METADATA, True)
+                # The prefix scheduler reads the first rollout before admission. A retried rollout must
+                # also retain the stop if queue retention removes an older completed item during the retry.
+                for item_id in dict.fromkeys(item.id for item in (items[0], *again)):
+                    self.queue.write_metadata(EVALUATIONS_QUEUE, item_id, RETRY_STOP_METADATA, total - len(items))
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             reopened = current.store.evaluations.reopen(evaluation_id) if ended else stored
