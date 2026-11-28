@@ -756,12 +756,14 @@ class EvaluationResults:
         )
         return tuple(sorted(found, key=lambda item: rollout_position(item.id)))
 
-    def templates(self, evaluation_id: str, scenario: str) -> dict[int, WorkItem]:
+    def templates(self, evaluation_id: str, scenario: str, *, payload: bool = True) -> dict[int, WorkItem]:
         """The template items of one evaluation (``template_work``), by task index. Only an evaluation on e2b has
-        them."""
+        them. Each item ID contains its task index, including when the caller omits payloads."""
         prefix = template_item_id(evaluation_id, 0).rsplit(":", 1)[0] + ":"
-        found = self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=TASK_TEMPLATE_KIND, id_prefix=prefix)
-        return {cast(int, item.payload["task_index"]): item for item in found}
+        found = self.queue.items(
+            EVALUATIONS_QUEUE, scenario=scenario, kind=TASK_TEMPLATE_KIND, id_prefix=prefix, payload=payload
+        )
+        return {int(item.id.rsplit(":", 1)[1]): item for item in found}
 
     def read_results(self) -> None:
         """Fail the evaluations whose rollouts the queue lost (``fail_stopped``), then end each evaluation whose
@@ -829,12 +831,7 @@ class EvaluationResults:
         """
         request = stored.request
         per_task = request.rollouts_per_task
-        if (
-            request.environment == "e2b"
-            or request.max_failed_fraction is not None
-            or len(request.task_names) > 100_000
-            or per_task > 100_000
-        ):
+        if len(request.task_names) > 100_000 or per_task > 100_000:
             return None
         evaluation_id = stored.evaluation_id
         first_id = rollout_item_id(evaluation_id, 0, 0)
@@ -848,11 +845,17 @@ class EvaluationResults:
         if not counts or "failed" in counts or any(marked for _, _, marked in counts.values()):
             return None
         held = sum(count for count, _, _ in counts.values())
-        active = held - counts.get("finished", (0, "", False))[0]
+        finished = counts.get("finished", (0, "", False))[0]
+        active = held - finished
         total = len(request.task_names) * per_task
+        # A finished item can hold a failed score. Read its result once the failure check can stop the evaluation.
+        if request.max_failed_fraction is not None and finished >= min(FAILURE_CHECK_ROLLOUTS, total):
+            return None
         started = bool(counts.keys() & {"assigned", "running"})
-        if held == total:
-            return started if active else None
+        if held == total and active and (request.environment != "e2b" or started or stored.state == "running"):
+            return started
+        if held == total or request.environment == "e2b":
+            return None
         # A retained prefix has exactly one item per position through the largest ID.
         if held > total or max(largest for _, largest, _ in counts.values()) != rollout_item_id(
             evaluation_id, *divmod(held - 1, per_task)
@@ -899,9 +902,22 @@ class EvaluationResults:
                 return
             # Read under the lock: a retry changes the evaluation and its rollouts under it, and rollouts read
             # before it would count as failed again.
-            items = self.rollouts(evaluation_id, scenario)
             request = stored.request
-            templates = self.templates(evaluation_id, scenario) if request.environment == "e2b" else {}
+            # Only the shared rollout inputs need a payload. Retention can remove the first item, in which case
+            # the first remaining rollout or template supplies those inputs as before.
+            # Older requests can lack task names. Read those names and their scores from the same queue rows.
+            if request.task_names:
+                rollout_seed = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, 0, 0))
+                if rollout_seed is None and request.environment == "e2b":
+                    seed = self.queue.read(EVALUATIONS_QUEUE, template_item_id(evaluation_id, 0))
+                else:
+                    seed = rollout_seed
+            else:
+                seed = None
+            items = self.rollouts(evaluation_id, scenario, payload=seed is None)
+            templates = (
+                self.templates(evaluation_id, scenario, payload=seed is None) if request.environment == "e2b" else {}
+            )
             cancelled = [item for item in items if rollout_cancelled(item)]
             ended = [item for item in items if rollout_ended(item) and not rollout_cancelled(item)]
             failed = sum(rollout_failed(item) for item in ended)
@@ -927,14 +943,14 @@ class EvaluationResults:
             # Each rollout has a fixed ID, so two settles at once add it once. The rollouts to add are those that the
             # queue does not hold, in task and repeat order.
             per_task = request.rollouts_per_task
-            held = {(cast(int, item.payload["task_index"]), cast(int, item.payload["repeat"])) for item in items}
+            held = {rollout_position(item.id) for item in items}
             missing = [position for position in range(total) if divmod(position, per_task) not in held]
             waiting = len(missing)
             retry_waiting = [item for item in items if rollout_waits(item)]
             if waiting > 0 or retry_waiting:
                 # An evaluation on e2b can have template items and no rollout yet; the task's first rollout is the
                 # payload of its template item.
-                first = EvaluationRollout.from_item(items[0] if items else next(iter(templates.values())))
+                first = EvaluationRollout.from_item(seed or (items[0] if items else next(iter(templates.values()))))
                 # A rollout that requires prepared templates also waits for its task's template item, which a retry
                 # or a resume queued again. A task whose item the queue no longer holds lets its rollouts go: the
                 # worker then fails them, with that reason.
@@ -943,7 +959,7 @@ class EvaluationResults:
                     if first.requires_prepared_templates
                     else set()
                 )
-                ready = [item for item in retry_waiting if cast(int, item.payload["task_index"]) not in building]
+                ready = [item for item in retry_waiting if rollout_position(item.id)[0] not in building]
                 # A retry or a resume can remove the limit while rollouts wait: then each one goes to the queue.
                 limit = request.max_concurrent_rollouts
                 free = waiting + len(retry_waiting) if limit is None else limit - sum(not item.final for item in items)
@@ -988,8 +1004,12 @@ class EvaluationResults:
                 error = f"too many rollouts failed: the stop ended {len(cancelled)} rollouts, which wait for a resume"
             self.end(scenario, evaluation_id, request, result=None, error=error)
             return
-        rollouts = [EvaluationRollout.from_item(item) for item in items]
-        names = list(dict.fromkeys(rollout.task_name for rollout in rollouts))
+        first = EvaluationRollout.from_item(seed or items[0])
+        if request.task_names:
+            names = list(dict.fromkeys(request.task_names[rollout_position(item.id)[0]] for item in items))
+        else:
+            # An evaluation without accepted task names gets them from the retained rollout payloads.
+            names = list(dict.fromkeys(EvaluationRollout.from_item(item).task_name for item in items))
         scores = [
             (
                 RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
@@ -998,9 +1018,7 @@ class EvaluationResults:
             )
             for item in items
         ]
-        result = PolicyEvaluation(
-            rollouts[0].policy_harness(), rollouts[0].model, RolloutScores.by_task(names, scores)
-        )
+        result = PolicyEvaluation(first.policy_harness(), first.model, RolloutScores.by_task(names, scores))
         self.end(scenario, evaluation_id, request, result=result, error=None)
 
     def end(
