@@ -333,6 +333,25 @@ def test_pack_preserves_a_concurrent_trajectory_replacement(open_store, monkeypa
         assert store.read("acme", "t").content == replacement.content
 
 
+def test_merging_small_segments_counts_only_the_items_still_at_their_old_locations(open_store, tmp_path, monkeypatch):
+    with closing(open_store()) as store:
+        for item_id in ("first", "second"):
+            store.create("acme", [trajectory(item_id, "original")])
+        sizes = [path.stat().st_size for path in segment_files(tmp_path)]
+        monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", sum(sizes))
+        monkeypatch.setattr(sql_data, "PACK_BYTES", sum(sizes) - len(sizes))
+        write = store.write_segment
+
+        def delete_before_publish(partition, lines):
+            places = write(partition, lines)
+            assert store.delete("acme", "first")
+            return places
+
+        monkeypatch.setattr(store, "write_segment", delete_before_publish)
+        assert store.merge_small_segments("acme") == 1
+        assert store.read("acme", "second").content == trajectory("second", "original").content
+
+
 def test_failed_segment_sync_leaves_no_staged_file(tmp_path, monkeypatch):
     import os
 
@@ -349,18 +368,30 @@ def test_failed_segment_sync_leaves_no_staged_file(tmp_path, monkeypatch):
     assert list(target.parent.iterdir()) == []
 
 
-def test_create_refuses_a_staged_segment_that_cleanup_reclaimed(open_store, monkeypatch):
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_create_refuses_a_staged_segment_that_cleanup_reclaimed(open_store, monkeypatch, interrupted):
     with closing(open_store()) as store:
         write = store.write_segment
 
         def reclaim_before_publish(partition, lines):
             places = write(partition, lines)
-            assert store.delete_unused_segments() == 1
+            if interrupted:
+                remove = partition.store.delete
+
+                def unlink_then_fail(owner, segment_id):
+                    remove(owner, segment_id)
+                    raise OSError("interrupted after unlink")
+
+                monkeypatch.setattr(partition.store, "delete", unlink_then_fail)
+                with pytest.raises(OSError, match="after unlink"):
+                    store.delete_unused_segments()
+            else:
+                assert store.delete_unused_segments() == 1
             return places
 
         monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
         monkeypatch.setattr(store, "write_segment", reclaim_before_publish)
-        with pytest.raises(SegmentNotFoundError, match="reclaimed"):
+        with pytest.raises(SegmentNotFoundError):
             store.create("acme", [trajectory("t", "A")])
         assert store.read("acme", "t") is None
 
@@ -380,8 +411,9 @@ def test_cleanup_waits_for_a_postgres_reader_of_a_replaced_segment(postgres_conf
         read = segments.read
 
         def paused_read(partition, lines):
-            selected.set()
-            assert fetch.wait(10)
+            if not selected.is_set():
+                selected.set()
+                assert fetch.wait(10)
             return read(partition, lines)
 
         a, b = trajectory("t", "A"), trajectory("t", "B")

@@ -919,7 +919,11 @@ class SQLDataStore(DataStore):
         return TrajectoryNodes(ScopedTable(self.nodes_table, {"owner": owner}), self.partition(owner))
 
     def check_segments(self, connection: Connection, owner: str, segment_ids: Iterable[str]) -> None:
-        """Keep the catalog entries until commit. A writer must retry if cleanup already reclaimed a segment."""
+        """Keep each staged file available until its publication commits.
+
+        Cleanup can unlink a file and then lose its database transaction. Its catalog entry survives that rollback.
+        Check one byte of each file while holding the row locks that exclude cleanup.
+        """
         segment = self.segment_table
         for batch in batches(sorted(set(segment_ids))):
             held = connection.scalars(
@@ -931,6 +935,9 @@ class SQLDataStore(DataStore):
             missing = set(batch).difference(held)
             if missing:
                 raise SegmentNotFoundError(f"segment {min(missing)!r} of {owner!r} was reclaimed before publication")
+            if self.segments is None:
+                raise ReefError("a segment pointer needs a segment store")
+            self.segments.read(owner, [SegmentLine(segment_id, 0, 1) for segment_id in batch])
 
     def write_segment(self, partition: SegmentPartition, lines: Sequence[str]) -> tuple[SegmentLine, ...]:
         """Write ``lines`` as a new segment of ``partition``, and return the place of each line.
@@ -947,7 +954,14 @@ class SQLDataStore(DataStore):
                 )
             )
         with self.transaction() as connection:
-            self.check_segments(connection, partition.partition, [segment_id])
+            segment = self.segment_table
+            staged = connection.scalar(
+                select(segment.c.segment_id)
+                .where(segment.c.owner == partition.partition, segment.c.segment_id == segment_id)
+                .with_for_update(read=True)
+            )
+            if staged is None:
+                raise SegmentNotFoundError(f"segment {segment_id!r} was reclaimed before its write")
             partition.store.write(partition.partition, segment_id, data)
         return places
 
@@ -2386,7 +2400,7 @@ class SQLDataStore(DataStore):
             with self.transaction() as connection:
                 self.check_segments(connection, owner, [places[0].segment_id])
                 # A row that another write moved meanwhile keeps its new place.
-                connection.execute(
+                moved += connection.execute(
                     update(items)
                     .where(
                         items.c.owner == owner,
@@ -2404,8 +2418,7 @@ class SQLDataStore(DataStore):
                         }
                         for row, place in zip(rows, places, strict=True)
                     ],
-                )
-            moved += len(rows)
+                ).rowcount
         return moved
 
     def maintain(self) -> None:
