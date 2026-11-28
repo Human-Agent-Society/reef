@@ -59,6 +59,7 @@ Layout validation precedes copying. Sources:
 
 - ``hf://org/model@revision``: Hugging Face snapshot; full 40-digit commit SHAs allow weight references below.
 - ``s3://bucket/prefix/``: prefix objects, excluding folder markers ending in ``/``.
+  Each object must map to a distinct file. For example, ``weights`` and ``./weights`` in the same prefix conflict.
 - ``file:///absolute/path``: service-local directory, percent-encoded as ``Path.as_uri()``; files are copied.
 - A scheme that ``storage.artifact-sources`` adds.
 
