@@ -79,10 +79,12 @@ class UpstreamLimit(Enum):
 
     Values: ``RATE`` is a limit that ends with time, so the same request can pass later unchanged. ``PAYMENT`` is a
     payment the provider requires for this request, so the same request does not pass again on its own. Each value is
-    also the error ``code`` with which the evaluation endpoint answers such a refusal.
+    also the error ``code`` with which the evaluation endpoint and the service's error translation answer such a
+    refusal.
 
     Purpose: ``reef.inference.http.upstream_limit`` makes it from a provider's reply. The evaluation endpoint sends a
-    call that ``RATE`` refused again, and sends no call again that ``PAYMENT`` refused.
+    call that ``RATE`` refused again, and sends no call again that ``PAYMENT`` refused. ``reef.api.errors`` relays it
+    to the caller of a service route as that error ``code``.
     """
 
     RATE = "rate_limit"

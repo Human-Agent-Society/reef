@@ -10,6 +10,7 @@ translate it, so the route answers HTTP 500.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 
@@ -103,12 +104,26 @@ def _translate_upstream(exc: UpstreamStatusError) -> web.HTTPError:
     attempt — and with the upstream's ``Retry-After`` wait, in whole seconds
     rounded up, when it named one. A 5xx is the upstream's own fault, not the
     caller's, so it becomes 502 rather than blaming the request.
+
+    A refusal that names an ``UpstreamLimit`` answers with the JSON body
+    ``{"error": {"message": ..., "code": <limit value>}}``. The status alone
+    does not carry the limit: a 403 refuses both a spending cap and a policy,
+    and a 402 can be a wait rather than a payment. The ``code`` is the one
+    that ``reef.evaluation.artifact_endpoint.refusal_limit`` reads back, so a
+    caller learns whether the same request can pass later. A refusal that
+    names no limit keeps the plain-text message it has always had.
     """
     if 400 <= exc.status < 500:
+        error_class = _UPSTREAM_CLIENT_ERRORS.get(exc.status, web.HTTPBadRequest)
         wait = exc.retry_after_seconds
         headers = None if wait is None else {"Retry-After": str(math.ceil(wait))}
-        return _UPSTREAM_CLIENT_ERRORS.get(exc.status, web.HTTPBadRequest)(text=str(exc), headers=headers)
-    return web.HTTPBadGateway(text=str(exc))
+    else:
+        error_class = web.HTTPBadGateway
+        headers = None
+    if exc.limit is None:
+        return error_class(text=str(exc), headers=headers)
+    body = json.dumps({"error": {"message": str(exc), "code": exc.limit.value}})
+    return error_class(text=body, content_type="application/json", headers=headers)
 
 
 def translate_error(exc: Exception) -> web.HTTPError | None:
