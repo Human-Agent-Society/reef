@@ -13,14 +13,14 @@ from tests.support.task_service_stubs import task_for
 from reef.artifact import SnapshotRef
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.tasks import write_harbor_task
-from reef.storage.commits import CommitRecord
-from reef.storage.data import DataStore, MemoryDataStore, NewItem
-from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.scenario import ScenarioStore
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.storage.data.store import DataStore, MemoryDataStore, NewItem
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.scenario.store import ScenarioStore
+from reef.storage.sql.data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql.postgres import PostgresScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 def trajectory(text: str, **fields) -> TrajectorySample:

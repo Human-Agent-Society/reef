@@ -7,12 +7,12 @@ from typing import Any
 
 from tests.support.stored_checkpoints import store_checkpoints
 
+from reef.control.scenario.factory import read_trainer_spec
+from reef.control.scenario.live_objects import LiveObjects
 from reef.recipe import Recipe
-from reef.scenario.factory import read_trainer_spec
-from reef.scenario.live_objects import LiveObjects
-from reef.storage.records import RecordStore
-from reef.storage.samples import TrainerSamples
-from reef.storage.tasks import TaskStorage
+from reef.storage.data.tasks import TaskStorage
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import TrainerSamples
 from reef.train import Trainer
 from reef.train.backend import ComponentArtifacts
 from reef.train.component import ScenarioRoot

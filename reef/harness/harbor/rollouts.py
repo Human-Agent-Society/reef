@@ -37,8 +37,9 @@ from reef_client.client import ReefClient, ReefClientError
 from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
+from reef.execution.sandbox.prepared_images import TaskImages
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-from reef.execution.sandbox.task_environment import environment_config
+from reef.execution.sandbox.task_environment import HarborEnvironmentConfig, environment_config
 from reef.harness.capture import CaptureObserver, CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
@@ -135,17 +136,24 @@ class ReefEvalLab(TaskLab):
 COMMAND_FILE = "command.json"
 
 
-def verifier_timed_out(trial_uri: str | None) -> bool:
-    """Whether Harbor's result file for a local trial records that its verifier ran past its timeout."""
+def trial_exception_type(trial_uri: str | None) -> str | None:
+    """The class name of the error that ended a local trial, as Harbor's result file records it; None for a trial
+    that ended without an error, for a trial that is not local, and for a trial with no result file."""
     if not trial_uri or not trial_uri.startswith("file://"):
-        return False
+        return None
     # The URI is percent-encoded (Path.as_uri), so a work dir with a space or a non-ASCII name needs decoding.
     result_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(trial_uri).path)) / "result.json"
-    # A trial whose harbor process was killed has no result file; its rollout stays unscored.
+    # A trial whose harbor process was killed has no result file.
     if not result_path.is_file():
-        return False
+        return None
     exception = json.loads(result_path.read_text(encoding="utf-8"))["exception_info"]
-    return exception is not None and exception["exception_type"] == "VerifierTimeoutError"
+    return None if exception is None else str(exception["exception_type"])
+
+
+def verifier_timed_out(trial_uri: str | None) -> bool:
+    """Whether Harbor's result file for a local trial records that its verifier ran past its timeout. A trial with no
+    result file stays unscored."""
+    return trial_exception_type(trial_uri) == "VerifierTimeoutError"
 
 
 def agent_command_exit(trial_uri: str | None) -> str:
@@ -320,7 +328,9 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     recorded rollout.
 
     ``builds_templates`` false makes each trial and each environment build of an ``e2b`` runner start only from
-    templates that exist (``environment_config``); a runner on another environment refuses it.
+    templates that exist (``environment_config``); a runner on another environment refuses it. ``task_images`` gives
+    each trial of an ``e2b`` runner the prepared images of its task (``TaskImages.for_task``), which only a trusted
+    caller gives; a runner on another environment refuses it.
     """
 
     def __init__(
@@ -345,6 +355,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         capture_observer: CaptureObserver | None = None,
         keeps_turns: bool = True,
         builds_templates: bool = True,
+        task_images: TaskImages | None = None,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -362,6 +373,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             raise TaskRolloutError("agent_host must be a non-empty host name or address")
         if not builds_templates and environment != "e2b":
             raise TaskRolloutError(f"only an e2b runner can refuse to build templates, not a {environment!r} runner")
+        if task_images is not None and environment != "e2b":
+            raise TaskRolloutError(f"only an e2b runner starts prepared images, not a {environment!r} runner")
         self.reef_url = reef_url.rstrip("/")
         self.scenario = scenario
         self.model = model
@@ -389,6 +402,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.concurrency = concurrency
         self.capture_observer = capture_observer
         self.builds_templates = builds_templates
+        self.task_images = task_images
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -426,11 +440,12 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         sandbox create can fail for a moment while the template is fine. When the second build fails too, no rollout
         of the task runs: each comes back as an infrastructure failure with the build's error. Docker needs no build
         first: Harbor builds one Docker image at a time. Two calls that run the same task at once can still build its
-        template together.
+        template together. A task with prepared images gets no build first (``builds_environment_first``).
 
         Raise ``ValueError`` before any rollout runs when a request names another harness or model than this
-        runner's, or a record directory: Harbor keeps each trial under ``work_dir``. Raise ``TaskRolloutError``
-        before any rollout runs when a request's task directory has no ``task.toml``.
+        runner's, a record directory, or a task that ``task_images`` does not list: Harbor keeps each trial under
+        ``work_dir``. Raise ``TaskRolloutError`` before any rollout runs when a request's task directory has no
+        ``task.toml``.
         """
         for request in requests:
             if request.harness != self.harness:
@@ -441,11 +456,14 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 raise ValueError("this runner keeps each trial under its work_dir, not in a request's record_dir")
             if not (Path(request.task) / "task.toml").is_file():
                 raise TaskRolloutError(f"{request.task} is not a Harbor task directory: no task.toml")
+            if self.task_images is not None:
+                # The lookup raises for a task that the images do not list, before any rollout or build starts.
+                self.task_images.for_task(Path(request.task))
         task_paths = [Path(request.task) for request in requests]
         builds = {
             task_path: asyncio.ensure_future(self.build_task_environment(task_path, slots))
             for task_path, count in Counter(task_paths).items()
-            if count > 1 and self.environment in REMOTE_TASK_ENVIRONMENTS
+            if count > 1 and self.builds_environment_first(task_path)
         }
 
         async def run_one(task_path: Path) -> TaskRollout:
@@ -468,16 +486,33 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
 
         return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
 
+    def trial_environment(self, task_path: Path) -> HarborEnvironmentConfig:
+        """The environment config of each trial and environment build of the task at ``task_path``: the time limits
+        of this runner's agent, its template rule, and the task's prepared images (``environment_config``)."""
+        return environment_config(
+            self.environment,
+            task_path,
+            self.agent,
+            builds_templates=self.builds_templates,
+            prepared_images=() if self.task_images is None else self.task_images.for_task(task_path),
+        )
+
+    def builds_environment_first(self, task_path: Path) -> bool:
+        """Whether the rollouts of the task at ``task_path`` wait for one environment build first
+        (``build_task_environment``): on a remote environment, for a task without prepared images. A prepared image
+        needs no build, and a rollout does not wait for an optional start of its environment. A task that
+        ``task_images`` does not list builds first, and its build fails (``trial_environment``)."""
+        if self.environment not in REMOTE_TASK_ENVIRONMENTS:
+            return False
+        return self.task_images is None or not self.task_images.has_images(task_path)
+
     async def build_task_environment(self, task_path: Path, slots: asyncio.Semaphore) -> str:
         """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try.
 
-        The build gets the environment config of the task's rollouts, which holds the time limits of this runner's
-        agent (``environment_config``).
+        The build gets the environment config of the task's rollouts (``trial_environment``).
         """
         error = ""
-        environment = environment_config(
-            self.environment, task_path, self.agent, builds_templates=self.builds_templates
-        )
+        environment = self.trial_environment(task_path)
         for _ in range(2):
             async with slots:
                 error = await self.lab.build_environment(task_path, overrides={"environment": environment})
@@ -515,11 +550,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
             # The environment config reads the agent's own time limits, so a cloud sandbox lives for them. They are
             # numbers, which bound_agent leaves as they are, so the task's build gets the same config.
-            overrides: dict[str, object] = {
-                "environment": environment_config(
-                    self.environment, task_path, self.agent, builds_templates=self.builds_templates
-                )
-            }
+            overrides: dict[str, object] = {"environment": self.trial_environment(task_path)}
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)

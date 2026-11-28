@@ -60,7 +60,8 @@ from recipes.beta.autoenvscaling.tinker import AutoEnvScalingTinkerObjective
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.pipeline_context import PipelineContext
+from reef.deploy.orchestrator import resolve_deployment_config
+from reef.deploy.service_config import service_config_from_mapping
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import (
@@ -69,11 +70,10 @@ from reef.recipe.generated_tasks.processor import (
     complete_generation_count,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
-from reef.record2sample.generator import DuplicateTaskError, GeneratorError, WrittenTask
-from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
-from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import service_config_from_mapping
+from reef.samples.context import PipelineContext
+from reef.samples.generator import DuplicateTaskError, GeneratorError, WrittenTask
+from reef.samples.generator.harbor import ORACLE_TIMEOUT_S
+from reef.samples.generator.inputs import TaskGenerationRequest
 from reef.train.tinker_backend.objectives import resolve_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
@@ -976,7 +976,7 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     assert config["generator"]["agent"] == rollout_agent
     kwargs = rollout_agent["kwargs"]
     # A training rollout that fills the context ends and is scored.
-    assert rollout_agent["import_path"] == "reef.record2sample.generator.terminus:VerifiedTerminus2"
+    assert rollout_agent["import_path"] == "reef.samples.generator.terminus:VerifiedTerminus2"
     # Each rollout's advantage is its reward minus its task's mean reward.
     objective = resolve_objective(config["recipe"]["config"]["job_parameters"]["objective"])
     assert isinstance(objective, AutoEnvScalingTinkerObjective)
@@ -1019,9 +1019,10 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     assert parameters["objective"] == "slime_dataset"
     assert options["advantage-estimator"] == "grpo" and options["disable-grpo-std-normalization"] is True
     assert int(options["n-samples-per-prompt"]) >= 2
-    # One job of buffer_size tasks is one Slime rollout and one optimizer step.
+    # One job of buffer_size tasks is one Slime rollout and one optimizer step; a job of fewer tasks would fill the
+    # rollout with its first tasks again.
     tasks = slime["pipeline"]["sample2job"]["config"]["buffer_size"]
-    assert int(options["rollout-batch-size"]) == tasks
+    assert int(options["rollout-batch-size"]) == tasks == slime["pipeline"]["sample2job"]["config"]["job_samples"]
     assert int(options["global-batch-size"]) == tasks * int(options["n-samples-per-prompt"])
     # The actor, the rollout engines and Reef's serving engine share one node, and the actor's parallel layout fits.
     actor = int(options["actor-num-gpus-per-node"])
@@ -1035,6 +1036,18 @@ def test_the_slime_example_trains_the_tinker_examples_agent_and_tasks_one_optimi
     window = slime["inference"]["options"]["context-length"]
     assert int(options["sglang-context-length"]) == int(options["rollout-max-context-len"]) == window
     assert int(options["rollout-max-response-len"]) == harbor["agent"]["kwargs"]["llm_kwargs"]["max_tokens"]
+
+
+@pytest.mark.unit
+def test_the_slime_example_trains_with_slimes_own_qwen35_loss() -> None:
+    options = yaml.safe_load((EXAMPLES / SLIME_EXAMPLE).read_text())["training"]["options"]
+    # REINFORCE with truncated importance sampling and score centering, each token weighing the same.
+    assert (options["loss-type"], options["pg-loss-type"]) == ("policy_loss", "reinforce")
+    assert options["use-tis"] is True and (float(options["tis-clip-low"]), float(options["tis-clip"])) == (0.0, 2.0)
+    assert options["use-score-centering"] is True and int(options["score-centering-top-k"]) == 128
+    assert options["calculate-per-token-loss"] is True
+    # Slime refuses get-mismatch-metrics with score centering; use-kl-loss with coef 0 only loads a reference model.
+    assert not {"get-mismatch-metrics", "use-kl-loss"} & options.keys()
 
 
 @pytest.mark.unit

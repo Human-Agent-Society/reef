@@ -1,207 +1,47 @@
 Scenario components
 ===================
 
-A recipe declares the components that every snapshot of a scenario binds, such
-as ``weights``, ``harness`` or ``config``. For each component, it says what
-kind of artifact the component holds, how Reef admits and imports it, and
-which files a client pulls. The scenario reads this declaration. The inference
-runtime loads the component of a weight kind, and a client pulls the component
-that has a file tree. Nothing in this declaration changes an inference
-request: the inference service forwards each request to the engine that
-``served_models`` names (see `Run the services in separate processes
-<../user-guide/operate.rst#run-the-services-in-separate-processes>`__).
+Components declare artifacts and their import, validation and client-file contracts.
+Most recipes use built-in ``weights`` or ``harness`` components.
 
-:For: recipe authors who declare a new component, and anyone reading ``reef/artifact/components.py``
-:Before you start: the ``ScenarioComponents`` fields from `Python API <../reference/python-api.rst#scenario-components>`__
-:You will have: what each field does, where Reef reads it, what the built-in recipes declare, and how to declare your own
+The declaration
+---------------
 
-Scope
------
+Override ``Recipe.build_components(scenario)`` to return ``ScenarioComponents``.
+Build declarations from configuration alone; every service loads them.
+Each ``ComponentSpec`` can provide:
 
-A recipe's components own the serving-side facts of its artifacts:
+- ``validator``: admit artifacts; the default accepts all.
+- ``layout``: import directories; omitted means no imports.
+- ``files``: expose a client file tree; omitted disables file routes.
+- ``kind``: artifact kind; ``model`` and ``model_adapter`` load into inference.
 
-- the admission check that runs before a component's artifact is stored;
-- the layout that an imported artifact must meet;
-- the kind of artifact, which decides whether the inference runtime loads it;
-- the file tree that a client pulls.
+At most one component loads weights and one exposes files.
+Invalid declarations raise ``ValueError``.
 
-They do not own producing or selecting a new artifact, storage or version
-identity, commit ordering, HTTP routing, or how a runtime loads weights. Those
-live in ``train/``, ``artifact/``, ``scenario/``, ``service/``, and
-``runtime/`` respectively.
+Declare components
+------------------
 
-Components
-----------
-
-``Recipe.build_components(scenario)`` returns a ``ScenarioComponents``. Its
-``components`` field maps each component name to a ``ComponentSpec``. The
-default is empty: the scenario records traffic only. At most one component
-has a weight kind (``model`` or ``model_adapter``), and at most one has a
-file tree.
-
-Each selected artifact keeps its own ``artifact_id``. ``Artifact.component``
-provides the view of one component. A snapshot of at most one component is
-flat; a snapshot of several components has one directory per component. That
-view does not create a new artifact identity.
-
-Publication admits the changed component and carries the others as previously
-admitted. Activation changes the complete scenario selection atomically and
-runs no check: every artifact was admitted when it was stored, and a stored
-artifact does not change. It does not publish a repository snapshot. The
-runtime loads a snapshot only when its loaded component changed. See the
-`state model <../advanced_topics/state-model.rst>`__ for ordering and recovery.
-
-Fields and where Reef reads them
---------------------------------
-
-+----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``ComponentSpec`` field          | Read in                             | Meaning                                                              |
-+==================================+=====================================+======================================================================+
-| ``validator``                    | ``train/job_queue.py``,             | Admit an artifact of the component before it is stored. Raising      |
-|                                  | ``scenario/committer.py``,          | fails the training job or refuses the import. The default accepts    |
-|                                  | ``scenario/factory.py``             | anything. See `Admission checks`_.                                   |
-+----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``layout``                       | ``scenario/committer.py``,          | Check an imported directory against the component's snapshot layout  |
-|                                  | ``scenario/factory.py``             | before admission. Without ``layout``, the component takes no import. |
-+----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``files``                        | ``service/request_service.py``      | Read the files a client pulls from the frozen snapshot. Without a    |
-|                                  |                                     | component with ``files``, harness file routes reject the scenario.   |
-+----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``kind``                         | ``scenario/binding.py``,            | The ``ArtifactKind`` of the component. A ``model`` or                |
-|                                  | ``scenario/scenario.py``,           | ``model_adapter`` component loads into the inference runtime         |
-|                                  | ``service/artifact_evaluations.py`` | (``activate_snapshot``). A kind also makes the component a side of an|
-|                                  |                                     | artifact evaluation. ``None`` declares no kind.                      |
-+----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-
-``activate_snapshot`` (``reef.scenario.binding``) calls the runtime's
-``InferenceRuntime.activate_checkpoint`` for the loaded component. The inference
-worker calls it for each selection that control queues, after the commit that
-makes the snapshot active. It then publishes the route that the runtime's
-``served_artifact`` reports for those weights. A snapshot without a loaded
-component gets no activation, and its route identifies no weights (see
-`Routes that bind no weights <executors.rst#routes-that-bind-no-weights>`__).
-Without a runtime, moving the head is enough.
-
-The scenario owns lifecycle ordering and admission; the service owns
-transport. The components supply only the facts at these sites.
-
-Built-in recipes
-----------------
-
-+-------------------------------+-------------+---------------------------------+----------------------------+------------------+
-| Recipe                        | Component   | Kind                            | Layout                     | Files            |
-+===============================+=============+=================================+============================+==================+
-| ``Recipe``                    | none        |                                 |                            |                  |
-+-------------------------------+-------------+---------------------------------+----------------------------+------------------+
-| ``WeightTrainingRecipe``      | ``weights`` | the runtime's                   | ``TrainingArtifactLayout`` | none             |
-|                               |             | ``served_weight_kind``          |                            |                  |
-+-------------------------------+-------------+---------------------------------+----------------------------+------------------+
-| ``HarnessEvolutionRecipe``    | ``harness`` | ``harness_plugin``              | ``HarnessLayout``          | ``HarnessFiles`` |
-+-------------------------------+-------------+---------------------------------+----------------------------+------------------+
-| ``CompositeRecipe``           | one per     | each recipe's                   | each recipe's              | each recipe's    |
-|                               | recipe      |                                 |                            |                  |
-+-------------------------------+-------------+---------------------------------+----------------------------+------------------+
-
-**Weights.** ``InferenceRuntime.activate_checkpoint`` makes the runtime serve
-a published snapshot, and returns the runtime load ID of that load (see
-`What a runtime implements <executors.rst#what-a-runtime-implements>`__).
-The runtime load ID stays inside the runtime: each record names the artifact
-that answered by its ``artifact_id`` (see `HTTP API
-<../reference/http-api.rst#artifact-of-a-recorded-response>`__).
-
-**Per-scenario adapters.** When the runtime serves one PEFT adapter per
-scenario (``InferenceRuntime.per_scenario_adapters``), ``activate_snapshot``
-passes the scenario name to ``activate_checkpoint``. The runtime serves the
-scenario's adapter revision under its own model name
-(``InferenceRuntime.served_model_name``), and the inference worker writes that
-name to the scenario's row in ``served_models``, so every request reaches
-that revision. After a restart, each scenario's snapshot loads again under a new runtime load
-ID. ``adapter_name(scenario, runtime_load_id)`` in ``reef.inference.residency``
-names a revision on the engine, and ``parse_adapter_name`` inverts it, so a
-recorded ``lora_path`` names exactly one (scenario, revision). The serving
-runtime owns one ``AdapterResidencyManager``, which keeps at most
-``adapter_capacity`` adapters loaded. It evicts a leaked adapter first, then
-the oldest-activated adapter that is no scenario's current one.
-
-**Harness file trees.** ``HarnessFiles`` (``reef.harness.sync``) serves each
-snapshot of the ``harness`` component. A snapshot stores the harness source
-tree, and a read renders it for the descriptor's adapter without a model
-binding, so the client gets the files its agent reads and binds its own model.
-``GET /reef/harness?form=source`` reads the stored source tree instead (see
-`Rendering <harness-adapters.rst#rendering>`__).
-
-Declaring components
---------------------
-
-A recipe returns a ``ScenarioComponents`` from ``build_components``:
+This recipe exposes text files:
 
 .. code:: python
 
-   from reef.artifact import ArtifactValidator
    from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
-
-
-   class PromptValidator(ArtifactValidator):
-       def validate(self, artifact):
-           validate_prompt_artifact(artifact)
+   from reef.recipe import Recipe
 
 
    class PromptRecipe(Recipe):
        def build_components(self, scenario: str) -> ScenarioComponents:
-           prompt = ComponentSpec(validator=PromptValidator(), files=TextFileTree())
-           return ScenarioComponents({"prompt": prompt})
+           return ScenarioComponents({"prompt": ComponentSpec(files=TextFileTree())})
 
-A recipe whose scenario serves two components declares both. A step then
-publishes one of them, naming it in ``TrainingCommit.component``, and the
-committer carries the other forward from the previous checkpoint:
-
-.. code:: python
-
-   class AgentRecipe(Recipe):
-       def build_components(self, scenario: str) -> ScenarioComponents:
-           return ScenarioComponents(
-               {
-                   "weights": ComponentSpec(kind="model_adapter"),
-                   "harness": ComponentSpec(files=TextFileTree()),
-               }
-           )
-
-The root snapshot of such a scenario keeps one directory per component
-(``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
-maps each component name to an existing flat recipe. Reef builds exactly
-this from the mapping, and runs each recipe's trainer as its own worker; see `configuration
-<../reference/configuration.rst#recipe-configuration>`__ for its layout.
+Add ``ArtifactValidator`` and ``ArtifactLayout`` for validation and imports.
+See the `component contracts <../../reef/artifact/components.py>`__.
+Composite commits replace one component while preserving the others and their IDs.
 
 Admission checks
 ----------------
 
-A validator reads the files of one artifact of its component, in a local
-directory, and raises ``ValueError`` or a ``ReefError`` that names what does
-not hold. The process that holds the files for its own work runs it once,
-before the artifact is stored:
-
-- the training service runs it on each checkpoint of a training job. A refused
-  checkpoint is not stored, and its job fails with the validator's message;
-  the samples of the job count as trained, as for any failed job;
-- control runs it on an import, on a person's synced tree and on the artifact
-  item that starts a scenario, since it copies those files. A refused import
-  returns HTTP 400.
-
-Activation, restore, serving and a train-from run no check, so no process
-fetches files to check them again. A check therefore applies to artifacts
-stored after it was configured. A snapshot of several components has no check
-of its own (``ScenarioComponents.validator`` is ``AcceptAnyArtifact``): each
-component is checked alone.
-
-Remote weight snapshots
------------------------
-
-What ``activate_checkpoint(artifact)`` does depends on the runtime. The
-saved-weight serving runtimes (``reef.inference.serving``) load the snapshot's
-files into the engines, and a generic proxy runtime refuses the activation.
-A runtime that serves immutable remote snapshots validates the checkpoint and
-binds its remote sampler. Tinker's inference runtime does this, so it serves
-the authoritative artifact before the scenario serves requests. The training
-component does not read the head: the next job starts from the trainer's
-committed start, and after a ``train-from`` the training service imports the
-snapshot into the component with ``import_start``.
+Validators read one component directory and raise ``ValueError`` or ``ReefError`` on refusal.
+Invalid checkpoints fail their job; samples remain consumed.
+Invalid imports, synced trees and starting artifacts return HTTP 400.
+Previously stored artifacts are not revalidated during activation, restore, serving or train-from.

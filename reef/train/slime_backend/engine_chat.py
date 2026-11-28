@@ -14,8 +14,10 @@ import urllib.request
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
+from reef.core.values import JsonValue
 from reef.train.task_rollouts import CHAT_COMPLETIONS_PATH, RolloutChat
 
 #: The OpenAI chat sampling options that the engines take, and SGLang's name of each.
@@ -54,7 +56,7 @@ class TrialEngineChat(RolloutChat):
     """
 
     chat: EngineChat
-    sampling_params: Mapping[str, Any]
+    sampling_params: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
         if not isinstance(self.chat, EngineChat) or not isinstance(self.sampling_params, Mapping):
@@ -62,6 +64,7 @@ class TrialEngineChat(RolloutChat):
         limit = self.sampling_params.get("max_new_tokens")
         if limit is not None and (type(limit) is not int or limit <= 0):
             raise ValueError("Trial max_new_tokens must be a positive integer or None.")
+        object.__setattr__(self, "sampling_params", MappingProxyType(dict(self.sampling_params)))
 
     def answer(self, path: str, payload: Any) -> tuple[int, Mapping[str, Any]]:
         return self.chat.answer(path, payload, sampling_params=self.sampling_params)
@@ -157,13 +160,15 @@ class EngineChat(RolloutChat):
     ) -> tuple[int, Mapping[str, Any]]:
         if path != CHAT_COMPLETIONS_PATH:
             return 404, {"error": {"message": f"no route {path}"}}
+        trial = dict(sampling_params or {})
+        trial_limit = trial.pop("max_new_tokens", None)
         try:
-            messages, sampling, template_kwargs = chat_request(payload)
+            messages, sampling, template_kwargs = chat_request(
+                payload, default_max_tokens=trial_limit if trial_limit is not None else DEFAULT_MAX_TOKENS
+            )
         except ValueError as exc:
             return 400, {"error": {"message": str(exc)}}
         sampling.update(self.distribution)
-        trial = dict(sampling_params or {})
-        trial_limit = trial.pop("max_new_tokens", None)
         sampling.update(
             {name: value for name, value in trial.items() if value is not None and (name != "stop" or value)}
         )
@@ -217,7 +222,9 @@ class EngineChat(RolloutChat):
         }
 
 
-def chat_request(payload: Any) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]]:
+def chat_request(
+    payload: Any, *, default_max_tokens: int = DEFAULT_MAX_TOKENS
+) -> tuple[list[dict[str, str]], dict[str, Any], dict[str, Any]]:
     """The messages, SGLang sampling parameters and chat template options of an OpenAI text chat request.
 
     Raise ``ValueError`` for a request outside text system, user and assistant messages, with another option,
@@ -241,7 +248,7 @@ def chat_request(payload: Any) -> tuple[list[dict[str, str]], dict[str, Any], di
         )
     ):
         raise ValueError("the rollout engines answer non-empty text system, user and assistant messages")
-    maximum = payload.get("max_completion_tokens", payload.get("max_tokens", DEFAULT_MAX_TOKENS))
+    maximum = payload.get("max_completion_tokens", payload.get("max_tokens", default_max_tokens))
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
         raise ValueError("max_tokens must be a positive int")
     sampling = {"max_new_tokens": maximum}
