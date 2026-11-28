@@ -5,7 +5,7 @@ from __future__ import annotations
 from tests.support.records import inference
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.record2sample.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
+from reef.samples.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
 from reef.train.types import TrajectorySample
 
 TASK = {"name": "openenv-00012-003-deduction", "path": "/tasks/openenv-00012-003-deduction", "digest": "ab" * 32}

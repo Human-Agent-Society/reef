@@ -25,7 +25,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     says in the backend's own shape: ``objective``, a dotted reference to a method
     that the deployment provides, and the rollouts (``rollout`` on Tinker, ``harbor``
     on Slime). The recipe requires both: the deployment's training component checks them
-    (``reef.scenario.live_objects.check_recipe_objects``).
+    (``reef.control.scenario.live_objects.check_recipe_objects``).
 
     Enabled rounds save each task and its train/eval split in the scenario's task store before their rollouts run.
     Eval tasks stay in the store without rollouts or training feedback.

@@ -41,8 +41,8 @@ from reef.recipe.generated_tasks.training import (
     sample_use_index,
     task_item,
 )
-from reef.storage.samples import StoredSample, TrainerSamples
-from reef.storage.tasks import TaskStore
+from reef.storage.data.tasks import TaskStore
+from reef.storage.scenario.samples import StoredSample, TrainerSamples
 
 logger = logging.getLogger(__name__)
 

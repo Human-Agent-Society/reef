@@ -21,7 +21,7 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.tree import HarnessTree, validate_tree
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.train.component import ScenarioRoot, TrainingBackendFacts
 from reef.train.harness_backend.settings import HarnessSettings
 

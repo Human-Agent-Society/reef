@@ -20,8 +20,9 @@ A sandbox carries its deployment as ``owner``; a Reef that stopped mid run never
 process starts its first sandbox it stops the ones its deployment left (:meth:`RemoteExecutor.reap_once`), and
 never another deployment's.
 
-A provider module (:mod:`reef.execution.sandbox.e2b`, :mod:`reef.execution.sandbox.modal`) implements the sandbox's start, its file and
-command primitives, and the launch of one process. :mod:`reef.execution.sandbox.config` selects a provider for an
+A provider's executor module (:mod:`reef.execution.sandbox.e2b.executor`,
+:mod:`reef.execution.sandbox.modal.executor`) implements the sandbox's start, its file and command
+primitives, and the launch of one process. :mod:`reef.execution.sandbox.config` selects a provider for an
 executor, and :mod:`reef.execution.sandbox.task_environment` names the Harbor task environments.
 """
 
@@ -476,6 +477,20 @@ class RemoteSession(ProgramExecutor):
         self.closed = True
 
 
+def loopback_url(port: int, target: object) -> str:
+    """The URL of the request target ``target`` on this host's loopback port ``port``.
+
+    ``target`` is the request target that a sandbox's relay recorded, so the sandbox chooses it. A target in origin
+    form, text that starts with ``/``, names a path of the port. Any other target changes the URL's host:
+    ``@host/`` makes ``127.0.0.1:<port>`` the user information of a URL of ``host``, and the request would leave this
+    host for an address that only the Reef host reaches. Raise ``ValueError`` for a target that is not text starting
+    with ``/``.
+    """
+    if not isinstance(target, str) or not target.startswith("/"):
+        raise ValueError(f"the relayed request target {target!r} is not a path of the Reef host's port")
+    return f"http://127.0.0.1:{port}{target}"
+
+
 class TunnelPump:
     """Answer the relay's requests from the Reef host: poll ``/next``, send each to the local port, stream the
     answer back as ``/reply`` pieces. Runs its own event loop on a thread.
@@ -484,7 +499,8 @@ class TunnelPump:
     ``tunnel_headers`` and the relay's ``secret`` in :data:`RELAY_SECRET_HEADER`. In ``tunnel_headers``, each name
     is an HTTP token and each value visible ASCII text (:data:`HEADER_VALUE`). No two names are equal ignoring case,
     and no name is :data:`RELAY_SECRET_HEADER`. The constructor raises ``ValueError`` for other headers; its message
-    names a header and never its value.
+    names a header and never its value. ``taken`` holds the IDs of the requests that the pump took: the relay gives
+    a request out again when no reply piece comes in time, and the pump answers each ID once.
     Purpose: :meth:`RemoteSession.forward` makes one for each forwarded port. Each request to the relay (``/ready``,
     ``/next``, ``/reply``) carries ``headers`` and never follows a redirect: a redirect fails the request, so no
     header reaches another address. A request to the local port carries only the headers that the sandbox's process
@@ -515,6 +531,7 @@ class TunnelPump:
         self.url = url
         self.port = port
         self.pollers = pollers
+        self.taken: set[str] = set()
         self.headers = {**(tunnel_headers or {}), RELAY_SECRET_HEADER: secret}
         self.ready = threading.Event()
         self.failure: str | None = None
@@ -582,6 +599,9 @@ class TunnelPump:
             except Exception:
                 await asyncio.sleep(1)
                 continue
+            if request["id"] in self.taken:
+                continue
+            self.taken.add(request["id"])
             await self.serve(tunnel, local, request)
 
     async def serve(self, tunnel: ClientSession, local: ClientSession, request: Mapping[str, Any]) -> None:
@@ -628,9 +648,15 @@ class TunnelPump:
         body = base64.b64decode(request.get("body") or "")
         head: dict[str, Any] | None = None
         try:
+            try:
+                url = loopback_url(self.port, request.get("path") or "/")
+            except ValueError as refused:
+                error = base64.b64encode(str(refused).encode()).decode()
+                await send({"status": 400, "headers": {"Content-Type": "text/plain"}, "data": error, "end": True})
+                return
             async with local.request(
                 str(request.get("method") or "GET"),
-                f"http://127.0.0.1:{self.port}{request.get('path') or '/'}",
+                url,
                 headers=headers,
                 data=body or None,
                 timeout=ClientTimeout(total=None, sock_read=3600),
@@ -664,6 +690,7 @@ __all__ = [
     "RemoteSession",
     "TunnelPump",
     "deployment_owner",
+    "loopback_url",
     "pack",
     "probe_command",
     "protected_command",

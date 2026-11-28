@@ -51,10 +51,10 @@ from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import ConfigReader, reader_field, section_field
 from reef.recipe.errors import RecipeConfigError
-from reef.record2sample.traces import TraceSamples
-from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.samples.traces import TraceSamples
 from reef.train.harness_backend.settings import EvolutionSettings, HarnessSettings, configured_tasks
 from reef.train.pipeline import PipelineSettings, PipelineSpec
+from reef.train.sample2job.traces import TraceJobData, TrainTaskJobData
 
 
 @dataclass(frozen=True)
@@ -175,11 +175,11 @@ class HarnessEvolutionRecipe(Recipe):
     runtime names none. The recipe builds no method, scorer, executor or
     agent: ``HarnessTrainingComponent`` builds them from ``harness_settings``.
     The recipe holds no runtime, no served endpoint and no training
-    component: the process holds them (``reef.scenario.live_objects.LiveObjects``).
+    component: the process holds them (``reef.control.scenario.live_objects.LiveObjects``).
     The model under test is that runtime
-    (``reef.scenario.live_objects.harness_models``), and the service builds
+    (``reef.control.scenario.live_objects.harness_models``), and the service builds
     the training component that runs the jobs
-    (``reef.service.assembly.with_harness_components``).
+    (``reef.api.assembly.with_harness_components``).
     Purpose: a deployment names it as its recipe; the service loads it once
     from the deployment config, and the scenario factory builds each
     scenario's trainer (``reef.train.trainer_builder.build_trainers``), which

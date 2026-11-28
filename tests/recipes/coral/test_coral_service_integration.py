@@ -1,6 +1,6 @@
 """End-to-end: adapter -> real reef service -> receipt -> journal -> report.
 
-The reef service is real (``reef.service.app.create_app`` with a stub
+The reef service is real (``reef.api.app.create_app`` with a stub
 inference backend, exactly as reef's own service tests build it); the
 middleware forwards to it over real HTTP. What LiteLLM would contribute in
 production — an opaque proxy hop — is the pass-through the shim reproduces.
@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-reef_service = pytest.importorskip("reef.service.app", reason="requires a reef checkout")
+reef_service = pytest.importorskip("reef.api.app", reason="requires a reef checkout")
 
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
@@ -25,13 +25,13 @@ from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
 from recipes.beta.coral.reporter import AttemptReport
 from reef.artifact import InMemoryRepositoryBackend
-from reef.dispatcher import Dispatcher
+from reef.control.dispatcher import Dispatcher
+from reef.control.scenario.live_objects import LiveObjects
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
-from reef.scenario.live_objects import LiveObjects
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class _EchoBackend(InferenceHandler):

@@ -1,0 +1,242 @@
+"""Storage boundary for a scenario's records, commits, settings, tasks, training state, evaluations, and recovery.
+
+Artifact publication remains the responsibility of the committer. A
+store settles record consumption and the committed scenario state together;
+implementations may use a database transaction or a recoverable journal.
+"""
+
+from __future__ import annotations
+
+import json
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Self
+
+from reef.core.errors import ReefError
+from reef.core.plugins import Plugin
+from reef.core.serving_config import ServingConfig
+from reef.storage.data.store import DataStore, check_owner
+from reef.storage.data.tasks import TaskFileStore, TaskStorage
+from reef.storage.scenario.commits import CommitRecord, CommitSnapshots
+from reef.storage.scenario.evaluations import EvaluationStore
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import SampleStore, TrainingState
+
+
+class ScenarioStoreConflictError(ReefError):
+    """A commit's expected commit number or content conflicts with the stored history."""
+
+
+@dataclass(frozen=True)
+class ScenarioSettings:
+    """The settings of one scenario, kept with its records and commits.
+
+    ``training_mode`` is the selected mode (``None`` selects the recipe's
+    default). ``artifact_evaluation`` is the
+    ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
+    artifact with (``None`` evaluates none). ``activation`` is the scenario's
+    own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
+    ``None`` follows the deployment's ``activation`` section. The scenario
+    registry checks the rule before it stores it. ``owner`` is the data store
+    owner whose items the scenario uses (RFC #1028), a name that passes
+    ``check_owner``. It is ``None`` only for a scenario that the data sync has
+    not opened yet; the first open sets it. ``serving_config`` is the serving fields that the scenario sets over
+    the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
+    ``serves`` is a boolean. When it is true, control asks inference to serve the scenario's active selection and
+    the artifacts beside it. When it is false, the scenario serves nothing: control withdraws its routes, and no
+    artifact answers its inference requests. ``record2sample_config`` maps the name of a component of the scenario
+    to a JSON object. Each key of that object replaces the same key of the deployment's
+    ``pipeline.record2sample.config`` for the trainer of that component. An empty mapping changes no trainer.
+    Construction checks these types, and keeps its own copies of ``record2sample_config``.
+
+    Purpose: the scenario registry and the dispatcher write the settings
+    through ``ScenarioStorage.write_settings`` and read them back when a
+    scenario loads.
+    """
+
+    training_mode: str | None = None
+    artifact_evaluation: Mapping[str, object] | None = None
+    activation: Mapping[str, object] | None = None
+    owner: str | None = None
+    serving_config: ServingConfig = field(default_factory=ServingConfig)
+    serves: bool = True
+    record2sample_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.training_mode is not None and not isinstance(self.training_mode, str):
+            raise ValueError("scenario settings training_mode must be a string or null")
+        if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
+            raise ValueError("scenario settings artifact_evaluation must be an object or null")
+        if self.activation is not None and not isinstance(self.activation, Mapping):
+            raise ValueError("scenario settings activation must be an object or null")
+        if self.owner is not None:
+            check_owner(self.owner)
+        if not isinstance(self.serving_config, ServingConfig):
+            raise ValueError("scenario settings serving_config must be a ServingConfig")
+        if not isinstance(self.serves, bool):
+            raise ValueError("scenario settings serves must be a boolean")
+        configs = self.record2sample_config
+        if not isinstance(configs, Mapping) or not all(
+            isinstance(component, str) and component and isinstance(config, Mapping)
+            for component, config in configs.items()
+        ):
+            raise ValueError("scenario settings record2sample_config maps component names to objects")
+        try:
+            copied = json.loads(json.dumps(configs, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"scenario settings record2sample_config must encode as JSON: {exc}") from exc
+        object.__setattr__(self, "record2sample_config", copied)
+
+
+class ScenarioStore(ABC):
+    """One scenario's storage session, including its record connection.
+
+    The caller closes the session when the scenario is unloaded. Closing is
+    idempotent; subsequent reads and writes fail. Records from other scenarios
+    must never be committed through this session.
+    """
+
+    @property
+    @abstractmethod
+    def records(self) -> RecordStore:
+        """The records connection owned by this session."""
+
+    @property
+    @abstractmethod
+    def durable(self) -> bool:
+        """Whether committed state survives a process restart. A scenario with a durable store needs a repository
+        backend that is a ``StagedSnapshotRepositoryBackend``."""
+
+    @property
+    @abstractmethod
+    def tasks(self) -> TaskStorage:
+        """Opens the generated task stores of this scenario.
+
+        Each record-to-sample stage opens its own store name. The stores close
+        with this session. They survive a restart if ``durable`` is true.
+        """
+
+    @property
+    @abstractmethod
+    def training_state(self) -> TrainingState:
+        """The training state of this scenario: the train counts of its samples and the records that its stages
+        consumed. It closes with this session, and survives a restart if ``durable`` is true."""
+
+    @property
+    @abstractmethod
+    def evaluations(self) -> EvaluationStore:
+        """The artifact evaluations that clients asked this scenario for.
+
+        The store closes with this session. Its evaluations survive a restart if ``durable`` is true.
+        """
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        """Locate the snapshot of each record that ``history`` reads. A store that keeps its records in memory holds
+        their snapshots, so it does nothing."""
+        return
+
+    @abstractmethod
+    def history(self) -> tuple[CommitRecord, ...]:
+        """Read commits in increasing commit number order: training steps, activations and new training starts."""
+
+    @abstractmethod
+    def training_run_position(self) -> tuple[int, int]:
+        """Return the commit number of the last new training start and the training count after it."""
+
+    @abstractmethod
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
+        """Persist the commit numbered ``expected_commit_number + 1`` with its consumption progress.
+
+        Conflicting writers are serialized across sessions. An identical retry
+        (ignoring only ``recorded_at``) returns the original record, even after
+        later commits. Different content or
+        a stale expected commit number raises ``ScenarioStoreConflictError``.
+        This check is not a lease: the caller still runs one training writer of a scenario at a time.
+
+        An exception can occur after the commit becomes durable. Callers
+        inspect history or retry the same commit before repeating training.
+        """
+
+    @abstractmethod
+    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
+        """Reconcile a checkpoint commit with history.
+
+        ``None`` denotes initial registration before any commit.
+        A checkpoint ahead of history is adopted durably.
+        Validate scenario identity and continuity after the checkpoint. Return
+        the committed head, or ``None`` at creation, without publishing artifacts.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release this session's records and other resources exactly once. The caller closes the scenario's
+        trainers first, also when the construction or the recovery of the scenario fails."""
+
+
+class ScenarioStorage(Plugin, ABC):
+    """Open sessions and maintain their storage without exposing file paths.
+
+    The owner serializes archive and retention with lifecycle changes and
+    closes a scenario's sessions before archiving it. Closing storage releases
+    shared resources only; sessions remain owned by their scenarios.
+
+    Every piece of per-scenario state that Reef owns goes through this
+    interface: records, commits, generated tasks, training state and evaluations through sessions, settings
+    through ``read_settings`` and ``write_settings``. Archiving a scenario
+    retires all of it. A deployment names a subclass in ``storage.record_backend``.
+    """
+
+    @classmethod
+    @abstractmethod
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
+        """Build the storage a deployment names.
+
+        ``config`` is the plugin's own configuration. ``directory`` is the
+        deployment's ``storage.agent_record_dir``, which the storage may use
+        for local files. ``task_files`` keeps the files of published tasks.
+        The storage owns it: ``archive`` retires the files of a scenario, and
+        ``close`` closes it. ``data`` is the deployment's data store, which keeps
+        each scenario's records as record items (RFC #1219); the storage shares
+        it and does not close it.
+        """
+
+    @property
+    @abstractmethod
+    def durable(self) -> bool:
+        """Whether newly opened sessions retain commits and settings across restarts."""
+
+    @abstractmethod
+    def read_settings(self, scenario: str) -> ScenarioSettings:
+        """Read the scenario's stored settings; a scenario with none reads as defaults."""
+
+    @abstractmethod
+    def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
+        """Replace the scenario's settings durably; the caller serializes writers of one scenario. Raise
+        ``ScenarioDeletedError`` for a scenario that ``archive`` archived."""
+
+    @abstractmethod
+    def open(self, scenario: str) -> ScenarioStore:
+        """Open an independently owned session for this scenario. Raise ``ScenarioDeletedError`` for a scenario
+        that ``archive`` archived, so that no late writer makes a new store of a deleted scenario."""
+
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        """The data items that ``scenario`` trains on, with the training state of its open ``session`` (RFC #1140).
+        A storage without a data store has none: its trainers keep their samples in memory."""
+        return None
+
+    @abstractmethod
+    def archive(self, scenario: str) -> tuple[str, ...]:
+        """Archive a closed scenario's records, commits, tasks and settings; return archive locations. Also remove
+        the scenario from the uses of its owner's data items (``DataStore.delete_scenario``). A repeated call
+        changes nothing more."""
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release shared storage resources; repeated closes are harmless."""
+
+
+__all__ = ["ScenarioSettings", "ScenarioStorage", "ScenarioStore", "ScenarioStoreConflictError"]
