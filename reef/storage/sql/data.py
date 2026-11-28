@@ -79,6 +79,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.records_types import RecordLoss
 from reef.core.trajectory_index import call_key
+from reef.core.values import canonical_json
 from reef.storage.data.item_kinds import TaskFilesReference, task_partition
 from reef.storage.data.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.data.store import (
@@ -655,10 +656,6 @@ DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (
     RetentionIndexes(),
     DeletedItems(),
 )
-
-
-def canonical_json(value: Mapping[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def deleted_item(row: RowMapping) -> DeletedItem:

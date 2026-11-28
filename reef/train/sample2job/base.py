@@ -19,14 +19,13 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, Sample, TaskSample
+from reef.core.job_data import JobData, Sample, SampleKind, TaskSample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.core.values import deep_merge
 from reef.observability import ExperimentLogger
 from reef.samples import Record2Sample
 from reef.samples.context import PipelineContext
-from reef.storage.scenario.samples import SampleKind
 
 
 def require_optional_positive(value: object, name: str) -> None:
