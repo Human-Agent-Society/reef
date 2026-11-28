@@ -1,11 +1,11 @@
-"""Artifact items: the content of the workspace artifact library's items (reef.storage.artifact_items)."""
+"""Artifact items: the content of the workspace artifact library's items (reef.storage.data.artifact_items)."""
 
 from __future__ import annotations
 
 import pytest
 
-from reef.storage.artifact_items import artifact_item
-from reef.storage.item_kinds import check_artifact_content
+from reef.storage.data.artifact_items import artifact_item
+from reef.storage.data.item_kinds import check_artifact_content
 
 ROW = {"artifact_id": "a1", "component": "weights", "content_id": "c1"}
 

@@ -7,8 +7,7 @@ import pytest
 from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobData, TaskFiles, TaskSample
-from reef.storage.data import MemoryDataStore
-from reef.storage.job_data import (
+from reef.storage.data.job_data import (
     JOB_FILE,
     SAMPLES_FILE,
     JobDataRef,
@@ -18,7 +17,8 @@ from reef.storage.job_data import (
     read_job_data,
     write_job_data,
 )
-from reef.storage.tasks import LocalTaskFileStore, TaskStoreError
+from reef.storage.data.store import MemoryDataStore
+from reef.storage.data.tasks import LocalTaskFileStore, TaskStoreError
 
 
 def task_dir(root, name, text="exit 0"):

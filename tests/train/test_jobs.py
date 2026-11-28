@@ -22,13 +22,13 @@ from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ArtifactFormat
-from reef.pipeline_context import PipelineContext
-from reef.sample2job import Sample2Job
-from reef.storage.data import NewItem
-from reef.storage.record_items import ItemRecordStore
+from reef.samples.context import PipelineContext
+from reef.storage.data.store import NewItem
+from reef.storage.scenario.record_items import ItemRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
 

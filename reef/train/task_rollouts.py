@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -23,13 +24,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from reef_client.sse import synthesize_sse_events
+
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import inference_aborted
 from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
+from reef.execution.sandbox.task_environment import task_images_from_environ
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.samples import recorded_training
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.samples import recorded_training
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +226,10 @@ class RolloutChat(ABC):
 class ChatEndpoint:
     """An HTTP endpoint on loopback that answers every POST with one ``RolloutChat``, for the rollouts of one job.
 
-    A request that is not JSON gets 400. The server runs on its own threads, so an agent that blocks the
+    A call that asks for a stream (``"stream": true``) and is answered gets the answer as a Chat Completions stream
+    that carries every field of it, the ``training`` capture too (``synthesize_sse_events``): the chat answers
+    whole, so this endpoint makes the stream, and the rollout's proxy passes it on unchanged and captures the
+    answer that it adds up to. A request that is not JSON gets 400. The server runs on its own threads, so an agent that blocks the
     rollout's event loop cannot block it. Use it as a context manager: it binds its loopback port and sets
     ``url`` when it is entered, and closes the port when it exits.
     """
@@ -242,7 +249,19 @@ class ChatEndpoint:
                 except json.JSONDecodeError as exc:
                     self.reply(400, {"error": {"message": f"the request is not JSON: {exc}"}})
                     return
-                self.reply(*chat.answer(self.path, payload))
+                status, body = chat.answer(self.path, payload)
+                if status == 200 and isinstance(payload, Mapping) and payload.get("stream") is True:
+                    self.stream(body)
+                else:
+                    self.reply(status, body)
+
+            def stream(self, body: Mapping[str, Any]) -> None:
+                data = "".join(synthesize_sse_events(dict(body), include_usage=True)).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
 
             def reply(self, status: int, body: Mapping[str, Any]) -> None:
                 data = json.dumps(body).encode()
@@ -329,9 +348,12 @@ def run_train_tasks(
     the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
     ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``. ``max_tokens`` is the most tokens a
     sample's targets, every token but the first, may have, or None for no bound: a longer sample is left out before
-    its task's group forms. The result counts the tokens of each rollout that ran (``RolloutTokens``).
+    its task's group forms. The result counts the tokens of each rollout that ran (``RolloutTokens``). The rollouts
+    start the prepared images that the deployment names for the tasks, when it names them
+    (``task_images_from_environ``).
     """
     assembly = rollout_assembly(settings)
+    task_images = task_images_from_environ(settings.environment, os.environ)
     with ChatEndpoint(chat) as endpoint:
         runner = TaskRolloutRunner(
             reef_url=endpoint.url,
@@ -347,6 +369,7 @@ def run_train_tasks(
             lab=lab,
             concurrency=settings.concurrency,
             model_adapter=model_adapter,
+            task_images=task_images,
         )
         rollouts = runner.run_rollouts(
             [

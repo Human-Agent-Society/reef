@@ -10,6 +10,7 @@ import pytest
 from tests.support.samples import made_task
 from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
+from reef.api.streaming import stream_record
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import (
@@ -20,7 +21,6 @@ from reef.core.trajectories import (
     trajectory_reward,
 )
 from reef.inference.interfaces import InferenceStream
-from reef.service.streaming import stream_record
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
@@ -242,10 +242,10 @@ def test_request_only_batch_preserves_manual_training_contract():
 
 
 def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job():
-    from reef.pipeline_context import PipelineContext
-    from reef.record2sample import ReportSamples
-    from reef.sample2job import Sample2Job
+    from reef.samples import ReportSamples
+    from reef.samples.context import PipelineContext
     from reef.train.pipeline import TrainingPipeline
+    from reef.train.sample2job import Sample2Job
 
     class MixedTasks(ReportSamples):
         def make_sample(self, context):

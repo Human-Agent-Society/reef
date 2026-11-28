@@ -15,7 +15,6 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
-from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
@@ -26,8 +25,9 @@ from reef.recipe.generated_tasks.generator import (
 )
 from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult
-from reef.record2sample.generator import GeneratorError, TaskNameConflictError
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.context import PipelineContext
+from reef.samples.generator import GeneratorError, TaskNameConflictError
+from reef.samples.generator.inputs import TaskGenerationRequest
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)

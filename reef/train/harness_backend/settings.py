@@ -49,25 +49,78 @@ class EvolutionSettings(Settings):
     ``HarnessTrainingComponent`` builds itself and each backend from it.
     """
 
-    method: str | Mapping[str, Any] | None = config_option(None, help="The Method that evolves the tree.")
-    adapter: str = config_option("pi", help="The harness adapter the tree renders for.")
-    seed: str | None = config_option(None, help="The directory of the first tree; none starts empty.")
+    method: str | Mapping[str, Any] | None = config_option(
+        None, help="The Method that evolves the tree. Required: the training service refuses to start without it."
+    )
+    adapter: str = config_option(
+        "pi",
+        help=(
+            "The harness adapter the tree renders for: pi, opencode, claude, codex, dsh, hermes, native, "
+            "python, or an adapter of the reef.harness_adapters entry point."
+        ),
+    )
+    seed: str | None = config_option(
+        None,
+        help=(
+            "The directory of the first tree, relative to Reef's working directory; none starts empty. "
+            "Startup refuses a tree that fails the adapter's validation, a symbolic link, and a file that"
+            " is not UTF-8 text."
+        ),
+    )
     binary: str | None = config_option(None, help="The harness binary; none installs the adapter's pinned one.")
     models: Mapping[str, Any] = config_option(
-        default_factory=dict, help="The method's own models by name: url, model and api_key_env."
+        default_factory=dict,
+        help=(
+            "The method's own models by name: url, model, optional api (openai, responses or "
+            "anthropic), timeout_s, and api_key or api_key_env. The name served is refused."
+        ),
     )
-    model_metadata: Mapping[str, Any] = config_option(default_factory=dict, help="Model metadata by model name.")
-    state_dir: str = config_option(".reef/harness", help="Each scenario's history and job records.")
-    max_steps: int = config_option(0, help="The most automatic jobs. 0 sets no limit.")
+    model_metadata: Mapping[str, Any] = config_option(
+        default_factory=dict,
+        help=(
+            "Model metadata by exact model name: context_window, a positive token count, and reasoning, a"
+            " boolean. Only the codex adapter reads it, before provider discovery."
+        ),
+    )
+    state_dir: str = config_option(
+        ".reef/harness",
+        help=(
+            "The directory of each scenario's history and job records. A relative path resolves against "
+            "the working directory of the Reef process."
+        ),
+    )
+    max_steps: int = config_option(
+        0,
+        help=(
+            "The most jobs before Reef skips automatic jobs; request, skipped and failed jobs count, and "
+            "a training request still runs. 0 sets no limit."
+        ),
+    )
     max_failure_streak: int = config_option(
         0, help="Skip automatic jobs after this many rejections in a row. 0 sets no limit."
     )
     max_model_calls_per_step: int = config_option(0, help="The most model calls of one job. 0 sets no limit.")
-    max_runs_per_step: int = config_option(0, help="The most runs a method runs in one job. 0 sets no limit.")
-    executor: str = config_option("local", help="Where tasks run: local, sandbox or e2b.")
-    sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the run executor.")
+    max_runs_per_step: int = config_option(
+        0,
+        help=(
+            "The most runs a method's services.evaluate starts in one job; reused runs and the job's own "
+            "evaluation do not count. 0 sets no limit."
+        ),
+    )
+    executor: str = config_option("local", help="Where tasks run: local, sandbox, e2b or modal.")
+    sandbox: Mapping[str, Any] | None = config_option(
+        None,
+        help=(
+            "The sandbox settings of the run executor: egress_hosts, limits and env_from for sandbox; the"
+            " e2b or modal options, forward_ports and env_from for a cloud sandbox."
+        ),
+    )
     agent: Mapping[str, Any] | None = config_option(
-        None, help="The coding agent a method runs: adapter, binary, sandbox and timeout_s."
+        None,
+        help=(
+            "The coding agent a method runs: adapter, binary, sandbox and timeout_s. Unset runs no "
+            "agent, and startup refuses a method that needs one."
+        ),
     )
 
     def __post_init__(self) -> None:
