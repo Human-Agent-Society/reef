@@ -126,11 +126,6 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
         self.token = record["token"]
 
     def get_samples(self, num_samples: int) -> list[list[Any]]:
-        """Refresh the job and ask Slime for up to ``num_samples`` sample groups.
-
-        Slime selects buffered groups first and fills the request from the prompt cursor.
-        Propagate refresh errors, including ValueError for an incompatible file dataset.
-        """
         self.refresh()
         return super().get_samples(num_samples)
 
