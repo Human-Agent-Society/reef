@@ -1,0 +1,222 @@
+# Continual environments on Slime: Qwen3.5-9B serves terminal traffic, the failed sessions of each window of the
+# traffic become Harbor tasks through the generation service, and the policy trains all its weights on them.
+# The traffic is a replay of TerminalWorld's tasks: their instructions are the requests of real terminal users, and a
+# judge scores each session with no verifier. The replay client tags each model call `x-reef-tag-source: traffic`
+# and reports the judge's score against the session's last call.
+# One Linux node with 8 GPUs of 80 GB (H100): 4 for the Megatron actor (TP2 with sequence parallelism, CP2), 3 for
+# Slime's rollout engines, and 1 for Reef's serving engine, which serves the traffic. Run it in the Reef image
+# (docker/README.md); the training rollouts and the oracle checks run in this host's Docker.
+# Supply REEF_TOKEN and REEF_ACCESS_TOKEN (a workspace access token of the Reef Platform with the scope
+# generators:write) through the shell. REEF_CONTINUAL_ENVS_STATE_DIR is where this deployment keeps its state, and
+# REEF_CONTINUAL_ENVS_MODEL_PATH a local copy of Qwen/Qwen3.5-9B. REEF_PLATFORM_URL is the Platform's URL, and
+# REEF_GENERATION_SPEC and REEF_GENERATION_GENERATOR name the generation spec and the generator of this run.
+# Export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True too: the trainer runs out of memory on a long sample without it.
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_CONTINUAL_ENVS_STATE_DIR}/stack
+  # The serving engine loads the model, and Slime starts its actor and rollout engines, before /healthz answers.
+  ready-timeout: 3600
+inference:
+  model-path: ${REEF_CONTINUAL_ENVS_MODEL_PATH}
+  # How long Reef's inference route waits for one reply; a reply may be 16384 tokens.
+  timeout-s: 1800
+  num-gpus: 1
+  tensor-parallel-size: 1
+  options:
+    # Reef's serving engine and Slime's rollout engines each have a router; they need different ports.
+    router-port: 31100
+    # A 64K window: a session ends at a history of 65536 - 16384 tokens, since SGLang refuses a longer prompt.
+    context-length: 65536
+    attention-backend: flashinfer
+# The generator service of the generated-task stage. The tasks come from the generation service of the Platform, and
+# the generator checks them itself on this host.
+generator:
+  tasks-root: ${REEF_CONTINUAL_ENVS_STATE_DIR}/tasks
+  environment: docker
+recipe:
+  implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+  config:
+    job_parameters:
+      # Slime's own loop trains the rollouts: each task is one prompt group of n-samples-per-prompt rollouts.
+      objective: slime_dataset
+      # The Harbor rollouts inside Slime's loop, on Slime's rollout engines at the job's start weights.
+      harbor:
+        # Rollouts in flight, each in its own container of this host's Docker.
+        concurrency: 24
+        environment: docker
+        # Qwen3.5 with thinking off ends each generation prompt with an empty think block the history drops.
+        scaffold_tolerance: 8
+        # The agent of the training rollouts: the agent that serves the traffic, so both measure the same thing.
+        agent:
+          # A rollout whose context fills ends and is scored; terminus-2 gives it no reward, which trains as 0.
+          import_path: reef.samples.generator.terminus:VerifiedTerminus2
+          model_name: openai/{model}
+          kwargs:
+            api_base: "{base_url}/v1"
+            # The tasks have no network, so the recorder cannot install.
+            record_terminal_session: false
+            # No compaction: a summarized history does not assemble into one sample.
+            enable_summarize: false
+            # Only the limit Harbor names to the model after a cut reply; on chat completions it caps nothing.
+            model_info: {max_input_tokens: 48000, max_output_tokens: 16384, input_cost_per_token: 0.0, output_cost_per_token: 0.0}
+            llm_kwargs:
+              api_key: "{api_key}"
+              max_tokens: 16384
+              # Thinking off: a thinking model's rollout trains only its last turn.
+              extra_body:
+                chat_template_kwargs:
+                  enable_thinking: false
+# The config of the generated-task recipe's two stages. Each config is the stage's own, keyed as the stage reads it.
+pipeline:
+  # The rounds: one window of traffic each, and one generation run of its failed sessions.
+  record2sample:
+    config:
+      # A window is 64 sessions of traffic. A round starts only when a whole window waits, so a round never runs
+      # on a part of a window or on none.
+      source_tag: source=traffic
+      source_records_per_round: 64
+      min_source_records_per_round: 64
+      # The next round starts when the last one ends, so the generation of a window runs while the tasks of the
+      # earlier windows train.
+      jobs_per_round: 0
+      rounds: 1000
+      # A generation run mines, builds and reviews tasks for hours; its timeout is the generator's run_timeout_seconds.
+      generation_deadline_seconds: 28800
+      generation_attempts: 2
+      # The candidates of one generation are checked at the same time, each in its own Docker containers.
+      validation_concurrency: 8
+      generator_url: ${endpoints.generator}
+      # The stage requires a description; the generator does not read it.
+      description: terminal tasks built from the failed sessions of live terminal traffic
+      # The training pool: a task trains again until a review finds its pass rate outside the band. A review reads
+      # the last 32 rewards of a task, one job of its rollouts.
+      pool_capacity: 256
+      review_interval: 16
+      review_window: 32
+      review_band_low: 0.0625
+      review_band_high: 0.9375
+      generator:
+        module: recipes.beta.continual_envs:TrafficTaskGenerator
+        config:
+          service_url: ${REEF_PLATFORM_URL}
+          spec: ${REEF_GENERATION_SPEC}
+          generator: ${REEF_GENERATION_GENERATOR}
+          # A session that the judge scored at most 0.5 is a failure; 1.0 sends every scored session.
+          max_score: 0.5
+          # Each failure gives two environments, and each environment the tasks of its task types.
+          params:
+            per_failure: 2
+          run_timeout_seconds: 27000
+  # One task job holds exactly 8 tasks: one Slime rollout, one optimizer step. A job of fewer tasks than
+  # rollout-batch-size would fill its rollout with its first tasks again, and they would train more than once.
+  sample2job:
+    config:
+      buffer_size: 8
+      job_samples: 8
+training:
+  backend: slime
+  ready-timeout: 3600
+  config:
+    checkpoint_dir: ${REEF_CONTINUAL_ENVS_STATE_DIR}/checkpoints
+    # Keep only the latest Megatron checkpoints. One is about 135 GB with the optimizer state.
+    checkpoint_retention:
+      max_storage_fraction: 0.8
+      min_free_space_fraction: 0.1
+      policy: latest
+  options:
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    megatron-to-hf-mode: bridge
+    hf-checkpoint: ${inference.model-path}
+    load: ${training.config.checkpoint_dir}/megatron
+    save-interval: "1"
+    save: ${training.config.checkpoint_dir}/megatron
+    save-hf: ${training.config.checkpoint_dir}/hf/{rollout_id}
+    num-rollout: "100000000"
+    # One Slime rollout per job: 8 tasks x 32 rollouts, trained as one optimizer step.
+    rollout-batch-size: "8"
+    n-samples-per-prompt: "32"
+    global-batch-size: "256"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "4"
+    num-gpus-per-node: "8"
+    rollout-num-gpus: "3"
+    rollout-num-gpus-per-engine: "1"
+    sglang-router-port: "31200"
+    sglang-mem-fraction-static: "0.8"
+    sglang-attention-backend: flashinfer
+    # Parallelism, recompute, packing and numerics from Slime's own Qwen3.5-9B example
+    # (examples/fully_async/run-qwen3.5-9B-fully_async.sh at the pinned Slime): TP2 with sequence parallelism, CP2.
+    tensor-model-parallel-size: "2"
+    sequence-parallel: true
+    context-parallel-size: "2"
+    pipeline-model-parallel-size: "1"
+    accumulate-allreduce-grads-in-fp32: true
+    attention-softmax-in-fp32: true
+    attention-backend: flash
+    seq-length: "66560"
+    rollout-max-response-len: "16384"
+    rollout-max-context-len: "65536"
+    # The rollout engines serve the same 64K window; a longer sample runs the trainer out of memory.
+    sglang-context-length: "65536"
+    rollout-temperature: "1.0"
+    # The Qwen3.5-9B model. Reef fills its shape from the model's config; these are the flags that it does not fill.
+    spec:
+      - slime_plugins.models.qwen3_5
+      - get_qwen3_5_spec
+    disable-bias-linear: true
+    qk-layernorm: true
+    use-gated-attention: true
+    attention-output-gate: true
+    normalization: RMSNorm
+    apply-layernorm-1p: true
+    position-embedding-type: rope
+    rotary-percent: "0.25"
+    swiglu: true
+    vocab-size: "248320"
+    recompute-granularity: full
+    recompute-method: uniform
+    recompute-num-layers: "1"
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "4096"
+    log-probs-chunk-size: "1024"
+    use-distributed-optimizer: true
+    # Constant lr 1e-6, weight decay 0.1, gradient clip 1.0, no KL, as the AutoEnvScaling example.
+    optimizer: adam
+    optimizer-cpu-offload: true
+    overlap-cpu-optimizer-d2h-h2d: true
+    use-precision-aware-optimizer: true
+    lr: 1e-6
+    min-lr: 1e-6
+    lr-decay-style: constant
+    weight-decay: "0.1"
+    clip-grad: "1.0"
+    adam-beta1: "0.9"
+    adam-beta2: "0.98"
+    # Each rollout's advantage is its reward minus its task's mean reward, with no std division.
+    advantage-estimator: grpo
+    disable-grpo-std-normalization: true
+    loss-type: policy_loss
+    # REINFORCE on the log-prob of each sampled token, with no PPO ratio; score centering requires it.
+    pg-loss-type: reinforce
+    # Truncated importance sampling: each token's weight is p_train / p_rollout, clipped to [0, 2].
+    use-tis: true
+    tis-clip: "2"
+    tis-clip-low: "0"
+    # Score centering with the engines' 128 most likely tokens at each sampled token.
+    use-score-centering: true
+    score-centering-top-k: "128"
+    # Each token weighs the same in the loss, not the mean over each sample's tokens.
+    calculate-per-token-loss: true
+storage:
+  artifact-repository: ${REEF_CONTINUAL_ENVS_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_CONTINUAL_ENVS_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_CONTINUAL_ENVS_STATE_DIR}/artifact-cache
+  agent-record-dir: ${REEF_CONTINUAL_ENVS_STATE_DIR}/agent-record
+  task-file-dir: ${REEF_CONTINUAL_ENVS_STATE_DIR}/task-files
+execution:
+  training: ray
+  rollout: ray
