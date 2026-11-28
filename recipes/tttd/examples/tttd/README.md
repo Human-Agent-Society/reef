@@ -195,8 +195,8 @@ is not spent entirely in the reasoning channel before it emits a program.
 Give the training component the same value, so that it renders each rollout as
 the engine served it: `apply-chat-template-kwargs: '{"enable_thinking": false}'`
 in `training.options` on Slime, or `chat_template_kwargs: {enable_thinking: false}`
-on Tinker. Reef refuses fewer than three rollouts per group, because TTTD's
-adaptive-entropic advantages have no bound for a group of two. Three rollouts
+on Tinker. Reef requires at least three rollouts per group. With two different
+scores, the winner's advantage can approach one trillion. Three rollouts
 are enough to exercise the path but not to train, so a step that should mean
 something needs several per group.
 

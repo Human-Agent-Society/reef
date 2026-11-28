@@ -37,14 +37,15 @@ class TTTDSettings(SampleAssemblySettings):
 
     groups_per_step: int = config_option(8, help="The comparison groups in one step.")
     rollouts_per_group: int = config_option(
-        64, help="The sibling rollouts in each group; at least three, since two give unbounded advantages."
+        64,
+        help="The number of sibling rollouts in each group. Use at least three to avoid extreme two-rollout advantages.",
     )
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.groups_per_step <= 0:
+        if type(self.groups_per_step) is not int or self.groups_per_step <= 0:
             raise ValueError("groups_per_step must be positive")
-        if self.rollouts_per_group < 3:
+        if type(self.rollouts_per_group) is not int or self.rollouts_per_group < 3:
             raise ValueError("rollouts_per_group must be at least three")
 
 

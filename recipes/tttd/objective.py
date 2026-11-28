@@ -23,13 +23,13 @@ def adaptive_entropic_advantages(rewards: list[float]) -> tuple[tuple[float, ...
     expansion bound, 60 bisection iterations, stable reward shift, and
     leave-one-out normalizer.
 
-    A group of two is refused. Its KL is below ``log(2)`` for every finite beta, so the search drives beta up
-    until the loser's weight underflows, and the winner's advantage approaches ``1 / epsilon``.
+    A group of two is refused. For unequal rewards its KL approaches ``log(2)`` only as beta tends to infinity.
+    The smaller weight can disappear from the floating-point sum, giving the winner an advantage of ``1 / epsilon - 1``.
     """
     if not rewards:
         raise ValueError("an adaptive-entropic group cannot be empty")
     if len(rewards) == 2:
-        raise ValueError("an adaptive-entropic group of two has unbounded advantages; use at least three rollouts")
+        raise ValueError("the KL target has no finite solution for two rollouts; use at least three rollouts")
 
     delta = math.log(2)
     beta_max = 1e6

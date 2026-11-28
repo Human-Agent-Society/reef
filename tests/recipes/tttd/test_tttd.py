@@ -159,6 +159,14 @@ def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict
 
 
 @pytest.mark.unit
+def test_grid_settings_require_integer_dimensions() -> None:
+    with pytest.raises(ValueError, match="groups_per_step"):
+        TTTDSettings(groups_per_step=True)
+    with pytest.raises(ValueError, match="rollouts_per_group"):
+        TTTDSettings(rollouts_per_group=3.5)
+
+
+@pytest.mark.unit
 def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
     def build(job_samples: int) -> Trainer:
         return Trainer.build(

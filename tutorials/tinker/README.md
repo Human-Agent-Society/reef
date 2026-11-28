@@ -2,7 +2,7 @@
 
 This runs four text completions (at most 32 new tokens each), assigns **synthetic** rewards 0, 1, 2, and 3, and waits for one TTTD training commit. It checks the inference → feedback → training → publication mechanism, not model quality. Both serving startup and the smoke use the paid Tinker API.
 
-Four rollouts keep TTTD's adaptive-entropic advantages moderate for these rewards. Reef refuses fewer than three rollouts per group. With two different rewards, the fixed `log(2)` KL target has no solution, and the leave-one-out normalization gives advantages near `1e12`.
+Four rollouts keep TTTD's adaptive-entropic advantages moderate for these rewards. Reef refuses fewer than three rollouts per group. With two different rewards, the fixed `log(2)` KL target has no finite solution. The winner's advantage can approach one trillion.
 
 Use Python 3.12+ on Linux or macOS, Git LFS, and a Tinker account with access to the configured model. From the Reef checkout:
 

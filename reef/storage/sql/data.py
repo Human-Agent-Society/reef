@@ -133,6 +133,8 @@ from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, valid
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
 PACK_BYTES = 64 * 2**20
+#: The rows that ``pack`` reads from the database at a time.
+PACK_READ_ROWS = 16
 #: The content bytes of the new trajectory items of one ``create`` call from which the call writes them as a segment.
 CREATE_SEGMENT_BYTES = 2**20
 #: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
@@ -2248,28 +2250,28 @@ class SQLDataStore(DataStore):
             )
             condition = and_(table.c.owner == owner, waiting)
             while True:
-                rows: list[RowMapping] = []
+                keys: list[int] = []
+                lines: list[str] = []
                 total = 0
                 with self.transaction() as connection:
                     if (connection.scalar(select(func.sum(size)).where(condition)) or 0) < PACK_BYTES:
                         break
+                    # The query selects all the waiting content of the owner, which can fill many segments. The
+                    # rows come ``PACK_READ_ROWS`` at a time, so the process holds the content of one segment only.
                     result = connection.execute(
-                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key)
+                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key),
+                        execution_options={"yield_per": PACK_READ_ROWS},
                     ).mappings()
                     for row in result:
-                        rows.append(row)
+                        keys.append(row["key"])
+                        if is_items:
+                            lines.append(row["content_json"])
+                        else:
+                            lines.append(node_line(row["entries_json"], row["shape_json"], row["call_json"]))
                         total += int(row["size"])
                         if total >= PACK_BYTES:
                             break
                     result.close()
-                lines = [
-                    (
-                        row["content_json"]
-                        if is_items
-                        else node_line(row["entries_json"], row["shape_json"], row["call_json"])
-                    )
-                    for row in rows
-                ]
                 places = self.write_segment(partition, lines)
                 cleared = (
                     {"content_json": None}
@@ -2286,15 +2288,15 @@ class SQLDataStore(DataStore):
                         ),
                         [
                             {
-                                "row_key": row["key"],
+                                "row_key": row_key,
                                 "new_segment_id": place.segment_id,
                                 "new_segment_offset": place.offset,
                                 "new_segment_length": place.length,
                             }
-                            for row, place in zip(rows, places, strict=True)
+                            for row_key, place in zip(keys, places, strict=True)
                         ],
                     )
-                moved += len(rows)
+                moved += len(keys)
         return moved
 
     def small_segment_items(self) -> tuple[ColumnElement[bool], ColumnElement[bool]]:

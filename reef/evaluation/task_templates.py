@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from reef.core.plugins import ConfiguredPlugin
+from reef.execution.sandbox.prepared_images import PreparedImageJson
 
 
 class TaskTemplateBuilder(ConfiguredPlugin, ABC):
@@ -66,8 +67,11 @@ class TaskTemplateBuilder(ConfiguredPlugin, ABC):
         task_directory: Path,
         *,
         task_digest: str | None,
-    ) -> None:
+    ) -> list[PreparedImageJson] | None:
+        """Return None once the templates are ready. For a pinned task, a builder may instead return image records
+        verified for the given owner and task digest."""
         await self.build_for_owner(owner, scenario, task_name, task_directory)
+        return None
 
 
 class DockerfileTemplateBuilder(TaskTemplateBuilder):
@@ -89,9 +93,10 @@ class DockerfileTemplateBuilder(TaskTemplateBuilder):
         task_directory: Path,
         *,
         task_digest: str | None,
-    ) -> None:
+    ) -> list[PreparedImageJson] | None:
         # The directory already points to the admitted version.
         await self.build_for_owner(owner, scenario, task_name, task_directory)
+        return None
 
 
 __all__ = ["DockerfileTemplateBuilder", "TaskTemplateBuilder"]
