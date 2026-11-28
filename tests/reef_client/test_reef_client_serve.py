@@ -41,6 +41,45 @@ COMPLETION: dict[str, Any] = {
 
 
 @pytest.mark.unit
+def test_sse_round_trip_preserves_the_training_capture_block() -> None:
+    """A synthesized stream must carry the private training capture end to end.
+
+    The rollout proxy passes stream bytes through and captures the answer the
+    stream adds up to; the rollout trains on that capture. A reef-client older
+    than 0.4.4 drops non-standard fields in both directions, so a streamed
+    rollout trained on empty tokens with no error. This pins the capture
+    through the installed client.
+    """
+    completion = {
+        **COMPLETION,
+        "training": {
+            "tokens": [1, 2, 3, 7, 8],
+            "loss_mask": [1, 1],
+            "rollout_log_probs": [-0.1, -0.2],
+            "prompt_length": 3,
+            "response_length": 2,
+            "runtime_load_id": "tinker:start",
+            "request_messages": [{"role": "user", "content": "solve add"}],
+            "response_message": COMPLETION["choices"][0]["message"],
+            "finish_reason": "tool_calls",
+        },
+    }
+    events = synthesize_sse_events(completion, include_usage=True, agent_record_id="receipt-7")
+    payload = "".join(events).encode()
+    accumulator = SSEAccumulator()
+    # Feed in awkward 7-byte slices to split multi-byte UTF-8 and SSE lines.
+    for offset in range(0, len(payload), 7):
+        accumulator.feed(payload[offset : offset + 7])
+    accumulator.finish()
+
+    assert accumulator.done
+    rebuilt = accumulator.completion
+    assert rebuilt is not None
+    assert rebuilt.get("training") == completion["training"]
+    assert rebuilt["choices"][0]["message"] == COMPLETION["choices"][0]["message"]
+
+
+@pytest.mark.unit
 def test_sse_accumulator_round_trip_with_synthesized_events() -> None:
     events = synthesize_sse_events(COMPLETION, include_usage=True, agent_record_id="receipt-1")
     payload = "".join(events).encode()
