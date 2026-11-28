@@ -657,11 +657,19 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost, PreparedImageHost
         except (SandboxRequestError, SandboxException) as error:
             # create_from_template keeps the SDK's error of a refused request as the cause of its own.
             answer = error.__cause__ if isinstance(error, SandboxRequestError) else error
-            if not isinstance(answer, SandboxException) or not is_missing_snapshot(
-                answer.status_code, str(answer), template_id
-            ):
+            if not isinstance(answer, SandboxException):
                 raise
-            return False
+            if answer.status_code == 424 and str(answer) == (
+                f"424: template {template_id}: resource lookup failed before placement"
+            ):
+                return False
+            if is_missing_snapshot(answer.status_code, str(answer), template_id):
+                return False
+            if answer.status_code in (424, 502, 504):
+                raise SandboxCapacityError(
+                    f"the sandbox service did not confirm creation from {template_id}: HTTP {answer.status_code}"
+                ) from error
+            raise
         return True
 
     @override
