@@ -74,6 +74,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql.elements import ColumnElement
 
+import reef.storage.data.job_data as job_data
 from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
@@ -81,7 +82,6 @@ from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.records_types import RecordLoss
 from reef.core.trajectory_index import call_key
 from reef.storage.data.item_kinds import TaskFilesReference, task_partition
-from reef.storage.data.job_data import JOB_DATA_PREFIX
 from reef.storage.data.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.data.store import (
     HOLD_ITEM_KINDS,
@@ -776,7 +776,7 @@ class SQLDataStore(DataStore):
             removed = connection.execute(delete(table).where(table.c.key == key, table.c.last_used_at < cutoff))
             if not removed.rowcount:
                 return False
-            self.job_directories.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
+            self.job_directories.delete_directory(f"{job_data.JOB_DATA_PREFIX}/{key}")
             return True
 
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]:

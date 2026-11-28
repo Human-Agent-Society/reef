@@ -1291,6 +1291,54 @@ def test_a_record_retry_with_a_new_time_matches(store):
     assert store.read("acme", item.item_id) == stored
 
 
+def test_refresh_after_expiration_scan_preserves_delayed_read(store, monkeypatch):
+    sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
+    monkeypatch.setattr(time, "time", lambda: 10.0)
+    written = store.write_job_directory(JobData("first", (sample,)))
+    scan = store.job_directories_unused_since
+    opened = []
+
+    def refresh_after_scan(cutoff):
+        expired = scan(cutoff)
+        opened.append(store.open_job_directory(written.to_dict()))
+        return expired
+
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    monkeypatch.setattr(store, "job_directories_unused_since", refresh_after_scan)
+    assert store.delete_unused_job_directories(100.0) == 0
+    assert opened[0].read().samples == (sample,)
+
+
+def test_a_private_job_directory_ends_with_its_store_and_a_shared_one_survives(tmp_path):
+    with closing(LocalTaskFileStore(tmp_path / "tasks")) as files:
+        memory = MemoryDataStore(files)
+        private = memory.write_job_directory(JobData("empty")).path
+        memory.close()
+        memory.close()
+        assert not private.exists()
+
+        with closing(SQLiteDataStore(tmp_path / "data", files)) as writer:
+            saved = writer.write_job_directory(JobData("empty")).to_dict()
+        with closing(SQLiteDataStore(tmp_path / "data", files)) as reader:
+            assert reader.open_job_directory(saved).read() == JobData("empty")
+
+
+def test_simultaneous_first_uses_of_one_job_directory_keep_the_latest_time(open_durable_store):
+    ready = threading.Barrier(2)
+    with closing(open_durable_store()) as first, closing(open_durable_store()) as second:
+
+        def register(store, used_at):
+            ready.wait(timeout=10)
+            store.write_job_directory_use("key", used_at)
+
+        with ThreadPoolExecutor(2) as pool:
+            writes = [pool.submit(register, first, 10.0), pool.submit(register, second, 20.0)]
+            for write in writes:
+                write.result(timeout=10)
+        assert first.job_directories_unused_since(15.0) == ()
+        assert second.job_directories_unused_since(25.0) == ("key",)
+
+
 def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: 10.0)
     sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
@@ -1887,51 +1935,3 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 8")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()
-
-
-def test_refresh_after_expiration_scan_preserves_delayed_read(store, monkeypatch):
-    sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
-    monkeypatch.setattr(time, "time", lambda: 10.0)
-    written = store.write_job_directory(JobData("first", (sample,)))
-    scan = store.job_directories_unused_since
-    opened = []
-
-    def refresh_after_scan(cutoff):
-        expired = scan(cutoff)
-        opened.append(store.open_job_directory(written.to_dict()))
-        return expired
-
-    monkeypatch.setattr(time, "time", lambda: 200.0)
-    monkeypatch.setattr(store, "job_directories_unused_since", refresh_after_scan)
-    assert store.delete_unused_job_directories(100.0) == 0
-    assert opened[0].read().samples == (sample,)
-
-
-def test_a_private_job_directory_ends_with_its_store_and_a_shared_one_survives(tmp_path):
-    with closing(LocalTaskFileStore(tmp_path / "tasks")) as files:
-        memory = MemoryDataStore(files)
-        private = memory.write_job_directory(JobData("empty")).path
-        memory.close()
-        memory.close()
-        assert not private.exists()
-
-        with closing(SQLiteDataStore(tmp_path / "data", files)) as writer:
-            saved = writer.write_job_directory(JobData("empty")).to_dict()
-        with closing(SQLiteDataStore(tmp_path / "data", files)) as reader:
-            assert reader.open_job_directory(saved).read() == JobData("empty")
-
-
-def test_simultaneous_first_uses_of_one_job_directory_keep_the_latest_time(open_durable_store):
-    ready = threading.Barrier(2)
-    with closing(open_durable_store()) as first, closing(open_durable_store()) as second:
-
-        def register(store, used_at):
-            ready.wait(timeout=10)
-            store.write_job_directory_use("key", used_at)
-
-        with ThreadPoolExecutor(2) as pool:
-            writes = [pool.submit(register, first, 10.0), pool.submit(register, second, 20.0)]
-            for write in writes:
-                write.result(timeout=10)
-        assert first.job_directories_unused_since(15.0) == ()
-        assert second.job_directories_unused_since(25.0) == ("key",)
