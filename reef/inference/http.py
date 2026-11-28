@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
 
+from aiohttp import ClientResponse
+
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.core.errors import UpstreamLimit, UpstreamStatusError
@@ -195,6 +197,30 @@ def provider_request_headers(api_key: str) -> RequestHeadersFactory:
     return ProviderRequestHeaders(api_key)
 
 
+class ResponseTooLargeError(UpstreamStatusError):
+    """A provider body, success or error, exceeded its caller's byte limit; nothing of it was parsed (status 502)."""
+
+
+async def bounded_body(response: ClientResponse, limit_bytes: int, label: str) -> bytes:
+    """The body of the aiohttp ``response``, collected only while it holds at most ``limit_bytes`` bytes.
+
+    A declared ``Content-Length`` above the limit is refused before any byte is read. Otherwise this collects at
+    most ``limit_bytes + 1`` bytes before it refuses a longer body. It bounds what it collects, not the read
+    buffers that aiohttp itself keeps.
+
+    Raises:
+        ResponseTooLargeError: The body is longer than ``limit_bytes``.
+    """
+    if response.content_length is not None and response.content_length > limit_bytes:
+        raise ResponseTooLargeError(f"{label} body exceeds {limit_bytes} bytes", status=502)
+    body = bytearray()
+    while chunk := await response.content.read(limit_bytes + 1 - len(body)):
+        body.extend(chunk)
+        if len(body) > limit_bytes:
+            raise ResponseTooLargeError(f"{label} body exceeds {limit_bytes} bytes", status=502)
+    return bytes(body)
+
+
 # -- HTTP handler -------------------------------------------------------------
 
 
@@ -268,21 +294,36 @@ class HttpInferenceHandler(InferenceHandler):
         return await self.post_json(path, payload, artifact=artifact)
 
     async def post_json(
-        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        artifact: InferenceArtifact | None = None,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any]:
-        """POST to the provider. External models omit the Reef artifact."""
+        """POST to the provider. External models omit the Reef artifact.
+
+        With ``max_response_bytes``, the body of every status is read by ``bounded_body`` and parsed as JSON
+        whatever its content type; a longer body raises ``ResponseTooLargeError``. Without it, the body is read whole.
+        """
         from aiohttp import ClientSession, ClientTimeout, ContentTypeError
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
             session.post(**self.post_arguments(artifact, path, payload)) as response,
         ):
+            body = None
+            if max_response_bytes is not None:
+                body = await bounded_body(response, max_response_bytes, self._error_label)
             if response.status >= 400:
                 # An error body that is not UTF-8 keeps the provider's status, as a stream's error body does.
-                body = (await response.read()).decode(errors="replace")
-                raise self._status_error(response.status, body, response.headers.get("Retry-After"))
+                if body is None:
+                    body = await response.read()
+                raise self._status_error(
+                    response.status, body.decode(errors="replace"), response.headers.get("Retry-After")
+                )
             try:
-                value = await response.json()
+                value = await response.json() if body is None else json.loads(body)
             except (ContentTypeError, ValueError) as exc:
                 # A successful status with an unreadable body is the provider's failure, not the caller's.
                 raise UpstreamStatusError(f"{self._error_label} returned a body that is not JSON", status=502) from exc

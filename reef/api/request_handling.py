@@ -20,11 +20,13 @@ from reef.api.routed_inference import (
     InferenceRetryTimeoutError,
     RoutedInference,
 )
+from reef.api.routed_shadow import ShadowTasks
 from reef.api.wire import ReportPayload, RequestHeaders, parse_request_headers, scenario_header, with_request_tags
 from reef.control.dispatcher import Dispatcher
 from reef.core.records_types import AgentRecord, RequestType
 from reef.routing.manifest import RoutingAdapter
 from reef.routing.preview import RoutingPreviewClient
+from reef.routing.settings import ShadowLimits
 
 logger = logging.getLogger(__name__)
 WriteResult = TypeVar("WriteResult")
@@ -46,7 +48,8 @@ class RequestHandling:
 
     Values: ``inference_url`` is the address at which clients reach the inference service
     (``harness.inference_url``), or ``None``; a client's harness layer sends its model calls there, else to the
-    address that the client gave.
+    address that the client gave. ``shadows`` tracks shadow calls for this app and uses the default
+    ``ShadowLimits`` when omitted.
     """
 
     def __init__(
@@ -58,12 +61,17 @@ class RequestHandling:
         writes: PendingWrites | None = None,
         preview: RoutingPreviewClient | None = None,
         retry_policy: InferenceRetryPolicy | None = None,
+        shadows: ShadowTasks | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self.routing = routing
         self.preview = preview
         self.routed = RoutedInference(
-            DispatcherRecords(dispatcher), preview, retry_policy or InferenceRetryPolicy(), writes
+            DispatcherRecords(dispatcher),
+            preview,
+            retry_policy or InferenceRetryPolicy(),
+            writes,
+            ShadowTasks(ShadowLimits()) if shadows is None else shadows,
         )
         self.inference_url = None if inference_url is None else inference_url.rstrip("/")
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 
@@ -18,7 +19,14 @@ from aiohttp.typedefs import Handler
 
 from reef.api.inference_service import ServedModelsCache
 from reef.api.lifecycle import PendingWrites
-from reef.api.routed_inference import InferenceRetryPolicy, RoutedInference, RoutedRecords, RoutedScenario
+from reef.api.routed_inference import (
+    InferenceRetryPolicy,
+    RoutedInference,
+    RoutedRecords,
+    RoutedScenario,
+    ShadowRecordWriter,
+)
+from reef.api.routed_shadow import ShadowTasks
 from reef.api.routes.routed_chat import serve_routed_chat
 from reef.api.settings import ServiceSettings
 from reef.control.scenario.live_objects import LiveObjects
@@ -30,12 +38,32 @@ from reef.routing.manifest import RoutingAdapter, RoutingRequestError, RoutingSn
 from reef.routing.policy import RouterManagementClient, RouterPolicyError
 from reef.routing.preview import PreviewSettings, RoutingPreviewClient
 from reef.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
-from reef.storage.scenario.store import ScenarioStorage
+from reef.storage.scenario.store import ScenarioStorage, ScenarioStore
 
 logger = logging.getLogger(__name__)
 
 #: How often a replica reads its router's health and runtime hash.
 ROUTER_CHECK_INTERVAL_SECONDS = 5.0
+
+
+class ReplicaShadowWriter(ShadowRecordWriter):
+    """A shadow's record writer through one open ``store`` of Scenario ``name``.
+
+    The session retains its record-generation guard and observer. ``close`` releases this owned session.
+    No write can open a replacement Scenario after the original is archived.
+    """
+
+    def __init__(self, name: str, store: ScenarioStore) -> None:
+        self.name = name
+        self.store = store
+
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
+        if item.scenario != self.name:
+            raise ValueError("a shadow record must name its bound Scenario")
+        return self.store.records.append_result(item).item
+
+    def close(self) -> None:
+        self.store.close()
 
 
 class ReplicaRecords(RoutedRecords):
@@ -48,10 +76,14 @@ class ReplicaRecords(RoutedRecords):
     def __init__(self, cache: ServedModelsCache, storage: ScenarioStorage) -> None:
         self.cache = cache
         self.storage = storage
-        self.operations = OperationMetrics(("serve/request",))
+        self.operations = OperationMetrics(("serve/request", "shadow/request"))
 
     def open_scenario(self, name: str) -> RoutedScenario:
         return RoutedScenario(self.operations, self.cache.serving_config(name))
+
+    def open_shadow_scenario(self, name: str) -> tuple[RoutedScenario, ShadowRecordWriter]:
+        scenario = self.open_scenario(name)
+        return scenario, ReplicaShadowWriter(name, self.storage.open(name))
 
     def accept_record(self, item: AgentRecord) -> AgentRecord:
         store = self.storage.open(item.scenario)
@@ -68,8 +100,8 @@ class ReplicaRouter:
     ``check`` last verified, or None before the first success. ``ready`` is true exactly when the last ``check``
     succeeded. Purpose: ``add_replica_routing`` makes it; its middleware and ``/readyz`` read it.
 
-    ``check`` accepts a new runtime hash only after every enabled target and one preview per Scenario pass, so a router
-    restart does not need a new replica.
+    ``check`` accepts a new runtime hash after one preview per Scenario and a provider check for each enabled
+    target except those used only for shadows. A router restart does not need a new replica.
     """
 
     def __init__(
@@ -166,6 +198,7 @@ def add_replica_routing(
         )
     )
     writes = PendingWrites()
+    shadows = ShadowTasks(policy.shadow_limits())
     retry = InferenceRetryPolicy(
         initial_s=settings.inference_retry_initial_s,
         max_s=settings.inference_retry_max_s,
@@ -173,7 +206,7 @@ def add_replica_routing(
     )
     router = ReplicaRouter(
         routing,
-        RoutedInference(records, preview, retry, writes),
+        RoutedInference(records, preview, retry, writes, shadows),
         preview,
         RouterManagementClient(policy.sr_management_port, environment[MANAGEMENT_TOKEN_ENV]),
     )
@@ -201,8 +234,11 @@ def add_replica_routing(
         finally:
             watch.cancel()
             await asyncio.gather(watch, return_exceptions=True)
-            # All requests have ended, so a write that has not finished is the last write of a cancelled request.
-            if not await writes.wait(policy.finalization_timeout_seconds):
+            # HTTP requests have ended; shadows can still own provider calls and record writes.
+            deadline = time.monotonic() + policy.finalization_timeout_seconds
+            if not await shadows.close(policy.finalization_timeout_seconds):
+                logger.error("routed shadow calls did not finish; %d are still pending", len(shadows.tasks))
+            if not await writes.wait(max(0.0, deadline - time.monotonic())):
                 logger.error("routed record writes did not finish; %d are still pending", len(writes.tasks))
             await preview.close()
 

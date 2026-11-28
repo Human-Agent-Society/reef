@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 
 from aiohttp import web
 
@@ -104,19 +105,27 @@ async def serve_routed_chat(
         client_payload = await read_object(request, strict=True)
         decision = await routed.select_route(routing, scenario, client_payload)
         handler = routing.handler_for(decision)
+        # Both branches keep this policy and their provider handlers after selection is released.
+        shadow = routing.shadow_decision(decision)
+        shadow_handler = None if shadow is None else routing.handler_for(shadow)
     finally:
         # The request has either failed or captured everything it needs from this routing policy.
         acceptance = request.app.get(REQUEST_ACCEPTANCE)
         task = asyncio.current_task()
         if acceptance is not None and task is not None:
             acceptance.release_selection(task)
+    request_id = uuid.uuid4().hex
+    if shadow is not None and shadow_handler is not None:
+        routed.start_shadow(dict(request.headers), client_payload, request.path, shadow, shadow_handler, request_id)
     payload = {**client_payload, "model": decision.target.provider_model}
     if payload.get("stream") is True:
         stream, pending = await routed.start_routed_stream(
-            request.headers, payload, request.path, handler, decision=decision
+            request.headers, payload, request.path, handler, decision=decision, request_id=request_id
         )
         return await relay_routed_stream(request, routed, for_codex, stream, pending)
-    response, item = await routed.infer_routed(request.headers, payload, request.path, decision, handler)
+    response, item = await routed.infer_routed(
+        request.headers, payload, request.path, decision, handler, request_id=request_id
+    )
     return web.json_response(response, headers={RECORD_HEADER: item.agent_record_id})
 
 

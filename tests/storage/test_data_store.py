@@ -15,7 +15,7 @@ import pytest
 import sqlalchemy
 import sqlalchemy.event
 from sqlalchemy import func, select
-from tests.support.conversations import conversation
+from tests.support.conversations import conversation, routed_call
 from tests.support.trajectories import policy_trajectory
 
 from reef.api.assembly import build_dispatcher
@@ -807,6 +807,23 @@ def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancesto
         "coding/call-2": RecordLink("coding/call-1", entries[2]),
         "coding/call-3": RecordLink("coding/call-2", entries[3]),
     }
+
+
+def test_a_shadow_record_item_with_its_primarys_messages_keeps_its_own_trajectory(store):
+    primary = routed_call(conversation("primary", 1, scenario="coding"), "serve", "primary-request")
+    shadow = routed_call(conversation("shadow", 1, scenario="coding"), "shadow", "shadow-request", reply=9)
+    following = routed_call(conversation("next", 3, scenario="coding"), "serve", "next-request")
+    # The shadow finished first; neither call becomes the other's retry, and the next turn continues the primary.
+    store.create("acme", [record_item(shadow), record_item(primary)])
+    store.create("acme", [record_item(following)])
+    entries = {turns: call_key(conversation("c", turns).payload).entry_count for turns in (1, 3)}
+    assert store.record_links("acme", ["coding/primary", "coding/shadow", "coding/next"]) == {
+        "coding/primary": RecordLink(None, entries[1]),
+        "coding/shadow": RecordLink(None, entries[1]),
+        "coding/next": RecordLink("coding/primary", entries[3]),
+    }
+    for record in (primary, shadow, following):
+        assert store.read("acme", f"coding/{record.agent_record_id}").content == record_item(record).content
 
 
 def test_writes_of_one_scenario_wait_and_writes_of_another_do_not(postgres_config, tmp_path):

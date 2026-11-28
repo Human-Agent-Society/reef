@@ -119,6 +119,15 @@ HTTP services, authentication and scenario limits.
    ``reef.routing-deployment.sr-memory-bytes`` : integer : 4294967296
        Semantic Router container memory limit in bytes.
 
+   ``reef.routing-deployment.shadow-max-concurrency`` : integer : 4
+       Shadow calls run at once; a request finding none free skips its shadow.
+
+   ``reef.routing-deployment.shadow-timeout-seconds`` : number : 300
+       Seconds one shadow call waits for its provider's answer.
+
+   ``reef.routing-deployment.shadow-max-response-bytes`` : integer : 8388608
+       Longest provider body, in bytes, that a shadow call reads.
+
 Storage
 -------
 

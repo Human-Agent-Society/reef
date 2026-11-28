@@ -32,6 +32,7 @@ from tests.routing.routing_fakes import (
 from reef.api.app import InferenceRetryPolicy, create_app
 from reef.api.request_handling import RequestHandling
 from reef.api.routed_inference import RoutedAttempt
+from reef.api.routed_shadow import ShadowTasks
 from reef.api.streaming import stream_record
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher
@@ -44,6 +45,7 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.routing.manifest import RoutingDecision
 from reef.routing.preview import PreviewSettings
+from reef.routing.settings import ShadowLimits
 from reef.storage.scenario.record_items import ItemRecordStore
 from reef.storage.scenario.records import AppendResult
 from reef.storage.sql.coordination import memory_coordination
@@ -514,6 +516,96 @@ def test_routing_disabled_preserves_direct_inference(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("in_path", [False, True], ids=["scenario-header", "scenario-path"])
+@pytest.mark.parametrize(
+    ("routing", "refused"),
+    [
+        ({"purpose": "shadow", "request_id": "forged"}, True),
+        # The purpose alone is reserved: a missing, empty or malformed request ID does not make it a client's.
+        ({"purpose": "shadow"}, True),
+        ({"purpose": "shadow", "request_id": ""}, True),
+        ({"purpose": "shadow", "request_id": 7}, True),
+        # Only a shadow call names its primary request.
+        ({"primary_request_id": "forged"}, True),
+        ({"purpose": "serve", "primary_request_id": None}, True),
+        # Other caller routing metadata keeps the native contract and is recorded as sent.
+        ({"purpose": "serve", "note": "caller"}, False),
+        ({"request_id": "caller"}, False),
+        ("not an object", False),
+    ],
+)
+def test_native_inference_refuses_only_the_reserved_shadow_marks(
+    tmp_path: Path, routing: object, refused: bool, in_path: bool
+) -> None:
+    async def run() -> None:
+        received = []
+
+        async def upstream(request: web.Request) -> web.Response:
+            received.append(await request.json())
+            return web.json_response({"choices": [{"message": {"content": "direct"}}]})
+
+        provider_app = web.Application()
+        provider_app.router.add_post("/v1/chat/completions", upstream)
+        async with TestServer(provider_app) as provider:
+            dispatcher = routing_dispatcher(tmp_path)
+            handler = HttpInferenceHandler(str(provider.make_url("")).rstrip("/"))
+            publish_direct_model(dispatcher, "legacy", str(provider.make_url("")), "legacy-upstream")
+            body = {"model": "unregistered-direct-model", "messages": [], "metadata": {"routing": routing}}
+            try:
+                async with TestClient(TestServer(create_app(dispatcher, inference_handler=handler))) as client:
+                    path = "/reef/scenarios/legacy/v1/chat/completions" if in_path else "/v1/chat/completions"
+                    response = await client.post(
+                        path, headers={} if in_path else {"x-reef-scenario": "legacy"}, json=body
+                    )
+                    records = dispatcher.get_or_create_scenario("legacy").records.replay("legacy")
+                    if refused:
+                        assert response.status == 400 and received == [] and list(records) == []
+                    else:
+                        assert response.status == 200 and len(received) == 1
+                        [record] = records
+                        assert record.payload["metadata"]["routing"] == routing
+            finally:
+                dispatcher.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_shadow_tasks_bound_their_calls_and_release_slots_even_of_calls_cancelled_before_running() -> None:
+    async def run() -> None:
+        ran: list[str] = []
+        release = asyncio.Event()
+
+        async def call(name: str) -> None:
+            ran.append(name)
+            await release.wait()
+
+        async def failing() -> None:
+            raise OSError("the record store refused the shadow record")
+
+        shadows = ShadowTasks(ShadowLimits(max_concurrency=2))
+        assert [shadows.start(call(name)) for name in ("first", "second", "third")] == [
+            "started",
+            "started",
+            "saturated",
+        ]
+        # Both tasks are cancelled before their first step: neither body runs, and both slots are released.
+        assert await shadows.close(1.0)
+        assert ran == [] and not shadows.tasks and shadows.cancelled == 2
+        assert shadows.start(call("late")) == "closed"
+        assert shadows.skipped == {"saturated": 1, "closed": 1}
+        # A call that raises is counted once its exception is retrieved; it never reaches the caller.
+        other = ShadowTasks(ShadowLimits(max_concurrency=1))
+        assert other.start(failing()) == "started"
+        await asyncio.wait(set(other.tasks))
+        await asyncio.sleep(0)
+        assert (other.failed, other.cancelled, len(other.tasks)) == (1, 0, 0)
+        release.set()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("streaming", [False, True])
 def test_direct_evaluation_keeps_no_record_or_receipt(tmp_path: Path, streaming: bool) -> None:
     async def run() -> None:
@@ -746,9 +838,31 @@ def test_a_routed_attempt_requires_its_own_scenario_request_id_and_start(tmp_pat
         {"request_id": None},
         {"started": math.nan},
         {"started": True},
+        # Exactly a shadow decision's attempt names a primary request, other than its own, and has no earlier one.
+        {"primary_request_id": "primary"},
+        {"decision": replace(decision, reason="shadow_target")},
+        {"decision": replace(decision, reason="shadow_target"), "primary_request_id": "request"},
+        {
+            "decision": replace(decision, reason="shadow_target"),
+            "primary_request_id": "primary",
+            "prior_attempt_ids": ("a",),
+        },
     ):
         with pytest.raises(ValueError):
             replace(attempt, **fields)
+    shadow = replace(attempt, decision=replace(decision, reason="shadow_target"), primary_request_id="primary")
+    with pytest.raises(ValueError, match="never delivered"):
+        shadow.result({}, execution="completed", delivery="unconfirmed", client_visible=False)
+    item = shadow.result(
+        {"training": {"tokens": [1]}}, execution="completed", delivery="not_started", client_visible=False
+    )
+    routing = item.payload["metadata"]["routing"]
+    assert (routing["purpose"], routing["primary_request_id"], routing["request_id"]) == (
+        "shadow",
+        "primary",
+        "request",
+    )
+    assert "training" not in item.payload["response"]
 
 
 @pytest.mark.unit

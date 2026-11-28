@@ -70,7 +70,7 @@ class Scenario:
             {} if record2sample_config is None else record2sample_config
         )
         self.operations = OperationMetrics(
-            ("ingest/write", "serve/request"),
+            ("ingest/write", "serve/request", "shadow/request"),
             counters=(
                 "ingest/accepted_total",
                 "ingest/duplicates_total",

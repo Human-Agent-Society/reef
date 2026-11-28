@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from reef.core.records_types import AgentRecord, RequestType
 
 
@@ -48,3 +50,16 @@ def conversation(
         },
         created_at=created_at,
     )
+
+
+def routed_call(record: AgentRecord, purpose: str, request_id: str, reply: int | None = None) -> AgentRecord:
+    """``record`` as a routed call stores it: with routing metadata of ``purpose`` (``serve`` or ``shadow``) and
+    ``request_id``, and with reply turn ``reply`` instead of its own when given. A shadow call names the primary
+    request ``primary-request``."""
+    routing = {"purpose": purpose, "request_id": request_id}
+    if purpose == "shadow":
+        routing["primary_request_id"] = "primary-request"
+    payload = {**record.payload, "metadata": {"caller": "kept", "routing": routing}}
+    if reply is not None:
+        payload["response"] = {"choices": [{"message": {**turn(reply), "refusal": None}}]}
+    return replace(record, payload=payload)
