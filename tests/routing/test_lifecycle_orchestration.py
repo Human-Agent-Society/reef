@@ -168,11 +168,14 @@ def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(
     assert owner["previous_calls"] == previous_calls
 
 
-def test_an_ordinary_deployment_never_installs_a_sighup_handler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_ordinary_deployment_handles_sighup_as_sigterm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     installed = []
-    monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: installed.append(signum))
+
+    def install(signum, handler):
+        installed.append((signum, handler))
+        return ("before reef serve", signum)
+
+    monkeypatch.setattr(orchestrator.signal, "signal", install)
 
     class Stack(orchestrator._Stack):
         """The real stack with no services: it starts and runs nothing, so only its signal setup is observed."""
@@ -195,8 +198,15 @@ def test_an_ordinary_deployment_never_installs_a_sighup_handler(
         )
     )
     assert orchestrator._run_orchestrator(str(path)) == 0
-    assert signal.SIGTERM in installed and signal.SIGINT in installed
-    assert signal.SIGHUP not in installed
+    handlers = {
+        number: [handler for signum, handler in installed if signum == number]
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    }
+    assert handlers[signal.SIGTERM] and handlers[signal.SIGINT]
+    # No reload handler: one hangup handler stops the stack, then the handler from before reef serve comes back.
+    assert handlers[signal.SIGHUP][0].__name__ == "stop_on_hangup"
+    assert handlers[signal.SIGHUP][1:] == [("before reef serve", signal.SIGHUP)]
+    assert handlers[signal.SIGTERM][-1] == ("before reef serve", signal.SIGTERM)
 
 
 @pytest.mark.parametrize("service", ["control", "inference"])

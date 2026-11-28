@@ -10,6 +10,11 @@ From a checkout, set your provider key in ``REEF_UPSTREAM_API_KEY`` and start Re
 
 Use ``reef serve --help`` to list flags. Press Ctrl-C to stop. Logs and PID files default to ``.reef/run``.
 
+On Linux and macOS, closing the terminal or the SSH session (SIGHUP) also
+requests graceful shutdown. A second hangup does not skip the grace period. To
+keep the stack running after you log out, start it with ``nohup reef serve``.
+A deployment with managed routing uses SIGHUP to reload its policy instead.
+
 Options
 -------
 

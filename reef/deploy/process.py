@@ -28,7 +28,9 @@ _PROCESS_REAP_TIMEOUT = 5
 
 def log_status(message: str) -> None:
     """Print one status line of the deployment to stderr."""
-    print(f"[reef] {message}", file=sys.stderr)
+    # A terminal that hung up fails every write. The stack still has to stop, and the logs stay in the run directory.
+    with contextlib.suppress(OSError):
+        print(f"[reef] {message}", file=sys.stderr)
 
 
 def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> list[str]:

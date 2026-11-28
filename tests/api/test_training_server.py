@@ -4,11 +4,13 @@ import asyncio
 import contextlib
 import dataclasses
 import os
+import select
 import signal
 import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -890,6 +892,144 @@ def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr.count("received signal, shutting down") == 1
+
+
+#: A service whose SIGTERM cleanup takes a second: it writes ``service.stopped`` only if the grace period lasts.
+HANGUP_SERVICE = """
+import os, pathlib, signal, sys, time
+directory = pathlib.Path(sys.argv[1])
+
+def stop(signum, frame):
+    time.sleep(1)
+    (directory / "service.stopped").write_text(str(signum))
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+(directory / "service.pid").write_text(str(os.getpid()))
+while True:
+    time.sleep(1)
+"""
+
+
+def hangup_deployment(tmp_path: Path, phase: str, before_serve: str) -> list[str]:
+    """The argv of a `reef serve` with one HANGUP_SERVICE. In phase "startup" its ready probe never passes."""
+    service = {"name": "sleeper", "command": [sys.executable, "-c", HANGUP_SERVICE, str(tmp_path)]}
+    if phase == "startup":
+        service |= {"ready": [sys.executable, "-c", "raise SystemExit(1)"], "ready_timeout": 60}
+    config_path = tmp_path / "serve.yaml"
+    config_path.write_text(
+        f"reef:\n  run-dir: {tmp_path / 'run'}\ninference:\n  upstream-url: http://127.0.0.1:9\n  upstream-model: demo\n"
+    )
+    program = "\n".join(
+        [
+            "import signal, sys",
+            "from reef.deploy import orchestrator",
+            before_serve,
+            f"orchestrator.validate_services = lambda config, path: [{service!r}]",
+            f"sys.exit(orchestrator._run_orchestrator({str(config_path)!r}))",
+        ]
+    )
+    return [sys.executable, "-c", program]
+
+
+def wait_for_stack(tmp_path: Path, phase: str, output: Callable[[], str]) -> int:
+    """Wait until the service runs and, in phase "running", the stack is up; return the service's pid."""
+    # The worker logs "stack up" once it has spawned the service. The orchestrator logs it a second time when every
+    # service is ready, just before it blocks; a ready probe that never passes keeps that line away.
+    stack_up_lines = 2 if phase == "running" else 1
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not (
+        (tmp_path / "service.pid").exists() and output().count("stack up") >= stack_up_lines
+    ):
+        time.sleep(0.05)
+    assert (tmp_path / "service.pid").exists(), output()
+    assert output().count("stack up") == stack_up_lines, output()
+    return int((tmp_path / "service.pid").read_text())
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions and SIGHUP")
+@pytest.mark.parametrize("phase", ["startup", "running"])
+def test_a_closed_terminal_stops_the_services_with_their_grace_period(tmp_path: Path, phase: str) -> None:
+    # `reef serve` runs on a terminal that then closes: the kernel hangs up its session, and later writes to the
+    # terminal fail. Each service runs in a session of its own and gets no hangup.
+    import pty  # POSIX only
+
+    terminal, terminal_side = pty.openpty()
+    make_controlling_terminal = "import fcntl, termios; fcntl.ioctl(0, termios.TIOCSCTTY, 0)"
+    serve = subprocess.Popen(
+        hangup_deployment(tmp_path, phase, make_controlling_terminal),
+        cwd=tmp_path,
+        stdin=terminal_side,
+        stdout=terminal_side,
+        stderr=terminal_side,
+        start_new_session=True,
+    )
+    os.close(terminal_side)
+    shown = bytearray()
+
+    def output() -> str:
+        while select.select([terminal], [], [], 0)[0]:
+            try:
+                shown.extend(os.read(terminal, 65536))
+            except OSError:
+                break
+        return shown.decode(errors="replace")
+
+    service_pid = None
+    try:
+        service_pid = wait_for_stack(tmp_path, phase, output)
+
+        os.close(terminal)
+        # The shell of a closed terminal hangs up its jobs once more; one hangup is one graceful stop.
+        serve.send_signal(signal.SIGHUP)
+        serve.wait(timeout=60)
+
+        assert serve.returncode == 0
+        assert (tmp_path / "service.stopped").read_text() == str(int(signal.SIGTERM))
+        with pytest.raises(ProcessLookupError):
+            os.kill(service_pid, 0)
+    finally:
+        if serve.poll() is None:
+            serve.kill()
+            serve.wait()
+        if service_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(service_pid, signal.SIGKILL)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions and SIGHUP")
+def test_reef_serve_keeps_an_ignored_sighup(tmp_path: Path) -> None:
+    # `nohup reef serve` starts with SIGHUP ignored; the stack must outlive the hangup.
+    serve_log = tmp_path / "serve.log"
+    with serve_log.open("w") as serve_stderr:
+        serve = subprocess.Popen(
+            hangup_deployment(tmp_path, "running", "signal.signal(signal.SIGHUP, signal.SIG_IGN)"),
+            cwd=tmp_path,
+            stderr=serve_stderr,
+            start_new_session=True,
+        )
+    service_pid = None
+    try:
+        service_pid = wait_for_stack(tmp_path, "running", serve_log.read_text)
+
+        serve.send_signal(signal.SIGHUP)
+        time.sleep(1)
+        assert serve.poll() is None, serve_log.read_text()
+        os.kill(service_pid, 0)
+
+        serve.send_signal(signal.SIGTERM)
+        serve.wait(timeout=60)
+        assert serve.returncode == 0, serve_log.read_text()
+        assert (tmp_path / "service.stopped").exists()
+    finally:
+        if serve.poll() is None:
+            serve.kill()
+            serve.wait()
+        if service_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(service_pid, signal.SIGKILL)
 
 
 @pytest.mark.unit

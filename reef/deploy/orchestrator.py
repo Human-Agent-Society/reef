@@ -75,6 +75,17 @@ from reef.routing.registry import RoutingOwnershipError
 _WATCHDOG_INTERVAL = 5
 
 
+def hangup_stops_stack(routing_controller: RoutingDeploymentController | None) -> bool:
+    """Whether a hangup stops the stack: on POSIX, without managed routing, unless SIGHUP is already ignored.
+
+    A local service runs in a session of its own, so a closed terminal or SSH session hangs up only this process.
+    The default action would end this process and leave the services running. An ignored SIGHUP (``nohup``) stays
+    ignored. A routed deployment uses SIGHUP to reload its policy instead. Read it before this process installs a
+    handler of its own.
+    """
+    return os.name == "posix" and routing_controller is None and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN
+
+
 class DeployStartupError(InternalError):
     """A deployment failed to start; includes its reason and local log location."""
 
@@ -140,7 +151,9 @@ class _Stack:
         if content:
             with (self.run_dir / f"{name}.log").open("a") as handle:
                 handle.write(content)
-            print(content, end="", flush=True)
+            # The run directory keeps the content when the terminal has hung up.
+            with suppress(OSError):
+                print(content, end="", flush=True)
 
     def _wait_ready(self, service: Mapping[str, Any], executor: Executor, deadline: float) -> None:
         while not self._stopping.is_set() and not self.stop_requested:
@@ -310,7 +323,7 @@ class _Stack:
 
         signal.signal(signal.SIGTERM, _request_stop)
         signal.signal(signal.SIGINT, _request_stop)
-        # A routed deployment's SIGHUP (policy reload) is handled by _run_orchestrator for the whole lifecycle.
+        # _run_orchestrator handles SIGHUP for the whole lifecycle: a routed deployment's policy reload, or a hangup.
         self.run_until_stopped()
 
     def run_until_stopped(self) -> None:
@@ -572,7 +585,7 @@ def _run_orchestrator(
         )
     preparation_sigterm = signal.getsignal(signal.SIGTERM)
     preparation_sigint = signal.getsignal(signal.SIGINT)
-    # Ordinary deployments never touch SIGHUP, which some platforms lack.
+    # SIGHUP exists only on POSIX. An ordinary deployment sets its own SIGHUP handlers around the stack below.
     preparation_sighup = signal.getsignal(signal.SIGHUP) if routing_controller is not None else signal.SIG_DFL
 
     def stop_routing_preparation(signum: int, frame: FrameType | None) -> None:
@@ -624,12 +637,29 @@ def _run_orchestrator(
                 log_status("received signal during startup, shutting down")
                 raise KeyboardInterrupt
 
+        started = False
+
+        def stop_on_hangup(signum: int, frame: FrameType | None) -> None:
+            # A closed terminal hangs up more than once (its shell, then the kernel), and every later write to it
+            # fails. The first hangup is one stop request with the full grace period; later ones are ignored.
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            with open(os.devnull, "w") as devnull:
+                for descriptor in terminal_descriptors:
+                    os.dup2(devnull.fileno(), descriptor)
+            if started:
+                stack.stop_requested = True
+            else:
+                interrupt_startup(signum, frame)
+
         # block() installs the steady-state handler only after every service is
         # ready. Until then, interruption must unwind start() and stop its peers.
         previous_sigterm = signal.signal(signal.SIGTERM, interrupt_startup)
         previous_sigint = signal.getsignal(signal.SIGINT)
         if routing_controller is not None:
             signal.signal(signal.SIGINT, interrupt_startup)
+        hangup_stops = hangup_stops_stack(routing_controller)
+        terminal_descriptors = [descriptor for descriptor in (1, 2) if os.isatty(descriptor)]
+        previous_sighup = signal.signal(signal.SIGHUP, stop_on_hangup) if hangup_stops else signal.SIG_DFL
         try:
             try:
                 stack.start()
@@ -637,6 +667,7 @@ def _run_orchestrator(
                 raise DeployStartupError(
                     f"deployment startup failed: {exc}\n  logs: {run_dir.resolve()}/*.log"
                 ) from exc
+            started = True
             stack.block()
         except KeyboardInterrupt:
             # Startup signals unwind the launch tasks before final cleanup.
@@ -647,6 +678,8 @@ def _run_orchestrator(
             finally:
                 signal.signal(signal.SIGTERM, previous_sigterm)
                 signal.signal(signal.SIGINT, previous_sigint)
+                if hangup_stops:
+                    signal.signal(signal.SIGHUP, previous_sighup)
         return stack.exit_code
     finally:
         try:
