@@ -2,6 +2,11 @@
 
 Reproduction of [Learning to Discover at Test Time](https://arxiv.org/abs/2601.16175) as a Reef weight-training recipe. TTT-Discover makes repeated attempts at one hard problem at test time: rollouts arrive as a fixed grid of sibling attempts, the step trains on the whole group, and the next grid runs on the weights it produced. The package holds the method; the search loop that drives it lives in [examples/tttd](examples/tttd/README.md).
 
+The adaptive-entropic objective keeps the reference KL target for groups with
+three or more rollouts. For two rollouts, it caps the softmax odds at four to
+one. This keeps each advantage between −0.75 and 3, including when the group
+has a single winner.
+
 - Paper: [arXiv:2601.16175](https://arxiv.org/abs/2601.16175)
 - Pins: `slime` pinned to `THUDM/slime@8a53b680e82932dabb48cbfcd34f749854400857` (via `pyproject.toml` `dependency-groups.runtime`); the completed run used Slime `41014d1f` and `Qwen/Qwen3-8B` with thinking, rank-32 LoRA, Adam lr `4e-5`, and the Erdos minimum-overlap task
 - Claim scope: a result-level reproduction of the paper's Qwen3-8B Erdos experiment at half its rollout budget (eight groups of 32 against the paper's 64 per group). 50 steps in about 22.6 hours on one four-B200 node reached a best certified C5 upper bound of 0.380916 against 0.380932 in the paper's Table 2.
@@ -24,6 +29,6 @@ tttd/
 
 [The tttd recipe page](../../docs/user-guide/recipes/tttd.rst) covers the runtime sequence, a reduced smoke, and recovery behavior, and the [example README](examples/tttd/README.md) records implementation details, paper fidelity, and the completed reproduction.
 
-The optional [Tinker backend](../../docs/user-guide/tinker.rst) reuses the same recipe, grouped objective, and feedback protocol. Start with the [two-rollout smoke](../../tutorials/tinker/README.md); the benchmark results above were obtained with Slime and are not Tinker validation results.
+The optional [Tinker backend](../../docs/user-guide/tinker.rst) reuses the same recipe, grouped objective, and feedback protocol. Start with the [four-rollout smoke](../../tutorials/tinker/README.md); the benchmark results above were obtained with Slime and are not Tinker validation results.
 
 [Guidance-TTT](../../docs/user-guide/recipes/guidance-ttt.rst) trains the guide while keeping the executor frozen. Its example includes Polyomino Packing, Lasso Path, AHC058, and TriMul.
