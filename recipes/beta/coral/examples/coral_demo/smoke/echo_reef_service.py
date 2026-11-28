@@ -2,7 +2,7 @@
 """The Reef service for the no-GPU smoke run: real service, canned model.
 
 Everything above the inference backend is the production code path —
-``reef.service.app.create_app`` with the default dispatcher, token auth,
+``reef.api.app.create_app`` with the default dispatcher, token auth,
 receipts, reports, dedup. Only the model is fake: instead of SGLang serving
 a trained policy, the backend cycles through canned ``merge_sorted``
 implementations of different quality, so graded attempts show score
@@ -16,11 +16,11 @@ import itertools
 
 from aiohttp import web
 
-from reef.dispatcher import build_default_dispatcher
+from reef.api.app import create_app
+from reef.control.dispatcher import build_default_dispatcher
 from reef.inference.interfaces import InferenceHandler
-from reef.service.app import create_app
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 CORRECT = """\
 def merge_sorted(a, b):

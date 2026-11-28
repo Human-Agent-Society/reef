@@ -2,7 +2,7 @@
 """Rebuild the service diagrams: python3 docs/assets/render_service_architecture.py
 
 Writes services-light.svg and services-dark.svg: the seven services of a
-deployment (``reef serve --component NAME``) around the shared store that they
+deployment (``reef serve --service NAME``) around the shared store that they
 read and write, and the queues between them. The drawing is static. It embeds
 IBM Plex Sans and IBM Plex Mono from the font cache of render_architecture.py.
 """

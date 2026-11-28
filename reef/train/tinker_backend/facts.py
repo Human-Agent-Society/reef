@@ -19,7 +19,7 @@ from reef.artifact.repository import DefaultStart
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, read_reference
 from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
-from reef.storage.job_data import JobDataKind
+from reef.storage.data.job_data import JobDataKind
 from reef.tinker.checkpoint import MANIFEST
 from reef.train.component import ScenarioRoot, TrainingBackendFacts
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint

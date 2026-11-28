@@ -18,7 +18,7 @@ from recipes.openclawrl.examples.openclawrl.user_sim.personas import (
 )
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
-from reef.record2sample.staleness import ServedArtifacts
+from reef.samples.staleness import ServedArtifacts
 from reef.train.pipeline import TrainingPipeline
 
 CLEAN_REPLY = """Sure, here is the working.
@@ -133,7 +133,7 @@ def _judged_turns(processor, worker, artifact_ids: list[str], score: float = 1.0
 @pytest.mark.unit
 def test_openclawrl_processor_drops_unfillable_stale_artifact_candidates() -> None:
     from recipes.openclawrl import OpenClawRLJobData
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     worker = _FakeWorker()
     context = PipelineContext("s")
@@ -157,7 +157,7 @@ def test_openclawrl_processor_drops_unfillable_stale_artifact_candidates() -> No
 @pytest.mark.unit
 def test_openclawrl_processor_keeps_single_artifact_queue_intact() -> None:
     from recipes.openclawrl import OpenClawRLJobData
-    from reef.pipeline_context import PipelineContext
+    from reef.samples.context import PipelineContext
 
     worker = _FakeWorker()
     context = PipelineContext("s")

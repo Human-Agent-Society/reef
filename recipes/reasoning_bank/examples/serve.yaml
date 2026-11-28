@@ -38,7 +38,7 @@ recipe:
 
 pipeline:
   record2sample:
-    module: reef.record2sample.traces:InferenceSamples
+    module: reef.samples.traces:InferenceSamples
   sample2job:
     config:
       # One step reads eight model calls. Most of them are calls in the middle of a run, which cost nothing.

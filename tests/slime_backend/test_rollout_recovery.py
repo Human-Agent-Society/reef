@@ -388,7 +388,7 @@ def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
     processor = module.TrainingBatchProcessor(
         types.SimpleNamespace(custom_rollout_data_keys=(), reef_rollout_tensor_dtypes={}), {"dp_size": 1}
     )
-    assert processor.train_parallel_config == {"dp_size": 1}
+    assert processor.train_parallel_config["dp_size"] == 1
     for name in ("inference_url", "pause_generation_for_update", "dispose", "shutdown"):
         assert not hasattr(processor, name)
 

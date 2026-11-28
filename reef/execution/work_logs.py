@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-from reef.storage.work_queue import MAX_LOG_LINES, MAX_LOG_MESSAGE, WorkItem, WorkLogLine, WorkQueue
+from reef.storage.coordination.work_queue import MAX_LOG_LINES, MAX_LOG_MESSAGE, WorkItem, WorkLogLine, WorkQueue
 
 logger = logging.getLogger(__name__)
 

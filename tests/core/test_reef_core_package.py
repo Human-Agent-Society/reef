@@ -13,15 +13,15 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ConfigError, DeployConfigError, ReefError, RuntimeConfigError
 from reef.core.plugins import PluginConfigError
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.record_items import ItemRecordStore
-from reef.storage.records import RecordConflictError, RecordStore
+from reef.storage.scenario.record_items import ItemRecordStore
+from reef.storage.scenario.records import RecordConflictError, RecordStore
 
 
 @pytest.mark.unit
 def test_core_package_exports_protocol_and_record_types() -> None:
     assert tuple(RequestType) == (RequestType.INFERENCE, RequestType.REPORT)
     assert AgentRecord.__module__ == "reef.core.records_types"
-    assert RecordStore.__module__ == "reef.storage.records"
+    assert RecordStore.__module__ == "reef.storage.scenario.records"
     assert inspect.isabstract(RecordStore)
     assert issubclass(ItemRecordStore, RecordStore)
     assert all(symbol is not None for symbol in (RecordConflictError,))

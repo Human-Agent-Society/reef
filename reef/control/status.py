@@ -1,0 +1,157 @@
+"""The training status that ``GET /reef/status`` reports: each training scenario's commits, job data and job."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from typing import Any
+
+from reef.control.scenario.live_objects import LiveObjects, weight_component_name
+from reef.control.scenario.registry import ScenarioRegistry
+from reef.control.scenario.scenario import Scenario
+from reef.control.training_errors import TrainingErrors, error_text
+from reef.recipe.base import Recipe
+from reef.recipe.composite import CompositeRecipe
+from reef.train.jobs import JobLoopState
+
+logger = logging.getLogger(__name__)
+
+
+class TrainingStatus:
+    """Build the training status from the registry and the recorded errors; ``live`` holds the runtime that the
+    serving status asks."""
+
+    def __init__(self, recipe: Recipe, live: LiveObjects, registry: ScenarioRegistry, errors: TrainingErrors) -> None:
+        self.recipe = recipe
+        self.live = live
+        self.registry = registry
+        self.errors = errors
+
+    def build(self) -> Mapping[str, Any]:
+        """Assemble the training status block, checking training health as it goes.
+
+        Reading the status records state so a repeated read does not repeat
+        a log line, so callers must expect a status read to have effects.
+        """
+        preload_errors = self.registry.preload_errors
+        # One scenario's status failing stops the sweep: the recorded error goes
+        # out with whatever was collected before it.
+        scenarios: dict[str, dict[str, Any]] = {}
+        failed = False
+        for scenario_name in self.registry.training_status_scenario_names:
+            try:
+                block = self.scenario_status(scenario_name)
+            except Exception as exc:
+                failed = True
+                if self.errors.set_status_build_error(f"{scenario_name}: {error_text(exc)}"):
+                    logger.exception("failed to build training status for scenario %r", scenario_name)
+                break
+            if block is not None:
+                scenarios[scenario_name] = block
+        if not failed:
+            self.errors.set_status_build_error(None)
+        errors = self.training_errors()
+        return {
+            "error": "\n".join(errors) or None,
+            "loaded_scenarios": len(self.registry.loaded_scenarios()),
+            "preload_errors": preload_errors,
+            "scenarios": scenarios,
+            "serving": self.serving_status(),
+        }
+
+    def scenario_status(self, scenario_name: str) -> dict[str, Any] | None:
+        current = self.registry.get_optional(scenario_name)
+        if current is None:
+            return None
+        try:
+            return self.instance_status(current)
+        except RuntimeError:
+            # A reload can replace the instance and close it while this read runs: read the new instance then.
+            replacement = self.registry.get_optional(scenario_name)
+            if replacement is None or replacement is current:
+                raise
+            return self.instance_status(replacement)
+
+    def instance_status(self, current: Scenario) -> dict[str, Any]:
+        """The status block of the loaded instance ``current``."""
+        runtime = current.runtime
+        stepping_trainer = current.trainer
+        job_data_ready = stepping_trainer.job_data_ready()
+        # The stepping trainer's status is read once and reported again in its component block.
+        stepping_pipeline_status = stepping_trainer.pipeline_status()
+        processor = dict(stepping_pipeline_status)
+        if "manual" in stepping_trainer.pipeline.supported_training_modes:
+            processor["pending_requests"] = current.pending_requests()
+        block: dict[str, Any] = {
+            **current.commit_status,
+            # The artifact that answers the scenario's requests now: the one that served_models names.
+            "served_artifact_id": current.served_artifact_id(),
+            "job_data_ready": job_data_ready,
+            "training_mode": stepping_trainer.pipeline.training_mode,
+            "processor": processor,
+            "inference_admission": runtime.inference_admission_status if runtime is not None else None,
+            # Each component's active artifact and training start, by artifact_id.
+            "artifacts": current.artifact_status(),
+        }
+        if stepping_trainer.job_loop is not None:
+            # The jobs the trainer waits on.
+            state = JobLoopState.from_dict(stepping_trainer.state)
+            backend = stepping_trainer.job_loop.component.name
+            block["training_jobs"] = [{**job.to_dict(), "backend": backend} for job in state.jobs]
+            block["finished_jobs"] = state.finished_jobs
+        if runtime is not None and runtime.per_scenario_adapters:
+            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(current.name)
+        if len(current.trainers) > 1:
+            # Each component's trainer commits on its own; report each one beside the scenario-wide commit number.
+            components: dict[str, Any] = {}
+            for component_trainer in current.trainers:
+                last = current.last_commit_for(component_trainer.component)
+                components[str(component_trainer.component)] = {
+                    "job_data_ready": component_trainer.trainer.job_data_ready(),
+                    "training_mode": component_trainer.trainer.pipeline.training_mode,
+                    "processor": dict(
+                        stepping_pipeline_status
+                        if component_trainer.trainer is stepping_trainer
+                        else component_trainer.trainer.pipeline_status()
+                    ),
+                    "last_training_commit": (
+                        None
+                        if last is None
+                        else {
+                            "commit_number": last.commit_number,
+                            "recorded_at": last.recorded_at,
+                            "metrics": None if last.metrics is None else dict(last.metrics),
+                        }
+                    ),
+                }
+            block["components"] = components
+        return block
+
+    def training_errors(self) -> list[str]:
+        """Every recorded training error."""
+        training_errors, status_build_error = self.errors.snapshot()
+        errors = [f"{scenario}: {training_errors[(scenario, source)]}" for scenario, source in sorted(training_errors)]
+        if status_build_error is not None:
+            errors.append(status_build_error)
+        return errors
+
+    def serving_status(self) -> dict[str, Any]:
+        """The adapter residency that the runtime of the recipe's weights reports, under the recipe's name.
+
+        The reader asks the runtime (``InferenceRuntime.adapter_residency_status``). A weight recipe's block is
+        ``{"adapters": residency}``; a composite's holds that block under the name of its weight component. The
+        result is empty for a recipe that trains no weights and for a runtime that reports no residency. A
+        runtime that raises gives ``{"error": text}``.
+        """
+        component = weight_component_name(self.recipe)
+        runtime = self.live.runtime
+        if component is None or runtime is None:
+            return {}
+        try:
+            residency = runtime.adapter_residency_status()
+        except Exception as exc:
+            return {self.recipe.name: {"error": error_text(exc)}}
+        if residency is None:
+            return {}
+        status: dict[str, Any] = {"adapters": residency}
+        return {self.recipe.name: {component: status} if isinstance(self.recipe, CompositeRecipe) else status}
