@@ -53,8 +53,9 @@ training:
     megatron-to-hf-mode: "bridge"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
-    # Each save is also an artifact: a full model copy. Publishing one paused generation long enough
-    # for the SGLang scheduler watchdog (300 s) to kill the engines, so this run does not save.
+    # Megatron requires save-interval with save, but the component does not read it: it saves the
+    # actor at the end of every job and publishes it. In the README runs, a publication pause let
+    # the SGLang scheduler watchdog (300 s) kill the engines.
     save-interval: "100000"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
     num-rollout: "100000000"
@@ -89,8 +90,15 @@ training:
     # Paper generation window (61,440 of a 65,536 sequence).
     seq-length: "28672"
     rollout-max-response-len: "24576"
+    # Checkpoints hold the weights only: with the optimizer state, each job
+    # would write about 4 times as much to the shared storage below. The cost:
+    # each job's new driver rebuilds the actor's fp32 master weights from the
+    # saved bf16 weights and starts Adam again. One 1e-6 step does not change
+    # a bf16 weight larger than about 5e-4, so while each job is one step,
+    # those actor weights do not move.
     optimizer: "adam"
     no-save-optim: true
+    reef-accept-optimizer-restart: true
     use-dynamic-batch-size: true
     max-tokens-per-gpu: "32768"
     log-probs-max-tokens-per-gpu: "32768"
@@ -106,7 +114,9 @@ training:
     eps-clip-high: "5.0"
     critic-steps-per-actor: "2"
     critic-lr: "5e-6"
-    # The critic never serves and no run resumes; its checkpoint is not needed.
+    # The critic is never saved, so each job's new driver starts the critic
+    # again from --load (the actor's latest checkpoint) instead of the critic
+    # that the last job trained.
     critic-save-interval: "100000"
     num-critic-only-steps: "10"
     sao-length-adaptive-lambda: true

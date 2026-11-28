@@ -96,6 +96,9 @@ Megatron requires native ``save-interval`` when ``save`` is configured.
 Slime retention preserves the next job's start. If a checkpoint cannot fit, the job
 fails and submitted samples remain consumed. Set ``training.options.reef-checkpoint-max-storage``
 and ``reef-checkpoint-min-free-space`` for absolute limits.
+A Megatron checkpoint holds the optimizer state, about 8 times the HF export without LoRA.
+``--no-save-optim`` keeps the weights only, about 2 times, but every job then restarts Adam,
+so it needs ``--reef-accept-optimizer-restart``.
 
 Restart and recovery
 --------------------

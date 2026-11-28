@@ -55,6 +55,8 @@ def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     assert args.megatron_lora_rank == 4
     assert args.use_critic is True
     assert args.reef_executor_backend == "auto"
+    assert args.is_optimizer_restart_accepted is False
+    assert parser.parse_args(["--reef-accept-optimizer-restart"]).is_optimizer_restart_accepted is True
 
 
 @pytest.mark.unit
@@ -156,6 +158,8 @@ def component_args(**overrides):
         {"rollout_num_gpus": 2},
         {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 4},
         {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 2},
+        # A deployment that accepts the optimizer restart may save weights only.
+        {"no_save_optim": True, "is_optimizer_restart_accepted": True},
     ],
 )
 def test_slime_args_accept_a_run_the_training_component_can_run(overrides) -> None:
@@ -176,6 +180,9 @@ def test_slime_args_accept_a_run_the_training_component_can_run(overrides) -> No
         ({"save_hf": "/tmp/hf/checkpoint"}, "{rollout_id}"),
         # The workers keep running through a job, so nothing releases and recreates them.
         ({"release_train": True}, "remove --release-train"),
+        # Each job's driver loads the latest checkpoint: without its optimizer state, Adam starts again every job.
+        ({"no_save_optim": True}, "--no-save-optim restarts the optimizer at every job"),
+        ({"is_optimizer_restart_accepted": True}, "--reef-accept-optimizer-restart applies only with --no-save-optim"),
     ],
 )
 def test_slime_args_refuse_what_the_training_component_cannot_run(overrides, refusal) -> None:
@@ -310,6 +317,13 @@ def test_a_critic_refuses_expandable_segments_only_when_slime_turns_off_the_cpu_
 def test_finalize_arguments_rejects_nonpositive_critic_save_interval(interval: int) -> None:
     with pytest.raises(ValueError, match="critic-save-interval"):
         finalize_reef_slime_args(slime_args(critic_save_interval=interval), [])
+
+
+@pytest.mark.unit
+def test_finalize_arguments_refuses_no_load_optim() -> None:
+    # Each job's driver loads the latest checkpoint, so the flag would restart Adam at every job.
+    with pytest.raises(ValueError, match="remove --no-load-optim"):
+        finalize_reef_slime_args(slime_args(), ["--no-load-optim"])
 
 
 @pytest.mark.unit

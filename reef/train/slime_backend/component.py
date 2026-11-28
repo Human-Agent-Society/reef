@@ -93,7 +93,11 @@ from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job, slime_payload_steps
-from reef.train.slime_backend.reef_adapters.startup import job_runtime_env, prepare_slime_arguments
+from reef.train.slime_backend.reef_adapters.startup import (
+    apply_unsaved_optimizer_resume,
+    job_runtime_env,
+    prepare_slime_arguments,
+)
 from reef.train.slime_backend.reef_adapters.train_groups import (
     DEFAULT_TRAIN_TIMEOUT_S,
     SlimeTrainGroup,
@@ -953,6 +957,7 @@ def start_slime_runner(settings: SlimeSettings, *, serving: bool = False) -> Sli
         settings.arguments, loss_family=settings.loss_family, recipe=settings.recipe, execution=settings.execution
     )
     storage = prepare_checkpoint_storage(args, retention)
+    apply_unsaved_optimizer_resume(args)
     with_engines = serving and bool(args.rollout_num_gpus)
     runtime_env = job_runtime_env()
     if with_engines:

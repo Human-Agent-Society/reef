@@ -9,6 +9,7 @@ of its batch processor, so the suite needs Ray installed.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 import types
@@ -63,6 +64,7 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
     RetentionSettings,
     _allocated_bytes,
+    checkpoint_record_path,
     retention_options,
 )
 from reef.train.slime_backend.schedule import next_steps
@@ -1103,6 +1105,9 @@ def build_calls(tmp_path, monkeypatch):
         megatron_to_hf_mode="raw",
         no_save_optim=False,
         release_train=False,
+        load=str(tmp_path / "megatron"),
+        save=str(tmp_path / "megatron"),
+        no_load_optim=False,
     )
 
     def parse(arguments):
@@ -1420,6 +1425,7 @@ def test_a_recipe_with_an_unknown_loss_family_is_refused_before_slime_parses(bui
         ({"save_hf": "/checkpoints/hf"}, "rollout_id"),
         ({"compute_advantages_and_returns": True}, "disable-compute-advantages-and-returns"),
         ({"release_train": True}, "remove --release-train"),
+        ({"no_save_optim": True}, "restarts the optimizer at every job"),
     ],
 )
 def test_slime_arguments_the_training_component_cannot_run_are_refused(overrides, message) -> None:
@@ -1541,27 +1547,54 @@ def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("no_save_optim", "same_dir", "tracked", "expected"),
+    ("record", "same_dir", "expected"),
     [
-        (True, True, True, True),
+        ({"has_optimizer_state": True}, True, False),
+        # Saved with --no-save-optim, whatever this run's flag says: a load of the missing state would fail.
+        ({"has_optimizer_state": False}, True, True),
+        # A record without the field (an older one) cannot say, so the workers load no optimizer state.
+        ({}, True, True),
         # A first start has nothing of its own to resume.
-        (True, True, False, False),
-        # A checkpoint from elsewhere may well carry its optimizer.
-        (True, False, True, False),
-        (False, True, True, False),
+        (None, True, False),
+        # A checkpoint from elsewhere is Megatron's to load as it is.
+        ({"has_optimizer_state": False}, False, False),
     ],
 )
-def test_a_restart_without_a_saved_optimizer_does_not_load_one(
-    tmp_path: Path, no_save_optim: bool, same_dir: bool, tracked: bool, expected: bool
+# The run's own --no-save-optim does not decide: a run may drop or add it between two jobs.
+@pytest.mark.parametrize("no_save_optim", [False, True])
+def test_a_restart_loads_the_optimizer_state_only_from_a_checkpoint_that_holds_it(
+    tmp_path: Path, caplog, record: dict[str, bool] | None, same_dir: bool, expected: bool, no_save_optim: bool
 ) -> None:
-    save = tmp_path / "megatron"
-    load = save if same_dir else tmp_path / "other"
+    save = tmp_path / "checkpoints" / "megatron"
+    load = save if same_dir else tmp_path / "elsewhere" / "megatron"
     load.mkdir(parents=True)
-    if tracked:
+    if record is not None:
         (load / "latest_checkpointed_iteration.txt").write_text("23")
+        stored = {"version": 1, "status": "COMPLETE", "job_id": "job-23", "rollout_id": 23, "bytes": 1, "reward": None}
+        write_json(checkpoint_record_path(load.parent, 23), {**stored, **record})
     args = SimpleNamespace(no_save_optim=no_save_optim, no_load_optim=False, load=str(load), save=str(save))
-    startup.apply_unsaved_optimizer_resume(args)
+    with caplog.at_level(logging.WARNING, logger=startup.__name__):
+        startup.apply_unsaved_optimizer_resume(args)
     assert args.no_load_optim is expected
+    # The restart is never silent.
+    assert [entry.levelno for entry in caplog.records] == ([logging.WARNING] if expected else [])
+
+
+@pytest.mark.unit
+def test_the_next_driver_loads_the_optimizer_state_only_when_the_latest_checkpoint_holds_it(
+    build_calls, tmp_path
+) -> None:
+    # A run saved weights only (--no-save-optim), then dropped the flag: its next driver loads no optimizer state,
+    # and the driver after the first checkpoint with one loads it again.
+    actor = FakeTrainGroup(str(tmp_path / "hf" / "{rollout_id}"), megatron_root=tmp_path / "megatron")
+    for rollout_id, saves_optimizer in ((0, False), (1, True)):
+        storage = checkpoint_storage(tmp_path, saves_optimizer=saves_optimizer)
+        with storage.admit(rollout_id=rollout_id):
+            actor.save_model(rollout_id)
+            storage.complete(f"job-{rollout_id}", rollout_id, reward=None)
+        build_calls["args"].no_load_optim = False
+        start_slime_runner(settings()).close()
+        assert build_calls["args"].no_load_optim is not saves_optimizer
 
 
 # -- The loss family's checks of the workers' arguments, which the component runs before the workers start

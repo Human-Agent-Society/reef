@@ -97,3 +97,5 @@ Sample jobs count optimizer steps in ``save_interval`` and checkpoint steps.
 Task and dataset jobs count rollout iterations.
 Only the final checkpoint retains next objective state; skipped jobs retain no new state.
 ``colocate`` shares training/rollout GPUs, never production inference GPUs.
+Each checkpoint records whether it holds the optimizer state; a job loads it only then, and otherwise starts Adam again.
+``--no-save-optim`` needs ``--reef-accept-optimizer-restart``, because every job then restarts Adam; ``--no-load-optim`` is refused.

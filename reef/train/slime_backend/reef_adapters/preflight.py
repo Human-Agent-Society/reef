@@ -47,6 +47,15 @@ def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> No
         )
     if args.release_train:
         raise ValueError("the training workers keep running through a job; remove --release-train")
+    if args.no_save_optim and not args.is_optimizer_restart_accepted:
+        raise ValueError(
+            "--no-save-optim restarts the optimizer at every job: each job's workers rebuild the fp32 master weights "
+            "from the saved bf16 weights and start Adam again, so updates below bf16 precision are lost. Remove "
+            "--no-save-optim (without LoRA, the storage then reserves about 8 x the HF export per checkpoint "
+            "instead of 2 x, twice that with a critic), or set --reef-accept-optimizer-restart to accept the restart"
+        )
+    if args.is_optimizer_restart_accepted and not args.no_save_optim:
+        raise ValueError("--reef-accept-optimizer-restart applies only with --no-save-optim; remove it")
 
 
 def enables_expandable_segments(allocator_settings: str) -> bool:

@@ -4,6 +4,7 @@
 exists. It separates Reef's checkpoint retention options, parses the rest
 through Slime, applies the startup loss family and Reef's adjustments, and
 refuses arguments, and a worker environment, the component cannot run with.
+``apply_unsaved_optimizer_resume`` decides whether the workers load the optimizer state, and
 ``job_runtime_env`` is the Ray environment of the workers.
 """
 
@@ -29,6 +30,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     MEGATRON_TRACKER,
     RetentionSettings,
+    latest_checkpoint_has_optimizer_state,
     retention_options,
 )
 
@@ -58,7 +60,6 @@ def prepare_slime_arguments(
     configure_executors(args, execution, slime_arguments)
     validate_tracking_args(args)
     use_megatron_bridge_first_start_load(args)
-    apply_unsaved_optimizer_resume(args)
     spec.apply_driver_options(args, loss_family_config)
     stamp_loss_family_reference(args, loss_family)
     # Imported here: the argument module reaches the Megatron LoRA stack (test_dependency_boundaries).
@@ -162,16 +163,34 @@ def use_megatron_bridge_first_start_load(args: SlimeArguments) -> None:
 
 
 def apply_unsaved_optimizer_resume(args: SlimeArguments) -> None:
-    """Resume a run that never saved its optimizer (``--no-save-optim``) from its weights alone."""
-    if not args.no_save_optim:
-        return
+    """Resume the workers' own latest checkpoint from its weights alone when it holds no optimizer state.
+
+    The checkpoint's record says whether it holds the optimizer state, whatever
+    this run's ``--no-save-optim`` says, so a run that drops the flag resumes
+    the weight-only checkpoints it saved before. When the record does not say,
+    the workers load no optimizer state either, because loading a missing one
+    fails. Call it after ``prepare_checkpoint_storage``, which pins
+    ``args.save`` to the storage's Megatron root.
+    """
     load, save = args.load, args.save
     if not (isinstance(load, str) and load.strip() and isinstance(save, str) and save.strip()):
         return
-    if Path(load).resolve() != Path(save).resolve():
+    if Path(load).resolve() != Path(save).resolve() or not (Path(load) / MEGATRON_TRACKER).is_file():
         return
-    if (Path(load) / MEGATRON_TRACKER).is_file():
-        args.no_load_optim = True
+    has_optimizer_state = latest_checkpoint_has_optimizer_state(Path(save))
+    if has_optimizer_state:
+        return
+    args.no_load_optim = True
+    if has_optimizer_state is None:
+        reason = "has no record of whether it holds the optimizer state"
+    else:
+        reason = "holds no optimizer state (--no-save-optim)"
+    logger.warning(
+        "the latest checkpoint in %s %s: the workers rebuild the fp32 master weights from its bf16 weights and "
+        "start Adam again",
+        save,
+        reason,
+    )
 
 
 def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
@@ -216,4 +235,4 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     return {"env_vars": env_vars}
 
 
-__all__ = ["job_runtime_env", "prepare_slime_arguments"]
+__all__ = ["apply_unsaved_optimizer_resume", "job_runtime_env", "prepare_slime_arguments"]

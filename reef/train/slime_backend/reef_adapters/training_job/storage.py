@@ -30,6 +30,8 @@ class CheckpointStorageError(InternalError, RuntimeError):
 
 #: The file Megatron keeps beside its checkpoints, naming the newest iteration.
 MEGATRON_TRACKER = "latest_checkpointed_iteration.txt"
+#: Where the storage keeps a record of each saved rollout, under its checkpoint root.
+RECORDS_DIRECTORY = Path(".reef-retention", "records")
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,29 @@ def size_bytes(value: str) -> int:
     return size
 
 
+def checkpoint_record_path(root: Path, rollout_id: int) -> Path:
+    """The record of the saved rollout ``rollout_id`` in the checkpoint storage whose checkpoint root is ``root``."""
+    return root / RECORDS_DIRECTORY / f"{rollout_id:020d}.json"
+
+
+def latest_checkpoint_has_optimizer_state(megatron_root: Path) -> bool | None:
+    """Whether the latest checkpoint in ``megatron_root`` holds its optimizer state, as its record says.
+
+    ``megatron_root`` is the actor's or the critic's Megatron root of a
+    ``CheckpointStorage``, which keeps its records under the root's parent.
+    Megatron's tracker in the root names the latest checkpoint's rollout. The
+    result is ``None`` when no record says: the root has no tracker, the
+    rollout has no record, or the record has no ``has_optimizer_state``.
+    """
+    try:
+        rollout_id = int((megatron_root / MEGATRON_TRACKER).read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return None
+    record = read_json(checkpoint_record_path(megatron_root.parent, rollout_id)) or {}
+    has_optimizer_state = record.get("has_optimizer_state")
+    return has_optimizer_state if isinstance(has_optimizer_state, bool) else None
+
+
 def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
     """Whether the saved rollout ``rollout_id`` includes the critic checkpoint.
 
@@ -155,7 +180,7 @@ class CheckpointStorage:
         self.source_hf = _optional_path(source_hf)
         self.source_megatron = _optional_path(source_megatron)
         self.meta_root = self.root / ".reef-retention"
-        self.records_root = self.meta_root / "records"
+        self.records_root = self.root / RECORDS_DIRECTORY
         self.estimate_path = self.meta_root / "estimate.json"
         self.lock_path = self.meta_root / "storage.lock"
         self._measure = measure or _allocated_bytes
@@ -227,6 +252,8 @@ class CheckpointStorage:
                 "rollout_id": rollout_id,
                 "bytes": pair_bytes,
                 "reward": _finite_or_none(reward),
+                # The next job's workers load the optimizer state only from a checkpoint that holds it.
+                "has_optimizer_state": self._saves_optimizer,
             },
         )
 
@@ -350,6 +377,9 @@ class CheckpointStorage:
             raise CheckpointStorageError("checkpoint record has invalid byte count")
         if record.get("reward") is not None and _finite_or_none(record.get("reward")) is None:
             raise CheckpointStorageError("checkpoint record has invalid reward")
+        # Records written before the field existed have none.
+        if not isinstance(record.get("has_optimizer_state", False), bool):
+            raise CheckpointStorageError("checkpoint record has invalid has_optimizer_state")
         if deleting != (record["status"] == "DELETING"):
             raise CheckpointStorageError("checkpoint record status mismatch")
         if not deleting and any(
@@ -481,7 +511,7 @@ class CheckpointStorage:
         return paths
 
     def _record_path(self, rollout_id: int) -> Path:
-        return self.records_root / f"{rollout_id:020d}.json"
+        return checkpoint_record_path(self.root, rollout_id)
 
     @staticmethod
     def _tombstone_path(original: Path, rollout_id: int, job_id: str) -> Path:
