@@ -9,10 +9,10 @@ import pytest
 from reef.core.errors import ScenarioDeletedError
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import SnapshotRef
-from reef.storage.commits import CommitHistoryError, CommitRecord
-from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commits import CommitHistoryError, CommitRecord
+from reef.storage.scenario.store import ScenarioSettings
+from reef.storage.sql.postgres import PostgresScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 EVALUATION = {"harness": {"name": "terminus-2"}}
 

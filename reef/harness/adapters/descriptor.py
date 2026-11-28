@@ -18,7 +18,8 @@ declares four things and, optionally, the checks of the agent's config files:
   model endpoint (``model_binding``).
 - ``run``: ``task``, the headless invocation (``{task}`` substituted
   per run), the variables beside the relocation ones, and optionally
-  ``skills``, the directory under the root where the agent reads the skills
+  ``stdin``, true when the agent reads the task from stdin once its
+  ``{task}`` arguments are left out (``task_on_stdin``), ``skills``, the directory under the root where the agent reads the skills
   that a Harbor task gives it, and ``mcp``, how the agent reads the MCP
   servers that a Harbor task gives it (``TaskMcpServers``); and ``layer``,
   how a person's machine runs the agent (``AdapterLayer``).
@@ -376,6 +377,10 @@ class AdapterDescriptor:
     #: True when the ``{task}`` argv slot takes a task directory (a Harbor task) rather than an instruction, the text the
     #: model reads, so an evaluation hands the adapter task directories instead of instructions.
     takes_task_directory: bool = False
+    #: True when the agent reads the task from stdin once the argv tokens that are ``{task}`` are left out. A Harbor
+    #: run then hands the instruction through stdin: Linux refuses a command argument over 128 KiB, and an
+    #: instruction can be longer.
+    task_on_stdin: bool = False
     #: The directory under the run root where the agent reads the skills that a Harbor task gives it
     #: (``environment.skills_dir``), each as ``<name>/SKILL.md``; ``None`` when the agent reads no such directory.
     task_skills_path: str | None = None
@@ -465,8 +470,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     if not isinstance(run, Mapping) or not set(run) <= {"task", "layer"}:
         raise DescriptorError(f"{where} requires 'run': its task command, and optionally its layer")
     task_run = run.get("task")
-    if not isinstance(task_run, Mapping) or not set(task_run) <= {"argv", "env", "skills", "mcp"}:
-        raise DescriptorError(f"{where} run 'task' must be an object of argv, env, skills and mcp")
+    if not isinstance(task_run, Mapping) or not set(task_run) <= {"argv", "env", "stdin", "skills", "mcp"}:
+        raise DescriptorError(f"{where} run 'task' must be an object of argv, env, stdin, skills and mcp")
     task_skills_path = None
     if task_run.get("skills") is not None:
         (task_skills_path,) = relative_paths([task_run["skills"]], f"{where} run task 'skills'")
@@ -497,6 +502,14 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_root_bind_mounted = data.get("is_root_bind_mounted", False)
     if not isinstance(is_root_bind_mounted, bool):
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
+    argv = str_list(task_run.get("argv"), f"{where} run task 'argv'")
+    task_on_stdin = task_run.get("stdin", False)
+    if not isinstance(task_on_stdin, bool):
+        raise DescriptorError(f"{where} run task 'stdin' must be a boolean")
+    if task_on_stdin and (takes_task_directory or any("{task}" in token and token != "{task}" for token in argv)):
+        raise DescriptorError(
+            f"{where} run task 'stdin' needs an instruction in argv tokens that are '{{task}}' alone"
+        )
     renderer = AdapterRenderer
     if data.get("renderer") is not None:
         renderer = AdapterRenderer.referenced_class(
@@ -514,7 +527,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     return AdapterDescriptor(
         name=name,
         binary=require_str(data, "binary", where),
-        argv=str_list(task_run.get("argv"), f"{where} run task 'argv'"),
+        argv=argv,
         env=env,
         config_targets=config_targets,
         layout=layout,
@@ -526,6 +539,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         install=parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         takes_task_directory=takes_task_directory,
+        task_on_stdin=task_on_stdin,
         task_skills_path=task_skills_path,
         task_mcp=parse_task_mcp(task_run.get("mcp"), config_targets, where),
         host_env=dict(host_env),

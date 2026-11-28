@@ -14,7 +14,7 @@ from pathlib import Path
 
 import aiohttp
 
-from reef.service.deploy.routing.registry import DeploymentRegistry
+from reef.routing.registry import DeploymentRegistry
 
 PROBE_INTERVAL_SECONDS = 0.025
 CHAT = "/v1/chat/completions"

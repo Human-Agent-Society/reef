@@ -3,8 +3,8 @@
 ``prepare_slime_arguments`` runs before any placement group or GPU worker
 exists. It separates Reef's checkpoint retention options, parses the rest
 through Slime, applies the startup loss family and Reef's adjustments, and
-refuses arguments the component cannot run with. ``job_runtime_env`` is the
-Ray environment of the workers.
+refuses arguments, and a worker environment, the component cannot run with.
+``job_runtime_env`` is the Ray environment of the workers.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from reef.execution.sandbox.task_environment import TASK_IMAGES_VARIABLE
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, loss_family_reference, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
@@ -23,6 +24,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     configure_critic_args_hook,
     configure_rollout_runtime,
     validate_slime_args,
+    validate_training_worker_environment,
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     MEGATRON_TRACKER,
@@ -43,8 +45,8 @@ def prepare_slime_arguments(
     dotted reference; ``recipe`` names the recipe in error messages.
     ``execution`` holds the deployment's ``execution`` and ``executors``
     sections. Raise ``RuntimeError`` for an unknown loss family, before Slime
-    parses anything, and ``ValueError`` or ``RuntimeError`` for arguments
-    the component cannot run with.
+    parses anything, and ``ValueError`` or ``RuntimeError`` for arguments,
+    or a worker environment, the component cannot run with.
     """
     try:
         spec = resolve_loss_family(loss_family)
@@ -65,6 +67,9 @@ def prepare_slime_arguments(
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
     validate_slime_args(args, spec)
+    # The workers get the Ray cluster's environment, usually this process's; each worker checks its own again
+    # (ReefMegatronTrainRayActor.init).
+    validate_training_worker_environment(args, os.environ)
     configure_critic_args_hook(args)
     configure_rollout_runtime(args)
     # Resolve the executor before any worker starts.
@@ -178,8 +183,9 @@ def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
 
 #: The credentials of Harbor's cloud task environments, which Ray's actors do not inherit from this process.
 TASK_ENVIRONMENT_CREDENTIALS = ("E2B_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
-#: The endpoints of a self-hosted service for the ``e2b`` task environment, which Ray's actors do not inherit either.
-TASK_ENVIRONMENT_ENDPOINTS = ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN")
+#: The endpoints of a self-hosted service for the ``e2b`` task environment, which Ray's actors do not inherit either,
+#: and the manifest of the prepared images of the job's tasks (``TASK_IMAGES_VARIABLE``).
+TASK_ENVIRONMENT_ENDPOINTS = ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN", TASK_IMAGES_VARIABLE)
 
 
 def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -194,7 +200,8 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     non-empty credentials of a cloud task environment that this process sets.
     It also gets each ``TASK_ENVIRONMENT_ENDPOINTS`` variable that this process
     sets, with its value unchanged, even when it is empty, so the rollouts
-    reach the same E2B service as this process.
+    reach the same E2B service, and start the same prepared images, as this
+    process.
     """
     source = os.environ if environ is None else environ
     env_vars = {

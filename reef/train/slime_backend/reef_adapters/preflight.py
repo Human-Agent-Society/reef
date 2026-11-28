@@ -2,10 +2,13 @@
 
 Everything here runs before any placement group or GPU worker exists, so a
 configuration or storage problem stops the start with a clear error instead
-of a half-started cluster.
+of a half-started cluster. Each training worker checks its own environment
+again before it builds the model.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import loss_family_names, resolve_loss_family
@@ -14,6 +17,10 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import Checkpoi
 
 CRITIC_ARGS_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.configure_critic_objective"
 REEF_ROLLOUT_DATA_KEYS = ("producing_artifact_ids",)
+#: The PyTorch allocator settings that can turn on expandable segments; PyTorch and torch_memory_saver read both.
+PYTORCH_ALLOCATOR_ENVS = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+#: Slime's own switch: ``1`` turns on expandable segments when a training worker starts.
+SLIME_EXPANDABLE_SEGMENTS_ENV = "SLIME_ENABLE_EXPANDABLE_SEGMENTS"
 
 
 def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
@@ -40,6 +47,62 @@ def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> No
         )
     if args.release_train:
         raise ValueError("the training workers keep running through a job; remove --release-train")
+
+
+def enables_expandable_segments(allocator_settings: str) -> bool:
+    """Whether PyTorch allocator settings turn on expandable segments.
+
+    The settings are comma-separated ``key:value`` pairs, such as
+    ``max_split_size_mb:512,expandable_segments:True``. Whitespace does not
+    matter, and ``true`` counts as ``True``, as torch_memory_saver reads it.
+    One such pair is sufficient, because PyTorch and torch_memory_saver can
+    read different pairs of a repeated key.
+    """
+    for pair in allocator_settings.split(","):
+        key, _, value = pair.partition(":")
+        if key.strip() == "expandable_segments" and value.strip().lower() == "true":
+            return True
+    return False
+
+
+def validate_training_worker_environment(args: SlimeArguments, environ: Mapping[str, str]) -> None:
+    """Refuse expandable segments for training workers that Slime offloads without a CPU copy of their buffers.
+
+    ``environ`` is the environment the workers inherit, the training
+    service's or a worker's own; Slime's ``--train-env-vars`` go over it.
+    Slime offloads the workers and turns off the CPU copy of Megatron's
+    parameter and gradient buffers with ``--colocate``, ``--offload``,
+    ``--offload-train`` or a ppo critic. torch_memory_saver then frees the
+    workers' GPU memory while they sleep. With expandable segments, it decides
+    the CPU copy for each 20 MiB page, not for each tensor. A tensor that shares
+    a page with a buffer can then come back as zeros, and the next optimizer
+    step writes the zeros into the weights.
+    """
+    if not (args.offload_train and (args.disable_grad_buffers_cpu_backup or args.disable_param_buffers_cpu_backup)):
+        return
+    worker_environ = {**environ, **args.train_env_vars}
+    names = [name for name in PYTORCH_ALLOCATOR_ENVS if enables_expandable_segments(worker_environ.get(name, ""))]
+    if worker_environ.get(SLIME_EXPANDABLE_SEGMENTS_ENV) == "1":
+        names.append(SLIME_EXPANDABLE_SEGMENTS_ENV)
+    if not names:
+        return
+    settings = ", ".join(
+        f"{name}={worker_environ[name]} in {'--train-env-vars' if name in args.train_env_vars else 'the environment'}"
+        for name in names
+    )
+    fixes = [
+        f"set {name} to 0" if name == SLIME_EXPANDABLE_SEGMENTS_ENV else f"remove expandable_segments from {name}"
+        for name in names
+    ]
+    raise ValueError(
+        "Slime offloads these training workers without a CPU copy of their parameter or gradient buffers "
+        "(--colocate, --offload, --offload-train or advantage-estimator ppo), and they cannot use expandable "
+        f"segments ({settings}): torch_memory_saver keeps their CPU copy per 20 MiB page, so a tensor that shares "
+        "a page with a buffer can come back as zeros after the workers sleep, and the optimizer step writes the "
+        f"zeros into the weights. To fix this, {' and '.join(fixes)}, or keep the workers on the GPU: remove "
+        "--offload and --offload-train, give the rollout engines GPUs of their own instead of --colocate, and "
+        "keep a ppo critic on the GPU with --use-critic and --no-offload-train"
+    )
 
 
 def configure_critic_args_hook(args: SlimeArguments) -> None:
