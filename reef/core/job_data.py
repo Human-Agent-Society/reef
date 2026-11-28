@@ -174,6 +174,24 @@ SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
 
 
+def sample_dict(sample: Sample) -> dict[str, Any]:
+    """The fields of one sample in the serialized job, including a task's local path."""
+    if isinstance(sample, TrajectorySample):
+        return {
+            "kind": "trajectory",
+            "trajectory": dict(sample.trajectory),
+            "group_id": sample.group_id,
+            "source_agent_record_ids": list(sample.source_agent_record_ids),
+        }
+    return {
+        "kind": "task",
+        "task_path": str(sample.task_path),
+        "source_agent_record_ids": list(sample.source_agent_record_ids),
+        "metadata": dict(sample.metadata),
+        "files": None if sample.files is None else dataclasses.asdict(sample.files),
+    }
+
+
 def check_record_ids(record_ids: tuple[str, ...]) -> None:
     """Raise ``TypeError`` unless ``record_ids`` is a tuple of non-empty strings."""
     if not isinstance(record_ids, tuple) or not all(isinstance(value, str) and value for value in record_ids):
@@ -224,27 +242,7 @@ class JobData:
         None, lists, and objects with string keys). The result holds the same
         values, so it is JSON exactly when the precondition holds.
         """
-        samples: list[dict[str, Any]] = []
-        for sample in self.samples:
-            if isinstance(sample, TrajectorySample):
-                samples.append(
-                    {
-                        "kind": "trajectory",
-                        "trajectory": dict(sample.trajectory),
-                        "group_id": sample.group_id,
-                        "source_agent_record_ids": list(sample.source_agent_record_ids),
-                    }
-                )
-            else:
-                samples.append(
-                    {
-                        "kind": "task",
-                        "task_path": str(sample.task_path),
-                        "source_agent_record_ids": list(sample.source_agent_record_ids),
-                        "metadata": dict(sample.metadata),
-                        "files": None if sample.files is None else dataclasses.asdict(sample.files),
-                    }
-                )
+        samples = [sample_dict(sample) for sample in self.samples]
         request = None if self.request is None else {"id": self.request.id, **self.request.to_dict()}
         return {"data_id": self.data_id, "samples": samples, "request": request}
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import tempfile
 import time
 import uuid
@@ -73,6 +74,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql.elements import ColumnElement
 
+import reef.storage.data.job_data as job_data
 from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
@@ -701,16 +703,17 @@ class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
     A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``write_new_items``
-    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
-    operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
-    inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
+    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``.
+    Item changes and their scenario uses commit together. A job directory's first use commits before publication.
+    A failed publication can leave a use record and files. Expiration removes both after their last use.
+    ``create`` inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
     ``ItemConflictError``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for
     the scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
     set of scenarios in this process share one transaction (a group commit), because only one of them can hold
     the lock at a time. ``segments`` is None, or the segment store that keeps the content of
     trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
     the job data directories: ``job_directories`` when given, else ``segments``, else a local segment store in a new
-    temporary directory, which only this process reads. ``job_directory_ttl_seconds`` is how long the store keeps a
+    temporary directory released on close. A file-backed SQLite store defaults to its database directory for job data. ``job_directory_ttl_seconds`` is how long the store keeps a
     job data directory that no job used.
     """
 
@@ -737,18 +740,55 @@ class SQLDataStore(DataStore):
         ) = tables
         self.task_files = task_files
         self.segments = segments
-        self.job_directories = (
-            job_directories or segments or LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
-        )
+        self.private_job_directory: Path | None = None
+        if job_directories is not None:
+            self.job_directories = job_directories
+        elif segments is not None:
+            self.job_directories = segments
+        else:
+            self.private_job_directory = Path(tempfile.mkdtemp(prefix="reef-job-directories-"))
+            self.job_directories = LocalSegmentStore(self.private_job_directory)
         self.job_directory_ttl_seconds = job_directory_ttl_seconds
         self.group_lock = Lock()
         self.waiting: dict[tuple[str, frozenset[str]], list[PendingCreate]] = {}
 
+    def register_job_directory(self, connection: Connection, key: str, used_at: float) -> None:
+        table = self.job_directory_table
+        insert_use = sqlite_insert(table) if connection.dialect.name == "sqlite" else postgresql_insert(table)
+        connection.execute(
+            insert_use.values(key=key, last_used_at=used_at).on_conflict_do_update(
+                index_elements=[table.c.key],
+                set_={"last_used_at": used_at},
+                where=table.c.last_used_at < used_at,
+            )
+        )
+
+    @contextmanager
+    def job_directory_use(self, key: str) -> Iterator[None]:
+        table = self.job_directory_table
+        while True:
+            with self.transaction() as connection:
+                held = connection.scalar(select(table.c.key).where(table.c.key == key).with_for_update())
+                if held is not None:
+                    yield
+                    self.register_job_directory(connection, key, time.time())
+                    return
+            # Commit the first registration separately. Even if publication raises after writing the files,
+            # rollback leaves a key that expiration can find. Lock it again in case cleanup ran in between.
+            self.write_job_directory_use(key, time.time())
+
     def write_job_directory_use(self, key: str, time: float) -> None:
+        with self.transaction() as connection:
+            self.register_job_directory(connection, key, time)
+
+    def delete_expired_job_directory(self, key: str, cutoff: float) -> bool:
         table = self.job_directory_table
         with self.transaction() as connection:
-            connection.execute(delete(table).where(table.c.key == key))
-            connection.execute(insert(table).values(key=key, last_used_at=time))
+            removed = connection.execute(delete(table).where(table.c.key == key, table.c.last_used_at < cutoff))
+            if not removed.rowcount:
+                return False
+            self.job_directories.delete_directory(f"{job_data.JOB_DATA_PREFIX}/{key}")
+            return True
 
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
         table = self.job_directory_table
@@ -2533,6 +2573,8 @@ class SQLiteDataStore(SQLDataStore):
     ) -> None:
         metadata = MetaData()
         tables = data_tables(metadata, sqlite=True)
+        if directory is not None and segments is None and job_directories is None:
+            job_directories = LocalSegmentStore(directory / "job-directories")
         super().__init__(tables, task_files, segments, job_directories, job_directory_ttl_seconds)
         if directory is None:
             database = ":memory:"
@@ -2625,6 +2667,8 @@ class SQLiteDataStore(SQLDataStore):
                 self.engine.dispose()
                 if self.segments is not None:
                     self.segments.close()
+                if self.private_job_directory is not None:
+                    shutil.rmtree(self.private_job_directory)
 
 
 @dataclass(frozen=True)
@@ -2684,6 +2728,7 @@ class PostgresDataStore(SQLDataStore):
             task_files,
             schema=settings.schema,
             segments=segments,
+            job_directories=segments or LocalSegmentStore(directory / "job-directories"),
             job_directory_ttl_seconds=job_directory_ttl_seconds,
         )
 
@@ -2761,6 +2806,8 @@ class PostgresDataStore(SQLDataStore):
             self.engine = None
             if self.segments is not None:
                 self.segments.close()
+            if self.private_job_directory is not None:
+                shutil.rmtree(self.private_job_directory)
 
 
 __all__ = [

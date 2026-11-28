@@ -28,7 +28,6 @@ from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.storage.data import store as data_module
 from reef.storage.data.item_kinds import TaskFilesReference, json_digest, task_partition
-from reef.storage.data.job_data import job_data_key
 from reef.storage.data.store import (
     DeletedItem,
     ItemConflictError,
@@ -1309,17 +1308,85 @@ def test_a_record_retry_with_a_new_time_matches(store):
     assert store.read("acme", item.item_id) == stored
 
 
-def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):
+def test_refresh_after_expiration_scan_preserves_delayed_read(store, monkeypatch):
+    sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
+    monkeypatch.setattr(time, "time", lambda: 10.0)
+    written = store.write_job_directory(JobData("first", (sample,)))
+    scan = store.job_directories_unused_since
+    opened = []
+
+    def refresh_after_scan(cutoff):
+        expired = scan(cutoff)
+        opened.append(store.open_job_directory(written.to_dict()))
+        return expired
+
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    monkeypatch.setattr(store, "job_directories_unused_since", refresh_after_scan)
+    assert store.delete_unused_job_directories(100.0) == 0
+    assert opened[0].read().samples == (sample,)
+
+
+def test_a_directory_published_before_an_error_remains_eligible_for_cleanup(store, monkeypatch):
+    publish = store.job_directories.write_directory
+    written = []
+
+    def publish_then_fail(key, source):
+        written.append(publish(key, source))
+        raise OSError("lost publication acknowledgement")
+
+    monkeypatch.setattr(store.job_directories, "write_directory", publish_then_fail)
+    monkeypatch.setattr(time, "time", lambda: 20.0)
+    with pytest.raises(OSError, match="publication acknowledgement"):
+        store.write_job_directory(JobData("empty"))
+    assert store.job_directory(written[0]).is_dir()
+    assert store.delete_unused_job_directories(21) == 1
+    with pytest.raises(FileNotFoundError):
+        store.job_directory(written[0])
+
+
+def test_a_private_job_directory_ends_with_its_store_and_a_shared_one_survives(tmp_path):
+    with closing(LocalTaskFileStore(tmp_path / "tasks")) as files:
+        memory = MemoryDataStore(files)
+        private = memory.write_job_directory(JobData("empty")).path
+        memory.close()
+        memory.close()
+        assert not private.exists()
+
+        with closing(SQLiteDataStore(tmp_path / "data", files)) as writer:
+            saved = writer.write_job_directory(JobData("empty")).to_dict()
+        with closing(SQLiteDataStore(tmp_path / "data", files)) as reader:
+            assert reader.open_job_directory(saved).read() == JobData("empty")
+
+
+def test_simultaneous_first_uses_of_one_job_directory_keep_the_latest_time(open_durable_store):
+    ready = threading.Barrier(2)
+    with closing(open_durable_store()) as first, closing(open_durable_store()) as second:
+
+        def register(store, used_at):
+            ready.wait(timeout=10)
+            store.write_job_directory_use("key", used_at)
+
+        with ThreadPoolExecutor(2) as pool:
+            writes = [pool.submit(register, first, 10.0), pool.submit(register, second, 20.0)]
+            for write in writes:
+                write.result(timeout=10)
+        assert first.job_directories_unused_since(15.0) == ()
+        assert second.job_directories_unused_since(25.0) == ("key",)
+
+
+def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 10.0)
     sample = policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0)
     first = store.write_job_directory(JobData("s:data:1", (sample,)))
     # A job of the same samples, under another data ID, uses the same directory.
     again = store.write_job_directory(JobData("s:request:r1", (sample,)))
     assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
     assert store.open_job_directory(again.to_dict()).read().samples == (sample,)
+    monkeypatch.setattr(time, "time", lambda: 200.0)
     other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
     assert other.uri != first.uri
     # A directory that no job used since the time goes; a used one stays.
-    store.write_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    store.write_job_directory_use(other.key, 1.0)
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
         store.open_job_directory(first.to_dict()).read()

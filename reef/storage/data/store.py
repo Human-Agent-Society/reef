@@ -15,14 +15,17 @@ from __future__ import annotations
 import copy
 import math
 import re
+import shutil
 import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from threading import RLock
 from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
@@ -698,7 +701,9 @@ class DataStore(Plugin, JobDataReader, ABC):
     A subclass sets ``job_directories`` and ``job_directory_ttl_seconds``, and keeps the time of the last use of each
     directory, by its key:
     ``write_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
-    ``delete_job_directory_record(key)``.
+    ``delete_job_directory_record(key)``. Concurrent backends override ``job_directory_use`` and
+    ``delete_expired_job_directory`` to synchronize registration, publication and deletion for each key.
+    The defaults require the caller to serialize those operations.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -986,16 +991,35 @@ class DataStore(Plugin, JobDataReader, ABC):
     @abstractmethod
     def delete_job_directory_record(self, key: str) -> None: ...
 
+    @contextmanager
+    def job_directory_use(self, key: str) -> Iterator[None]:
+        """Register before publishing so cleanup can find an interrupted write. Refresh the use on success."""
+        self.write_job_directory_use(key, time.time())
+        yield
+        self.write_job_directory_use(key, time.time())
+
+    def delete_expired_job_directory(self, key: str, cutoff: float) -> bool:
+        """Remove an expired directory and its use record. Return whether it was removed."""
+        if key not in self.job_directories_unused_since(cutoff):
+            return False
+        self.remove_job_directory(key)
+        return True
+
+    def remove_job_directory(self, key: str) -> None:
+        """Remove the directory before forgetting its key, so cleanup can retry a failed removal."""
+        self.job_directories.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
+        self.delete_job_directory_record(key)
+
     def write_job_directory(self, data: JobData) -> JobDataRef:
         key = job_data_key(data)
         name = f"{JOB_DATA_PREFIX}/{key}"
-        uri = self.job_directories.read_directory_uri(name)
-        if uri is None:
-            with tempfile.TemporaryDirectory() as staging:
-                directory = Path(staging) / key
-                write_job_data(data, directory)
-                uri = self.job_directories.write_directory(name, directory)
-        self.write_job_directory_use(key, time.time())
+        with self.job_directory_use(key):
+            uri = self.job_directories.read_directory_uri(name)
+            if uri is None:
+                with tempfile.TemporaryDirectory() as staging:
+                    directory = Path(staging) / key
+                    write_job_data(data, directory)
+                    uri = self.job_directories.write_directory(name, directory)
         return JobDataRef(uri, key, data.data_id, len(data.samples), job_data_kind(data), self)
 
     def task_path_for_digest(self, owner: str, digest: str) -> Path:
@@ -1030,10 +1054,7 @@ class DataStore(Plugin, JobDataReader, ABC):
 
     def delete_unused_job_directories(self, time: float) -> int:
         unused = self.job_directories_unused_since(time)
-        for key in unused:
-            self.job_directories.delete_directory(f"{JOB_DATA_PREFIX}/{key}")
-            self.delete_job_directory_record(key)
-        return len(unused)
+        return sum(self.delete_expired_job_directory(key, time) for key in unused)
 
     @abstractmethod
     def close(self) -> None:
@@ -1244,7 +1265,9 @@ class MemoryDataStore(DataStore):
         self, task_files: TaskFileStore, job_directory_ttl_seconds: float = JOB_DIRECTORY_TTL_SECONDS
     ) -> None:
         self.task_files = task_files
-        self.job_directories = LocalSegmentStore(Path(tempfile.mkdtemp(prefix="reef-job-directories-")))
+        self.private_job_directory = Path(tempfile.mkdtemp(prefix="reef-job-directories-"))
+        self.job_directories = LocalSegmentStore(self.private_job_directory)
+        self.job_directory_lock = RLock()
         self.job_directory_ttl_seconds = job_directory_ttl_seconds
         self.job_directory_uses: dict[str, float] = {}
         self.items: dict[str, dict[str, StoredItem]] = {}
@@ -1349,14 +1372,29 @@ class MemoryDataStore(DataStore):
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
         return cls(task_files, job_directory_ttl_seconds)
 
+    @contextmanager
+    def job_directory_use(self, key: str) -> Iterator[None]:
+        with self.job_directory_lock, super().job_directory_use(key):
+            yield
+
     def write_job_directory_use(self, key: str, time: float) -> None:
-        self.job_directory_uses[key] = time
+        with self.job_directory_lock:
+            self.job_directory_uses[key] = max(time, self.job_directory_uses.get(key, time))
 
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
-        return tuple(key for key, last_used in self.job_directory_uses.items() if last_used < time)
+        with self.job_directory_lock:
+            return tuple(key for key, last_used in self.job_directory_uses.items() if last_used < time)
 
     def delete_job_directory_record(self, key: str) -> None:
-        self.job_directory_uses.pop(key, None)
+        with self.job_directory_lock:
+            self.job_directory_uses.pop(key, None)
+
+    def delete_expired_job_directory(self, key: str, cutoff: float) -> bool:
+        with self.job_directory_lock:
+            if self.job_directory_uses.get(key, cutoff) >= cutoff:
+                return False
+            self.remove_job_directory(key)
+            return True
 
     def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
@@ -1764,4 +1802,5 @@ class MemoryDataStore(DataStore):
         return self.stored_collections.get(owner, {}).pop(name, None) is not None
 
     def close(self) -> None:
-        return None
+        if self.private_job_directory.exists():
+            shutil.rmtree(self.private_job_directory)

@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from reef.core.job_data import JobData, TaskFiles, TaskSample
+from reef.core.job_data import JobData, TaskFiles, TaskSample, sample_dict
 
 #: The format of the directories that ``write_job_data`` writes.
 JOB_DATA_FORMAT = 2
@@ -63,7 +63,8 @@ def job_data_kind(data: JobData) -> JobDataKind | None:
 def sample_lines(data: JobData) -> Iterator[dict[str, Any]]:
     """The lines of ``samples.jsonl`` for ``data``, in job order. A task's line names its directory in the task file
     store in place of its local path. ``ValueError`` for a task whose directory the store does not keep."""
-    for entry, sample in zip(data.to_dict()["samples"], data.samples, strict=True):
+    for sample in data.samples:
+        entry = sample_dict(sample)
         if isinstance(sample, TaskSample):
             if sample.files is None:
                 raise ValueError(f"the task file store does not keep the task directory {sample.task_path}")
