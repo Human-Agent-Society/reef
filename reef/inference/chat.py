@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
-from reef.core.values import JsonValue
+from reef.core.values import JsonValue, require_integer
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.interfaces import InferenceArtifact, InferenceStream, parse_full_weight_name
@@ -150,29 +150,82 @@ def _new_call_id() -> str:
     return f"call_{uuid.uuid4().hex[:24]}"
 
 
+@dataclass(frozen=True)
+class StreamedToolCall:
+    """One tool argument delta supplied by a native parser adapter to the chat relay.
+
+    ``index`` is the parser's nonnegative integer call position. ``name`` is a nonempty tool name or None when omitted.
+    ``arguments`` is the argument fragment, which may be empty. The relay checks the position and name across deltas.
+    """
+
+    index: int
+    name: str | None
+    arguments: str
+
+    def __post_init__(self) -> None:
+        require_integer(self.index, "the streamed tool-call index")
+        if not isinstance(self.arguments, str):
+            raise ValueError("a streamed tool-call argument fragment must be a string")
+        if self.name is not None and (not isinstance(self.name, str) or not self.name):
+            raise ValueError("a streamed tool-call name must be a nonempty string or None")
+
+
+class StreamingToolParser(ABC):
+    """Read one tool parser's incremental text and emit typed tool call deltas.
+
+    ``parse_stream_chunk`` returns the visible text and tool call deltas in the order read from that chunk.
+    An adapter that has only a buffered parser returns no visible text or tool deltas.
+    """
+
+    @abstractmethod
+    def parse_stream_chunk(self, text: str) -> tuple[str, list[StreamedToolCall]]:
+        """Parse the next text fragment of this reply."""
+
+
 class _StreamedToolCalls:
-    """Tool calls seen so far in one stream: their ids, names and the argument text already sent."""
+    """Keep the tool calls that ``ChatStreamRelay`` announced in one stream.
+
+    ``ids`` and ``names`` have the same nonnegative integer indices. Each index is a tool's position in the
+    completed reply. Its ID and name are nonempty strings and remain fixed after announcement. Each key of
+    ``arguments`` has an announced call. Its value is a nonempty list of strings in send order, including empty
+    fragments. An absent key means no fragments have been sent for that call.
+    """
 
     def __init__(self) -> None:
         self.ids: dict[int, str] = {}
         self.names: dict[int, str] = {}
-        self.arguments: dict[int, str] = {}
+        self.arguments: dict[int, list[str]] = {}
 
-    def announce(self, index: int, name: Any) -> bool:
-        """Record a call's name on first sight; returns whether this chunk carried the name."""
-        if name:
-            self.ids.setdefault(index, _new_call_id())
-            self.names[index] = str(name)
-        if index not in self.ids:
+    def announce(self, index: int, name: str | None) -> bool:
+        """Return true and assign an ID when a named call first appears.
+
+        Return false when an existing call has the same name or the fragment omits its name. Raise
+        ``ValueError`` for a negative index, a changed name, or a new call without a name.
+        """
+        if index < 0:
+            raise ValueError("a streamed tool-call index must be nonnegative")
+        if index in self.ids:
+            if name and self.names[index] != name:
+                raise ValueError("the streamed tool-call name changed")
+            return False
+        if not name:
             raise ValueError("tool stream emitted arguments before the tool name")
-        return bool(name)
+        self.ids[index] = _new_call_id()
+        self.names[index] = name
+        return True
 
     def add_arguments(self, index: int, arguments: str) -> None:
-        self.arguments[index] = self.arguments.get(index, "") + arguments
+        """Append the argument fragment for already announced ``index``."""
+        self.arguments.setdefault(index, []).append(arguments)
 
 
 class _StreamWriter(ABC):
-    """Encode one protocol's streamed events; the relay decides what to send and when."""
+    """Encode one protocol's streamed events; the relay decides what to send and when.
+
+    ``accepts_raw_arguments`` is false for protocols that require the final tool arguments to be a JSON object.
+    """
+
+    accepts_raw_arguments: bool = False
 
     @abstractmethod
     def start(self) -> list[bytes]: ...
@@ -196,11 +249,35 @@ class _StreamWriter(ABC):
 
 
 class _OpenAIChunkWriter(_StreamWriter):
-    """``chat.completion.chunk`` events sharing one id, model and timestamp."""
+    """Encode one OpenAI Chat Completions stream for ``ChatStreamRelay``.
 
-    def __init__(self, common: Mapping[str, Any], *, include_usage: bool = False) -> None:
-        self._common = dict(common)
-        self._include_usage = include_usage
+    The response ID and model are strings. The creation timestamp is a nonnegative integer in seconds.
+    The writer sets the object value to ``chat.completion.chunk``. The boolean ``include_usage`` adds null
+    usage to each choice chunk. It also adds
+    the response totals in one empty-choice chunk after the final choice.
+
+    ``start`` emits the assistant role. ``thinking``, ``text``, and ``logprobs`` put their inputs in the
+    corresponding choice fields. ``tool_call`` emits the argument fragment at its index. Its first fragment also
+    names the call and includes its ID. ``finish`` emits the final choice, optional usage chunk, and ``[DONE]``.
+    """
+
+    accepts_raw_arguments = True
+
+    def __init__(self, response_id: str, *, model: str, created: int, include_usage: bool) -> None:
+        if not isinstance(response_id, str) or not isinstance(model, str):
+            raise ValueError("The response ID and model must be strings.")
+        require_integer(created, "the creation timestamp")
+        if not isinstance(include_usage, bool):
+            raise ValueError("The include_usage flag must be a boolean.")
+        self._common: dict[str, JsonValue] = {
+            "id": response_id,
+            "model": model,
+            "created": created,
+            "object": "chat.completion.chunk",
+        }
+        self.include_usage = include_usage
+        if include_usage:
+            self._common["usage"] = None
 
     def _chunk(self, delta: Mapping[str, Any], **choice_fields: Any) -> bytes:
         finish_reason = choice_fields.pop("finish_reason", None)
@@ -227,18 +304,20 @@ class _OpenAIChunkWriter(_StreamWriter):
         return [self._chunk({}, logprobs={"content": content})]
 
     def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
-        """The last chunk carries the finish reason and ``meta_info``, and the token IDs of a response that has
-        them: ``token_ids`` in its choice and ``prompt_token_ids`` beside ``choices``."""
+        """Use the completed first choice's finish reason and metadata in the final choice chunk.
+
+        If the response has token IDs, put the output IDs in the choice and the prompt IDs beside ``choices``.
+        """
         choice = response["choices"][0]
         closing = {"index": 0, "delta": {}, "finish_reason": choice["finish_reason"], "meta_info": choice["meta_info"]}
         if "token_ids" in choice:
             closing["token_ids"] = choice["token_ids"]
         prompt = {"prompt_token_ids": response["prompt_token_ids"]} if "prompt_token_ids" in response else {}
-        output = [_sse_data({**self._common, **prompt, "choices": [closing]})]
-        if self._include_usage:
-            output.append(_sse_data({**self._common, "choices": [], "usage": response["usage"]}))
-        output.append(b"data: [DONE]\n\n")
-        return output
+        frames = [_sse_data({**self._common, **prompt, "choices": [closing]})]
+        if self.include_usage:
+            frames.append(_sse_data({**self._common, "choices": [], "usage": response["usage"]}))
+        frames.append(b"data: [DONE]\n\n")
+        return frames
 
 
 #: The fields of a Messages answer that Reef adds when a call asks for them (``anthropic.TOKEN_REQUEST_KEYS``).
@@ -246,11 +325,20 @@ ANTHROPIC_TOKEN_FIELDS = ("logprobs", "token_ids", "prompt_token_ids")
 
 
 class _AnthropicEventWriter(_StreamWriter):
-    """Anthropic Messages events; content blocks open and close as the sampled text changes kind. ``message_delta``
-    carries the answer's token IDs and log probabilities when it has them (``ANTHROPIC_TOKEN_FIELDS``), so the stream
-    holds all that the whole answer does."""
+    """Encode one Anthropic Messages stream for ``ChatStreamRelay``.
+
+    The message ID and model are strings. Input tokens are a nonnegative count. The block index counts closed
+    blocks, starting at zero. The open block is absent, or a pair of a block kind and a call index. The kind is
+    ``text``, ``thinking``, or ``tool``. Only a tool has a call index, its nonnegative position among the reply's calls.
+
+    ``start`` emits the header. ``thinking`` and ``text`` use the current block when its kind matches. Otherwise
+    they close it and open a block for the new kind. ``tool_call`` opens a block for a new call. An argument
+    fragment for an announced call requires its block to remain open. ``finish`` closes the block and emits the
+    stop reason, stop sequence, and output token count before ``message_stop``.
+    """
 
     def __init__(self, message_id: str, *, model: str, input_tokens: int) -> None:
+        require_integer(input_tokens, "the input token count")
         self._message_id = message_id
         self._model = model
         self._input_tokens = input_tokens
@@ -308,7 +396,10 @@ class _AnthropicEventWriter(_StreamWriter):
         return output
 
     def tool_call(self, index: int, call_id: str, name: str, arguments: str, *, announced: bool) -> list[bytes]:
-        output = self._open(("tool", index), {"type": "tool_use", "id": call_id, "name": name, "input": {}})
+        key = ("tool", index)
+        if not announced and self._open_block != key:
+            raise ValueError("streamed tool-call arguments arrived after the content block closed")
+        output = self._open(key, {"type": "tool_use", "id": call_id, "name": name, "input": {}})
         if arguments:
             output.append(self._delta({"type": "input_json_delta", "partial_json": arguments}))
         return output
@@ -329,50 +420,62 @@ class _AnthropicEventWriter(_StreamWriter):
 
 
 class ChatStreamRelay:
-    """Turn one request's sampled deltas into client frames and remember what was sent.
+    """Translate one model reply into protocol frames and check the completed parse.
 
-    Tool markers are parsed out of the visible text as it streams; at the end
-    :meth:`reconcile` compares the canonical parse of the full sample with
-    what already went out and sends only the difference.
+    The writer encodes one protocol. The parser is absent or a ``StreamingToolParser``. The tool calls hold the
+    indices, names, IDs, and argument fragments already sent. Text and reasoning fragments are nonempty strings
+    in send order. Pending reasoning whitespace holds only whitespace after the last emitted reasoning character.
+
+    ``piece`` takes one text or thinking delta. It emits no frame for empty input and holds trailing thinking
+    whitespace until more reasoning arrives. For text with a parser, it emits the text and tool calls that the parser returns. A parser without an incremental method defers text and tool output to ``reconcile``.
+
+    ``reconcile`` takes the completed assistant message. It emits missing suffixes and assigns the streamed IDs
+    to matching completed calls. It raises ``ValueError`` if any emitted field and its completed value disagree
+    or the protocol cannot append to an earlier block. The caller sends a terminal event only on success.
     """
 
-    def __init__(self, writer: _StreamWriter, stream_tool_parser: Any) -> None:
+    def __init__(self, writer: _StreamWriter, stream_tool_parser: StreamingToolParser | None) -> None:
         self.writer = writer
         self._parser = stream_tool_parser
         self._tools = _StreamedToolCalls()
-        self._reasoning = ""
-        self._text_parts: list[str] = []
+        self.reasoning_fragments: list[str] = []
+        self.reasoning_whitespace: list[str] = []
+        self.text_fragments: list[str] = []
 
-    def piece(self, kind: str, value: str, *, parse_tools: bool = True) -> list[bytes]:
+    def piece(self, kind: str, value: str) -> list[bytes]:
         if not value:
             return []
         if kind == "thinking":
-            self._reasoning += value
-            return self.writer.thinking(value)
-        normal_text, calls = value, []
-        if self._parser is not None and parse_tools:
-            parse = getattr(self._parser, "parse_stream_chunk", None)
-            if parse is None:
-                # Third-party test/fallback parsers without an incremental
-                # API cannot safely distinguish a partial tool marker from
-                # visible text. Reconciliation emits the final parsed tool
-                # call at stream end.
-                normal_text = ""
+            # The complete parse trims reasoning. Keep whitespace until another reasoning fragment follows it.
+            if not self.reasoning_fragments:
+                value = value.lstrip()
+            trimmed = value.rstrip()
+            if trimmed:
+                delta = "".join(self.reasoning_whitespace) + trimmed
+                self.reasoning_whitespace.clear()
+                self.reasoning_fragments.append(delta)
+                frames = self.writer.thinking(delta)
             else:
-                normal_text, calls = parse(value)
+                frames = []
+            if len(trimmed) < len(value):
+                self.reasoning_whitespace.append(value[len(trimmed) :])
+            return frames
+        calls: list[StreamedToolCall]
+        if self._parser is None:
+            normal_text, calls = value, []
+        else:
+            normal_text, calls = self._parser.parse_stream_chunk(value)
         output: list[bytes] = []
         if normal_text:
-            self._text_parts.append(normal_text)
+            self.text_fragments.append(normal_text)
             output.extend(self.writer.text(normal_text))
-        for fallback_index, call in enumerate(calls):
-            index = getattr(call, "tool_index", fallback_index)
-            index = fallback_index if index is None else int(index)
-            announced = self._tools.announce(index, getattr(call, "name", None))
-            arguments = _argument_text(getattr(call, "parameters", ""))
-            self._tools.add_arguments(index, arguments)
+        for call in calls:
+            index = call.index
+            announced = self._tools.announce(index, call.name)
+            self._tools.add_arguments(index, call.arguments)
             output.extend(
                 self.writer.tool_call(
-                    index, self._tools.ids[index], self._tools.names[index], arguments, announced=announced
+                    index, self._tools.ids[index], self._tools.names[index], call.arguments, announced=announced
                 )
             )
         return output
@@ -384,54 +487,85 @@ class ChatStreamRelay:
         announced, so the recorded response and the streamed one agree.
         """
         tool_calls = message.get("tool_calls") or []
-        for index, call in enumerate(tool_calls):
-            if not isinstance(call, dict):
-                continue
-            call["id"] = self._tools.ids.setdefault(index, str(call.get("id") or _new_call_id()))
-            function = call.get("function")
-            if isinstance(function, Mapping):
-                self._tools.names.setdefault(index, str(function.get("name", "")))
+        if any(index >= len(tool_calls) for index in self._tools.ids):
+            raise ValueError("a streamed tool call is missing from the completed response")
         output: list[bytes] = []
-        final_reasoning = message.get("reasoning_content")
-        if isinstance(final_reasoning, str) and final_reasoning.startswith(self._reasoning):
-            output.extend(self.piece("thinking", final_reasoning[len(self._reasoning) :], parse_tools=False))
-        final_text = message.get("content")
-        streamed_text = "".join(self._text_parts)
-        if isinstance(final_text, str) and final_text.startswith(streamed_text):
-            output.extend(self.piece("text", final_text[len(streamed_text) :], parse_tools=False))
+        for name, field, fragments, write in (
+            ("reasoning", "reasoning_content", self.reasoning_fragments, self.writer.thinking),
+            ("text", "content", self.text_fragments, self.writer.text),
+        ):
+            final = message.get(field) or ""
+            emitted = "".join(fragments)
+            if not final.startswith(emitted):
+                raise ValueError(f"streamed {name} differs from the completed response")
+            if len(final) > len(emitted):
+                output.extend(write(final[len(emitted) :]))
         for index, call in enumerate(tool_calls):
-            function = call.get("function") if isinstance(call, Mapping) else None
-            if not isinstance(function, Mapping):
-                continue
-            arguments = _argument_text(function.get("arguments", ""))
-            emitted = self._tools.arguments.get(index, "")
-            if index in self._tools.arguments:
-                if _json_arguments_equal(arguments, emitted):
-                    continue
-                if not arguments.startswith(emitted):
-                    continue
-                missing = arguments[len(emitted) :]
-            else:
-                missing = arguments
-            if not missing:
-                continue
-            output.extend(
-                self.writer.tool_call(index, self._tools.ids[index], self._tools.names[index], missing, announced=True)
-            )
+            function = call["function"]
+            name = function["name"]
+            announced = index in self._tools.ids
+            if announced:
+                if self._tools.names[index] != name:
+                    raise ValueError("the streamed tool-call name differs from the completed response")
+                call["id"] = self._tools.ids[index]
+            arguments = argument_text(function["arguments"])
+            emitted = "".join(self._tools.arguments.get(index, ()))
+            missing = remaining_tool_arguments(emitted, arguments, allow_raw_prefix=self.writer.accepts_raw_arguments)
+            if missing or not announced:
+                output.extend(self.writer.tool_call(index, call["id"], name, missing, announced=not announced))
         return output
 
 
-def _argument_text(arguments: Any) -> str:
+def argument_text(arguments: Any) -> str:
     return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
 
 
-def _json_arguments_equal(left: str, right: str) -> bool:
+def without_json_whitespace(value: str) -> str:
+    """Remove JSON whitespace outside strings, including in a partial object."""
+    inside_string = False
+    escaped = False
+    characters: list[str] = []
+    for character in value:
+        if not inside_string and character in " \t\r\n":
+            continue
+        characters.append(character)
+        if escaped:
+            escaped = False
+        elif inside_string and character == "\\":
+            escaped = True
+        elif character == '"':
+            inside_string = not inside_string
+    return "".join(characters)
+
+
+def remaining_tool_arguments(emitted: str, arguments: str, *, allow_raw_prefix: bool = False) -> str:
+    """Return the suffix that completes emitted arguments, or raise ValueError on a mismatch.
+
+    When allow_raw_prefix is true, a literal prefix match suffices even for invalid JSON.
+    Other matches must complete a JSON object equal to the final object.
+    """
+    has_prefix = arguments.startswith(emitted)
+    if allow_raw_prefix and has_prefix:
+        return arguments[len(emitted) :]
     try:
-        return json.dumps(json.loads(left), sort_keys=True, separators=(",", ":")) == json.dumps(
-            json.loads(right), sort_keys=True, separators=(",", ":")
-        )
-    except json.JSONDecodeError:
-        return False
+        expected = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("completed tool-call arguments are not valid JSON") from exc
+    if not isinstance(expected, dict):
+        raise ValueError("completed tool-call arguments must be a JSON object")
+    if has_prefix:
+        return arguments[len(emitted) :]
+
+    compact = without_json_whitespace(arguments)
+    prefix = without_json_whitespace(emitted)
+    suffix = compact[len(prefix) :] if compact.startswith(prefix) else ""
+    try:
+        actual = json.loads(emitted + suffix)
+    except json.JSONDecodeError as exc:
+        raise ValueError("streamed tool-call arguments cannot be completed") from exc
+    if json.dumps(actual, sort_keys=True) != json.dumps(expected, sort_keys=True):
+        raise ValueError("streamed tool-call arguments differ from the completed response")
+    return suffix
 
 
 @dataclass(frozen=True)
@@ -625,13 +759,18 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             tool_parser=self._configured_tool_parser(request),
         )
 
-    def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
+    def _response_from_capture(
+        self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any, *, infer_from_closing_tag: bool = True
+    ) -> dict[str, Any]:
         """The OpenAI-shaped response of one exact sample."""
         text = captured.text
         if text is None:
             text = self._require_tokenizer().decode(captured.output_ids, skip_special_tokens=True)
         message, parsed_tool_calls = self._assistant_message(
-            text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
+            text,
+            tool_parser,
+            force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids),
+            infer_from_closing_tag=infer_from_closing_tag,
         )
         # Tool parsing must not hide an engine abort from the service's abort check.
         if parsed_tool_calls and captured.finish_reason != "abort":
@@ -684,17 +823,12 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 model=str(call.payload.get("model", self._model_path)),
                 input_tokens=len(call.prompt_ids),
             )
+        options = call.request.get("stream_options")
         return _OpenAIChunkWriter(
-            {
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": str(call.request.get("model", self._model_path)),
-            },
-            include_usage=(
-                isinstance(call.request.get("stream_options"), Mapping)
-                and call.request["stream_options"].get("include_usage") is True
-            ),
+            chat_id,
+            model=str(call.request.get("model", self._model_path)),
+            created=created,
+            include_usage=isinstance(options, Mapping) and options.get("include_usage") is True,
         )
 
     def _finish_frames(
@@ -870,23 +1004,15 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         tool_parser: Any,
         *,
         force_reasoning: bool = False,
+        infer_from_closing_tag: bool = True,
     ) -> tuple[dict[str, Any], bool]:
-        # Thinking-template models emit reasoning before </think>. The
-        # opening tag is often inserted by the chat template, so it is
-        # usually absent from the sampled text. OpenAI-shaped clients render
-        # content verbatim, so reasoning must ride the standard
-        # reasoning_content field — otherwise every consumer downstream
-        # (agents, judges, user simulators) sees chain-of-thought as the
-        # reply. Training tensors are captured from the raw token stream and
-        # are unaffected by this presentation split. The split follows
-        # SGLang's Qwen3 reasoning parser (``split_reasoning``). SGLang forces
-        # reasoning whenever enable_thinking is not false, so a closing tag
-        # also starts the split: it only appears when thinking is on. A reply
-        # without a closing tag hit its token cap mid-thought, so all of it is
-        # reasoning: a judge that scored it as content would score the wrong text.
+        # A buffered reply can infer reasoning from a closing tag. The live stream has already sent
+        # unmarked text in the answer channel by the time it sees a closing tag.
         reasoning = ""
         if cls.SPLIT_REASONING:
-            reasoning, text = split_reasoning(text, pre_opened=force_reasoning)
+            reasoning, text = split_reasoning(
+                text, pre_opened=force_reasoning, infer_from_closing_tag=infer_from_closing_tag
+            )
         message: dict[str, Any] = {"role": "assistant", "content": text}
         if reasoning:
             message["reasoning_content"] = reasoning

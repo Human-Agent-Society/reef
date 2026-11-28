@@ -36,6 +36,8 @@ def test_a_prompt_that_ends_with_an_open_think_tag_pre_opens_the_reasoning() -> 
     [
         (["<thi", "nk>a", "</th", "ink>\n\nb"], False, [("thinking", "a"), ("text", "b")]),
         (["<think>a</think>b"], True, [("thinking", "a"), ("text", "b")]),
+        (["<think><think>a</think>b"], False, [("thinking", "a"), ("text", "b")]),
+        (["<think><thi", "nk>a", "</think>b"], True, [("thinking", "a"), ("text", "b")]),
         (["a", "<tool_", "call>x"], True, [("thinking", "a"), ("text", "<tool_call>x")]),
         (["still thin", "king"], True, [("thinking", "still thin"), ("thinking", "king")]),
         (["plain ", "text"], False, [("text", "plain "), ("text", "text")]),
@@ -45,3 +47,69 @@ def test_reasoning_stream_split_follows_sglang_qwen3_parser(deltas, force_reason
     splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=force_reasoning)
     streamed = [part for delta in deltas for part in splitter.feed(delta)]
     assert [*streamed, *splitter.finish()] == parts
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("force_reasoning", [False, True])
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("\n<think>work</think>answer", ("work", "answer")),
+        (" \t<think> \n<think>work</think>\n   answer", ("work", "   answer")),
+        ("\n<think></think>\nanswer", ("", "answer")),
+        ("\n<think>unfinished", ("unfinished", "")),
+        ("", ("", "")),
+        ("\n  ", None),
+        ("\n <thi", None),
+        ("\n <thing>literal", None),
+        ("\n   ordinary answer", None),
+    ],
+)
+def test_leading_whitespace_preserves_reasoning_and_literal_answer_text(reply, expected, force_reasoning) -> None:
+    if expected is None:
+        expected = (reply.strip(), "") if force_reasoning else ("", reply)
+    assert split_reasoning(reply, pre_opened=force_reasoning) == expected
+    for offset in range(len(reply) + 1):
+        splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=force_reasoning)
+        parts = splitter.feed(reply[:offset]) + splitter.feed(reply[offset:]) + splitter.finish()
+        reasoning = "".join(value for kind, value in parts if kind == "thinking").strip()
+        answer = "".join(value for kind, value in parts if kind == "text")
+        assert (reasoning, answer) == expected, offset
+
+
+def test_a_plain_answer_streams_before_it_finishes():
+    splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)
+    assert splitter.feed("Hello") == [("text", "Hello")]
+    assert splitter.feed(" world") == [("text", " world")]
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("Use <think> literally.", ("", "Use <think> literally.")),
+        ("<think>plan<tool_call>args</think>end", ("plan", "<tool_call>args</think>end")),
+        ("answer<tool_call>{}", ("", "answer<tool_call>{}")),
+    ],
+)
+def test_reasoning_boundaries_agree_for_every_chunk_split(reply, expected):
+    assert split_reasoning(reply, pre_opened=False) == expected
+    for offset in range(len(reply) + 1):
+        splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)
+        parts = splitter.feed(reply[:offset]) + splitter.feed(reply[offset:]) + splitter.finish()
+        reasoning = "".join(value for kind, value in parts if kind == "thinking").strip()
+        answer = "".join(value for kind, value in parts if kind == "text")
+        assert (reasoning, answer) == expected, offset
+
+
+@pytest.mark.unit
+def test_an_opening_reasoning_tag_split_after_whitespace_leaks_no_answer_text() -> None:
+    splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=False)
+    for fragment in ["\n "] * 32:
+        assert splitter.feed(fragment) == []
+    assert splitter.feed("<thi") == []
+    assert splitter.feed("nk>") == []
+    for fragment in ["\t"] * 32:
+        assert splitter.feed(fragment) == []
+    assert splitter.feed("<thi") == []
+    assert splitter.feed("nk>work") == [("thinking", "work")]
+    assert splitter.feed("</think>answer") == [("text", "answer")]

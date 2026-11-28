@@ -8,16 +8,20 @@ from unittest.mock import ANY
 
 import pytest
 from aiohttp import ClientPayloadError, web
-from aiohttp.test_utils import TestServer
+from aiohttp.test_utils import TestClient, TestServer
 from tests.support import tokenizers
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
+from reef.api.inference_service import build_inference_app
 from reef.api.streaming import stream_record
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
-from reef.inference.chat import _json_arguments_equal, sse_json_events
-from reef.inference.interfaces import InferenceArtifact, full_weight_name
+from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.inference.chat import remaining_tool_arguments, sse_json_events
+from reef.inference.interfaces import FixedEngineClients, InferenceArtifact, full_weight_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class RecordingClient(SGLangGenerateClient):
@@ -285,7 +289,13 @@ def test_native_stream_capture_joins_many_disjoint_text_chunks() -> None:
         )
 
     assert capture.text == "prefix-" + "".join(chunks)
-    assert capture.response()["text"] == capture.text
+    response = capture.response()
+    assert response["text"] == capture.text
+    capture.text = ""
+    assert capture.text_fragments == []
+    assert capture.response() == {**response, "text": ""}
+    with pytest.raises(TypeError, match="must be a string"):
+        capture.text = None
 
 
 @pytest.mark.unit
@@ -855,7 +865,8 @@ def test_pinned_stream_ends_with_its_terminal_event_only_after_a_finish_reason(f
 
 
 @pytest.mark.unit
-def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None:
+@pytest.mark.parametrize("include_usage", [False, True])
+def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path, include_usage) -> None:
     async def run() -> None:
         text_parts = [f"chunk-{index};" for index in range(2048)]
 
@@ -899,7 +910,7 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
                     "max_completion_tokens": len(text_parts),
                     "logprobs": True,
                     "return_token_ids": True,
-                    "stream_options": {"include_usage": True},
+                    "stream_options": {"include_usage": include_usage},
                     "stream": True,
                 },
             )
@@ -917,13 +928,14 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
             list(range(20, 20 + len(text_parts))),
         )
         usage_chunks = [chunk for chunk in chunks if chunk["choices"] == []]
-        assert [chunk["usage"] for chunk in usage_chunks] == [
-            {
-                "prompt_tokens": 2,
-                "completion_tokens": len(text_parts),
-                "total_tokens": len(text_parts) + 2,
-            }
-        ]
+        if include_usage:
+            assert [chunk["usage"] for chunk in usage_chunks] == [
+                {"prompt_tokens": 2, "completion_tokens": len(text_parts), "total_tokens": len(text_parts) + 2}
+            ]
+            assert all(chunk["usage"] is None for chunk in chunks if chunk["choices"])
+        else:
+            assert not usage_chunks
+            assert all("usage" not in chunk for chunk in chunks)
         recorded = stream_record(stream, body, complete=True)
         assert recorded["choices"][0]["message"]["content"] == "".join(text_parts)
         assert [item["logprob"] for item in recorded["choices"][0]["logprobs"]["content"]] == [-0.5] * len(text_parts)
@@ -1070,14 +1082,15 @@ def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> Non
 
 
 @pytest.mark.unit
-def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() -> None:
+@pytest.mark.parametrize("pre_opened", [False, True])
+def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks(pre_opened: bool) -> None:
     async def run() -> None:
         async def generate(request):
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
             events = [
                 {
-                    "text": "work</thi",
+                    "text": "\nwork  </thi",
                     "output_ids": [20],
                     "meta_info": {
                         "finish_reason": None,
@@ -1086,12 +1099,21 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                     },
                 },
                 {
-                    "text": "nk>\nanswer",
+                    "text": "nk>\n",
                     "output_ids": [21],
                     "meta_info": {
-                        "finish_reason": {"type": "stop"},
+                        "finish_reason": None,
                         "completion_tokens": 2,
                         "output_token_logprobs": [[-0.25, 21]],
+                    },
+                },
+                {
+                    "text": "\nanswer",
+                    "output_ids": [22],
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "completion_tokens": 3,
+                        "output_token_logprobs": [[-0.25, 22]],
                     },
                 },
             ]
@@ -1109,7 +1131,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
-                force_reasoning=True,
+                force_reasoning=pre_opened,
             )
             stream = await backend.inference_stream(
                 live_artifact(),
@@ -1117,7 +1139,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                 {
                     "model": "served-model",
                     "messages": [{"role": "user", "content": "hello"}],
-                    "max_tokens": 2,
+                    "max_tokens": 3,
                     "stream": True,
                 },
             )
@@ -1125,60 +1147,135 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
         finally:
             await server.close()
 
-        text = body.decode()
-        assert '"type": "thinking_delta", "thinking": "work"' in text
-        assert '"type": "text_delta", "text": "answer"' in text
-        assert "</think>" not in text
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
+        deltas = [event["delta"] for event in events if event["type"] == "content_block_delta"]
+        thinking = "".join(delta["thinking"] for delta in deltas if delta["type"] == "thinking_delta")
+        answer = "".join(delta["text"] for delta in deltas if delta["type"] == "text_delta")
         recorded = stream_record(stream, body, complete=True)
-        assert recorded["content"] == [
-            {"type": "thinking", "thinking": "work", "signature": ""},
-            {"type": "text", "text": "answer"},
-        ]
+        if pre_opened:
+            assert (thinking, answer) == ("work", "answer")
+            assert recorded["content"] == [
+                {"type": "thinking", "thinking": "work", "signature": ""},
+                {"type": "text", "text": "answer"},
+            ]
+        else:
+            assert (thinking, answer) == ("", "\nwork  </think>\n\nanswer")
+            assert recorded["content"] == [{"type": "text", "text": answer}]
         assert "training" not in recorded
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("path", "arguments", "failure", "repeated_think_tags", "completed_arguments"),
+    [
+        *(
+            pytest.param(path, arguments, failure, repeated, None, id=f"{name}-{path}")
+            for path in ("/v1/chat/completions", "/v1/messages")
+            for name, arguments, failure, repeated in (
+                ("equivalent", '{"path":"out.txt"}', None, False),
+                ("prefix", '{"path": "out', None, False),
+                ("spaced-prefix", '{"path":   "out', None, False),
+                ("divergent-arguments", '{"path":"other.txt"}', "streamed tool-call arguments", False),
+                ("divergent-text", '{"path":"out.txt"}', "streamed text", False),
+                ("repeated-think-tags", '{"path":"out.txt"}', None, True),
+                ("negative-index", '{"path":"out.txt"}', "streamed tool-call index", False),
+            )
+        ),
+        pytest.param("/v1/chat/completions", '{"path":"README', None, False, '{"path":"README', id="raw-match"),
+        pytest.param("/v1/chat/completions", '{"path":"RE', None, False, '{"path":"README', id="raw-prefix"),
+        pytest.param("/v1/chat/completions", None, None, False, '{"path":"README', id="raw-buffered-only"),
+        pytest.param(
+            "/v1/chat/completions",
+            '{"path":"else',
+            "completed tool-call arguments",
+            False,
+            '{"path":"README',
+            id="raw-divergence",
+        ),
+        pytest.param(
+            "/v1/messages",
+            '{"path":"README',
+            "completed tool-call arguments are not valid JSON",
+            False,
+            '{"path":"README',
+            id="anthropic-invalid-json",
+        ),
+        pytest.param("/v1/messages", "[]", "must be a JSON object", False, "[]", id="anthropic-non-object"),
+    ],
+)
+def test_streamed_tool_turns_agree_with_the_buffered_result(
+    tmp_path, path, arguments, failure, repeated_think_tags, completed_arguments
+) -> None:
     raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
+    if failure == "streamed text":
+        chunks = ("Before", raw_tool_call, "After")
+    elif repeated_think_tags:
+        chunks = ("\n ", "<think>", "\t<thi", "nk>work</think>", raw_tool_call)
+    else:
+        chunks = (raw_tool_call,)
 
     class FakeStreamingToolParser:
+        """Present one tool call to the stream and buffered paths under the fixture's fault cases.
+
+        ``raw_tool_call`` is the one tool chunk. ``arguments`` is the streamed fragment, which may differ
+        from the buffered object. ``failure`` is None for an accepted case or the expected error text.
+
+        ``has_tool_call`` checks for a tool marker. ``parse_stream_chunk`` passes ordinary text through.
+        For the tool chunk it emits the fragment at index zero, or minus one for the invalid-index case.
+        ``parse_non_stream`` keeps only text before the marker and returns the complete tool call.
+        """
+
         @staticmethod
         def has_tool_call(text):
-            return text.startswith("<tool_call>")
+            return "<tool_call>" in text
 
         @staticmethod
         def parse_stream_chunk(text):
-            del text
+            if text != raw_tool_call:
+                return text, []
+            if arguments is None:
+                return "", []
             return "", [
                 SimpleNamespace(
                     name="write_file",
-                    parameters='{"path":"out.txt"}',
-                    tool_index=0,
+                    parameters=arguments,
+                    tool_index=-1 if failure == "streamed tool-call index" else 0,
                 )
             ]
 
         @staticmethod
         def parse_non_stream(text):
-            del text
-            return "", [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
+            before = text.partition("<tool_call>")[0]
+            final = {"path": "out.txt"} if completed_arguments is None else completed_arguments
+            return before, [SimpleNamespace(name="write_file", parameters=final)]
 
     async def run() -> None:
         async def generate(request):
+            native = await request.json()
+
+            def event(text, token_ids, total, *, finished):
+                return {
+                    "text": text,
+                    "output_ids": token_ids,
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"} if finished else None,
+                        "completion_tokens": total,
+                        "output_token_logprobs": [[-0.5, token_id] for token_id in token_ids],
+                        "weight_version": "wv-tools",
+                    },
+                }
+
+            if not native["stream"]:
+                return web.json_response(
+                    event("".join(chunks), list(range(20, 20 + len(chunks))), len(chunks), finished=True)
+                )
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
-            event = {
-                "text": raw_tool_call,
-                "output_ids": [20],
-                "meta_info": {
-                    "finish_reason": {"type": "stop"},
-                    "completion_tokens": 1,
-                    "output_token_logprobs": [[-0.5, 20]],
-                    "weight_version": "wv-tools",
-                },
-            }
-            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            for index, chunk in enumerate(chunks):
+                item = event(chunk, [20 + index], index + 1, finished=index + 1 == len(chunks))
+                await response.write(f"data: {json.dumps(item)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
             return response
 
@@ -1194,53 +1291,123 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                 tool_call_parser="qwen25",
                 client=RecordingClient(FakeStreamingToolParser),
             )
-            stream = await backend.inference_stream(
-                local_artifact(tmp_path),
-                "/v1/messages",
-                {
-                    "model": "served-model",
-                    "messages": [{"role": "user", "content": "write it"}],
-                    "tools": [
-                        {
-                            "name": "write_file",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {"path": {"type": "string"}},
-                            },
-                        }
-                    ],
-                    "max_tokens": 1,
-                    "stream": True,
-                },
-            )
+            artifact = local_artifact(tmp_path)
+            anthropic = path == "/v1/messages"
+            schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+            if anthropic:
+                tool = {"name": "write_file", "input_schema": schema}
+            else:
+                tool = {"type": "function", "function": {"name": "write_file", "parameters": schema}}
+            payload = {
+                "model": "served-model",
+                "messages": [{"role": "user", "content": "write it"}],
+                "tools": [tool],
+                "max_tokens": len(chunks),
+            }
+            if failure is not None:
+                scenario = "tools"
+                storage = SQLiteScenarioStorage(tmp_path / "records")
+                coordination = memory_coordination()
+                lease = coordination.control_lease.acquire("control")
+                coordination.served_models.write(
+                    ScenarioModel(scenario, ACTIVE),
+                    ServedArtifact("artifact", str(server.make_url("/")), "served-model"),
+                    control_lease_number=lease.number,
+                )
+                replica = build_inference_app(
+                    coordination.served_models, storage, FixedEngineClients(backend), tokens=None
+                )
+                async with TestClient(TestServer(replica)) as client:
+                    response = await client.post(
+                        path, json={**payload, "stream": True}, headers={"x-reef-scenario": scenario}
+                    )
+                    assert response.status == 200
+                    with pytest.raises(ClientPayloadError):
+                        await response.read()
+                store = storage.open(scenario)
+                try:
+                    (record,) = store.records.replay(scenario)
+                    failed = record.payload["response"]
+                    assert failed["complete"] is False
+                    assert failure in failed["error"]
+                    assert "[DONE]" not in failed["body"] and "message_stop" not in failed["body"]
+                finally:
+                    store.close()
+                return
+            buffered = await backend.inference(artifact, path, payload)
+            stream = await backend.inference_stream(artifact, path, {**payload, "stream": True})
             body = b"".join([chunk async for chunk in stream.chunks])
         finally:
             await server.close()
 
-        text = body.decode()
-        assert '"type": "tool_use"' in text
-        assert '"type": "input_json_delta", "partial_json": "{\\"path\\":\\"out.txt\\"}"' in text
-        assert text.count('"type": "input_json_delta"') == 1
-        assert "<tool_call>" not in text
+        assert b"<tool_call>" not in body
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
         recorded = stream_record(stream, body, complete=True)
-        assert recorded["stop_reason"] == "tool_use"
-        assert recorded["content"] == [
-            {
-                "type": "tool_use",
-                "id": recorded["content"][0]["id"],
-                "name": "write_file",
-                "input": {"path": "out.txt"},
-            }
-        ]
-        assert "training" not in recorded
+        if anthropic:
+            (start,) = [
+                event
+                for event in events
+                if event["type"] == "content_block_start" and event["content_block"]["type"] == "tool_use"
+            ]
+            assert start["content_block"]["id"] == recorded["content"][-1]["id"]
+            fragments = [
+                event["delta"]["partial_json"]
+                for event in events
+                if event["type"] == "content_block_delta" and event["delta"]["type"] == "input_json_delta"
+            ]
+            if repeated_think_tags:
+                (thinking,) = [
+                    event["delta"]["thinking"]
+                    for event in events
+                    if event["type"] == "content_block_delta" and event["delta"]["type"] == "thinking_delta"
+                ]
+                assert thinking == recorded["content"][0]["thinking"] == buffered["content"][0]["thinking"] == "work"
+            assert events[-1]["type"] == "message_stop"
+            assert recorded["stop_reason"] == buffered["stop_reason"] == "tool_use"
+            assert (
+                json.loads("".join(fragments)) == recorded["content"][-1]["input"] == buffered["content"][-1]["input"]
+            )
+        else:
+            deltas = [
+                delta
+                for event in events
+                for choice in event["choices"]
+                for delta in choice["delta"].get("tool_calls", [])
+            ]
+            (announced,) = [delta for delta in deltas if "id" in delta]
+            recorded_call = recorded["choices"][0]["message"]["tool_calls"][0]
+            buffered_call = buffered["choices"][0]["message"]["tool_calls"][0]
+            if repeated_think_tags:
+                (thinking,) = [
+                    choice["delta"]["reasoning_content"]
+                    for event in events
+                    for choice in event["choices"]
+                    if "reasoning_content" in choice["delta"]
+                ]
+                assert thinking == recorded["choices"][0]["message"]["reasoning_content"] == "work"
+            assert announced["id"] == recorded_call["id"]
+            fragments = [delta["function"]["arguments"] for delta in deltas]
+            assert body.endswith(b"data: [DONE]\n\n")
+            emitted = "".join(fragments)
+            if completed_arguments is None:
+                assert json.loads(emitted) == json.loads(recorded_call["function"]["arguments"])
+                assert json.loads(emitted) == json.loads(buffered_call["function"]["arguments"])
+            else:
+                assert emitted == recorded_call["function"]["arguments"] == buffered_call["function"]["arguments"]
+                assert emitted == completed_arguments
+        if arguments is not None:
+            assert fragments[0] == arguments
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_tool_argument_json_comparison_ignores_layout_without_coercing_types() -> None:
-    assert _json_arguments_equal('{"path":"out.txt","enabled":true}', '{ "enabled": true, "path": "out.txt" }')
-    assert not _json_arguments_equal('{"enabled":true}', '{"enabled":1}')
+    assert (
+        remaining_tool_arguments('{"path":"out.txt","enabled":true}', '{ "enabled": true, "path": "out.txt" }') == ""
+    )
+    with pytest.raises(ValueError, match="arguments differ"):
+        remaining_tool_arguments('{"enabled":true}', '{"enabled":1}')
 
 
 @pytest.mark.unit

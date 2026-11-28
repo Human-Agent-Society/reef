@@ -17,7 +17,10 @@ from reef.inference.chat import (
     ChatCall,
     ChatStreamRelay,
     NativeGenerateClient,
+    StreamedToolCall,
+    StreamingToolParser,
     TokenNativeChatHandler,
+    argument_text,
     finite_log_prob,
     normalize_finish_reason,
     positive_max_tokens,
@@ -157,10 +160,42 @@ def normalize_native_response(response: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+class SGLangStreamingToolParser(StreamingToolParser):
+    """Adapt one SGLang tool parser to the chat relay.
+
+    ``parser`` is the native parser for one request. Its incremental method may be absent on buffered parsers.
+    Each native delta supplies argument text and may omit its name or index. Use its position in the returned
+    list when the index is absent.
+    """
+
+    def __init__(self, parser: Any) -> None:
+        self.parser = parser
+
+    def parse_stream_chunk(self, text: str) -> tuple[str, list[StreamedToolCall]]:
+        parse = getattr(self.parser, "parse_stream_chunk", None)
+        if parse is None:
+            return "", []
+        visible, deltas = parse(text)
+        calls = []
+        for position, delta in enumerate(deltas):
+            index = getattr(delta, "tool_index", None)
+            name = getattr(delta, "name", None)
+            calls.append(
+                StreamedToolCall(
+                    position if index is None else int(index),
+                    str(name) if name else None,
+                    argument_text(getattr(delta, "parameters", "")),
+                )
+            )
+        return visible, calls
+
+
 class NativeStreamCapture:
     """Accumulate the disjoint incremental events of one SGLang stream into its complete native response.
 
-    Values: ``text`` joins the events' text deltas in order, and ``output_ids`` joins their output token IDs.
+    ``text_fragments`` starts empty. Assigning a string to ``text`` replaces the fragments with that string as
+    their seed, or clears them for an empty string. Each later event appends its nonempty text delta.
+    Reading ``text`` joins the fragments. ``output_ids`` joins the events' output token IDs.
     ``meta`` holds each list field of ``_LIST_META_KEYS`` joined over the events in order, and the newest value of
     every other ``meta_info`` field. ``last_output_logprobs`` holds the newest event's own
     ``output_token_logprobs``. ``seen`` is whether an event arrived.
@@ -182,7 +217,7 @@ class NativeStreamCapture:
     )
 
     def __init__(self) -> None:
-        self._text_parts: list[str] = []
+        self.text_fragments: list[str] = []
         self.output_ids: list[int] = []
         self.meta: dict[str, Any] = {}
         self.last_output_logprobs: list[Any] = []
@@ -190,11 +225,14 @@ class NativeStreamCapture:
 
     @property
     def text(self) -> str:
-        return "".join(self._text_parts)
+        """The text received so far."""
+        return "".join(self.text_fragments)
 
     @text.setter
     def text(self, value: str) -> None:
-        self._text_parts = [value]
+        if not isinstance(value, str):
+            raise TypeError("capture text must be a string")
+        self.text_fragments = [value] if value else []
 
     def accept(self, event: Mapping[str, Any]) -> str:
         meta = event.get("meta_info")
@@ -238,7 +276,8 @@ class NativeStreamCapture:
             return ""
         if not isinstance(current_text, str):
             raise ValueError("SGLang stream event text must be a string")
-        self._text_parts.append(current_text)
+        if current_text:
+            self.text_fragments.append(current_text)
         return current_text
 
     def response(self) -> dict[str, Any]:
@@ -296,7 +335,8 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         native_payload = self.client.payload(call.request, call.prompt_ids, call.sampling_params, stream=True)
         upstream = await HttpInferenceHandler.inference_stream(self, artifact, SGLANG_GENERATE_PATH, native_payload)
         chat_id, message_id, created = stream_ids()
-        relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), call.tool_parser)
+        parser = SGLangStreamingToolParser(call.tool_parser) if call.tool_parser is not None else None
+        relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), parser)
 
         async def chunks() -> AsyncIterator[bytes]:
             # ``stream`` is bound below, before the first chunk is pulled; the
@@ -348,7 +388,9 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             captured = self.client.parse(capture.response())
             # Streaming parsers are stateful. Parse the complete sample with a
             # fresh instance for the canonical response that the record keeps.
-            response = self._response_from_capture(call, captured, self._configured_tool_parser(call.request))
+            response = self._response_from_capture(
+                call, captured, self._configured_tool_parser(call.request), infer_from_closing_tag=False
+            )
             provider_response, frames = self._finish_frames(call, relay, response, chat_id, message_id, created)
             stream.record_response = provider_response
             for frame in frames:
