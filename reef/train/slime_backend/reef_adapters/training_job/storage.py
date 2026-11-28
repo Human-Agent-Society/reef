@@ -207,6 +207,24 @@ class CheckpointStorage:
                 plan = self._plan(active, inventory)
             yield plan
 
+    def check_rollout_owner(self, job_id: str, rollout_id: int) -> bool:
+        """Return whether this rollout has a complete record for the job. Reject a conflicting record."""
+        path = self._record_path(rollout_id)
+        if (
+            self.meta_root.is_symlink()
+            or self.records_root.is_symlink()
+            or path.is_symlink()
+            or (path.exists() and not path.is_file())
+        ):
+            raise CheckpointStorageError(f"checkpoint record is unsafe: {path}")
+        record = read_json(path)
+        if record is None:
+            return False
+        self._validate_record(record)
+        if (record["job_id"], record["rollout_id"], record["status"]) != (job_id, rollout_id, "COMPLETE"):
+            raise CheckpointStorageError(f"checkpoint record has the wrong owner or rollout: {path}")
+        return True
+
     def complete(self, job_id: str, rollout_id: int, *, reward: float | None) -> None:
         # The critic asset is required at completion time on the rollouts the
         # critic's cadence saves it — the component saves it before completing —

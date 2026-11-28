@@ -71,6 +71,8 @@ def _stub_module(monkeypatch: pytest.MonkeyPatch, name: str, **attributes) -> ty
 
 
 def _load_train_actor(monkeypatch: pytest.MonkeyPatch):
+    from reef.train.slime_backend.reef_adapters.worker_hooks import APPLIED_LEARNING_RATE, OPTIMIZER_UPDATES_METRIC
+
     _stub_module(monkeypatch, "slime.backends.megatron_utils.actor", MegatronTrainRayActor=type("Actor", (), {}))
     _stub_module(
         monkeypatch,
@@ -105,6 +107,8 @@ def _load_train_actor(monkeypatch: pytest.MonkeyPatch):
     _stub_module(
         monkeypatch,
         "reef.train.slime_backend.reef_adapters.worker_hooks",
+        APPLIED_LEARNING_RATE=APPLIED_LEARNING_RATE,
+        OPTIMIZER_UPDATES_METRIC=OPTIMIZER_UPDATES_METRIC,
         drain_worker_metrics=lambda: {"train/loss": 0.5},
         record_worker_metrics=lambda _metrics: None,
         reef_node_ip_and_free_port=lambda: ("127.0.0.1", 1234),
@@ -128,6 +132,48 @@ def _load_train_actor(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("attempts", "expected_updates"),
+    [((), 0), ((True, False), 1), ((True, True), 2), ((False, False), 0), ((None,), None)],
+)
+def test_actor_reports_successful_optimizer_attempts(monkeypatch, attempts, expected_updates):
+    from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
+    from reef.train.slime_backend.reef_adapters.worker_hooks import apply_learning_rate_schedule
+
+    module = _load_train_actor(monkeypatch)
+    monkeypatch.setattr(module, "drain_worker_metrics", lambda: {"_reef_optimizer_updates": 999})
+    base = module.ReefMegatronTrainRayActor.__mro__[1]
+    optimizer = types.SimpleNamespace(param_groups=[{"lr": 0.0}])
+
+    def train(self, rollout_id, rollout_data, external_data=None):
+        scheduler = self.opt_param_scheduler
+        for step, accepted in enumerate(attempts):
+            if accepted is not None:
+                apply_learning_rate_schedule(self.args, rollout_id, step, self.model, optimizer, scheduler)
+            if accepted is not False:
+                scheduler.num_steps += 16 if step == 0 else 1
+
+    monkeypatch.setattr(base, "train_actor", train, raising=False)
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+    actor.args = types.SimpleNamespace(
+        reef_learning_rate_schedule_state=LearningRateScheduleState(
+            LearningRateSchedule("warmup", 0.002, warmup_steps=2)
+        ).to_dict(),
+        reef_chained_before_train_step_hook_path=None,
+    )
+    actor.model = []
+    actor.opt_param_scheduler = types.SimpleNamespace(num_steps=0)
+
+    if expected_updates is None:
+        with pytest.raises(RuntimeError, match="without running the recipe schedule hook"):
+            actor.train_actor(0, {})
+    else:
+        actor.train_actor(0, {})
+        assert actor.pop_metrics() == {"_reef_optimizer_updates": expected_updates}
+    assert actor.pop_metrics() == {}
 
 
 @pytest.mark.unit

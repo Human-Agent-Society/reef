@@ -107,8 +107,9 @@ class SlimeRound:
     ``rollout_id`` is the non-negative id that names the rollout's Megatron
     iteration and Hugging Face export. ``step`` is a positive job progress count: cumulative optimizer steps for
     external-data jobs, or cumulative rollouts for native dataset jobs. ``schedule_state`` is the learning-rate
-    schedule's progress before the rollout and ``next_schedule`` after it:
-    both are ``None`` (Slime's configured scheduler), or both are set.
+    schedule's progress before the rollout. ``next_schedule`` assumes all planned steps succeeded.
+    Recovery uses it if Megatron saved the rollout before Reef recorded its schedule state.
+    Both are ``None`` when Slime's own scheduler sets the rate.
     ``objective`` and ``algorithm_state`` are the
     objective state that the rollout's start records, with the same
     condition as in ``SlimeStart``: the job's next state on its last rollout,

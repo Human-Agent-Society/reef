@@ -39,6 +39,7 @@ class FakeTrainGroup:
         self.lora = lora
         self.megatron_root = megatron_root
         self.rank_metrics = [{}] if rank_metrics is None else rank_metrics
+        self.world_size = len(self.rank_metrics)
         self.release_error = release_error
         self.train_calls: list[tuple[int, Any]] = []
         self.saved: list[tuple[int, bool]] = []

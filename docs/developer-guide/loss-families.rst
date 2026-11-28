@@ -62,6 +62,12 @@ for hook signatures, wire fields and actor/critic orchestration.
 Jobs can switch actor families, but startup flags remain fixed.
 New family flags, critic changes, a second distillation family or conflicting dtypes are rejected.
 
+Actor learning-rate schedules
+-----------------------------
+
+A recipe schedule advances after each successful actor optimizer update. A rejected update uses the same rate on the next attempt.
+The checkpoint start records the confirmed update count. If the process stops after saving weights but before writing the start, recovery uses the planned step count.
+
 Distillation
 ------------
 

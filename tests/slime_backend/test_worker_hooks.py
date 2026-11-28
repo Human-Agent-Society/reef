@@ -436,8 +436,16 @@ def test_learning_rate_schedule_sets_each_optimizer_step_and_chains_the_user_hoo
     from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
 
     chained: list[tuple[object, ...]] = []
+
+    def load_hook(path):
+        def chained_hook(args, rollout_id, step_id, model, optimizer, scheduler):
+            chained.append((path, rollout_id, step_id))
+            scheduler.num_steps += 1
+
+        return chained_hook
+
     misc = importlib.import_module("slime.utils.misc")
-    monkeypatch.setattr(misc, "load_function", lambda path: lambda *call: chained.append((path, *call[1:3])))
+    monkeypatch.setattr(misc, "load_function", load_hook)
     groups = [{"lr": 9.0, "lr_mult": 1.0}, {"lr": 9.0, "lr_mult": 0.5}, {"lr": 9.0}]
     optimizer = SimpleNamespace(param_groups=groups)
     schedule_state = LearningRateScheduleState(LearningRateSchedule("warmup", 1e-4, warmup_steps=4), completed_steps=2)
@@ -446,16 +454,22 @@ def test_learning_rate_schedule_sets_each_optimizer_step_and_chains_the_user_hoo
         reef_learning_rate_schedule_state=schedule_state.to_dict(),
     )
 
-    worker_hooks.apply_learning_rate_schedule(args, 7, 1, "model", optimizer, "scheduler")
+    scheduler = SimpleNamespace(num_steps=100)
+    worker_hooks.apply_learning_rate_schedule(args, 7, 0, "model", optimizer, scheduler)
+    # Slime leaves the native sample counter alone after a rejected update.
+    worker_hooks.apply_learning_rate_schedule(args, 7, 1, "model", optimizer, scheduler)
+    assert [group["lr"] for group in groups] == pytest.approx([5e-5, 2.5e-5, 5e-5])
+    scheduler.num_steps += 16
+    worker_hooks.apply_learning_rate_schedule(args, 7, 2, "model", optimizer, scheduler)
 
-    # The job's second step is the schedule's step 3; each group keeps its multiplier.
+    # One successful update advances the recipe to step 3.
     assert [group["lr"] for group in groups] == pytest.approx([7.5e-5, 3.75e-5, 7.5e-5])
-    assert chained == [("user.before_step", 7, 1)]
+    assert chained == [("user.before_step", 7, step) for step in range(3)]
     assert worker_hooks.APPLIED_LEARNING_RATE.value == pytest.approx(7.5e-5)
 
     # Without a schedule Slime's scheduler keeps the rate it set.
     args.reef_learning_rate_schedule_state = None
-    worker_hooks.apply_learning_rate_schedule(args, 7, 2, "model", optimizer, "scheduler")
+    worker_hooks.apply_learning_rate_schedule(args, 7, 3, "model", optimizer, scheduler)
     assert [group["lr"] for group in groups] == pytest.approx([7.5e-5, 3.75e-5, 7.5e-5])
     assert worker_hooks.APPLIED_LEARNING_RATE.value is None
 
