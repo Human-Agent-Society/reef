@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -25,6 +27,7 @@ from tests.support.runtime_stubs import (
 from tests.support.training_deployment import LocalFacts, LocalServingFactory, facts_component_factory
 from tests.support.trajectories import policy_trajectory
 
+from reef.api import app as service_app
 from reef.api import assembly
 from reef.api import services as service_apps
 from reef.api.app import create_data_app, get_dispatcher
@@ -788,6 +791,33 @@ def test_the_data_service_serves_the_data_routes_and_the_reads_and_control_alone
             assert (await client.get("/reef/namespaces/o/data", headers=auth)).status == 404
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_the_data_service_maintains_its_data_store_on_one_thread_that_answers_no_route(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(service_app, "DATA_STORE_MAINTENANCE_SECONDS", 0.01)
+    dispatcher = assembly.build_dispatcher(settings(tmp_path), environ={}, components=frozenset({"data"}))
+    maintenance_threads: list[int] = []
+    monkeypatch.setattr(dispatcher.data_store, "maintain", lambda: maintenance_threads.append(threading.get_ident()))
+
+    def route_work() -> int:
+        time.sleep(0.05)
+        return threading.get_ident()
+
+    async def run() -> set[int]:
+        async with TestClient(TestServer(create_data_app(dispatcher, tokens=(TOKEN,)))):
+            # A route does its work with ``asyncio.to_thread``: four at once use four threads.
+            route_threads = set(await asyncio.gather(*(asyncio.to_thread(route_work) for _ in range(4))))
+            calls = len(maintenance_threads)
+            while len(maintenance_threads) < calls + 8:
+                await asyncio.sleep(0.01)
+        return route_threads
+
+    route_threads = asyncio.run(asyncio.wait_for(run(), timeout=30))
+    assert len(route_threads) == 4
+    assert len(set(maintenance_threads)) == 1 and not route_threads & set(maintenance_threads)
 
 
 @pytest.mark.unit

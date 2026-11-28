@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from recipes.opd.stages import OPDSamples
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 from reef.train.sample2job import DistillJobData
 

@@ -19,14 +19,13 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, Sample, TaskSample
+from reef.core.job_data import JobData, Sample, SampleKind, TaskSample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.core.values import deep_merge
 from reef.observability import ExperimentLogger
 from reef.samples import Record2Sample
 from reef.samples.context import PipelineContext
-from reef.storage.scenario.samples import SampleKind
 
 
 def require_optional_positive(value: object, name: str) -> None:
@@ -50,15 +49,16 @@ class Sample2JobSettings(PluginSettings):
     buffer_size: int | None = config_option(
         None,
         help=(
-            "The most samples that one automatic job takes, beside the rest of a group; at least "
-            "job_samples. Omitted takes job_samples."
+            "The most samples that one automatic job takes, beside the rest of a group; a "
+            "positive integer, at least job-samples. Omitted takes job-samples; on the "
+            "generated-task stage it takes 4 when that is more."
         ),
     )
     job_samples: int | None = config_option(
         None,
         help=(
-            "The fewest samples one job trains. Required for weight training; a harness evolution "
-            "stage defaults it to 1."
+            "The fewest samples one job trains, a positive integer. Required for weight training;"
+            " the generated-task stage and a harness evolution stage default it to 1."
         ),
     )
 

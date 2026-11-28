@@ -312,6 +312,23 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         store.create("a/b", [trajectory("y")])
 
 
+def test_changes_to_returned_content_and_metadata_do_not_edit_the_stored_item(store):
+    item = trajectory("t", scenarios={"coding": "train"})
+    (created,) = store.create("owner", [item])
+    created.metadata["scenarios"].clear()
+    found = store.read("owner", "t")
+    found.content["steps"][0]["message"] = "caller edit"
+    (query_item,) = store.query("owner", scenario="coding")
+    assert query_item.content == item.content
+    query_item.metadata["scenarios"].clear()
+    (summary,) = store.read_many("owner", ["t"], content=False)
+    assert summary.content is None and summary.metadata["scenarios"] == {"coding": "train"}
+    summary.metadata["scenarios"].clear()
+    (use,) = store.scenario_items("owner", "coding", kinds=["trajectory"])
+    assert use.item.metadata["scenarios"] == {"coding": "train"}
+    assert json_digest(use.item.content) == created.digest
+
+
 def test_an_update_patches_the_metadata_and_a_scenario_query_follows_it(store):
     store.create("acme", [trajectory("t1"), trajectory("t2"), trajectory("t3", scenarios={"other": "train"})])
     store.update("acme", ["t1", "t2"], {"scenarios": {"coding": "train"}, "label": "week 43"})
@@ -1886,3 +1903,14 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 8")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()
+
+
+def test_sqlite_database_only_read_leaves_the_writer_slot_available(tmp_path):
+    import sqlite3
+
+    with closing(LocalTaskFileStore(tmp_path / "tasks")) as files, closing(SQLiteDataStore(tmp_path, files)) as store:
+        store.create("acme", [trajectory("t")])
+        with store.transaction(read_only=True) as reader:
+            assert reader.scalar(select(store.items_table.c.item_id)) == "t"
+            with closing(sqlite3.connect(tmp_path / "data-store.sqlite3", timeout=0)) as writer:
+                writer.execute("BEGIN IMMEDIATE")

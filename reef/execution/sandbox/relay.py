@@ -7,7 +7,10 @@ Uploaded into the sandbox and started as root with the standard library only
 which the provider exposes at a public address. The sandbox cannot reach the Reef host,
 so Reef reaches in: it polls ``GET /next`` for the next request a process
 made and answers it with ``POST /reply/<id>`` pieces, the first carrying the
-status and headers, the last ``end``. The tunnel refuses a request without
+status and headers, the last ``end``. A request that Reef took but did not
+answer within ``REOFFER_SECONDS`` goes back to ``/next``: the exchange that took
+it can fail before Reef reads it, and Reef ignores a request that it already
+answers. The tunnel refuses a request without
 the secret, so the internet can neither take nor answer one. The sandbox's
 own root could, but the tunnel carries nothing that holds a key: Reef adds
 every credential on its side of the gateway.
@@ -20,6 +23,7 @@ import base64
 import json
 import queue
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +33,8 @@ from pathlib import Path
 POLL_SECONDS = 20.0
 #: How long a process waits for Reef to answer before the relay gives up with 504.
 ANSWER_SECONDS = 3600.0
+#: How long a request that ``/next`` gave out can go without a reply piece before ``/next`` gives it out again.
+REOFFER_SECONDS = 60.0
 
 
 class Pending:
@@ -41,10 +47,22 @@ class Pending:
 
 
 class Relay:
+    """The requests of the sandbox's processes, from their arrival until their answer ends.
+
+    Values: ``open`` maps the ID of each request that a process still waits on to its ``Pending``. ``waiting`` holds
+    the open requests that ``/next`` can give out, oldest first. ``given`` maps each open request that ``/next`` gave
+    out, and that has no reply piece yet, to the monotonic time it went out and the request. No ID is in both
+    ``waiting`` and ``given``. ``lock`` guards all three, and ``request_ready`` signals a new waiting request.
+
+    Purpose: ``local_handler`` adds a request and removes it when its answer ends; ``tunnel_handler`` gives requests
+    to Reef (``take``) and takes their reply pieces.
+    """
+
     def __init__(self, secret: str) -> None:
         self.secret = secret
         self.waiting: OrderedDict[str, dict[str, str | dict[str, str]]] = OrderedDict()
         self.open: dict[str, Pending] = {}
+        self.given: dict[str, tuple[float, dict[str, str | dict[str, str]]]] = {}
         self.lock = threading.Lock()
         self.request_ready = threading.Condition(self.lock)
 
@@ -63,6 +81,26 @@ class Relay:
             self.waiting[pending.id] = request
             self.request_ready.notify()
         return pending
+
+    def take(self) -> dict[str, str | dict[str, str]] | None:
+        """The oldest waiting request, or None when none waits within ``POLL_SECONDS``. A given request without a
+        reply piece for ``REOFFER_SECONDS`` waits again first: the exchange that took it may have lost it."""
+        deadline = time.monotonic() + POLL_SECONDS
+        with self.request_ready:
+            while True:
+                now = time.monotonic()
+                for request_id, (given_at, request) in list(self.given.items()):
+                    if now - given_at >= REOFFER_SECONDS:
+                        self.given.pop(request_id)
+                        self.waiting[request_id] = request
+                if self.waiting:
+                    request_id, request = self.waiting.popitem(last=False)
+                    self.given[request_id] = (now, request)
+                    return request
+                if now >= deadline:
+                    return None
+                # Wake at least each second, so a given request goes out again on time.
+                self.request_ready.wait(min(deadline - now, 1.0))
 
     def local_handler(self) -> type[BaseHTTPRequestHandler]:
         relay = self
@@ -106,6 +144,7 @@ class Relay:
                 finally:
                     with relay.lock:
                         relay.waiting.pop(pending.id, None)
+                        relay.given.pop(pending.id, None)
                         relay.open.pop(pending.id, None)
                 if first is None:
                     self.send_error(504, "Reef did not answer through the tunnel")
@@ -149,10 +188,7 @@ class Relay:
                 if self.path != "/next":
                     self.answer(404)
                     return
-                with relay.request_ready:
-                    request = None
-                    if relay.request_ready.wait_for(lambda: bool(relay.waiting), timeout=POLL_SECONDS):
-                        _, request = relay.waiting.popitem(last=False)
+                request = relay.take()
                 if request is None:
                     self.answer(204)
                     return
@@ -172,12 +208,15 @@ class Relay:
                     self.answer(400)
                     return
                 with relay.lock:
-                    pending = relay.open.get(self.path[len("/reply/") :])
+                    request_id = self.path[len("/reply/") :]
+                    pending = relay.open.get(request_id)
                     if pending is None:
                         status = 410
                     elif piece.get("error"):
                         # An abort must arrive even if the last data piece's acknowledgements were all lost.
                         pending.pieces.put(piece)
+                        relay.given.pop(request_id, None)
+                        relay.waiting.pop(request_id, None)
                         status = 200
                     elif sequence > pending.sequence:
                         status = 409
@@ -185,6 +224,9 @@ class Relay:
                         if sequence == pending.sequence:
                             pending.pieces.put(piece)
                             pending.sequence += 1
+                        # Reef answers the request, so it does not go out again.
+                        relay.given.pop(request_id, None)
+                        relay.waiting.pop(request_id, None)
                         status = 200
                 self.answer(status)
 

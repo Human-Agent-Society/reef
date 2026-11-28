@@ -23,7 +23,7 @@ import time
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -39,6 +39,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    Select,
     String,
     Table,
     Text,
@@ -49,6 +50,7 @@ from sqlalchemy import (
     exists,
     func,
     insert,
+    literal,
     not_,
     select,
     update,
@@ -61,7 +63,7 @@ from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.core.values import require_text
+from reef.core.values import canonical_json, require_text
 from reef.storage.coordination.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination.served_models import (
     AUTOMATIC_RETRIES,
@@ -77,6 +79,7 @@ from reef.storage.coordination.served_models import (
 )
 from reef.storage.coordination.store import Coordination, CoordinationResource
 from reef.storage.coordination.work_queue import (
+    DEFERRED_ATTEMPTS,
     FINAL_STATES,
     HELD_STATES,
     WORK_STATES,
@@ -230,10 +233,6 @@ def coordination_tables(metadata: MetaData, *, sqlite: bool) -> CoordinationTabl
 WORK_SEQUENCE = 1
 #: The counter row that numbers the changes of ``served_models`` and its scheduled stops.
 SERVED_SEQUENCE = 2
-
-
-def canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 class CoordinationDatabase(CoordinationResource):
@@ -944,6 +943,15 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
+def item_columns(table: Table, payload: bool) -> Select[tuple[object, ...]]:
+    """The read of the columns of ``table`` that ``item_from_row`` reads. Without ``payload``, the read gives an
+    empty JSON object for each payload, so the database does not read the stored payloads."""
+    if payload:
+        return select(*table.c)
+    others = (column for column in table.c if column.name != "payload_json")
+    return select(*others, literal("{}").label("payload_json"))
+
+
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -973,8 +981,9 @@ def item_from_row(row: RowMapping) -> WorkItem:
 class SQLWorkQueue(WorkQueue):
     """Work queues in a coordination database.
 
-    Every change holds the ``WORK_SEQUENCE`` counter row, so the changes of all queues are serialized: two workers
-    that take at once never get the same item. ``take`` selects the oldest item that the worker can take.
+    Every numbered change holds the ``WORK_SEQUENCE`` counter row, so those changes across all queues are serialized:
+    two workers that take at once never get the same item. Lease-only extensions (``extend_lease``) lock only the
+    item row and take no counter. ``take`` selects the oldest item that the worker can take.
     """
 
     def __init__(
@@ -1199,9 +1208,15 @@ class SQLWorkQueue(WorkQueue):
 
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
-        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+        lease_expires_at = moment + self.lease_seconds
+        # A lease extension numbers no change, so it takes no counter. ``held`` locks the item's row (PostgreSQL) or
+        # the database (SQLite), so no other write changes the item between the check and the update.
+        with self.database.connection(write=True) as connection:
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.write_item(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
+            connection.execute(
+                update(self.table).where(*self.key(item.queue, item.id)).values(lease_expires_at=lease_expires_at)
+            )
+            return replace(item, lease_expires_at=lease_expires_at)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
@@ -1260,11 +1275,12 @@ class SQLWorkQueue(WorkQueue):
         *,
         retryable: bool,
         now: float | None = None,
+        attempt: int | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
             again = retryable and self.has_attempts_left(item)
             return self.write_item(
                 connection,
@@ -1287,13 +1303,20 @@ class SQLWorkQueue(WorkQueue):
         now: float | None = None,
         available_at: float | None = None,
         error: str = "the worker stopped",
+        deferred: bool = False,
+        attempt: int | None = None,
     ) -> WorkItem:
         require_text(error, "error")
         if available_at is not None and not is_finite_time(available_at):
             raise ValueError("available_at is a finite time or None")
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, moment)
+            item = self.held(connection, queue, item_id, worker_id, moment, attempt)
+            # The count grows from the stored row in the give-back's own change, so a deferral counts once, and an
+            # attempt that no longer holds the item counts none.
+            metadata = dict(item.metadata)
+            if deferred:
+                metadata[DEFERRED_ATTEMPTS] = item.deferred_attempt_count + 1
             return self.write_item(
                 connection,
                 counter,
@@ -1305,6 +1328,7 @@ class SQLWorkQueue(WorkQueue):
                 lease_expires_at=None,
                 available_at=moment if available_at is None else available_at,
                 stopped_attempt_count=item.stopped_attempt_count + 1,
+                metadata_json=canonical_json(metadata),
             )
 
     def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
@@ -1313,8 +1337,19 @@ class SQLWorkQueue(WorkQueue):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or not item.final:
                 return item
+            # The retry waits for capacity as a new item does: an item that failed after its last deferral would
+            # otherwise fail again at the first refusal.
+            metadata = {name: value for name, value in item.metadata.items() if name != DEFERRED_ATTEMPTS}
             return self.write_item(
-                connection, counter, item, moment, state="queued", result=None, ended_at=None, available_at=moment
+                connection,
+                counter,
+                item,
+                moment,
+                state="queued",
+                result=None,
+                ended_at=None,
+                available_at=moment,
+                metadata_json=canonical_json(metadata),
             )
 
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
@@ -1390,11 +1425,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
-    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+    def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         if not item_ids:
             return ()
         found = {}
-        query = select(self.table).where(self.table.c.queue == queue)
+        query = item_columns(self.table, payload).where(self.table.c.queue == queue)
         with self.database.read() as connection:
             for batch in batches(dict.fromkeys(item_ids)):
                 rows = connection.execute(query.where(self.table.c.item_id.in_(batch))).mappings()
@@ -1414,7 +1449,13 @@ class SQLWorkQueue(WorkQueue):
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
     def items(
-        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+        self,
+        queue: str,
+        *,
+        scenario: str | None = None,
+        kind: str | None = None,
+        id_prefix: str | None = None,
+        payload: bool = True,
     ) -> tuple[WorkItem, ...]:
         conditions = [self.table.c.queue == queue]
         if scenario is not None:
@@ -1424,7 +1465,7 @@ class SQLWorkQueue(WorkQueue):
         if id_prefix is not None:
             check_id_prefix(id_prefix)
             conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
-        query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
+        query = item_columns(self.table, payload).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 

@@ -144,6 +144,7 @@ function renderDiagram(id: string, chart: string, dark: boolean) {
         curve: "basis",
         nodeSpacing: 24,
         rankSpacing: 34,
+        minNodeWidth: 36,
         padding: 12,
         diagramPadding: 4,
         subGraphTitleMargin: { top: 0, bottom: 26 },
@@ -179,6 +180,7 @@ function renderDiagram(id: string, chart: string, dark: boolean) {
 export function MermaidDiagram({ chart }: { chart: string }) {
   const stableId = `mermaid-${useId().replaceAll(":", "")}`;
   const accTitle = /^\s*accTitle:\s*(.+)$/m.exec(chart)?.[1].trim() ?? "Architecture diagram";
+  const summary = /^\s*accDescr:[ \t]*(.+)$/m.exec(chart)?.[1].trim();
   const version = useRef(0);
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
@@ -231,18 +233,11 @@ export function MermaidDiagram({ chart }: { chart: string }) {
 
   if (!svg) {
     return (
-      <figure className="mermaid-diagram mermaid-loading" aria-label={accTitle} aria-busy="true">
-        <span>Rendering diagram…</span>
+      <figure className="mermaid-diagram mermaid-loading" aria-label={accTitle}>
+        <span>{summary || "Rendering diagram…"}</span>
       </figure>
     );
   }
 
-  return (
-    <figure
-      className="mermaid-diagram"
-      role="img"
-      aria-label={accTitle}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
-  );
+  return <figure className="mermaid-diagram" dangerouslySetInnerHTML={{ __html: svg }} />;
 }

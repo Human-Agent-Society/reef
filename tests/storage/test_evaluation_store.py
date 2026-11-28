@@ -140,7 +140,9 @@ def test_the_evaluation_list_can_omit_digests_without_changing_the_stored_reques
             def newest(self, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
                 return super().newest(limit=limit)
 
-        legacy = LegacyStore(evaluations.database, evaluations.table, evaluations.starts, evaluations.digests)
+        legacy = LegacyStore(
+            evaluations.database, evaluations.table, evaluations.starts, evaluations.digests, evaluations.progress
+        )
         assert legacy.newest_for_list(limit=1) == (created,)
 
 
@@ -191,6 +193,31 @@ def test_an_ended_evaluation_reopens_and_ends_again(storage):
         assert evaluations.finish("e1", result=RESULT, finished_at=30.0).finished_at == 30.0
         with pytest.raises(EvaluationStateConflictError):
             evaluations.reopen("missing")
+
+
+def test_the_store_gives_the_kept_progress_of_the_end_that_the_evaluation_has(storage):
+    with closing(storage.open("math")) as session:
+        evaluations = session.evaluations
+        evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=10.0)
+        evaluations.create(evaluation_id="e2", owner="service-a", request=REQUEST, created_at=11.0)
+        assert evaluations.ended_progress(["e1", "e2", "missing"]) == {}
+        # An evaluation that runs, and one that the store does not hold, keep nothing.
+        assert not evaluations.keep_ended_progress("e1", 15.0, {"total": 2})
+        assert not evaluations.keep_ended_progress("missing", 15.0, {"total": 2})
+        evaluations.finish("e1", result=RESULT, finished_at=15.0)
+        evaluations.fail("e2", error="cancelled", finished_at=16.0)
+        assert not evaluations.keep_ended_progress("e1", 14.0, {"total": 2})
+        assert evaluations.keep_ended_progress("e1", 15.0, {"total": 2, "benchmarks": []})
+        # An evaluation without rollouts has no progress, and the store keeps that too.
+        assert evaluations.keep_ended_progress("e2", 16.0, None)
+        assert evaluations.ended_progress(["e1", "e2"]) == {"e1": {"total": 2, "benchmarks": []}, "e2": None}
+        assert evaluations.keep_ended_progress("e1", 15.0, {"total": 3})
+        assert evaluations.ended_progress(["e1"]) == {"e1": {"total": 3}}
+        # A new end has a new progress: the store does not give the progress of the earlier end.
+        evaluations.reopen("e1")
+        assert evaluations.ended_progress(["e1"]) == {}
+        evaluations.finish("e1", result=RESULT, finished_at=30.0)
+        assert evaluations.ended_progress(["e1"]) == {}
 
 
 def test_evaluations_survive_a_restart(open_durable_storage):

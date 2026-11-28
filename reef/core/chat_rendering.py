@@ -27,7 +27,7 @@ def flatten_content(content: Any) -> str:
         return content
     if isinstance(content, list):
         parts = [item.get("text", "") for item in content if isinstance(item, Mapping) and item.get("type") == "text"]
-        return " ".join(parts) if parts else ""
+        return "".join(parts)
     return str(content) if content is not None else ""
 
 

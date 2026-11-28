@@ -15,12 +15,12 @@ from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
@@ -72,7 +72,13 @@ class Recipe:
     deployment wins. A class that only sets other defaults for a base class's sections declares them here."""
 
     name: str = "recipe"
-    training_mode: str = config_field("auto")
+    training_mode: str = config_field(
+        "auto",
+        help=(
+            "auto starts a job when job_samples untrained samples wait; manual starts a job only for a "
+            "POST /reef/train request. A request trains in both modes."
+        ),
+    )
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
     pipeline_stages: PipelineSettings | None = field(default=None, repr=False, compare=False)
     #: The deployment's ``activation`` section: the rule that activates new artifacts; None is ``always``.

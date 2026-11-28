@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -31,9 +31,13 @@ from reef.core.snapshot import SnapshotRef
 from reef.evaluation import artifact_endpoint
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.evaluation.rollout_worker import (
+    AGENT_TIMEOUT_ENV,
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
+    PREPARED_DIGEST_RESULT,
+    PREPARED_IMAGES_RESULT,
     TASK_TEMPLATE_KIND,
+    TREE_AGENT_TIMEOUT_S,
     CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
@@ -43,6 +47,7 @@ from reef.evaluation.rollout_worker import (
     RolloutCalls,
     TaskTemplateWorker,
     TreeHarness,
+    agent_timeout_seconds,
     check_finish_timeout,
     evaluation_call,
     reply_summary,
@@ -53,7 +58,8 @@ from reef.evaluation.rollout_worker import (
 )
 from reef.evaluation.task_templates import DockerfileTemplateBuilder, TaskTemplateBuilder
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.sandbox.agentenv_build import AgentEnvBuildError
+from reef.execution.sandbox.agentenv.build import AgentEnvBuildError
+from reef.execution.sandbox.task_environment import environment_config
 from reef.execution.workers import ItemFailedError, ServiceWorkers, WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.inference.http import HttpInferenceHandler
@@ -77,6 +83,33 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
         "docker",
         {"weights": "artifact-1"},
     )
+
+
+def test_each_rollout_opens_its_candidate_with_its_own_session_key(monkeypatch) -> None:
+    from reef.evaluation import rollout_worker
+
+    opened = []
+
+    class RecordedEndpoint:
+        def __init__(self, *args, session_key: str | None, **kwargs) -> None:
+            opened.append(session_key)
+            self.url = "http://127.0.0.1:1"
+
+        def __enter__(self) -> RecordedEndpoint:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(rollout_worker, "ArtifactEndpoint", RecordedEndpoint)
+    artifacts = Mock(spec=CandidateArtifacts)
+    artifacts.candidate.return_value = (Mock(), Mock())
+    endpoints = LocalCandidateEndpoints(artifacts)
+    for value in (rollout(0), rollout(1), rollout(0)):
+        with endpoints.open(value, None):
+            pass
+    # The repeats of one task are other conversations; an attempt again of one rollout is the same one.
+    assert opened == ["evaluation:e1:2:0", "evaluation:e1:2:1", "evaluation:e1:2:0"]
 
 
 class ServedWorker(EvaluationRolloutWorker):
@@ -185,30 +218,82 @@ def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing
     assert (failed in caplog.text) == failing
 
 
-class NoCapacityLab(NoSandboxLab):
-    """A lab whose trial ends as Harbor records a sandbox that the service refused for want of capacity."""
+class SandboxErrorLab(NoSandboxLab):
+    """A lab whose trial of a task in ``tasks`` (of every task when it is None) ends as Harbor records an error of the
+    class ``exception_type`` that ended the trial, with the error ``error``. A trial of another task ends as
+    ``NoSandboxLab``'s, with no result file."""
+
+    def __init__(self, root: Path, exception_type: str, error: str, tasks: frozenset[str] | None = None) -> None:
+        super().__init__(root)
+        self.exception_type = exception_type
+        self.error = error
+        self.tasks = tasks
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         row = await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
-        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        if self.tasks is not None and Path(task_path).name not in self.tasks:
+            return row
+        result = {"exception_info": {"exception_type": self.exception_type, "exception_message": self.error}}
         (self.root / key / "result.json").write_text(json.dumps(result))
-        return row
+        return replace(row, error=self.error)
 
 
 @pytest.mark.unit
-def test_a_rollout_whose_sandbox_found_no_capacity_waits_in_the_queue_and_keeps_its_attempts(tmp_path):
+def test_a_rollout_whose_sandbox_found_no_capacity_waits_and_its_worker_runs_other_rollouts(tmp_path):
+    queue = memory_coordination().work_queue
+    # A large task finds no capacity, and a small task after it can start.
+    large = replace(rollout(), task_index=0, task_name="large")
+    small = replace(rollout(), task_index=1, task_name="small")
+    for value in (large, small):
+        queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = SandboxErrorLab(tmp_path / "t", "SandboxCapacityError", "no node has 12 vCPUs free", frozenset({"large"}))
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
+    taken_at = time.time()
+    assert worker.run_once()
+    waiting = queue.read(EVALUATIONS_QUEUE, large.item_id())
+    assert (waiting.state, waiting.error) == ("queued", "waiting for sandbox capacity: no node has 12 vCPUs free")
+    assert waiting.available_at >= taken_at + worker.first_deferral_seconds
+    assert waiting.deferred_attempt_count == waiting.stopped_attempt_count == waiting.attempt_count == 1
+    # The same worker starts the small rollout at once: only the refused rollout waits.
+    assert worker.run_once()
+    other = queue.read(EVALUATIONS_QUEUE, small.item_id())
+    assert (other.attempt_count, other.stopped_attempt_count) == (1, 0)
+    assert other.error == "ReefError: the rollout reached no model: the sandbox did not start"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exception_type", "state", "error", "given_back"),
+    [
+        # A refusal for want of capacity at a sandbox's start, in Reef's names: E2B's and Modal's, and AgentENV
+        # Compose's. The rollout waits, and the attempt does not count.
+        ("SandboxCapacityError", "queued", "waiting for sandbox capacity: {reason}", 1),
+        ("TransientStartError", "queued", "waiting for sandbox capacity: {reason}", 1),
+        # A sandbox request that the service refused as invalid: the rollout fails at once, with the reason.
+        ("SandboxRequestError", "failed", "the sandbox service refused the sandbox: {reason}", 0),
+        # Modal's own error, which comes from after the sandbox's creation, such as from a command of the agent: an
+        # ordinary failed attempt, retried as any other.
+        ("ResourceExhaustedError", "queued", "ReefError: the rollout reached no model: {reason}", 0),
+    ],
+    ids=["capacity", "compose-capacity", "invalid-request", "other-provider-error"],
+)
+def test_the_error_that_ended_a_trial_decides_whether_its_rollout_waits_fails_or_retries(
+    tmp_path, exception_type, state, error, given_back
+):
     queue = memory_coordination().work_queue
     value = rollout()
     queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=NoCapacityLab(tmp_path / "t"))
-    taken_at = time.time()
+    reason = "the service's reason"
+    lab = SandboxErrorLab(tmp_path / "t", exception_type, reason)
+    observer = ReadingObserver()
+    worker = ServedWorker(queue, OpenEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab, trial_observer=observer)
     assert worker.run_once()
-    waiting = queue.read(EVALUATIONS_QUEUE, value.item_id())
-    assert (waiting.state, waiting.error) == ("queued", "waiting for sandbox capacity: the sandbox did not start")
-    assert waiting.available_at >= taken_at + worker.first_deferral_seconds
-    assert waiting.stopped_attempt_count == waiting.attempt_count == 1
-    # The worker starts no other rollout while the service adds capacity.
-    assert not worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.result, item.error) == (state, None, error.format(reason=reason))
+    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (1, given_back, given_back)
+    # The trial observer learns whether the attempt was given back for want of capacity, so its logs can show it.
+    [(trial, _)] = observer.trials
+    assert trial.deferred == bool(given_back)
 
 
 class AnsweringEndpoints(OpenEndpoints):
@@ -296,36 +381,50 @@ def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp
     }
 
 
-class CalledThenNoVerifierCapacityLab(CalledThenFailedLab):
-    """A lab whose agent calls the model, and whose separate verifier then finds no sandbox capacity, as Harbor
-    records it in the trial's ``result.json`` under ``root``."""
+class CalledThenVerifierSandboxErrorLab(CalledThenFailedLab):
+    """A lab whose agent calls the model, and whose separate verifier's sandbox then ends the trial with an error of
+    the class ``exception_type`` and the error ``error``, as Harbor records it in the trial's ``result.json`` under
+    ``root``."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, exception_type: str, error: str) -> None:
         self.root = root
+        self.exception_type = exception_type
+        self.error = error
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
         trial = self.root / key
         trial.mkdir(parents=True)
-        result = {"exception_info": {"exception_type": "SandboxCapacityError", "exception_message": "no nodes"}}
+        result = {"exception_info": {"exception_type": self.exception_type, "exception_message": self.error}}
         (trial / "result.json").write_text(json.dumps(result))
-        error = "the sandbox service has no capacity now: 503"
-        return RolloutRow(rewards={}, error=error, trial_uri=trial.as_uri())
+        return RolloutRow(rewards={}, error=self.error, trial_uri=trial.as_uri())
 
 
 @pytest.mark.unit
-def test_a_rollout_whose_verifier_found_no_sandbox_capacity_runs_again_and_gets_no_score(tmp_path):
+@pytest.mark.parametrize(
+    ("exception_type", "state", "error", "given_back"),
+    [
+        # It waits for capacity and runs again.
+        ("SandboxCapacityError", "queued", "waiting for sandbox capacity: {reason}", 1),
+        # The verifier's sandbox request fails the same way again, so the rollout fails at once.
+        ("SandboxRequestError", "failed", "the sandbox service refused the sandbox: {reason}", 0),
+    ],
+    ids=["no-capacity", "invalid-request"],
+)
+def test_a_rollout_whose_verifier_sandbox_was_refused_gets_no_score(
+    tmp_path, exception_type, state, error, given_back
+):
     queue = memory_coordination().work_queue
     value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
     queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    lab = CalledThenNoVerifierCapacityLab(tmp_path / "trials")
+    reason = "the service's reason"
+    lab = CalledThenVerifierSandboxErrorLab(tmp_path / "trials", exception_type, reason)
     worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=lab)
     assert worker.run_once() is True
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
-    # The agent called the model, but the rollout gets no score of 0: it waits for capacity and runs again.
-    assert (item.state, item.result) == ("queued", None)
-    assert item.error == "waiting for sandbox capacity: the sandbox service has no capacity now: 503"
-    assert item.stopped_attempt_count == item.attempt_count == 1
+    # The agent called the model, but the rollout gets no score of 0.
+    assert (item.state, item.result, item.error) == (state, None, error.format(reason=reason))
+    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (1, given_back, given_back)
 
 
 def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
@@ -617,14 +716,40 @@ class ProviderRuntime(InferenceRuntime):
 
 
 class CallingLab(TaskLab):
-    """A lab whose agent makes ``calls`` chat calls through its endpoint, one at a time, and keeps the status of each
-    in ``statuses``. It goes on after a refused call. Its trial ends with ``reward``, and with an agent error when its
-    last call was refused and ``fails_after_refusal`` is set. ``runs`` counts its trials. It starts no sandbox."""
+    """A test ``TaskLab`` that sends a fixed schedule of chat calls to the rollout's endpoint and starts no sandbox.
 
-    def __init__(self, calls: int, reward: float, *, fails_after_refusal: bool = True) -> None:
+    Values: ``calls`` is a positive int (number of requests per trial); ``reward`` is the float reward written by each
+    trial; ``fails_after_refusal`` is a bool controlling whether a non-200 final status produces an agent error;
+    ``tool_calls`` is None (no call carries ``tools``) or a tuple of bools with ``len(tool_calls) == calls`` where
+    ``tool_calls[i]`` says whether step ``i`` carries a non-empty ``tools`` list; ``statuses`` records the HTTP status
+    of every call across trials in call order; ``runs`` is the non-negative count of ``run`` calls.
+
+    Purpose: rollout-worker tests pass it to ``provider_rollouts`` to simulate an agent's call sequence against a
+    scripted provider. ``run`` requires ``agent["kwargs"]["api_base"]``, sends ``calls`` ``POST /chat/completions``
+    requests (continuing after non-200 replies), increments ``runs``, and returns
+    ``RolloutRow(rewards={"reward": reward}, error=..., trial_uri=None)`` with an ``AgentError`` string iff
+    ``statuses[-1] != 200`` and ``fails_after_refusal`` is True, else ``error=None``. ``build_environment`` returns
+    ``""``. Construction raises ``ValueError`` if ``calls < 1`` or ``tool_calls`` does not have one bool per step."""
+
+    def __init__(
+        self,
+        calls: int,
+        reward: float,
+        *,
+        fails_after_refusal: bool = True,
+        tool_calls: Sequence[bool] | None = None,
+    ) -> None:
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1:
+            raise ValueError("calls is a positive integer")
+        schedule: tuple[bool, ...] | None = None
+        if tool_calls is not None:
+            schedule = tuple(tool_calls)
+            if len(schedule) != calls or not all(isinstance(flag, bool) for flag in schedule):
+                raise ValueError("tool_calls has one bool for each call")
         self.calls = calls
         self.reward = reward
         self.fails_after_refusal = fails_after_refusal
+        self.tool_calls = schedule
         self.statuses: list[int] = []
         self.runs = 0
 
@@ -632,7 +757,9 @@ class CallingLab(TaskLab):
         self.runs += 1
         api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
         for step in range(self.calls):
-            body = {"model": "m", "messages": [{"role": "user", "content": f"step {step}"}]}
+            body: dict[str, object] = {"model": "m", "messages": [{"role": "user", "content": f"step {step}"}]}
+            if self.tool_calls is not None and self.tool_calls[step]:
+                body["tools"] = [{"type": "function", "function": {"name": "bash"}}]
             request = urllib.request.Request(
                 f"{api_base}/chat/completions",
                 data=json.dumps(body).encode(),
@@ -715,11 +842,11 @@ def test_a_failed_trial_after_a_402_fails_its_rollout_once_and_spares_the_other_
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("replies", "reward", "error"),
-    [([ANSWER, WRAPPED_402], 0.0, None), ([ANSWER, WRAPPED_402], 1.0, None), ([WRAPPED_402], 1.0, PAYMENT_ERROR)],
+    ("replies", "reward"),
+    [([ANSWER, WRAPPED_402], 0.0), ([ANSWER, WRAPPED_402], 1.0), ([WRAPPED_402], 1.0)],
 )
-def test_a_refused_last_call_keeps_a_completed_score_only_after_an_answered_call(tmp_path, replies, reward, error):
-    # Each trial ends without an agent error, and its verifier writes a reward.
+def test_a_refused_last_call_fails_the_rollout_even_without_an_agent_error(tmp_path, replies, reward):
+    # Each trial exits with no agent error (as OpenCode does on HTTP 402/429), and its verifier writes a reward.
     lab = CallingLab(len(replies), reward=reward, fails_after_refusal=False)
     with scripted_provider(replies) as (url, bodies):
         queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
@@ -727,17 +854,127 @@ def test_a_refused_last_call_keeps_a_completed_score_only_after_an_answered_call
     # The provider got each call once: no 402 is sent again.
     assert len(bodies) == len(replies)
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
-    if error is not None:
-        assert (item.state, item.attempt_count, item.result, item.error) == ("failed", 1, None, error)
-        return
-    assert (item.state, item.error, RolloutScore.from_json(item.result["score"]).value) == ("finished", None, reward)
+    assert (item.state, item.attempt_count, item.result, item.error) == ("failed", 1, None, PAYMENT_ERROR)
 
 
-def timed_turn(status: int, started_at: float, duration_s: float) -> CapturedTurn:
-    """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
-    return CapturedTurn(
-        "", "/v1/chat/completions", status, {"messages": []}, None, None, False, duration_s, at=started_at + duration_s
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("replies", "tool_calls", "fails_after_refusal", "expected_state", "expected_error"),
+    [
+        # Main-loop 402 masked by a trailing 200 OK auxiliary title-generation call (no tools).
+        ([WRAPPED_402, ANSWER], [True, False], False, "failed", PAYMENT_ERROR),
+        # Earlier main-loop turn succeeded, next main-loop turn hit 402, then trailing 200 OK title call.
+        ([ANSWER, WRAPPED_402, ANSWER], [True, True, False], False, "failed", PAYMENT_ERROR),
+        # Exhausted 429 on main-loop call masked by a trailing 200 OK auxiliary call.
+        (
+            [(429, {"error": {"message": "concurrency limit"}}, {"Retry-After": "600"}), ANSWER],
+            [True, False],
+            False,
+            "failed",
+            RATE_LIMITED_ERROR,
+        ),
+        # Auxiliary title call failed with 402 before or after a clean tool-bearing main loop (no trial error): kept.
+        ([WRAPPED_402, ANSWER, ANSWER], [False, True, True], False, "finished", None),
+        ([ANSWER, ANSWER, WRAPPED_402], [True, True, False], False, "finished", None),
+        # Required tool-less step refused after a tool-bearing 200, failing the trial with result.error: rollout fails.
+        ([ANSWER, WRAPPED_402], [True, False], True, "failed", PAYMENT_ERROR),
+    ],
+)
+def test_auxiliary_calls_without_tools_do_not_mask_or_trigger_provider_refusal_failures(
+    tmp_path, replies, tool_calls, fails_after_refusal, expected_state, expected_error
+):
+    lab = CallingLab(
+        len(replies),
+        reward=1.0 if expected_state == "finished" else 0.0,
+        fails_after_refusal=fails_after_refusal,
+        tool_calls=tool_calls,
     )
+    with scripted_provider(replies) as (url, _):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.attempt_count) == (expected_state, 1)
+    if expected_state == "finished":
+        assert item.error is None
+        assert RolloutScore.from_json(item.result["score"]).value == 1.0
+        return
+    assert item.result is None
+    if isinstance(expected_error, re.Pattern):
+        assert expected_error.fullmatch(item.error or "") is not None
+    else:
+        assert item.error == expected_error
+
+
+def timed_turn(
+    status: int, started_at: float, duration_s: float, *, with_tools: bool | list[object] = False
+) -> CapturedTurn:
+    """A chat call that started at ``started_at`` and answered ``status`` after ``duration_s`` seconds."""
+    request: dict[str, object] = {"messages": []}
+    if isinstance(with_tools, list):
+        request["tools"] = with_tools
+    elif with_tools:
+        request["tools"] = [{"type": "function", "function": {"name": "bash"}}]
+    response: dict[str, object] | None = None
+    if status == 402:
+        response = {"error": {"code": "payment_required"}}
+    elif status == 429:
+        response = {"error": {"code": "rate_limit"}}
+    return CapturedTurn(
+        "", "/v1/chat/completions", status, request, response, None, False, duration_s, at=started_at + duration_s
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("turns", "expected_refusal", "expected_answered"),
+    [
+        # Transient recovered 429s (1/4, 4/9, and 7/10) followed by 200 OK main-loop completion clear last_refusal.
+        ([(200, True), (429, True), (200, True), (200, True)], None, 3),
+        (
+            [
+                (429, True),
+                (429, True),
+                (200, True),
+                (200, True),
+                (429, True),
+                (200, True),
+                (429, True),
+                (200, True),
+                (200, True),
+            ],
+            None,
+            5,
+        ),
+        (
+            [
+                (429, True),
+                (429, True),
+                (429, True),
+                (429, True),
+                (429, True),
+                (429, True),
+                (200, True),
+                (200, True),
+                (429, True),
+                (200, True),
+            ],
+            None,
+            3,
+        ),
+        # A trailing 200 OK auxiliary call (no tools or empty tools list) does not clear a terminal 402 on the main loop.
+        ([(402, True), (200, False)], ModelCallRefusal(PAYMENT, 402, None), 0),
+        ([(200, True), (402, True), (200, False)], ModelCallRefusal(PAYMENT, 402, None), 1),
+        ([(200, True), (402, True), (200, [])], ModelCallRefusal(PAYMENT, 402, None), 1),
+    ],
+)
+def test_rollout_calls_keep_recovered_transient_429s_and_ignore_trailing_auxiliary_calls(
+    turns, expected_refusal, expected_answered
+):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    for index, (status, with_tools) in enumerate(turns):
+        calls.call_captured(timed_turn(status, 1000.0 + index, 0.2, with_tools=with_tools))
+    calls.close()
+    assert (calls.last_refusal, calls.answered) == (expected_refusal, expected_answered)
 
 
 @pytest.mark.unit
@@ -1348,6 +1585,110 @@ def test_the_trial_of_a_rollout_that_requires_prepared_templates_builds_no_templ
     assert ("builds_templates" in environment.get("kwargs", {})) == requires
     if requires:
         assert environment["kwargs"]["builds_templates"] is False
+    # A template item whose builder gave no images gives its trials none.
+    assert "prepared_images" not in environment.get("kwargs", {})
+
+
+#: The JSON object of a synthetic prepared image of a task's environment, which a builder verified.
+PREPARED_ENTRY: dict[str, str | None] = {
+    "directory": "environment",
+    "source_image": None,
+    "image": "registry.example/tasks/add@sha256:" + "f" * 64,
+    "template_id": None,
+    "start": None,
+    "ready": None,
+}
+#: The files digest of the task of ``e2b_rollout``, as its endpoints resolve it.
+TASK_DIGEST = "1" * 64
+
+
+class ImageBuilder(TaskTemplateBuilder):
+    """A builder that makes no template and gives ``images`` as the prepared images of each task version."""
+
+    def __init__(self, images: object) -> None:
+        self.images = images
+
+    async def build(self, scenario: str, task_name: str, task_directory: Path) -> None:
+        raise AssertionError("the worker calls build_for_version")
+
+    async def build_for_version(self, owner, scenario, task_name, task_directory, *, task_digest):
+        return self.images
+
+
+class DigestEndpoints(AnsweringEndpoints):
+    """``AnsweringEndpoints`` whose task directory has the files digest ``digest``, or an unknown one for None."""
+
+    def __init__(self, root: Path, digest: str | None) -> None:
+        super().__init__(root)
+        self.digest = digest
+
+    def task_version(self, rollout: EvaluationRollout) -> tuple[Path, str | None]:
+        return self.task_directory(rollout), self.digest
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requires", [False, True])
+def test_a_trial_starts_the_prepared_images_that_its_template_item_made_for_its_task_files(tmp_path, requires):
+    queue = memory_coordination().work_queue
+    value = replace(
+        e2b_rollout(),
+        agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}},
+        requires_prepared_templates=requires,
+    )
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    endpoints = DigestEndpoints(tmp_path / "tasks", TASK_DIGEST)
+    assert TaskTemplateWorker(queue, endpoints, ImageBuilder([PREPARED_ENTRY]), worker_id="t").run_once()
+    template = queue.read(EVALUATIONS_QUEUE, item_id)
+    # The item keeps the images with the task files that they were verified for.
+    assert template.state == "finished"
+    assert template.result == {PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: TASK_DIGEST}
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    assert ServedWorker(queue, endpoints, worker_id="w", lab=lab).run_once() is True
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "finished"
+    [environment] = lab.environments
+    assert environment["kwargs"]["prepared_images"] == [PREPARED_ENTRY]
+    assert environment["kwargs"]["task_directory"] == str(endpoints.task_directory(value))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("result", "resolved"),
+    [
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: "2" * 64}, TASK_DIGEST),
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: None}, TASK_DIGEST),
+        ({PREPARED_IMAGES_RESULT: [PREPARED_ENTRY], PREPARED_DIGEST_RESULT: TASK_DIGEST}, None),
+        # The result of an item that an older Reef finished.
+        ({}, TASK_DIGEST),
+    ],
+    ids=["other-files", "unknown-template-files", "unknown-trial-files", "older-reef"],
+)
+def test_a_trial_starts_no_prepared_image_of_other_or_unknown_task_files(tmp_path, result, resolved):
+    queue = memory_coordination().work_queue
+    value = replace(e2b_rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, value.scenario, TASK_TEMPLATE_KIND, value.to_payload()))
+    assert queue.take(EVALUATIONS_QUEUE, "builder", [TASK_TEMPLATE_KIND]).id == item_id
+    queue.finish(EVALUATIONS_QUEUE, item_id, "builder", result)
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    lab = EnvironmentLab()
+    assert ServedWorker(queue, DigestEndpoints(tmp_path / "tasks", resolved), worker_id="w", lab=lab).run_once()
+    [environment] = lab.environments
+    assert "prepared_images" not in environment.get("kwargs", {})
+
+
+@pytest.mark.unit
+def test_a_template_item_whose_builder_gives_forged_images_fails_as_retryable(tmp_path):
+    queue = memory_coordination().work_queue
+    value = e2b_rollout()
+    item_id = template_item_id(value.evaluation_id, value.task_index)
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", TASK_TEMPLATE_KIND, value.to_payload()))
+    forged = [{**PREPARED_ENTRY, "image": "registry.example/tasks/add:latest"}]
+    endpoints = DigestEndpoints(tmp_path / "tasks", TASK_DIGEST)
+    assert TaskTemplateWorker(queue, endpoints, ImageBuilder(forged), worker_id="t").run_once()
+    item = queue.read(EVALUATIONS_QUEUE, item_id)
+    assert item.state == "queued" and "host/repository@sha256" in str(item.error)
 
 
 @pytest.mark.unit
@@ -1630,3 +1971,159 @@ def test_the_longest_finish_timeout_is_a_wait_that_the_timer_can_keep():
     with pytest.raises(OverflowError):
         threading.Lock().acquire(timeout=2 * threading.TIMEOUT_MAX)
     check_finish_timeout("finish", threading.TIMEOUT_MAX)
+
+
+@pytest.mark.unit
+def test_tree_harness_agent_timeout_env_caps_agent_and_sandbox_timeouts(tmp_path: Path) -> None:
+    """When ``REEF_AGENT_TIMEOUT_SECONDS`` is unset, ``TreeHarness.agent`` preserves ``TREE_AGENT_TIMEOUT_S`` and sets
+    no ``override_timeout_sec``. When set, it overrides unbounded tasks, caps longer task timeouts, preserves shorter
+    task timeouts, and bounds the E2B ``sandbox_timeout_secs``."""
+    unbounded_task = tmp_path / "unbounded"
+    unbounded_task.mkdir()
+    (unbounded_task / "task.toml").write_text("", encoding="utf-8")
+
+    long_task = tmp_path / "long"
+    long_task.mkdir()
+    (long_task / "task.toml").write_text("[agent]\ntimeout_sec = 7200\n", encoding="utf-8")
+
+    short_task = tmp_path / "short"
+    short_task.mkdir()
+    (short_task / "task.toml").write_text("[agent]\ntimeout_sec = 600\n", encoding="utf-8")
+
+    string_short_task = tmp_path / "string-short"
+    string_short_task.mkdir()
+    (string_short_task / "task.toml").write_text('[agent]\ntimeout_sec = "600"\n', encoding="utf-8")
+
+    default_tree = TreeHarness("opencode", "openai-chat", {})
+    default_agent = default_tree.agent(tmp_path / "default", task_directory=unbounded_task)
+    assert "override_timeout_sec" not in default_agent
+    assert cast(Mapping[str, object], default_agent["kwargs"])["timeout_s"] == TREE_AGENT_TIMEOUT_S
+    default_env = environment_config("e2b", unbounded_task, default_agent)
+    assert "sandbox_timeout_secs" not in default_env.get("kwargs", {})
+
+    capped_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "1800"})
+    unbounded_agent = capped_tree.agent(tmp_path / "capped-unbounded", task_directory=unbounded_task)
+    assert unbounded_agent["override_timeout_sec"] == 1800.0
+    assert cast(Mapping[str, object], unbounded_agent["kwargs"])["timeout_s"] == 1800.0
+    bounded_env = environment_config("e2b", unbounded_task, unbounded_agent)
+    sandbox_timeout = bounded_env["kwargs"]["sandbox_timeout_secs"]
+    assert isinstance(sandbox_timeout, int) and 1800 < sandbox_timeout < 86400
+
+    long_agent = capped_tree.agent(tmp_path / "capped-long", task_directory=long_task)
+    assert long_agent["override_timeout_sec"] == 1800.0
+    assert cast(Mapping[str, object], long_agent["kwargs"])["timeout_s"] == 1800.0
+
+    short_agent = capped_tree.agent(tmp_path / "capped-short", task_directory=short_task)
+    assert short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], short_agent["kwargs"])["timeout_s"] == 600.0
+
+    string_short_agent = capped_tree.agent(tmp_path / "capped-string-short", task_directory=string_short_task)
+    assert string_short_agent["override_timeout_sec"] == 600.0
+    assert cast(Mapping[str, object], string_short_agent["kwargs"])["timeout_s"] == 600.0
+
+    subsecond_tree = TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "0.5"})
+    subsecond_agent = subsecond_tree.agent(tmp_path / "subsecond", task_directory=unbounded_task)
+    assert subsecond_agent["override_timeout_sec"] == 0.5
+    assert cast(Mapping[str, object], subsecond_agent["kwargs"])["timeout_s"] == 1.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["", " ", "0", "-5", "abc", "nan", "inf", "-inf"])
+def test_tree_harness_refuses_invalid_agent_timeout_env(raw: str) -> None:
+    """``agent_timeout_seconds`` and ``TreeHarness`` reject non-positive, non-finite, or non-numeric values of
+    ``REEF_AGENT_TIMEOUT_SECONDS``."""
+    with pytest.raises(ValueError, match=AGENT_TIMEOUT_ENV):
+        agent_timeout_seconds({AGENT_TIMEOUT_ENV: raw})
+    with pytest.raises(ValueError, match=AGENT_TIMEOUT_ENV):
+        TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: raw})
+
+
+class RecordingAgentLab(TaskLab):
+    """A ``TaskLab`` double that records the agent and environment overrides passed to ``run`` and returns no calls.
+
+    Values hold ``recorded``, a list of ``(agent, overrides)`` pairs collected in call order, initially empty.
+    ``run`` appends ``(dict(agent), dict(overrides))`` and returns a failed ``RolloutRow`` with no rewards.
+    ``build_environment`` returns an empty string without external side effects.
+    """
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    async def run(
+        self,
+        task_path: Path,
+        agent: Mapping[str, object],
+        *,
+        key: str,
+        tags: Mapping[str, str],
+        overrides: Mapping[str, object],
+    ) -> RolloutRow:
+        self.recorded.append((dict(agent), dict(overrides)))
+        return RolloutRow(rewards={}, error="recorded")
+
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        return ""
+
+
+class TimedTaskEndpoints(CandidateEndpoints):
+    """Test ``CandidateEndpoints`` whose task directory declares ``[agent].timeout_sec`` in ``task.toml``.
+
+    Values hold ``root`` (``Path``), ``task_timeout_sec`` (``float | None``), and ``calls`` / ``trajectories`` lists
+    (initially empty). ``task_directory`` creates ``root / rollout.task_name``, writes
+    ``[agent]\\ntimeout_sec = <value>\\n`` when ``task_timeout_sec`` is not None (or an empty ``task.toml``
+    otherwise), and returns that directory. ``open`` yields ``CandidateEndpoint("http://127.0.0.1:9", None)`` without
+    starting a server. ``add_call`` and ``add_trajectory`` append to ``calls`` and ``trajectories``.
+    """
+
+    def __init__(self, root: Path, task_timeout_sec: float | None) -> None:
+        self.root = root
+        self.task_timeout_sec = task_timeout_sec
+        self.calls: list[EvaluationCall] = []
+        self.trajectories: list[EvaluationTrajectory] = []
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        content = f"[agent]\ntimeout_sec = {self.task_timeout_sec}\n" if self.task_timeout_sec is not None else ""
+        (task / "task.toml").write_text(content, encoding="utf-8")
+        return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        self.calls.append(call)
+
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        self.trajectories.append(trajectory)
+
+
+@pytest.mark.unit
+def test_rollout_worker_applies_agent_timeout_cap_with_task_directory(tmp_path: Path) -> None:
+    """``EvaluationRolloutWorker.score`` passes ``task_directory`` into ``TreeHarness.agent`` so
+    ``REEF_AGENT_TIMEOUT_SECONDS`` caps the task's timeout and bounds E2B ``sandbox_timeout_secs``."""
+    lab = RecordingAgentLab()
+    endpoints = TimedTaskEndpoints(tmp_path / "tasks", task_timeout_sec=3600.0)
+    worker = ServedWorker(memory_coordination().work_queue, endpoints, worker_id="w", lab=lab)
+    capped_rollout = replace(
+        rollout(),
+        agent=None,
+        environment="e2b",
+        tree=TreeHarness("opencode", "openai-chat", {}, env={AGENT_TIMEOUT_ENV: "1200"}),
+    )
+    with pytest.raises(ReefError, match="recorded"):
+        worker.score(capped_rollout, threading.Event(), 1)
+    [(recorded_agent, recorded_overrides)] = lab.recorded
+    assert recorded_agent["override_timeout_sec"] == 1200.0
+    assert cast(Mapping[str, object], recorded_agent["kwargs"])["timeout_s"] == 1200.0
+    env_override = cast(Mapping[str, object], recorded_overrides["environment"])
+    env_kwargs = cast(Mapping[str, object], env_override["kwargs"])
+    task_dir = tmp_path / "tasks" / capped_rollout.task_name
+    uncapped_timeout = environment_config("e2b", task_dir, {})["kwargs"]["sandbox_timeout_secs"]
+    expected_timeout = environment_config("e2b", task_dir, {"override_timeout_sec": 1200.0})["kwargs"][
+        "sandbox_timeout_secs"
+    ]
+    assert env_kwargs["sandbox_timeout_secs"] == expected_timeout
+    assert isinstance(expected_timeout, int) and isinstance(uncapped_timeout, int)
+    assert expected_timeout < uncapped_timeout

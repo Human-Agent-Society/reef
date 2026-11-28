@@ -124,7 +124,7 @@ class ItemFailedError(InternalError):
 
 class ItemDeferredError(InternalError):
     """The work of an item found no capacity of a service that it needs, and a later try can pass: the item goes back
-    to the queue with this message, and the worker waits before it takes an item (``QueueWorker``)."""
+    to the queue with this message, and waits before a worker takes it again (``QueueWorker``)."""
 
 
 class QueueWorker(ServiceWorker):
@@ -149,10 +149,11 @@ class QueueWorker(ServiceWorker):
     - ``WorkerStoppedError``: the item goes back to the queue at once, and the attempt does not count
       (``WorkQueue.give_back``);
     - ``ItemDeferredError``: the item goes back to the queue with the error's message, and the attempt does not
-      count. The worker takes neither it nor another item for ``first_deferral_seconds``, doubled for each earlier
-      give-back of the item (``stopped_attempt_count``), at most ``max_deferral_seconds``. So a service that has no
-      capacity gets no new work from this worker until it can add some. After ``max_deferrals`` give-backs, the
-      error fails the item as retryable;
+      count. No worker takes the item for ``first_deferral_seconds``, doubled for each earlier give-back of the item
+      for want of capacity (``WorkItem.deferred_attempt_count``), at most ``max_deferral_seconds``. A give-back of a
+      worker that stopped does not make the wait longer. The worker goes on to take other items, so one item that
+      finds no capacity does not hold back work that can run. The item never fails for want of capacity: it waits
+      until an attempt finds capacity or its producer cancels it;
     - ``WorkLeaseLostError``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
@@ -167,7 +168,6 @@ class QueueWorker(ServiceWorker):
     keeps_log = False
     first_deferral_seconds = 30.0
     max_deferral_seconds = 600.0
-    max_deferrals = 24
 
     def __init__(
         self,
@@ -196,8 +196,6 @@ class QueueWorker(ServiceWorker):
         self.item_threads: list[threading.Thread] = []
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
-        #: The ``time.monotonic()`` value before which the worker takes no item, after an ``ItemDeferredError``.
-        self.paused_until = 0.0
 
     @abstractmethod
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
@@ -248,20 +246,15 @@ class QueueWorker(ServiceWorker):
     def run_once(self) -> bool:
         """Take one item and run it; return whether there was one. With more than one slot, start the item on a
         thread of its own and return at once; return False when every slot is busy. A stopped worker takes no
-        item, and gives back an item that it took while it began to stop (``WorkQueue.give_back``). A worker that
-        waits after an ``ItemDeferredError`` takes no item."""
-        if (
-            self.stopped.is_set()
-            or time.monotonic() < self.paused_until
-            or not self.free_slots.acquire(blocking=False)
-        ):
+        item, and gives back an item that it took while it began to stop (``WorkQueue.give_back``)."""
+        if self.stopped.is_set() or not self.free_slots.acquire(blocking=False):
             return False
         try:
             self.requeue_expired()
             item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
             if item is not None and self.stopped.is_set():
                 # The stop began during the take: the item has not started, so another worker runs it at once.
-                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+                self.queue.give_back(self.queue_name, item.id, self.worker_id, attempt=item.attempt_count)
                 item = None
         except BaseException:
             self.free_slots.release()
@@ -303,7 +296,7 @@ class QueueWorker(ServiceWorker):
             return
         except WorkerStoppedError:
             try:
-                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+                self.queue.give_back(self.queue_name, item.id, self.worker_id, attempt=item.attempt_count)
             except WorkLeaseLostError:
                 logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
@@ -325,16 +318,22 @@ class QueueWorker(ServiceWorker):
         self.item_finished(item, result)
 
     def defer(self, item: WorkItem, reason: str) -> None:
-        """Give ``item`` back with ``reason`` and wait before the next take, as ``ItemDeferredError`` says."""
-        if item.stopped_attempt_count >= self.max_deferrals:
-            self.fail(item, f"{reason} (given back {item.stopped_attempt_count} times)", retryable=True)
-            return
-        delay_seconds = min(self.first_deferral_seconds * 2**item.stopped_attempt_count, self.max_deferral_seconds)
-        self.paused_until = max(self.paused_until, time.monotonic() + delay_seconds)
+        """Give ``item`` back with ``reason``, to wait as ``ItemDeferredError`` says. ``item`` is the item as this
+        attempt took it, so its deferral count is the stored one: only this attempt can change it while it holds
+        the item."""
+        # The item can wait without limit, so the exponent has a bound: a float holds no ``2**1024``.
+        doublings = min(item.deferred_attempt_count, 32)
+        delay_seconds = min(self.first_deferral_seconds * 2**doublings, self.max_deferral_seconds)
         logger.info("worker %s gives %s back for %.0f s: %s", self.worker_id, item.id, delay_seconds, reason)
         try:
             self.queue.give_back(
-                self.queue_name, item.id, self.worker_id, available_at=time.time() + delay_seconds, error=reason
+                self.queue_name,
+                item.id,
+                self.worker_id,
+                available_at=time.time() + delay_seconds,
+                error=reason,
+                deferred=True,
+                attempt=item.attempt_count,
             )
         except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
@@ -345,7 +344,9 @@ class QueueWorker(ServiceWorker):
         and an exception's message can have them, so the worker strips ``error`` first."""
         error = error.strip() or "the work item failed"
         try:
-            failed = self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
+            failed = self.queue.fail(
+                self.queue_name, item.id, self.worker_id, error, retryable=retryable, attempt=item.attempt_count
+            )
         except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return

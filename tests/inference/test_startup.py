@@ -31,8 +31,9 @@ from reef.control.scenario.live_objects import LiveObjects
 from reef.control.workers import serving
 from reef.control.workers.serving import ServingWorker
 from reef.core.errors import ScenarioDeletedError
-from reef.core.served_models import ScheduledStop, ServedArtifact
+from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.inference.checkpoint_slots import CheckpointSlotsRuntime
+from reef.inference.engine_clients import DeploymentEngineClients
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import (
     FixedEngineClients,
@@ -439,6 +440,91 @@ def test_a_standby_recovers_completed_selections_after_the_owner_stops(startup, 
     finally:
         replacement.release.set()
         standby.stop()
+
+
+@pytest.mark.unit
+def test_a_new_owner_removes_the_routes_at_another_url_before_it_opens_its_runtime(startup, tmp_path, monkeypatch):
+    control, worker, runtime, _ = startup
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+    routes = control.coordination.served_models
+    assert {served.url for served in routes.read_scenario("math").values()} == {runtime.base_url}
+    worker.stop()
+    # A restart gives the engines of the new stack another port.
+    replacement = StubInferenceRuntime("http://replacement-runtime")
+    opening, opened = threading.Event(), threading.Event()
+
+    def open_slowly():
+        opening.set()
+        assert opened.wait(10)
+
+    monkeypatch.setattr(replacement, "open", open_slowly)
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(TestPolicyRecipe(), live, worker.backends, control.coordination, worker_id="standby")
+    # As in production, the replica reaches a row at a URL that its runtime does not serve through a plain proxy.
+    clients = DeploymentEngineClients(replacement, provider_key=None, timeout_seconds=5)
+    inference_app = build_inference_app(routes, control.storage, clients, tokens=None)
+
+    async def run() -> None:
+        async with TestClient(TestServer(inference_app)) as client:
+            work = asyncio.create_task(asyncio.to_thread(standby.run_once))
+            try:
+                assert await asyncio.to_thread(opening.wait, 2)
+                assert (await (await client.get(STATUS)).json())["state"] == "starting"
+                waiting = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "math"}, json=CHAT)
+                assert waiting.status == 503 and waiting.headers["Retry-After"] == "30"
+                assert (await waiting.json())["error"]["type"] == "inference_starting"
+                assert routes.read_scenario("math") == {}
+            finally:
+                opened.set()
+                assert await asyncio.wait_for(work, 5)
+            assert {served.url for served in routes.read_scenario("math").values()} == {replacement.base_url}
+
+    try:
+        asyncio.run(run())
+    finally:
+        opened.set()
+        standby.stop()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("adopts", [True, False])
+def test_a_new_owner_offers_its_runtime_only_the_routes_at_its_url(startup, tmp_path, monkeypatch, adopts):
+    control, worker, runtime, _ = startup
+    control.create_scenario("math")
+    runtime.release.set()
+    assert worker.run_once()
+    routes = control.coordination.served_models
+    own = routes.read_scenario("math")["active"]
+    # The selection also has a row under its artifact ID; move that row to another URL.
+    foreign = replace(own, url="http://other-engine")
+    routes.write(ScenarioModel("math", own.artifact_id), foreign, control_lease_number=control.publisher.lease_number)
+    worker.stop()
+    replacement = StubInferenceRuntime(runtime.base_url)
+    during_open, offered, at_activation = [], [], []
+    activate = replacement.activate_checkpoint
+
+    def activate_checkpoint(artifact, *, scenario=None):
+        at_activation.append(dict(routes.read_scenario("math")))
+        return activate(artifact, scenario=scenario)
+
+    monkeypatch.setattr(replacement, "open", lambda: during_open.append(dict(routes.read_scenario("math"))))
+    monkeypatch.setattr(replacement, "adopt", lambda served: offered.append(served) or adopts)
+    monkeypatch.setattr(replacement, "activate_checkpoint", activate_checkpoint)
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(TestPolicyRecipe(), live, worker.backends, control.coordination, worker_id="standby")
+    try:
+        assert standby.run_once()
+    finally:
+        standby.stop()
+    # The route at another URL went before the open; the runtime got the other one after it.
+    assert during_open == [{"active": own}] and offered == [own]
+    # A route that the runtime did not take over went after the open.
+    assert at_activation == [{"active": own} if adopts else {}]
+    assert foreign in {stop.served for stop in routes.due_stops(float("inf"))}
+    items = control.coordination.work_queue.items(SERVING_QUEUE, scenario="math", kind=SERVING_KIND)
+    assert [item.metadata for item in items].count({"recovery": True}) == 1
 
 
 @pytest.mark.unit
@@ -945,6 +1031,38 @@ def test_a_cancelled_serve_item_stops_the_start_of_its_artifact(tmp_path, monkey
     finally:
         worker.stop()
         control.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stoppable", [2], indirect=True)
+def test_one_candidate_start_serves_the_items_made_before_it(stoppable, monkeypatch):
+    control, worker, runtime = stoppable
+    runtime.release.set()
+    control.create_scenario("math")
+    assert worker.run_once()
+    worker.item_threads[-1].join(5)
+    routes = control.coordination.served_models
+    served = routes.read_scenario("math")["active"]
+    starts = []
+    monkeypatch.setattr(
+        runtime, "serve_artifact", lambda artifact, scenario, serving_config: starts.append(scenario) or served
+    )
+    payload = {"selection": routes.current_request("math").payload["selection"], "component": "weights"}
+
+    def serve(item_id):
+        assert worker.run_once()
+        worker.item_threads[-1].join(5)
+        return worker.queue.read(SERVING_QUEUE, item_id)
+
+    for item_id in ("first", "second"):
+        worker.queue.append(NewWork(SERVING_QUEUE, item_id, "math", SERVE_ARTIFACT_KIND, payload))
+    first, second = serve("first"), serve("second")
+    # The second rollout asked before the first start began, so that start serves it.
+    assert first.result == second.result == {"served": served.to_json()}
+    assert starts == ["math"]
+    worker.queue.append(NewWork(SERVING_QUEUE, "third", "math", SERVE_ARTIFACT_KIND, payload))
+    assert serve("third").result == {"served": served.to_json()}
+    assert starts == ["math", "math"]
 
 
 @pytest.mark.unit

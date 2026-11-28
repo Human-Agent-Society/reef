@@ -1,71 +1,34 @@
-Configure Reef serving and training
-===================================
+Configure a deployment
+======================
 
-Every setting of ``reef serve`` is a key in one section of a configuration file, and each key is also a command-line flag with the same path, such as ``--inference.model-path``. This page lists the sections and names the page that holds the keys of each one.
+Save deployment settings in YAML. Flags use the same paths, such as ``--inference.model-path``.
+See the `settings reference <configuration-settings.rst>`__ for all keys, types and defaults.
 
-.. code:: bash
+A typical file
+--------------
 
-   reef serve -c reef.yaml --reef.port 9000 --print-config
+Save this as ``reef.yaml`` to connect a local service to a hosted model.
 
-Reef reads a file only when ``-c`` selects one, and it rejects an unknown section or key. ``--print-config`` prints every resolved setting with its source and starts nothing. `Configuration file layout <configuration-files.rst>`__ gives the layout, the value rules and the starts that need no file.
+.. code:: yaml
 
-.. list-table::
-   :header-rows: 1
-   :widths: 22 48 30
+   inference:
+     upstream-url: https://api.openai.com
+     upstream-api-key: ${REEF_UPSTREAM_API_KEY:?}
+     upstream-model: gpt-4o
 
-   * - Section
-     - Holds
-     - Page
-   * - ``reef``
-     - HTTP host, port, authentication, run directory, readiness deadline and scenario limits
-     - `Service and storage settings <configuration-service.rst>`__
-   * - ``reef.routing_manifest``, ``reef.routing_deployment``
-     - routing of a scenario's requests among external targets, and the Semantic Router lifecycle
-     - `Scenario routing between students and teachers <configuration-routing.rst>`__
-   * - ``harness``
-     - how harness clients reach the deployment's services
-     - `Service and storage settings <configuration-service.rst>`__
-   * - ``storage``
-     - artifact, record, data and task-file stores, and record retention
-     - `Service and storage settings <configuration-service.rst#the-storage-section>`__
-   * - ``data``
-     - the data service's limits
-     - `Service and storage settings <configuration-service.rst#the-data-section>`__
-   * - ``evaluation``
-     - sandbox limits and plugins of the evaluation service
-     - `Service and storage settings <configuration-service.rst#the-evaluation-section>`__
-   * - ``inference``
-     - model path, backend, GPUs, provider connection, serving mode, request handlers and native engine ``options``
-     - `The inference section <configuration-inference.rst>`__
-   * - ``training``, ``teacher``
-     - backend, timeouts, Ray connection, workload variables (``config``) and native training ``options``; a frozen SGLang teacher engine
-     - `The training section <configuration-training.rst>`__
-   * - ``execution``, ``executors``
-     - executor selection for each role, and named executor profiles
-     - `Stack execution backends <configuration-execution.rst>`__
-   * - ``recipe``
-     - ``implementation`` (the recipe class or preset), ``config`` (the recipe's declared fields) and ``runtime`` (a runtime type and its settings)
-     - `Recipe configuration <configuration-recipe.rst>`__
-   * - ``recipe.config.evolution``
-     - the method, adapter, limits, run executor and evaluation of harness evolution
-     - `Harness evolution keys <configuration-harness.rst>`__
-   * - ``activation``
-     - the rule that decides which new artifacts serve
-     - `Recipe configuration <configuration-recipe.rst#the-activation-section>`__
-   * - ``pipeline``
-     - the config, and optionally the class, of each pipeline stage
-     - `Recipe configuration <configuration-recipe.rst#the-pipeline-section>`__
-   * - ``generator``, ``task-import``
-     - the generator service that writes and checks Harbor tasks and runs their rollouts, and the Harbor tasks that each scenario imports
-     - `Generated tasks <configuration-generated-tasks.rst>`__
-   * - ``observability``
-     - experiment tracking (``wandb``) and record tracing (``tracing``)
-     - `Observability settings <configuration-observability.rst>`__
+Set your provider key and run ``reef serve -c reef.yaml``. Use ``--print-config`` to inspect settings before startup.
+For local inference, use ``inference.model-path`` with the engine and GPU-enabled PyTorch installed. Remove upstream URL and model settings.
 
-Some topics cover more than one section:
+How Reef reads values
+---------------------
 
-- **Serving of a weight-training deployment**, the engines' native options and the chat template arguments: `The inference section <configuration-inference.rst#serving-of-a-weight-training-deployment>`__.
-- **Slime jobs** that run their own rollouts, and training without an inference engine: `Task jobs on Slime <configuration-training.rst#task-jobs-on-slime>`__, `Dataset jobs on Slime <configuration-training.rst#dataset-jobs-on-slime>`__ and `Train without an inference engine <configuration-training.rst#train-without-an-inference-engine>`__.
-- **The generated-task recipe**, its rounds, its training pool and its rollout parameters: `Generated tasks <configuration-generated-tasks.rst>`__.
-- **Operational metrics** of a scenario: `Observability settings <configuration-observability.rst#operational-metrics>`__.
-- **Cookbook stacks** to start from: `Start from a cookbook stack <configuration-files.rst#start-from-a-cookbook-stack>`__.
+Command-line flags override file values, then environment fallbacks, then defaults. The last repeated flag wins.
+Without a file, Reef reads ``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and ``REEF_TOKEN``.
+
+- In YAML, ``${VAR}`` expands to an environment variable or an empty string. Use ``${VAR:?}`` to require a value.
+- Use ``${dotted.path}`` for an explicit file or flag value. References to defaults remain literal.
+- Pass lists and objects as quoted JSON or YAML on the command line. Use ``--no-<path>`` to disable a boolean option.
+- Use the spelling in the settings reference. Some nested sections require underscores.
+
+Reef masks secret fields in ``--print-config``. Credentials embedded in ordinary URLs can still appear.
+An invalid configuration exits with status 2. A failed startup exits with status 1 and identifies the service and log directory.

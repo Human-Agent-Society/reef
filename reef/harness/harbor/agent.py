@@ -21,6 +21,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 import secrets
 import shlex
 import shutil
@@ -61,6 +62,8 @@ from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.runs.run import TaskResult, TaskRunError, headless_env, write_rendered
 from reef.harness.runs.trajectory import reader_for
 from reef.harness.tree import HarnessTree, render_tree
+
+logger = logging.getLogger(__name__)
 
 #: Where the rendered tree goes in the task's container: the run root of ``run.task``.
 CONTAINER_ROOT = "/reef-run"
@@ -352,7 +355,9 @@ class AdapterAgent(BaseInstalledAgent):
         Reef's sandbox relay answers that port in the container and holds each call. ``BRIDGE_POLLERS`` loops here
         take the calls through Harbor's exec, with ``bridge_client``, answer each from this host's port, and give the
         answer back in the next exchange. One loop waits for the first call. The others start when it gets a call or
-        fails. Exec works in every Harbor environment. Raise ``ProgramLaunchError`` when the relay does not answer.
+        fails. The relay gives a call out again when its answer does not come in time, so the loops share the IDs of
+        the calls that they took, and each call is answered once. Exec works in every Harbor environment. Raise
+        ``ProgramLaunchError`` when the relay does not answer.
         """
         if self.bridge_port is None:
             yield
@@ -382,8 +387,11 @@ class AdapterAgent(BaseInstalledAgent):
         async with aiohttp.ClientSession(auto_decompress=False) as local:
             # An idle exchange uses a Python process in the agent's container.
             concurrent_polls = asyncio.Event()
+            taken: set[str] = set()
             pollers = [
-                asyncio.create_task(self.relay_calls(environment, client, local, concurrent_polls, primary=index == 0))
+                asyncio.create_task(
+                    self.relay_calls(environment, client, local, concurrent_polls, taken, primary=index == 0)
+                )
                 for index in range(BRIDGE_POLLERS)
             ]
             pollers[0].add_done_callback(lambda _: concurrent_polls.set())
@@ -400,31 +408,51 @@ class AdapterAgent(BaseInstalledAgent):
         client: str,
         local: aiohttp.ClientSession,
         concurrent_polls: asyncio.Event,
+        taken: set[str],
         *,
         primary: bool,
     ) -> None:
         """Answer the relay's calls one at a time, until cancelled: each exchange gives the last answer back and
-        takes the next call. A failed exchange runs again with the same answer, which the relay takes once."""
+        takes the next call. A failed exchange runs again with the same answer, which the relay takes once. An
+        exchange fails when its command exits with an error, when the environment raises, or when its output is not
+        a call; the loop then goes on. ``taken`` holds the IDs of the calls that the bridge's loops took: a call that
+        the relay gives out again is answered only once."""
         if not primary:
             await concurrent_polls.wait()
         reply = ""
         while True:
-            result = await environment.exec(command=f"{client} {reply}".rstrip(), timeout_sec=120)
-            if result.return_code != 0:
+            try:
+                result = await environment.exec(command=f"{client} {reply}".rstrip(), timeout_sec=120)
+                request = (
+                    json.loads(result.stdout) if result.return_code == 0 and (result.stdout or "").strip() else {}
+                )
+            except Exception as error:
+                # The sandbox service can fail one exchange; the relay gives out a call that it lost again.
+                logger.warning("a bridge exchange failed: %s", error)
+                result = None
+            if result is None or result.return_code != 0:
                 concurrent_polls.set()
                 await asyncio.sleep(1)
                 continue
             reply = ""
-            if not (result.stdout or "").strip():
+            if not request:
                 continue
             concurrent_polls.set()
-            request = json.loads(result.stdout)
+            if request["id"] in taken:
+                continue
+            taken.add(request["id"])
             piece = await self.answer(local, request)
             path = f"{RELAY_DIR}/replies/{request['id']}.json"
             with tempfile.TemporaryDirectory(prefix="reef-relay-") as staging:
                 staged = Path(staging) / "piece.json"
                 staged.write_text(json.dumps(piece), encoding="utf-8")
-                await environment.upload_file(staged, path)
+                while True:
+                    try:
+                        await environment.upload_file(staged, path)
+                        break
+                    except Exception as error:
+                        logger.warning("could not upload a bridge answer: %s", error)
+                        await asyncio.sleep(1)
             reply = f"{request['id']} {path}"
 
     async def answer(self, local: aiohttp.ClientSession, request: Mapping[str, Any]) -> dict[str, Any]:

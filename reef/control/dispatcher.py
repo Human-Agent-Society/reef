@@ -37,7 +37,7 @@ from reef.control.workers.work_retention import EndedWorkSweeper
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
-from reef.core.job_data import TaskSample
+from reef.core.job_data import SAMPLE_KINDS, TaskSample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
 from reef.core.serving_config import ServingConfig
@@ -60,7 +60,7 @@ from reef.storage.data.sync import ScenarioUses
 from reef.storage.data.tasks import LocalTaskFileStore
 from reef.storage.scenario.record_items import evaluation_call_item, evaluation_trajectory_item
 from reef.storage.scenario.records import RecordRetention
-from reef.storage.scenario.samples import SAMPLE_KINDS, ListedSample, StoredSample
+from reef.storage.scenario.samples import ListedSample, StoredSample
 from reef.storage.scenario.store import ScenarioSettings, ScenarioStorage
 from reef.train.job_queue import (
     JobExperimentRecorder,

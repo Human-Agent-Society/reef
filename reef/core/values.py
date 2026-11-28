@@ -11,6 +11,11 @@ from typing import Any
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
+def canonical_json(value: object) -> str:
+    """Encode a JSON value with sorted keys, compact separators and unescaped Unicode."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def require_text(value: object, name: str) -> str:
     """``value`` when it is a non-empty string without surrounding spaces; else ``ValueError`` naming ``name``."""
     if not isinstance(value, str) or not value or value != value.strip():
@@ -66,4 +71,4 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-__all__ = ["JsonValue", "deep_merge", "require_integer", "require_text", "strict_json_object"]
+__all__ = ["JsonValue", "canonical_json", "deep_merge", "require_integer", "require_text", "strict_json_object"]

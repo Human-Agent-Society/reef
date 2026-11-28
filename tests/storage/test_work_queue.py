@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import math
 import threading
@@ -25,7 +26,16 @@ from reef.storage.coordination.served_models import (
     ControlLeaseConflictError,
     ServedModelsWriter,
 )
-from reef.storage.coordination.work_queue import NewWork, WorkConflictError, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import (
+    DEFERRED_ATTEMPTS,
+    LEASE_RETRY_MAX_SECONDS,
+    LeaseExtender,
+    NewWork,
+    WorkConflictError,
+    WorkItem,
+    WorkLeaseLostError,
+    WorkQueue,
+)
 from reef.storage.sql.coordination import (
     ADDED_INDEXES,
     PostgresCoordinationDatabase,
@@ -158,6 +168,22 @@ def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_co
         queue.items("jobs", id_prefix="")
 
 
+@pytest.mark.unit
+def test_a_read_without_payload_gives_items_with_an_empty_payload(open_coordination):
+    queue = open_coordination().queue
+    first = queue.append(NewWork("jobs", "rollout:e1:0", "s", "rollout", {"tree": {"files": {"a.md": "x" * 1000}}}))
+    second = queue.append(NewWork("jobs", "rollout:e1:1", "s", "rollout", {"task_index": 4}))
+    # Only the payload differs from the stored items.
+    empty = (dataclasses.replace(first, payload={}), dataclasses.replace(second, payload={}))
+
+    assert queue.items("jobs", id_prefix="rollout:e1:", payload=False) == empty
+    assert queue.items("jobs", id_prefix="rollout:e1:") == (first, second)
+    ids = ["rollout:e1:1", "missing", "rollout:e1:0"]
+    assert queue.read_items("jobs", ids, payload=False) == empty[::-1]
+    assert WorkQueue.read_items(queue, "jobs", ids, payload=False) == empty[::-1]
+    assert queue.read_items("jobs", ids) == (second, first)
+
+
 def job(
     item_id: str, *, scenario: str = "s", kind: str = "training_job:tinker", serial_key: str | None = "s"
 ) -> NewWork:
@@ -194,6 +220,46 @@ def test_an_item_given_back_with_a_time_and_a_reason_waits_until_that_time(open_
     assert queue.take("jobs", "w", ["training_job:tinker"], now=60).attempt_count == 2
     with pytest.raises(ValueError):
         queue.give_back("jobs", "a", "w", now=61, available_at=math.inf)
+
+
+@pytest.mark.unit
+def test_a_deferred_give_back_counts_apart_and_only_for_the_attempt_that_holds_the_item(
+    open_coordination, monkeypatch
+):
+    queue = open_coordination().queue
+    queue.append(job("a"), now=0)
+    first = queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    deferred = queue.give_back(
+        "jobs",
+        "a",
+        "w",
+        now=1,
+        available_at=31,
+        error="waiting for capacity",
+        deferred=True,
+        attempt=first.attempt_count,
+    )
+    assert (deferred.stopped_attempt_count, deferred.deferred_attempt_count) == (1, 1)
+    assert deferred.metadata == {DEFERRED_ATTEMPTS: 1}
+    # A worker that stops gives the item back too; that is no refusal of capacity. An item without the key, such as
+    # one that an earlier Reef gave back, has the count 0.
+    queue.take("jobs", "w", ["training_job:tinker"], now=31)
+    stopped = queue.give_back("jobs", "a", "w", now=32)
+    assert (stopped.stopped_attempt_count, stopped.deferred_attempt_count) == (2, 1)
+    assert WorkItem("jobs", "b", "s", "k", {}, attempt_count=3, stopped_attempt_count=3).deferred_attempt_count == 0
+    # An attempt whose lease expired cannot give back the item that a newer attempt of the same worker holds.
+    expired = queue.take("jobs", "w", ["training_job:tinker"], now=33)
+    queue.requeue_expired(now=100)
+    newer = queue.take("jobs", "w", ["training_job:tinker"], now=101)
+    with pytest.raises(WorkLeaseLostError):
+        queue.give_back("jobs", "a", "w", now=102, deferred=True, attempt=expired.attempt_count)
+    # A late refusal at the retry cutoff must also leave the new lease with its worker.
+    monkeypatch.setattr(workers.time, "time", lambda: 102.0)
+    worker = FailingWorker(queue, ItemDeferredError("waiting for capacity"))
+    worker.defer(expired, "waiting for capacity")
+    held = queue.read("jobs", "a")
+    assert (held.state, held.attempt_count) == ("assigned", newer.attempt_count)
+    assert (held.stopped_attempt_count, held.deferred_attempt_count) == (2, 1)
 
 
 @pytest.mark.unit
@@ -255,6 +321,178 @@ def test_an_expired_lease_returns_the_item_and_a_late_worker_loses_it(open_coord
     assert again.worker_id == "w2" and again.attempt_count == 2
     # The last attempt expires too: no attempts are left, so the item fails.
     assert [item.state for item in queue.requeue_expired(now=100)] == ["failed"]
+
+
+class FlakyLeaseWorkQueue(SQLWorkQueue):
+    """A work queue whose ``extend_lease`` raises scripted errors before delegating to ``SQLWorkQueue``.
+
+    Values: ``outcomes`` is a list of optional exceptions popped from the front on each ``extend_lease`` call;
+    ``None`` or an exhausted list delegates to ``SQLWorkQueue.extend_lease``. ``call_count`` counts every
+    ``extend_lease`` call and ``success_count`` counts completed delegations, both guarded by ``lock``.
+
+    Purpose: unit tests of ``LeaseExtender`` inject transient errors and lease-loss errors cleanly.
+    """
+
+    def __init__(
+        self,
+        database: SQLiteCoordinationDatabase,
+        *,
+        lease_seconds: float,
+        outcomes: list[Exception | None],
+    ) -> None:
+        super().__init__(database, lease_seconds=lease_seconds)
+        self.outcomes: list[Exception | None] = list(outcomes)
+        self.call_count = 0
+        self.success_count = 0
+        self.lock = threading.Lock()
+
+    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        with self.lock:
+            self.call_count += 1
+            outcome = self.outcomes.pop(0) if self.outcomes else None
+        if outcome is not None:
+            raise outcome
+        extended = super().extend_lease(queue, item_id, worker_id, now=now)
+        with self.lock:
+            self.success_count += 1
+        return extended
+
+
+class RecordingStopEvent(threading.Event):
+    """A ``threading.Event`` that records each ``wait`` timeout and sets itself after ``max_waits`` calls.
+
+    Values: ``max_waits`` is a positive integer; ``waits`` records each ``timeout`` passed to ``wait``. Calling
+    ``wait`` appends ``timeout`` to ``waits``, calls ``set()`` once ``len(waits) > max_waits`` if the event is not yet
+    set, and returns ``is_set()``.
+
+    Purpose: deterministic unit tests inspect the exact wait intervals of ``LeaseExtender.run`` without sleeping.
+    """
+
+    def __init__(self, max_waits: int) -> None:
+        if isinstance(max_waits, bool) or max_waits < 1:
+            raise ValueError("max_waits must be at least 1")
+        super().__init__()
+        self.max_waits = max_waits
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        if not self.is_set() and len(self.waits) > self.max_waits:
+            self.set()
+        return self.is_set()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("lease_seconds", "expected_waits"),
+    [
+        (60.0, [20.0, LEASE_RETRY_MAX_SECONDS, LEASE_RETRY_MAX_SECONDS, 20.0]),
+        (6.0, [2.0, 0.6, 0.6, 2.0]),
+    ],
+)
+def test_lease_extender_retries_with_bounded_short_wait_and_resets_after_recovery(
+    lease_seconds: float, expected_waits: list[float]
+):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(
+            database,
+            lease_seconds=lease_seconds,
+            outcomes=[RuntimeError("pool timeout"), RuntimeError("db restart"), None],
+        )
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        extender = LeaseExtender(queue, taken, "w1")
+        recorder = RecordingStopEvent(max_waits=3)
+        extender.done = recorder
+        extender.run()
+
+        assert recorder.waits == expected_waits
+        assert recorder.is_set()
+        assert queue.call_count == 3
+        assert not extender.lease_lost.is_set()
+        assert queue.read("jobs", "a").lease_expires_at >= taken.lease_expires_at
+
+
+@pytest.mark.unit
+def test_lease_extender_recovers_before_lease_expiry_on_transient_error():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(database, lease_seconds=1.5, outcomes=[RuntimeError("transient"), None])
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        with LeaseExtender(queue, taken, "w1") as extender:
+            wait_until(lambda: queue.success_count >= 1, timeout_seconds=5)
+            refreshed = queue.read("jobs", "a")
+            assert not extender.lease_lost.is_set()
+            assert queue.call_count >= 2
+            assert refreshed.lease_expires_at > taken.lease_expires_at
+            assert queue.requeue_expired() == ()
+
+
+@pytest.mark.unit
+def test_lease_extender_exits_immediately_on_lease_lost_without_retrying():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(database, lease_seconds=0.06, outcomes=[WorkLeaseLostError("lost")])
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        with LeaseExtender(queue, taken, "w1") as extender:
+            assert extender.lease_lost.wait(2.0)
+            extender.thread.join(timeout=2.0)
+            assert not extender.thread.is_alive()
+            assert queue.call_count == 1
+
+
+@pytest.mark.unit
+def test_lease_extender_stop_wakes_promptly_during_wait():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = FlakyLeaseWorkQueue(database, lease_seconds=60.0, outcomes=[])
+        queue.append(job("a"))
+        taken = queue.take("jobs", "w1", ["training_job:tinker"])
+        extender = LeaseExtender(queue, taken, "w1")
+        extender.thread.start()
+        started = time.monotonic()
+        extender.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+        assert not extender.thread.is_alive()
+        assert not extender.lease_lost.is_set()
+
+
+@pytest.mark.unit
+def test_extending_a_lease_refreshes_expiry_without_taking_the_sequence_counter(open_coordination, monkeypatch):
+    queue = open_coordination().queue
+    queue.append(job("a"), now=0)
+    taken = queue.take("jobs", "w1", ["training_job:tinker"], now=0)
+
+    def refuse_counter(connection, sequence):
+        raise AssertionError(f"extend_lease must not acquire sequence counter {sequence}")
+
+    monkeypatch.setattr(queue.database, "counter", refuse_counter)
+    extended = queue.extend_lease("jobs", "a", "w1", now=5)
+
+    assert extended.lease_expires_at == 15
+    assert extended.changed_sequence == taken.changed_sequence
+    assert queue.read("jobs", "a") == extended
+    assert queue.read_changes("jobs", taken.changed_sequence) == ()
+
+
+@pytest.mark.unit
+def test_extending_a_lease_rejects_reassigned_ownership_without_mutating_the_item(open_coordination):
+    queue = open_coordination(max_attempts={"jobs": 2}).queue
+    queue.append(job("a"), now=0)
+    queue.take("jobs", "w1", ["training_job:tinker"], now=0)
+    assert queue.requeue_expired(now=16)[0].state == "queued"
+    reassigned = queue.take("jobs", "w2", ["training_job:tinker"], now=17)
+
+    with pytest.raises(WorkLeaseLostError):
+        queue.extend_lease("jobs", "a", "w1", now=18)
+
+    current = queue.read("jobs", "a")
+    assert (current.worker_id, current.attempt_count, current.lease_expires_at, current.changed_sequence) == (
+        reassigned.worker_id,
+        reassigned.attempt_count,
+        reassigned.lease_expires_at,
+        reassigned.changed_sequence,
+    )
 
 
 @pytest.mark.unit
@@ -327,12 +565,25 @@ def test_a_request_makes_the_queued_item_of_its_key_available_no_later_than_it_a
 class FailingWorker(QueueWorker):
     """A worker whose every item ends with ``error``."""
 
-    def __init__(self, queue: WorkQueue, error: Exception) -> None:
-        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id="w")
+    def __init__(self, queue: WorkQueue, error: Exception, worker_id: str = "w") -> None:
+        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id=worker_id)
         self.error = error
 
     def run_item(self, item, lease_lost):
         raise self.error
+
+
+class CapacityWorker(QueueWorker):
+    """A worker whose items with an ID in ``refused`` find no capacity, and whose other items finish."""
+
+    def __init__(self, queue: WorkQueue, refused: frozenset[str]) -> None:
+        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id="w")
+        self.refused = refused
+
+    def run_item(self, item, lease_lost):
+        if item.id in self.refused:
+            raise ItemDeferredError("waiting for sandbox capacity")
+        return {}
 
 
 def warnings_of(caplog) -> list[str]:
@@ -462,24 +713,106 @@ def test_a_worker_gives_an_item_without_capacity_back_and_waits_longer_each_time
     # The test sets the clock that the queue reads too.
     queue.append(job("a"), now=0)
     worker = FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity"))
-    worker.max_deferrals = 2
-    clock = {"wall": 1000.0, "monotonic": 50.0}
+    clock = {"wall": 1000.0}
     monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
-    monkeypatch.setattr(workers.time, "monotonic", lambda: clock["monotonic"])
-    for delay_seconds in (30, 60):
+    # The wait doubles up to ``max_deferral_seconds``, and the item never fails for want of capacity.
+    for delay_seconds in (30, 60, 120, 240, 480, *[600] * 30):
         assert worker.run_once()
         item = queue.read("jobs", "a")
         assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
         assert item.available_at == clock["wall"] + delay_seconds
-        # The worker takes no item while it waits, so the service gets no new work.
+        # No worker takes the item while it waits.
         assert not worker.run_once()
         clock["wall"] += delay_seconds
-        clock["monotonic"] += delay_seconds
-    # The give-backs did not use the item's attempts; after ``max_deferrals`` of them the error counts as a failure.
-    assert worker.run_once()
-    item = queue.read("jobs", "a")
-    assert (item.attempt_count, item.stopped_attempt_count) == (3, 2)
-    assert item.state == "queued" and item.error == "waiting for sandbox capacity (given back 2 times)"
+    # The give-backs did not use the item's attempts.
+    assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (35, 35, 35)
+    assert queue.has_attempts_left(item)
+
+
+@pytest.mark.unit
+def test_a_retried_item_waits_for_capacity_as_a_new_item_does(monkeypatch):
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.append(job("a"))
+        queue.write_metadata("jobs", "a", "run", "r1")
+        refused = FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity"))
+        for delay_seconds in (30, 60):
+            assert refused.run_once()
+            clock["wall"] += delay_seconds
+        # An attempt that found capacity fails the item for another reason.
+        assert FailingWorker(queue, ItemFailedError("the sandbox stopped")).run_once()
+        failed = queue.read("jobs", "a")
+        assert (failed.state, failed.deferred_attempt_count) == ("failed", 2)
+
+        again = queue.retry("jobs", "a")
+        # The retry keeps the attempt counts and the other metadata, and counts the refusals from zero.
+        assert (again.attempt_count, again.stopped_attempt_count, again.deferred_attempt_count) == (3, 2, 0)
+        assert again.metadata == {"run": "r1"}
+        assert refused.run_once()
+        item = queue.read("jobs", "a")
+        assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
+        assert item.available_at == clock["wall"] + 30
+        assert (item.stopped_attempt_count, item.deferred_attempt_count) == (3, 1)
+
+
+@pytest.mark.unit
+def test_a_worker_runs_other_items_while_an_item_without_capacity_waits():
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database)
+        # A large item finds no capacity, and a small one after it can run.
+        queue.append(job("large", serial_key=None))
+        queue.append(job("small", serial_key=None))
+        worker = CapacityWorker(queue, frozenset({"large"}))
+        assert worker.run_once()
+        waiting = queue.read("jobs", "large")
+        assert waiting.state == "queued"
+        # The same worker takes the small item at once: only the large item waits.
+        assert worker.run_once()
+        assert queue.read("jobs", "small").state == "finished"
+        assert not worker.run_once()
+        queue.append(job("newer", serial_key=None))
+        assert queue.take("jobs", "w", ["training_job:tinker"], now=waiting.available_at).id == "large"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("restarts", [5, 24])
+def test_give_backs_of_a_stopping_worker_do_not_lengthen_the_first_wait_for_capacity(monkeypatch, restarts):
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.append(job("a"))
+        for restart in range(restarts):
+            queue.take("jobs", f"stopped-{restart}", ["training_job:tinker"])
+            queue.give_back("jobs", "a", f"stopped-{restart}")
+        assert FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity")).run_once()
+        item = queue.read("jobs", "a")
+        # The first refusal of capacity waits the first delay, and the item keeps its one attempt.
+        assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
+        assert item.available_at == clock["wall"] + 30
+        assert (item.stopped_attempt_count, item.deferred_attempt_count) == (restarts + 1, 1)
+        assert queue.has_attempts_left(item)
+
+
+@pytest.mark.unit
+def test_the_wait_for_capacity_of_an_item_grows_across_workers_and_restarts(monkeypatch):
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
+    refused = ItemDeferredError("waiting for sandbox capacity")
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database)
+        queue.append(job("a"))
+        assert FailingWorker(queue, refused, worker_id="w1").run_once()
+        clock["wall"] += 30
+        # A worker that stops between the two refusals gives the item back, which counts as no refusal.
+        queue.take("jobs", "stopping", ["training_job:tinker"])
+        queue.give_back("jobs", "a", "stopping")
+        assert FailingWorker(queue, refused, worker_id="w2").run_once()
+        item = queue.read("jobs", "a")
+        assert item.available_at == clock["wall"] + 60
+        assert (item.attempt_count, item.stopped_attempt_count, item.deferred_attempt_count) == (3, 3, 2)
 
 
 @pytest.mark.unit

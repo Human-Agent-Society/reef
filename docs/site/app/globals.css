@@ -408,10 +408,20 @@ html[data-theme="dark"] .fig-diagram .fig-dark { display: block; }
 .fig-flow-stage.fig-emphasis .fig-flow-title { color: var(--diagram-emphasis-text); }
 .fig-flow-stage.fig-emphasis .fig-flow-caption { color: color-mix(in srgb, var(--diagram-emphasis-text) 78%, transparent); }
 .fig-flow-loop { margin-top: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 14px; }
-.markdown-body .config-card { margin: 24px 0 32px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--card); box-shadow: var(--shadow-sm); font-size: 14px; line-height: 1.6; }
-.config-row { padding: 12px 16px; display: grid; grid-template-columns: minmax(130px, max-content) 1fr; gap: 4px 20px; border-bottom: 1px solid color-mix(in srgb, var(--border) 62%, transparent); scroll-margin-top: 92px; }
+/* Package layers keep one aligned row per level at every screen width. */
+.layer-map .fig-flow-track { flex-direction: column; align-items: stretch; }
+.layer-map .fig-flow-track > .fig-arrow-next { transform: rotate(90deg); }
+.layer-map .fig-flow-stage { padding: 14px 16px; display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: baseline; gap: 16px; text-align: left; }
+.layer-map .fig-flow-caption { line-height: 1.6; }
+.layer-map .fig-flow-stage code, .layer-map .fig-flow-stage .literal { white-space: nowrap; }
+@media (max-width: 600px) {
+  .layer-map .fig-flow-stage { grid-template-columns: 1fr; gap: 6px; }
+}
+/* The card owns the key column, so the keys of all its rows line up. */
+.markdown-body .config-card { margin: 24px 0 32px; overflow: hidden; display: grid; grid-template-columns: fit-content(46%) 1fr; border: 1px solid var(--border); border-radius: 10px; background: var(--card); box-shadow: var(--shadow-sm); font-size: 14px; line-height: 1.6; }
+.config-row { padding: 12px 16px; display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 4px 20px; border-bottom: 1px solid color-mix(in srgb, var(--border) 62%, transparent); scroll-margin-top: 92px; }
 .config-row:last-child { border-bottom: 0; }
-.config-key { color: var(--foreground); font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
+.config-key { align-self: start; color: var(--foreground); font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
 .config-default { margin-right: 10px; padding: 1px 8px; display: inline-block; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; font-family: var(--font-mono); font-size: 12px; }
 .config-desc { color: var(--text); }
 .markdown-body .admonition { margin: 24px 0 32px; padding: 14px 18px; border: 1px solid; border-radius: 10px; }
@@ -474,12 +484,12 @@ html[data-theme="dark"] .fig-diagram .fig-dark { display: block; }
 }
 
 @media (max-width: 720px) {
-  .markdown-body .mermaid-diagram svg { min-width: 600px; }
+  .markdown-body .mermaid-diagram svg[aria-roledescription="sequence"] { min-width: 600px; }
   .markdown-body .mermaid-diagram { background: linear-gradient(90deg, var(--card) 45%, transparent) left center / 32px 100% no-repeat local, linear-gradient(270deg, var(--card) 45%, transparent) right center / 32px 100% no-repeat local, radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--foreground) 28%, transparent), transparent) left center / 14px 100% no-repeat scroll, radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--foreground) 28%, transparent), transparent) right center / 14px 100% no-repeat scroll, var(--card); }
   .fig-flow-track { flex-direction: column; align-items: stretch; }
   .fig-flow-track .fig-arrow-next { transform: rotate(90deg); }
   .fig-flow-loop { text-align: center; }
-  .config-row { grid-template-columns: 1fr; }
+  .markdown-body .config-card, .config-row { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {

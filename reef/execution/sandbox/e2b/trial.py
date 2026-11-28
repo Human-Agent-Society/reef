@@ -1,25 +1,17 @@
-"""Run task processes in an E2B cloud sandbox (:mod:`reef.execution.sandbox.remote`).
-
-An E2B sandbox is a microVM of its own. :class:`E2BExecutor` is the deployment's
-setting (the API key, the template, how long a sandbox may live);
-:meth:`E2BExecutor.open` starts one sandbox and answers an :class:`E2BSession`.
-The template is the harness's pinned binary on Node 22; one Reef builds on
-first use (about a minute) when the alias does not exist yet. E2B grants a
-sandbox at most an hour when it is created, so a session that runs longer
-asks for the hour again before it ends (:class:`SandboxKeeper`).
+"""Reef's Harbor environment for E2B task trials, and the builds of their templates.
 
 ``KillOnTimeoutE2BEnvironment`` reuses Harbor's E2B environment for task trials. It requests deletion at timeout,
 so AgentENV deletes an abandoned sandbox instead of pausing it. It also keeps the file modes of a task's
 ``COPY --chmod``, which E2B's Dockerfile parser ignores (:func:`dockerfile_with_copy_modes`). On AgentENV, whose E2B
 template builds take no files, ``REEF_E2B_DOCKERFILE_BUILD=aenv`` makes it build a task's Dockerfile with
-``aenv build`` (:mod:`reef.execution.sandbox.agentenv_build`). There, ``REEF_E2B_COMPOSE=aenv`` also makes it run the
-Compose project of a task that has one in one sandbox, so that the agent reaches the task's other services
-(:mod:`reef.execution.sandbox.agentenv_compose`). The shared
-``environment_config`` selects this class for Reef's Harbor rollouts and generator checks through ``import_path``.
-A standalone Harbor trial that selects only ``e2b`` uses Harbor's own class.
-
-A service can keep a sandbox's ports private and return a traffic access token for them. An :class:`E2BSession`
-then sends that token with each request to the sandbox's relays (:meth:`E2BSession.tunnel_headers`).
+``aenv build`` (:mod:`reef.execution.sandbox.agentenv.build`). There, ``REEF_E2B_COMPOSE=aenv`` also makes
+it run the Compose project of a task that has one in one sandbox, so that the agent reaches the task's other services
+(:mod:`reef.execution.sandbox.agentenv.compose`). When a deployment supplies verified images for the task,
+AgentENV can start each environment from its image (:mod:`reef.execution.sandbox.agentenv.images`).
+The shared ``environment_config`` selects this class for Reef's Harbor rollouts and generator checks through
+the ``import_path`` that saved trial configs keep,
+``reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment``. A standalone Harbor trial that selects only ``e2b`` uses
+Harbor's own class.
 
 This module can load without the optional E2B SDK. Opening a sandbox requires the SDK; the Harbor subclass also
 requires Harbor 0.25, installed through ``reef-infra[e2b]``.
@@ -37,33 +29,31 @@ import posixpath
 import re
 import shlex
 import tempfile
-import threading
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Self, override
+from typing import Any, override
 
+import aiohttp
 from harbor.environments.base import ExecResult
 from harbor.environments.definition import effective_exec_cwd
 from harbor.environments.e2b import E2BEnvironment
-from harbor.models.task.config import NetworkMode
+from harbor.models.task.config import EnvironmentConfig, NetworkMode
 from harbor.models.task.task import Task
 from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
 from harbor.models.trial.paths import TrialPaths
 from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from reef.core.errors import InternalError
-from reef.execution.sandbox.agentenv_build import (
+from reef.execution.sandbox.agentenv.build import (
     DOCKERFILE_BUILD_VARIABLE,
     AgentEnvTemplates,
     DockerfileBuild,
-    build_image,
     dockerfile_build,
     dockerfile_sets_start_command,
-    ensure_aenv_template,
 )
-from reef.execution.sandbox.agentenv_compose import (
+from reef.execution.sandbox.agentenv.compose import (
     COMPOSE_FILE,
     COMPOSE_VARIABLE,
     AgentEnvComposeOps,
@@ -73,41 +63,25 @@ from reef.execution.sandbox.agentenv_compose import (
     TransientStartError,
     compose_mode,
     compose_project,
-    delete_sandbox,
     main_image,
-    prepare_guest,
 )
-from reef.execution.sandbox.process import (
-    ProcessOutcome,
-    ProgramLaunchError,
-    ProgramTimeoutError,
-    SandboxCapacityError,
-    SandboxProgram,
-    SandboxUnavailableError,
-    parse_env_from,
+from reef.execution.sandbox.agentenv.images import (
+    ColdSandbox,
+    ColdSandboxError,
+    PreparedImageHost,
+    is_missing_snapshot,
+    start_prepared_image,
 )
-from reef.execution.sandbox.remote import (
-    SANDBOX_MARGIN_S,
-    TUNNEL_PORT_BASE,
-    RemoteExecutor,
-    RemoteSession,
-    check_options,
-    parse_forward_ports,
-    probe_command,
-    protected_command,
-    remote_command,
-    remote_root,
+from reef.execution.sandbox.prepared_images import (
+    PreparedImage,
+    PreparedImageJson,
+    prepared_images_from_json,
+    select_prepared_image,
 )
+from reef.execution.sandbox.process import SandboxCapacityError, SandboxRequestError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__package__)
 
-#: The longest life E2B grants a sandbox at creation; asking for more is refused outright, so a run that needs
-#: more keeps its own sandbox alive instead (:class:`SandboxKeeper`).
-SANDBOX_MAX_TIMEOUT_S = 3600
-#: How long before that deadline the keeper asks for it again, so a slow extension still lands in time.
-SANDBOX_RENEW_MARGIN_S = 300
-#: The header that carries a sandbox's traffic access token to a port of a private sandbox.
-TRAFFIC_ACCESS_TOKEN_HEADER = "e2b-traffic-access-token"
 #: The end of the template alias of a task whose Dockerfile has ``--chmod``. Harbor's class builds that template
 #: without the modes, so Reef's class does not use a template that Harbor's class built.
 COPY_MODES_TEMPLATE_SUFFIX = "__copy-modes"
@@ -130,6 +104,8 @@ SYSTEMD_TMP_CLEANUP_WAIT = (
 )
 #: The seconds that ``KillOnTimeoutE2BEnvironment.start`` gives ``SYSTEMD_TMP_CLEANUP_WAIT``.
 SYSTEMD_TMP_CLEANUP_WAIT_SECONDS = 150
+#: The longest wait for the deletion of a sandbox whose start failed, in seconds.
+DELETE_WAIT_SECONDS = 30.0
 
 
 def dockerfile_with_copy_modes(dockerfile: str, context_dir: Path) -> str:
@@ -189,278 +165,6 @@ def dockerfile_with_copy_modes(dockerfile: str, context_dir: Path) -> str:
     return "".join(lines)
 
 
-def template_alias(adapter: str, version: str) -> str:
-    """The pinned agent template, versioned separately for its run isolation dependencies."""
-    return f"reef-{adapter}-{version}-runs-v1".replace(".", "-").lower()
-
-
-def ensure_template(alias: str, npm_package: str, api_key: str) -> None:
-    """Build ``alias`` from Node 22 with ``npm_package`` installed globally, unless it exists already."""
-    from e2b import Template
-
-    if Template.alias_exists(alias, api_key=api_key):
-        return
-    logger.warning(
-        "building the E2B template %s with %s; the first run takes about a minute longer", alias, npm_package
-    )
-    Template.build(
-        Template().from_node_image("22").apt_install("bubblewrap").npm_install(npm_package, g=True),
-        alias=alias,
-        cpu_count=2,
-        memory_mb=2048,
-        api_key=api_key,
-    )
-
-
-@dataclass(frozen=True)
-class E2BExecutor(RemoteExecutor):
-    """A :class:`RemoteExecutor` on E2B.
-
-    ``api_key`` is the E2B key; ``template`` is the sandbox's image by alias. With ``npm_package`` a missing
-    alias is built first.
-    """
-
-    provider: ClassVar[str] = "e2b"
-    provider_options: ClassVar[frozenset[str]] = frozenset({"e2b_api_key", "e2b_api_key_env", "e2b_template"})
-    image_option: ClassVar[str] = "e2b_template"
-
-    api_key: str = field(default="", repr=False)
-    template: str = ""
-
-    @classmethod
-    def from_config(cls, section: Mapping[str, object], environ: Mapping[str, str]) -> Self:
-        check_options("E2B", section, cls.provider_options)
-        key_name = section.get("e2b_api_key_env", "E2B_API_KEY")
-        if not isinstance(key_name, str) or not key_name.isidentifier():
-            raise SandboxUnavailableError("e2b_api_key_env must name an environment variable")
-        api_key = section.get("e2b_api_key") or environ.get(key_name, "")
-        template = section.get("e2b_template", "")
-        if not isinstance(api_key, str) or not isinstance(template, str):
-            raise SandboxUnavailableError("e2b_api_key and e2b_template must be strings")
-        return cls(
-            api_key=api_key.strip(),
-            template=template.strip(),
-            forward_ports=parse_forward_ports(section),
-            env=parse_env_from(section, environ),
-        )
-
-    def has_image(self) -> bool:
-        return bool(self.template)
-
-    def with_program(self, program: SandboxProgram, binary: str) -> Self:
-        return replace(
-            self,
-            template=template_alias(program.name, program.version),
-            npm_package=program.npm_package,
-            binary=binary,
-        )
-
-    def reap(self) -> int:
-        if not self.owner:
-            return 0
-        from e2b import Sandbox, SandboxQuery
-
-        pages = Sandbox.list(query=SandboxQuery(metadata=self.labels()), api_key=self.api_key)
-        stopped = 0
-        while pages.has_next:
-            for info in pages.next_items():
-                if (info.metadata or {}).get("reef_owner") == self.owner and Sandbox.kill(
-                    info.sandbox_id, api_key=self.api_key
-                ):
-                    stopped += 1
-        return stopped
-
-    def preflight(self) -> None:
-        if not self.api_key:
-            raise SandboxUnavailableError(
-                "an E2B sandbox needs an API key: set E2B_API_KEY or the selected sandbox's e2b_api_key"
-            )
-        try:
-            import e2b
-        except ImportError as exc:
-            raise SandboxUnavailableError(
-                "an E2B sandbox needs the e2b package: pip install 'reef-infra[e2b]'"
-            ) from exc
-        if not self.template or self.validated:
-            return
-        # Probing must not reap a running deployment's sandboxes or require its HTTP server to be listening yet.
-        session = None
-        try:
-            session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
-            session.sandbox.commands.run(probe_command(self.binary), timeout=30)
-        except (e2b.SandboxException, ProgramLaunchError) as exc:
-            raise SandboxUnavailableError(f"E2B startup check failed: {exc}") from exc
-        finally:
-            if session is not None:
-                try:
-                    session.close()
-                except ProgramLaunchError as exc:
-                    raise SandboxUnavailableError("E2B startup probe could not be cleaned up") from exc
-        object.__setattr__(self, "validated", True)
-
-    def open(self) -> E2BSession:
-        if not self.template:
-            raise ProgramLaunchError("an E2B sandbox needs a template")
-        from e2b import Sandbox
-
-        self.reap_once()
-        try:
-            if self.npm_package:
-                ensure_template(self.template, self.npm_package, self.api_key)
-            sandbox = Sandbox.create(
-                template=self.template,
-                # E2B refuses a longer life than its ceiling; the session extends it while the run still needs it.
-                timeout=min(int(self.timeout_s + SANDBOX_MARGIN_S), SANDBOX_MAX_TIMEOUT_S),
-                api_key=self.api_key,
-                metadata=self.labels(),
-            )
-        except Exception as exc:
-            raise ProgramLaunchError(f"the E2B sandbox did not start: {exc}") from exc
-        session = E2BSession(sandbox, env=self.env)
-        try:
-            for index, port in enumerate(self.forward_ports):
-                session.forward(port, TUNNEL_PORT_BASE + index)
-        except BaseException:
-            session.close()
-            raise
-        return session
-
-
-class SandboxKeeper(threading.Thread):
-    """Hold one sandbox open past E2B's creation ceiling, for as long as its session is.
-
-    E2B grants a sandbox at most :data:`SANDBOX_MAX_TIMEOUT_S` when it is created, so an agent run allowed more
-    than that would lose its sandbox mid-run. The keeper asks for the ceiling again before each one expires; it
-    stops with the session, and a refusal ends it rather than repeating against a sandbox that is gone.
-    """
-
-    def __init__(self, sandbox: Any) -> None:
-        super().__init__(name="reef-e2b-keeper", daemon=True)
-        self.sandbox = sandbox
-        self.stopped = threading.Event()
-
-    def run(self) -> None:
-        period = max(SANDBOX_MAX_TIMEOUT_S - SANDBOX_RENEW_MARGIN_S, 1)
-        while not self.stopped.wait(period):
-            try:
-                self.sandbox.set_timeout(SANDBOX_MAX_TIMEOUT_S)
-            except Exception as exc:
-                logger.warning("the E2B sandbox's deadline could not be extended, it may end mid-run: %s", exc)
-                return
-
-    def stop(self) -> None:
-        self.stopped.set()
-
-
-class E2BSession(RemoteSession):
-    """One running E2B sandbox (:class:`RemoteSession`), kept alive by its :class:`SandboxKeeper`."""
-
-    provider: ClassVar[str] = "E2B"
-
-    def __init__(self, sandbox: Any, *, env: Mapping[str, str] | None = None) -> None:
-        super().__init__(env=env)
-        self.sandbox = sandbox
-        self.keeper = SandboxKeeper(sandbox)
-        self.keeper.start()
-
-    def write_file(self, path: str, data: bytes, *, as_root: bool = False) -> None:
-        if as_root:
-            self.sandbox.files.write(path, data, user="root")
-        else:
-            self.sandbox.files.write(path, data)
-
-    def read_file(self, path: str) -> bytes:
-        return bytes(self.sandbox.files.read(path, format="bytes"))
-
-    def run(self, command: str, *, as_root: bool = False) -> None:
-        if as_root:
-            self.sandbox.commands.run(command, user="root")
-        else:
-            self.sandbox.commands.run(command)
-
-    def start(self, command: str, *, as_root: bool = False) -> None:
-        if as_root:
-            self.sandbox.commands.run(command, background=True, user="root", timeout=0)
-        else:
-            self.sandbox.commands.run(command, background=True, timeout=0)
-
-    def public_url(self, port: int) -> str:
-        return f"https://{self.sandbox.get_host(port)}"
-
-    def tunnel_headers(self) -> dict[str, str]:
-        """The sandbox's traffic access token, when the service returned a non-empty one; a private sandbox's ports
-        require it. The E2B API key is never one of these headers."""
-        token = self.sandbox.traffic_access_token
-        return {TRAFFIC_ACCESS_TOKEN_HEADER: token} if token else {}
-
-    def stop(self) -> None:
-        self.keeper.stop()
-        self.sandbox.kill()
-
-    def launch(
-        self,
-        argv: Sequence[str],
-        *,
-        root: Path,
-        workspace: Path,
-        env: Mapping[str, str],
-        timeout: float,
-        writable_paths: Sequence[Path] = (),
-        readonly_paths: Sequence[Path] = (),
-    ) -> ProcessOutcome:
-        from connectrpc.code import Code
-        from connectrpc.errors import ConnectError
-        from e2b import CommandExitException, TimeoutException
-        from e2b.sandbox_sync.commands.command_handle import CommandHandle
-
-        command, envs = remote_command(argv, {**env, **self.env}, root)
-        command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
-        cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
-        process: CommandHandle | None = None
-        finished = False
-        try:
-            self.push(root)
-            deadline = time.monotonic() + timeout
-            process = self.sandbox.commands.run(command, envs=envs, cwd=cwd, timeout=timeout, background=True)
-            process_id = process.pid
-            for attempt in range(3):
-                try:
-                    if attempt:
-                        remaining_seconds = deadline - time.monotonic()
-                        if remaining_seconds <= 0:
-                            raise TimeoutException("the command deadline expired while reconnecting")
-                        process = self.sandbox.commands.connect(process_id, timeout=remaining_seconds)
-                    result = process.wait()
-                    finished = True
-                    return ProcessOutcome(result.exit_code, result.stdout, result.stderr)
-                except ConnectError as exc:
-                    if exc.code not in (Code.INTERNAL, Code.UNKNOWN, Code.UNAVAILABLE) or attempt == 2:
-                        raise
-                    # Reattach to the same PID: replaying a command could repeat its side effects.
-                    process.disconnect()
-                    logger.warning("the E2B command connection dropped; reconnecting to process %s", process_id)
-            raise ProgramLaunchError("the E2B command connection could not be restored")
-        except CommandExitException as exc:
-            finished = True
-            return ProcessOutcome(exc.exit_code, exc.stdout, exc.stderr)
-        except TimeoutException as exc:
-            raise ProgramTimeoutError(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
-        except Exception as exc:
-            raise ProgramLaunchError(f"the E2B sandbox could not run the process: {exc}") from exc
-        finally:
-            if process is not None and not finished:
-                try:
-                    self.sandbox.commands.kill(process.pid)
-                except Exception as exc:
-                    logger.warning("could not stop the E2B process %s: %s", process.pid, exc)
-            try:
-                self.pull(root)
-            except Exception as exc:
-                if finished:
-                    raise ProgramLaunchError(f"could not copy {root.name} back from the E2B sandbox") from exc
-                logger.warning("could not copy %s back from the failed E2B process", root.name)
-
-
 #: The part of a session ID that Harbor gives a separate verifier environment of a trial
 #: (``Trial._separate_verifier_session_id`` in Harbor 0.25).
 VERIFIER_SESSION_MARKER = "__verifier__"
@@ -474,10 +178,10 @@ VERIFIER_CAPACITY_MAX_PAUSE_SECONDS = 120.0
 
 class TemplateNotPreparedError(InternalError):
     """A trial that builds no template (``KillOnTimeoutE2BEnvironment.builds_templates`` false) found its template
-    missing, or not ready on AgentENV."""
+    missing, or not ready on AgentENV; or the prepared images of a task have no image of one of its environments."""
 
 
-class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
+class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost, PreparedImageHost):
     """Harbor's ``E2BEnvironment`` whose sandbox is created with ``lifecycle={"on_timeout": "kill"}``, and whose
     template keeps the modes of ``COPY --chmod``.
 
@@ -487,7 +191,7 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     template is the parent's, with two differences for a task that builds its image from a Dockerfile:
 
     - With ``dockerfile_build`` ``aenv``, ``aenv build`` builds the template on the AgentENV deployment
-      (``reef.execution.sandbox.agentenv_build``), and its alias ends with ``AENV_TEMPLATE_SUFFIX``.
+      (``reef.execution.sandbox.agentenv.build``), and its alias ends with ``AENV_TEMPLATE_SUFFIX``.
     - Else, when the Dockerfile has ``--chmod``, the template is built from ``dockerfile_with_copy_modes`` of it, and
       its alias ends with ``COPY_MODES_TEMPLATE_SUFFIX``.
 
@@ -509,6 +213,16 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     - AgentENV pauses the sandbox at its timeout, and does not delete it: ``aenv compose up`` sets no other policy.
     - The start does not wait for systemd: the first process of ``main`` is the project's command.
 
+    ``prepared_image`` is the descriptor of the config's ``kwargs.prepared_images`` for this environment: the one
+    whose directory is this environment's in the task at ``kwargs.task_directory``, and whose source image is the
+    task config's ``docker_image`` (``select_prepared_image``). A Compose project uses the verified digest for
+    its main service. The constructor raises ``ValueError`` for an invalid list and ``TemplateNotPreparedError``
+    for a missing environment. With a
+    descriptor, the environment builds no template, also with ``force_build``, and ``_create_sandbox`` starts the
+    image on AgentENV (``start_prepared_image`` of ``reef.execution.sandbox.agentenv.images``), through this class's
+    ``PreparedImageHost`` operations. When a later step of its ``start`` fails or is cancelled, the start deletes that
+    sandbox.
+
     Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
     as its ``import_path``, and one for each separate verifier environment of the trial, from the same config.
     ``start`` builds a missing template with ``_create_template``, creates the sandbox with ``_create_sandbox``, and
@@ -516,9 +230,18 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     emptied ``/tmp`` (``SYSTEMD_TMP_CLEANUP_WAIT``). ``build_task_template`` makes one that builds templates.
     """
 
-    def __init__(self, *args: Any, builds_templates: bool = True, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        builds_templates: bool = True,
+        prepared_images: list[PreparedImageJson] | None = None,
+        task_directory: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         if not isinstance(builds_templates, bool):
             raise TypeError("builds_templates is a bool")
+        if (prepared_images is None) != (task_directory is None):
+            raise ValueError("prepared_images and task_directory are given together")
         super().__init__(*args, **kwargs)
         self.builds_templates = builds_templates
         #: The ``time.monotonic()`` value when ``start`` began, or None before it.
@@ -530,6 +253,25 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         self.compose_ops: AgentEnvComposeOps | None = (
             AgentEnvComposeOps(self) if runs_compose and (self.environment_dir / COMPOSE_FILE).is_file() else None
         )
+        self.prepared_image: PreparedImage | None = None
+        if prepared_images is not None and task_directory is not None:
+            images = prepared_images_from_json(prepared_images)
+            task_path = Path(task_directory)
+            missing = [
+                f"{directory} (source image {config.docker_image or None})"
+                for directory, config in task_environments(Task(task_path))
+                if select_prepared_image(images, task_path, directory, config.docker_image or None) is None
+            ]
+            if missing:
+                raise TemplateNotPreparedError(
+                    f"the prepared images of {self.environment_name} have no image of {', '.join(missing)}, and a "
+                    "task with prepared images builds none"
+                )
+            self.prepared_image = select_prepared_image(
+                images, task_path, self.environment_dir, self.task_env_config.docker_image or None
+            )
+            if self.prepared_image is None:
+                raise TemplateNotPreparedError(f"no prepared image for the environment at {self.environment_dir}")
         # Harbor builds the template from the task's image when it has one; then the Dockerfile is not read.
         if self.task_env_config.docker_image:
             return
@@ -543,13 +285,21 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     @override
     async def start(self, force_build: bool) -> None:
         self.started_at = time.monotonic()
-        if self.compose_ops is not None:
-            await self.start_compose(force_build)
-            return
-        await super().start(force_build)
-        # A task image can boot systemd, which empties /tmp some seconds after the start. The agent's install uploads
-        # its archives there next, so it waits for that step. The wait is a best effort: its result is not checked.
-        await self.exec(SYSTEMD_TMP_CLEANUP_WAIT, timeout_sec=SYSTEMD_TMP_CLEANUP_WAIT_SECONDS, user="root")
+        try:
+            if self.compose_ops is not None:
+                await self.start_compose(force_build)
+                return
+            await super().start(force_build)
+            # A task image can boot systemd, which empties /tmp some seconds after the start. The agent's install
+            # uploads its archives there next, so it waits for that step. The wait is a best effort: its result is not
+            # checked.
+            await self.exec(SYSTEMD_TMP_CLEANUP_WAIT, timeout_sec=SYSTEMD_TMP_CLEANUP_WAIT_SECONDS, user="root")
+        except BaseException:
+            # The sandbox of a prepared image that a later step of the start did not finish, such as Harbor's
+            # directories or uploads, is this start's own.
+            if self.prepared_image is not None and self._sandbox is not None:
+                await self.discard_sandbox(self._sandbox.sandbox_id)
+            raise
 
     async def start_compose(self, force_build: bool) -> None:
         """Start the task's Compose project in one AgentENV sandbox, and make that sandbox this environment's.
@@ -567,8 +317,12 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         # Keep this optional SDK import inside sandbox creation.
         from e2b import AsyncSandbox
 
+        from reef.execution.sandbox.e2b import delete_sandbox, prepare_guest
+
         templates = AgentEnvTemplates.from_environ(os.environ)
-        image = self.task_env_config.docker_image or main_image(self._template_name)[1]
+        image = (
+            self.prepared_image.image if self.prepared_image else self.task_env_config.docker_image
+        ) or main_image(self._template_name)[1]
         cpus = self._effective_cpus
         sandbox = ComposeSandbox(
             project=compose_project((self.environment_dir / COMPOSE_FILE).read_text(), image, self._startup_env()),
@@ -577,7 +331,9 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
             lifetime_seconds=self._sandbox_timeout,
             startup_seconds=min(max(math.ceil(self.task_env_config.build_timeout_sec), 1), 86400),
         )
-        if force_build:
+        if self.prepared_image is not None:
+            sandbox_id = await self.start_compose_sandbox(sandbox, templates)
+        elif force_build:
             await self._create_template()
             sandbox_id = await self.start_compose_sandbox(sandbox, templates)
         else:
@@ -588,7 +344,7 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
                 sandbox_id = await self.start_compose_sandbox(sandbox, templates)
         try:
             await prepare_guest(templates, sandbox_id)
-            self._sandbox = await AsyncSandbox.connect(sandbox_id, timeout=self._sandbox_timeout)
+            self._sandbox: AsyncSandbox | None = await AsyncSandbox.connect(sandbox_id, timeout=self._sandbox_timeout)
         finally:
             # Harbor's stop deletes only the sandbox that this environment holds.
             if self._sandbox is None:
@@ -702,6 +458,9 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
 
     @override
     async def _does_template_exist(self) -> bool:
+        if self.prepared_image is not None:
+            # A prepared image needs no template build; ``start_prepared_image`` (AgentENV) checks its template.
+            return True
         if self.compose_ops is not None:
             return False
         if not self.builds_with_aenv:
@@ -713,10 +472,11 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         state = await AgentEnvTemplates.from_environ(os.environ).state(self._template_name)
         return state is not None and state.status == "ready"
 
-    # Harbor 0.25.0's template build, with four changes: an environment that builds no template refuses; with a
-    # Compose project, ``aenv build --image`` builds the image of the main service; with ``builds_with_aenv``,
-    # ``aenv build`` builds the template; else the Dockerfile is ``dockerfile_with_copy_modes`` of the task's
-    # Dockerfile. Harbor's retry policy applies to builds. A trial that cannot build fails immediately.
+    # Harbor 0.25.0's template build, with five changes: an environment with a prepared image builds nothing; an
+    # environment that builds no template refuses; with a Compose project, ``aenv build --image`` builds the image of
+    # the main service; with ``builds_with_aenv``, ``aenv build`` builds the template; else the Dockerfile is
+    # ``dockerfile_with_copy_modes`` of the task's Dockerfile. Harbor's retry policy applies to builds. A trial that
+    # cannot build fails immediately.
     # The parity test in tests/sandbox/test_task_environment.py compares the build with Harbor's for a Dockerfile
     # without ``--chmod``.
     @retry(
@@ -728,6 +488,11 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
     )
     @override
     async def _create_template(self) -> None:
+        from reef.execution.sandbox.e2b import build_image, ensure_aenv_template
+
+        if self.prepared_image is not None:
+            # Also for ``force_build``: the deployment prepared the image, so the task's Dockerfile is not built.
+            return
         if not self.builds_templates:
             missing = (
                 f"the template {self._template_name}"
@@ -789,17 +554,28 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
         )
 
     # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The decorator
-    # is Harbor's retry policy, because Harbor's decorator wraps its own method and not this one. The create call, in
-    # create_sandbox_once, is Harbor's call with one more argument. When Harbor adds an argument to the call, add it
-    # there too: the parity test in tests/sandbox/test_task_environment.py compares the two calls. A refusal for want
-    # of capacity becomes ``SandboxCapacityError``, so that an evaluation waits for capacity instead of failing.
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    # preserves Harbor's retry for transient failures. Bad requests and capacity refusals fail immediately:
+    # verifiers already wait for capacity inside this method, and agent rollouts defer in the queue. A failed cold
+    # start fails immediately too: its sandbox can exist after an answer that did not come.
+    # The create call, in create_from_template, is Harbor's call with one more argument.
+    # When Harbor adds an argument to the call, add it there too: the parity test in
+    # tests/sandbox/test_task_environment.py compares the two calls. A refusal for want of capacity becomes
+    # ``SandboxCapacityError``, so that an evaluation waits for capacity instead of failing, and a bad request becomes
+    # ``SandboxRequestError``.
+    @retry(
+        retry=retry_if_exception_type(Exception)
+        & retry_if_not_exception_type((SandboxCapacityError, SandboxRequestError, ColdSandboxError)),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     @override
     async def _create_sandbox(self) -> None:
         """Create the sandbox. A separate verifier environment runs after the agent, so it does not give up the
         agent's work at the first refusal for want of capacity: it calls again, with pauses of 15 s doubling to 2 min,
         until ``VERIFIER_CAPACITY_WAIT_SHARE`` of its start time limit has passed since ``start``. Then it raises the
-        last ``SandboxCapacityError``. Another environment raises it at once."""
+        last ``SandboxCapacityError``. Another environment raises it at once. Any environment raises a
+        ``SandboxRequestError`` at once."""
         verifier = VERIFIER_SESSION_MARKER in self.session_id
         started_at = time.monotonic() if self.started_at is None else self.started_at
         wait_ends_at = started_at + VERIFIER_CAPACITY_WAIT_SHARE * self.task_env_config.build_timeout_sec
@@ -816,15 +592,27 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
                 pause_seconds = min(2 * pause_seconds, VERIFIER_CAPACITY_MAX_PAUSE_SECONDS)
 
     async def create_sandbox_once(self) -> None:
-        """Ask the sandbox service for the sandbox once. Raise ``SandboxCapacityError`` when the service refused it
-        for want of capacity."""
+        """Ask the sandbox service for the sandbox once: from the prepared image when the environment has one, by the
+        end of the start time limit (``build_timeout_sec``) counted from ``start``, or from now before it
+        (``start_prepared_image``); else from the environment's template (``create_from_template``)."""
+        if self.prepared_image is None:
+            await self.create_from_template(self._template_name)
+            return
+        started_at = time.monotonic() if self.started_at is None else self.started_at
+        deadline = started_at + self.task_env_config.build_timeout_sec
+        await start_prepared_image(self, AgentEnvTemplates.from_environ(os.environ), self.prepared_image, deadline)
+
+    async def create_from_template(self, template: str) -> None:
+        """Create the sandbox from the template ``template`` once. Raise ``SandboxCapacityError`` when the service
+        refused it for want of capacity, and ``SandboxRequestError`` with the service's reason when it answered that
+        the request is bad (HTTP 400)."""
         # Keep these optional SDK imports inside sandbox creation.
         import httpx
-        from e2b import AsyncSandbox, RateLimitException, ServiceBusyException
+        from e2b import AsyncSandbox, RateLimitException, SandboxException, ServiceBusyException
 
         try:
             self._sandbox = await AsyncSandbox.create(
-                template=self._template_name,
+                template=template,
                 metadata={"environment_name": self.environment_name, "session_id": self.session_id},
                 envs=self._startup_env(),
                 timeout=self._sandbox_timeout,
@@ -844,6 +632,115 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment, ComposeHost):
             raise SandboxCapacityError(
                 "the sandbox service gave no JSON answer, as its gateway does when it times out"
             ) from exc
+        except SandboxException as exc:
+            # The SDK keeps the HTTP status of the service's answer. Only a bad request is definite and final; the
+            # other answers, such as a credential error, stay the SDK's.
+            if exc.status_code != 400:
+                raise
+            raise SandboxRequestError(f"the sandbox service refused the sandbox's request: {exc}") from exc
+
+    @override
+    async def start_from_template(self, template_id: str) -> bool:
+        # Keep this optional SDK import inside sandbox creation.
+        from e2b import SandboxException
+
+        try:
+            await self.create_from_template(template_id)
+        except (SandboxRequestError, SandboxException) as error:
+            # create_from_template keeps the SDK's error of a refused request as the cause of its own.
+            answer = error.__cause__ if isinstance(error, SandboxRequestError) else error
+            if not isinstance(answer, SandboxException) or not is_missing_snapshot(
+                answer.status_code, str(answer), template_id
+            ):
+                raise
+            return False
+        return True
+
+    @override
+    def cold_sandbox(self, image: str) -> ColdSandbox:
+        # The values of the create call in create_from_template, and the task's CPU and memory of a template build.
+        cpus = self._effective_cpus
+        return ColdSandbox(
+            image=image,
+            timeout_seconds=self._sandbox_timeout,
+            allow_internet_access=self.network_policy.network_mode != NetworkMode.NO_NETWORK,
+            network=self._sandbox_create_network_options(),
+            metadata={"environment_name": self.environment_name, "session_id": self.session_id},
+            env_vars=self._startup_env(),
+            cpu_count=None if cpus is None else int(cpus),
+            memory_mb=self._effective_memory_mb,
+        )
+
+    @override
+    async def attach_sandbox(self, sandbox_id: str) -> None:
+        # Keep this optional SDK import inside sandbox creation.
+        from e2b import AsyncSandbox
+
+        self._sandbox = await AsyncSandbox.connect(sandbox_id, timeout=self._sandbox_timeout)
+
+    @override
+    async def discard_sandbox(self, sandbox_id: str) -> None:
+        """Delete the sandbox ``sandbox_id``, which a start from a prepared image made and did not finish, and hold no
+        sandbox: Harbor's ``stop`` deletes only a sandbox that the environment holds. The delete waits at most
+        ``DELETE_WAIT_SECONDS``. A delete that fails is logged, and AgentENV deletes the sandbox at the end of its
+        lifetime."""
+        from reef.execution.sandbox.e2b import delete_sandbox
+
+        self._sandbox = None
+        try:
+            await asyncio.wait_for(
+                delete_sandbox(AgentEnvTemplates.from_environ(os.environ), sandbox_id), DELETE_WAIT_SECONDS
+            )
+        except (TimeoutError, aiohttp.ClientError) as error:
+            logger.warning("could not delete the sandbox %s of a failed start: %s", sandbox_id, error)
+
+    @override
+    @asynccontextmanager
+    async def start_command(self, command: str) -> AsyncIterator[asyncio.Future[None]]:
+        if self._sandbox is None:
+            raise RuntimeError("Sandbox not found. Please start the environment first.")
+        # No user, directory or variable: the command runs as the image's own. A timeout of 0 sets no limit on it.
+        handle = await self._sandbox.commands.run(cmd=command, background=True, timeout=0)
+
+        async def end() -> None:
+            await handle.wait()
+
+        ended = asyncio.ensure_future(end())
+        try:
+            yield ended
+        finally:
+            if not ended.done():
+                ended.cancel()
+            elif not ended.cancelled():
+                # The command's error, if it had one, counts as read.
+                ended.exception()
+            # This runs also when the end was never awaited. The command keeps running after the disconnect.
+            await handle.disconnect()
+
+    @override
+    async def command_passes(self, command: str, timeout_seconds: int) -> bool:
+        # Keep this optional SDK import inside sandbox creation.
+        from e2b.sandbox.commands.command_handle import CommandExitException
+
+        if self._sandbox is None:
+            raise RuntimeError("Sandbox not found. Please start the environment first.")
+        try:
+            await self._sandbox.commands.run(cmd=command, timeout=timeout_seconds)
+        except CommandExitException:
+            return False
+        return True
+
+
+def task_environments(task: Task) -> list[tuple[Path, EnvironmentConfig]]:
+    """The environments of a trial of ``task``, each as the directory and the config that Harbor starts it from: the
+    task's environment, then each separate verifier environment of the task or of its steps. A verifier that runs in
+    the task's environment has no environment of its own."""
+    environments = [(task.paths.environment_dir, task.config.environment)]
+    for step in task.config.steps or [None]:
+        verifier = resolve_verifier_environment_definition(task.config, task.paths, step)
+        if verifier is not None:
+            environments.append((verifier.directory, verifier.config))
+    return environments
 
 
 async def build_task_template(task_path: Path) -> str:
@@ -863,14 +760,9 @@ async def build_task_template(task_path: Path) -> str:
     service, on every call, and still returns the alias (``build_task_main_image``).
     """
     task = Task(task_path)
-    environments = [(task.paths.environment_dir, task.config.environment)]
-    for step in task.config.steps or [None]:
-        verifier = resolve_verifier_environment_definition(task.config, task.paths, step)
-        if verifier is not None:
-            environments.append((verifier.directory, verifier.config))
     aliases: list[str] = []
     with tempfile.TemporaryDirectory(prefix="reef-template-") as trial_directory:
-        for environment_dir, environment_config in environments:
+        for environment_dir, environment_config in task_environments(task):
             environment = KillOnTimeoutE2BEnvironment(
                 environment_dir=environment_dir,
                 environment_name=task.short_name,
@@ -915,15 +807,10 @@ async def build_task_main_image(task_path: Path) -> str | None:
 __all__ = [
     "AENV_TEMPLATE_SUFFIX",
     "COPY_MODES_TEMPLATE_SUFFIX",
-    "TRAFFIC_ACCESS_TOKEN_HEADER",
-    "E2BExecutor",
-    "E2BSession",
     "KillOnTimeoutE2BEnvironment",
-    "SandboxKeeper",
     "TemplateNotPreparedError",
     "build_task_main_image",
     "build_task_template",
     "dockerfile_with_copy_modes",
-    "ensure_template",
-    "template_alias",
+    "task_environments",
 ]

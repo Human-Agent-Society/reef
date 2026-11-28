@@ -6,10 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from reef.core.job_data import SampleKind
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.sft.stages import SFTJobData, SFTSamples
-from reef.storage.scenario.samples import SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
