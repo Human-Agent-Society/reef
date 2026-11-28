@@ -30,22 +30,23 @@ logger = logging.getLogger(__name__)
 class TTTDSettings(SampleAssemblySettings):
     """The config of ``TTTDSamples``: the step grid and the sample assembly.
 
-    Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two; the other keys
-    are as in ``SampleAssemblySettings``. The constructor refuses other values.
+    Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least three; the other
+    keys are as in ``SampleAssemblySettings``. The constructor refuses other values.
     Purpose: ``TTTDSamples.from_config`` parses it from ``pipeline.record2sample.config``.
     """
 
     groups_per_step: int = config_option(8, help="The comparison groups in one step.")
     rollouts_per_group: int = config_option(
-        64, help="The sibling rollouts in each group; at least two, since a group of one has no relative reward."
+        64,
+        help="The number of sibling rollouts in each group. Use at least three to avoid extreme two-rollout advantages.",
     )
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.groups_per_step <= 0:
+        if type(self.groups_per_step) is not int or self.groups_per_step <= 0:
             raise ValueError("groups_per_step must be positive")
-        if self.rollouts_per_group < 2:
-            raise ValueError("rollouts_per_group must be at least two")
+        if type(self.rollouts_per_group) is not int or self.rollouts_per_group < 3:
+            raise ValueError("rollouts_per_group must be at least three")
 
 
 class TTTDGrouping(ReportGrouping):

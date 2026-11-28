@@ -189,21 +189,21 @@ The step grid has one source: `groups_per_step` and `rollouts_per_group` under
 reads them as `GROUPS_PER_STEP` and `ROLLOUTS_PER_GROUP`, so the harness sends
 exactly the coordinates that Reef waits for. Slime's `--global-batch-size` in
 `serve.yaml` must equal their product. A one-step plumbing smoke sets the grid
-to 2 x 2 and
+to 2 x 3 and
 `enable_thinking: false` in the stack's `training.config`, so a short completion
 is not spent entirely in the reasoning channel before it emits a program.
 Give the training component the same value, so that it renders each rollout as
 the engine served it: `apply-chat-template-kwargs: '{"enable_thinking": false}'`
 in `training.options` on Slime, or `chat_template_kwargs: {enable_thinking: false}`
-on Tinker. Two
-rollouts per group are enough to exercise the path but not to train: TTTD's
-leave-one-out entropic advantages degenerate with one rewarded and one
-unrewarded rollout, so a step that should mean something needs several per group.
+on Tinker. Reef requires at least three rollouts per group. With two different
+scores, the winner's advantage can approach one trillion. Three rollouts
+are enough to exercise the path but not to train, so a step that should mean
+something needs several per group.
 
 `serve-tinker.yaml` runs the same method with Tinker training and sampling
 the model remotely (see the [Tinker guide](../../../../docs/user-guide/tinker.rst)):
 no GPU, Ray, or model download on this machine, the paper's LoRA, Adam, KL and
-sampling settings, and the reduced 2 x 2 grid for one step. Point the harness at
+sampling settings, and the reduced 2 x 3 grid for one step. Point the harness at
 it with `TTTD_STACK=serve-tinker.yaml`, export `TINKER_API_KEY` and
 `TTTD_STATE_DIR`, start `python -m reef serve -c serve-tinker.yaml` and run
 `run.py` as `run.sh` does. Raise `rollouts_per_group` before reading anything

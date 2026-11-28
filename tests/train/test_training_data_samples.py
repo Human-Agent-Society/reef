@@ -67,12 +67,12 @@ def test_mixed_items_survive_worker_serialization():
 #: The step schedule of a job without a ``scheduling`` parameter, as the cookbook recipes submit them.
 SCHEDULING = StepScheduling()
 #: The rollouts in one optimizer step: each batch here trains as one step.
-STEP_SIZE = 2
+STEP_SIZE = 3
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
 def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algorithm):
-    items = tuple(replace(captured_trajectory(str(index), float(index)), group_id="group") for index in range(2))
+    items = tuple(replace(captured_trajectory(str(index), float(index)), group_id="group") for index in range(3))
     original = JobData("batch", items)
     loaded = JobData(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
@@ -200,19 +200,19 @@ def test_policy_backend_reports_missing_training_data_without_inventing_tokens()
 
 def test_groups_preserve_row_and_advantage_order():
     items = tuple(
-        replace(captured_trajectory(str(index), reward), group_id="z" if index < 2 else "a")
-        for index, reward in enumerate((0.0, 2.0, 3.0, 1.0))
+        replace(captured_trajectory(str(index), reward), group_id="z" if index < 3 else "a")
+        for index, reward in enumerate((0.0, 2.0, 1.0, 3.0, 1.0, 0.0))
     )
     batch = JobData("groups", items)
     assert trajectories(batch) == items
-    assert trajectory_groups(batch) == (items[:2], items[2:])
+    assert trajectory_groups(batch) == (items[:3], items[3:])
     from recipes.tttd.objective import adaptive_entropic_advantages
     from recipes.tttd.slime import TttdObjective
 
     objective = TttdObjective()
     expected = tuple(
         value
-        for group in (items[:2], items[2:])
+        for group in (items[:3], items[3:])
         for value in adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
     )
     assert objective.prepare(batch, {}).advantages == expected

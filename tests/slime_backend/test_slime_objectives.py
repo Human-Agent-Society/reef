@@ -188,22 +188,22 @@ def test_a_skipped_job_keeps_the_proposed_state_without_resolving_a_loss():
 def test_group_advantages_are_computed_before_optimizer_partitioning():
     # One sample per optimizer step: every group is split across steps, yet
     # its advantages come from the whole group because prepare ran first.
-    rewards = (0.0, 2.0, 3.0, 1.0)
+    rewards = (0.0, 2.0, 1.0, 3.0, 1.0, 0.0)
     batch = JobData(
         "two-groups",
         tuple(
-            replace(policy_trajectory(str(index), (10, 11), (1,), (-0.1,), reward), group_id=str(index // 2))
+            replace(policy_trajectory(str(index), (10, 11), (1,), (-0.1,), reward), group_id=str(index // 3))
             for index, reward in enumerate(rewards)
         ),
     )
     state = {"steps": 4}
     expected = tuple(
-        advantage for group in (rewards[:2], rewards[2:]) for advantage in adaptive_entropic_advantages(list(group))[0]
+        advantage for group in (rewards[:3], rewards[3:]) for advantage in adaptive_entropic_advantages(list(group))[0]
     )
     prepared = prepare_slime_job(batch, "tttd", state, StepScheduling(), step_size=1)
     assert prepared.payload["loss"] == "tttd"
     assert prepared.payload["advantages"] == pytest.approx(expected)
-    assert prepared.payload["external_step_sizes"] == [1, 1, 1, 1]
+    assert prepared.payload["external_step_sizes"] == [1] * 6
     assert prepared.next_algorithm_state == {"steps": 5}
     assert state == {"steps": 4}
     assert len(prepared.metrics["adaptive_betas"]) == 2

@@ -44,8 +44,9 @@ Report a finite score against each inference receipt:
 
 ``step`` must be nonnegative. Group and rollout indices start at 0 and
 must be below their dimensions. Dimensions must match the served grid,
-with at least one group and two rollouts. Two-rollout groups test the
-workflow only; use more to assess learning.
+with at least one group and three rollouts per group. A group of two distinct
+scores can give the winner an advantage near one trillion. The Tinker example
+uses two groups of three to check the workflow.
 
 Configure the grid under ``pipeline.record2sample.config`` in ``serve.yaml``.
 Keep ``job_samples``, ``buffer_size``, and ``global-batch-size`` equal to
