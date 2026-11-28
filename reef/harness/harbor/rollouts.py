@@ -266,10 +266,21 @@ class RolloutTurn:
 
 @dataclass(frozen=True)
 class TaskRollout:
-    """One rollout of a task: what the verifier said and what reached Reef.
+    """One Harbor task attempt and the score available to its caller.
 
-    ``turns`` holds the answered model calls of a rollout, in call order; a rollout that reports to
-    Reef has none, because its calls are records.
+    ``task_path`` and ``name`` identify the task. ``rollout_id`` identifies the attempt, and ``trial_uri`` locates its
+    trial when Harbor returned a URI. ``rewards`` contains the verifier's original named values. The runner sets
+    ``reward`` to the finite primary value, the configured verifier timeout score, or None when neither exists.
+    Zero is a score. A training caller can clear ``reward`` and set ``error`` when a captured call invalidates the
+    attempt. The original ``rewards`` stay available even when training excludes the attempt.
+
+    ``receipts`` and ``report_agent_record_ids`` identify acknowledged calls and accepted reports. ``failed_calls``
+    counts calls the runner could not capture successfully in its recording mode. ``turns`` holds answered calls
+    in completion order when the runner keeps their bodies. Recorded rollouts keep receipts instead.
+
+    When the runner keeps turns for training, ``model_call_statuses`` holds integer HTTP statuses from 100
+    through 599 in completion order, including failed calls. It selects tool-bearing calls if any exist, otherwise
+    all calls. If the trial returned an error, the final call also counts. Other runners leave this tuple empty.
     """
 
     task_path: Path
@@ -283,12 +294,19 @@ class TaskRollout:
     report_agent_record_ids: tuple[str, ...]
     trial_uri: str | None
     turns: tuple[RolloutTurn, ...] = ()
+    model_call_statuses: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model_call_statuses, tuple) or any(
+            not isinstance(status, int) or not 100 <= status <= 599 for status in self.model_call_statuses
+        ):
+            raise ValueError("the captured model statuses must be a tuple of HTTP statuses")
 
     @property
     def is_infrastructure_failure(self) -> bool:
-        """Whether the rollout could not run: the sandbox, the agent or the verifier failed before it scored.
+        """True exactly when the attempt has no effective score and ``error`` gives the reason.
 
-        That is a failure of the infrastructure, not of the solver.
+        A run can fail before verification, or training can reject a verifier score after a model call failed.
         """
         return self.reward is None and bool(self.error)
 
@@ -595,6 +613,15 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 # A refused report is this rollout's failure, not the caller's: the rollout comes back unreported
                 # with the reason, and the other rollouts in flight go on.
                 error = str(exc)
+        if self.is_unrecorded and self.keeps_turns and turns:
+            tool_calls = [
+                turn for turn in turns if isinstance(turn.get("request"), Mapping) and turn["request"].get("tools")
+            ]
+            if tool_calls and row.error and tool_calls[-1] is not turns[-1]:
+                tool_calls.append(turns[-1])
+            statuses = tuple(turn["status"] for turn in (tool_calls or turns))
+        else:
+            statuses = ()
         return TaskRollout(
             task_path=task_path,
             name=task_path.name,
@@ -607,6 +634,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             report_agent_record_ids=report_ids,
             trial_uri=row.trial_uri,
             turns=answered,
+            model_call_statuses=statuses,
         )
 
     def report(

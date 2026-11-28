@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -63,7 +64,7 @@ class HarborSettings:
     environment: str = "docker"
     agent_host: str | None = None
     concurrency: int = 2
-    verifier_timeout_reward: float | None = 0.0
+    verifier_timeout_reward: float | None = None
     scaffold_tolerance: int = 8
 
     def __post_init__(self) -> None:
@@ -80,8 +81,10 @@ class HarborSettings:
         if self.agent_host is not None and (not isinstance(self.agent_host, str) or not self.agent_host):
             raise ValueError("agent_host must be a non-empty host or None")
         reward = self.verifier_timeout_reward
-        if reward is not None and (isinstance(reward, bool) or not isinstance(reward, (int, float))):
-            raise ValueError("verifier_timeout_reward must be a number or None")
+        if reward is not None and (
+            isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)
+        ):
+            raise ValueError("verifier_timeout_reward must be a finite number or None")
 
 
 @dataclass(frozen=True)
@@ -294,13 +297,32 @@ def task_name(task: TaskSample) -> str:
     return task.task_path.name
 
 
+def training_rollout(rollout: TaskRollout) -> TaskRollout:
+    """Exclude missing scores, access and payment refusals, and a rate or service failure that ends the trial."""
+    statuses = rollout.model_call_statuses
+    for status in reversed(statuses):
+        if status in (401, 402):
+            return replace(
+                rollout, reward=None, error=rollout.error or f"the model provider refused a call with HTTP {status}"
+            )
+    if statuses and (statuses[-1] in (403, 429) or statuses[-1] >= 500):
+        return replace(
+            rollout, reward=None, error=rollout.error or f"the final model call returned HTTP {statuses[-1]}"
+        )
+    if any(inference_aborted(turn.response) for turn in rollout.turns):
+        return replace(rollout, reward=None, error=rollout.error or "the model aborted a response")
+    if rollout.reward is None and not rollout.error:
+        return replace(rollout, error="the verifier returned no finite primary reward")
+    return rollout
+
+
 def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, start: str) -> TrajectorySample | None:
     """The sample of one rollout in ``group``, or None when it has no calls, an aborted call, or does not assemble.
 
     Each call sampled the weights ``start``, so each turn's record names ``start`` as its ``artifact_id``: the
-    turns of one rollout are one policy. A rollout that ran without a reward scores 0.
+    turns of one rollout are one policy. A rollout without a reward produces no sample.
     """
-    if not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
+    if rollout.reward is None or not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
         return None
     inferences = tuple(
         AgentRecord.create(
@@ -312,7 +334,7 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
         for turn in rollout.turns
     )
     try:
-        sample = assembly.assemble(inferences, rollout.reward or 0.0, source_id=rollout.rollout_id)
+        sample = assembly.assemble(inferences, rollout.reward, source_id=rollout.rollout_id)
     except ValueError:
         logger.warning("rollout %s of task %s does not assemble into a sample", rollout.rollout_id, group)
         return None
@@ -371,13 +393,14 @@ def run_train_tasks(
             model_adapter=model_adapter,
             task_images=task_images,
         )
-        rollouts = runner.run_rollouts(
+        completed = runner.run_rollouts(
             [
                 RolloutRequest(runner.harness, runner.policy_model, str(task.task_path))
                 for task in tasks
                 for _ in range(settings.rollouts_per_task)
             ]
         )
+    rollouts = [training_rollout(rollout) for rollout in completed]
     samples: list[TrajectorySample] = []
     tokens: list[RolloutTokens] = []
     left_out = 0

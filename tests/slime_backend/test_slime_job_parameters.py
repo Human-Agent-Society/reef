@@ -69,6 +69,7 @@ def test_the_parameters_of_a_dataset_job_parse_into_their_typed_value() -> None:
         ({"save_interval": 0}, "save_interval must be a positive int"),
         ({"dataset": {"path": "relative.jsonl"}}, "dataset.path must be an absolute path"),
         ({"dataset": {"path": "/d.jsonl", "shuffle": True}}, "dataset parameter is an object"),
+        ({"harbor": {"verifier_timeout_reward": float("inf")}}, "verifier_timeout_reward must be a finite number"),
         ({"harbor": None}, "needs the harbor parameter as an object"),
         ({"harbor": {"n_samples_per_prompt": 4}}, r"harbor parameter takes no \['n_samples_per_prompt'\]"),
         ({"harbor": {"rollouts_per_task": 4}}, r"harbor parameter takes no \['rollouts_per_task'\]"),

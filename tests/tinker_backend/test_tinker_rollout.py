@@ -74,7 +74,7 @@ class AgentLab(TaskLab):
         # A blocking agent: the sampler endpoint runs on its own threads.
         with urllib.request.urlopen(request, timeout=10) as response:
             response.read()
-        return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
+        return RolloutRow(rewards={"reward": self.rewards[task_path.name]} if task_path.name in self.rewards else {})
 
     async def build_environment(self, task_path, *, overrides) -> str:
         self.builds.append(task_path.name)
@@ -90,7 +90,7 @@ def harbor_task(root: Path, name: str) -> TaskSample:
 
 @pytest.mark.unit
 def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples(tmp_path):
-    tasks = (harbor_task(tmp_path, "add"), harbor_task(tmp_path, "sort"), harbor_task(tmp_path, "broken"))
+    tasks = tuple(harbor_task(tmp_path, name) for name in ("add", "sort", "broken", "unscored"))
     sampler = Sampler()
     lab = AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"}))
 
@@ -107,17 +107,18 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
 
     # This runner runs on Docker, which builds one image at a time, so no build comes before the rollouts.
     assert lab.builds == []
-    assert sampler.paths == ["tinker://start/sampler"] * 4
+    assert sampler.paths == ["tinker://start/sampler"] * 6
     # Each task's two rollouts form its group; the task whose sandbox failed has none.
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add", "sort", "sort"]
-    assert rollouts.rewards() == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": ()}
+    assert rollouts.rewards() == {"add": (1.0, 1.0), "sort": (0.0, 0.0), "broken": (), "unscored": ()}
     # The sandbox of "broken" did not start: its rollouts failed, which is not the policy's failure.
     assert rollouts.scores.to_json() == [
         {"task": "add", "scores": [1.0, 1.0]},
         {"task": "sort", "scores": [0.0, 0.0]},
         {"task": "broken", "scores": ["failed", "failed"]},
+        {"task": "unscored", "scores": ["failed", "failed"]},
     ]
-    assert rollouts.metrics()["removed_rollouts"] == 2, "a rollout whose sandbox failed gives no sample"
+    assert rollouts.metrics()["removed_rollouts"] == 4
     training = rollouts.samples[0].training
     assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
     # Every call sampled the job's start, so the sample names it as the policy that produced its tokens.

@@ -30,6 +30,11 @@ Task jobs on Slime
 
 Slime runs each Harbor task ``n-samples-per-prompt`` times on its rollout engines.
 The verifier rewards form a group for ``advantage-estimator`` and ``policy_loss``.
+A numeric zero counts as a score. Reef excludes a rollout if the model aborts a response or the verifier returns no finite primary reward.
+Reef excludes a rollout when a model call returns HTTP 401 or 402, or when its final call returns 403, 429, or a 5xx status.
+If the agent sent requests that declared tools, Reef checks those requests. When the trial reports an error, Reef also checks its final request.
+Verifier timeouts are unscored by default. Set ``harbor.verifier_timeout_reward`` to a number to score them.
+
 Use these training and recipe options:
 
 .. code:: yaml

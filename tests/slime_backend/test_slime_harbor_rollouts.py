@@ -10,7 +10,9 @@ import asyncio
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -220,6 +222,12 @@ def test_score_centering_gets_a_head_per_response_token_with_a_uniform_head_wher
         (AgentLab(error="the sandbox did not start"), (200, GENERATED), None, "the sandbox did not start"),
         # The verifier scored the rollout, but the agent made no call: the sample cannot train, and the reward reports.
         (AgentLab(reward=1.0, turns=0), (200, GENERATED), 1.0, "no model call"),
+        (
+            AgentLab(reward=0.0),
+            (200, {**GENERATED, "meta_info": {**GENERATED["meta_info"], "finish_reason": {"type": "abort"}}}),
+            None,
+            "abort",
+        ),
         # An agent that gives up when the engines fail.
         (AgentLab(), (500, "no engine"), None, "HTTPError 500"),
     ],
@@ -238,6 +246,26 @@ def test_a_failed_rollout_is_a_removed_sample_outside_its_prompt_group(
     assert error in sample.metadata["abort_reason"]
     (result,) = read_task_rollout_results(Path(source.job_directory))
     assert (result.reward, result.assembled) == (reward, False)
+
+
+@pytest.mark.parametrize(("settings", "rewards"), [({}, []), ({"verifier_timeout_reward": 0.0}, [0.0])])
+def test_a_verifier_timeout_reports_only_an_explicit_score(tmp_path, sessions, settings, rewards) -> None:
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({"exception_info": {"exception_type": "VerifierTimeoutError"}}))
+
+    class TimedOutLab(AgentLab):
+        """Call the model and return the trial whose verifier timed out."""
+
+        async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+            post(agent, [{"role": "user", "content": "first"}])
+            return RolloutRow(rewards={}, error="verifier timed out", trial_uri=trial.as_uri())
+
+    source = source_of(tmp_path, **settings)
+    fields = run_one(sessions(source, TimedOutLab()), source)
+    (result,) = read_task_rollout_results(Path(source.job_directory))
+    assert fields.remove_sample == (not rewards)
+    assert task_job_metrics([result.task], [result])["rollout_rewards"][result.task] == rewards
 
 
 class RaisingLab(AgentLab):
@@ -774,3 +802,54 @@ def test_slime_gives_a_lone_rollout_of_a_group_no_advantage() -> None:
     builder = slime_builder()
     samples = slime_samples([assembled(1.0), removed_fields("a", 0), removed_fields("b", 0)])
     assert builder.convert(samples)["rewards"] == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected_rewards"),
+    [
+        ((200, 200), [0.0]),
+        ((200, 401), []),
+        ((200, 402, 200), []),
+        ((200, 403), []),
+        ((403, 200), [0.0]),
+        ((200, 429), []),
+        ((429, 200), [0.0]),
+        ((200, 503), []),
+        ((503, 200), [0.0]),
+    ],
+)
+def test_training_rewards_exclude_provider_refusals_and_terminal_service_failures(
+    tmp_path: Path, statuses: tuple[int, ...], expected_rewards: list[float]
+) -> None:
+    class RetryingLab(AgentLab):
+        """Attempt each call even after an HTTP error and return a verifier score of zero."""
+
+        async def run(self, task_path: Path, agent, *, key: str, tags, overrides) -> RolloutRow:
+            messages = [{"role": "user", "content": "first"}]
+            for status in statuses:
+                try:
+                    answer = post(agent, messages)
+                except urllib.error.HTTPError as exc:
+                    assert exc.code == status
+                else:
+                    messages.extend([answer["choices"][0]["message"], {"role": "user", "content": "next"}])
+            return RolloutRow(rewards={"reward": 0.0})
+
+    class RetryingChat(Chat):
+        """Return each configured HTTP status in call order."""
+
+        def generate(self, body: Mapping[str, object]):
+            reply = super().generate(body)
+            status = statuses[len(self.bodies) - 1]
+            return reply if status == 200 else (status, "unavailable")
+
+    source = source_of(tmp_path)
+    chat = RetryingChat((200, GENERATED))
+    session = HarborRolloutSession(source, chat=chat, model="m", top_k=0, lab=RetryingLab())
+    try:
+        fields = run_one(session, source)
+    finally:
+        session.close()
+    (result,) = read_task_rollout_results(Path(source.job_directory))
+    assert fields.remove_sample == (not expected_rewards)
+    assert task_job_metrics([result.task], [result])["rollout_rewards"][result.task] == expected_rewards

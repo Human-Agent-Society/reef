@@ -234,7 +234,8 @@ def generated(answer: Any) -> tuple[list[int], list[float], str]:
         log_probs.append(float(pair[0]))
         tokens.append(pair[1])
     reason = meta.get("finish_reason")
-    finish = "length" if isinstance(reason, dict) and reason.get("type") == "length" else "stop"
+    finish_type = reason.get("type") if isinstance(reason, dict) else reason
+    finish = finish_type if finish_type in ("abort", "length") else "stop"
     return tokens, log_probs, finish
 
 
