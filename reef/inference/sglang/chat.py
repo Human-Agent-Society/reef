@@ -385,7 +385,9 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             captured = self.client.parse(capture.response())
             # Streaming parsers are stateful. Parse the complete sample with a
             # fresh instance for the canonical response that the record keeps.
-            response = self._response_from_capture(call, captured, self._configured_tool_parser(call.request))
+            response = self._response_from_capture(
+                call, captured, self._configured_tool_parser(call.request), infer_from_closing_tag=False
+            )
             provider_response, frames = self._finish_frames(call, relay, response, chat_id, message_id, created)
             stream.record_response = provider_response
             for frame in frames:

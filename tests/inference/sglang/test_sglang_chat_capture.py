@@ -1076,7 +1076,8 @@ def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> Non
 
 
 @pytest.mark.unit
-def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() -> None:
+@pytest.mark.parametrize("pre_opened", [False, True])
+def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks(pre_opened: bool) -> None:
     async def run() -> None:
         async def generate(request):
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -1124,7 +1125,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                 str(server.make_url("")).rstrip("/"),
                 model_path="model",
                 tokenizer=FakeTokenizer(),
-                force_reasoning=True,
+                force_reasoning=pre_opened,
             )
             stream = await backend.inference_stream(
                 live_artifact(),
@@ -1140,15 +1141,20 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
         finally:
             await server.close()
 
-        text = body.decode()
-        assert '"type": "thinking_delta", "thinking": "work"' in text
-        assert '"type": "text_delta", "text": "answer"' in text
-        assert "</think>" not in text
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
+        deltas = [event["delta"] for event in events if event["type"] == "content_block_delta"]
+        thinking = "".join(delta["thinking"] for delta in deltas if delta["type"] == "thinking_delta")
+        answer = "".join(delta["text"] for delta in deltas if delta["type"] == "text_delta")
         recorded = stream_record(stream, body, complete=True)
-        assert recorded["content"] == [
-            {"type": "thinking", "thinking": "work", "signature": ""},
-            {"type": "text", "text": "answer"},
-        ]
+        if pre_opened:
+            assert (thinking, answer) == ("work", "answer")
+            assert recorded["content"] == [
+                {"type": "thinking", "thinking": "work", "signature": ""},
+                {"type": "text", "text": "answer"},
+            ]
+        else:
+            assert (thinking, answer) == ("", "\nwork  </think>\n\nanswer")
+            assert recorded["content"] == [{"type": "text", "text": answer}]
         assert "training" not in recorded
 
     asyncio.run(run())

@@ -759,13 +759,18 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             tool_parser=self._configured_tool_parser(request),
         )
 
-    def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
+    def _response_from_capture(
+        self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any, *, infer_from_closing_tag: bool = True
+    ) -> dict[str, Any]:
         """The OpenAI-shaped response of one exact sample."""
         text = captured.text
         if text is None:
             text = self._require_tokenizer().decode(captured.output_ids, skip_special_tokens=True)
         message, parsed_tool_calls = self._assistant_message(
-            text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
+            text,
+            tool_parser,
+            force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids),
+            infer_from_closing_tag=infer_from_closing_tag,
         )
         # Tool parsing must not hide an engine abort from the service's abort check.
         if parsed_tool_calls and captured.finish_reason != "abort":
@@ -999,23 +1004,15 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         tool_parser: Any,
         *,
         force_reasoning: bool = False,
+        infer_from_closing_tag: bool = True,
     ) -> tuple[dict[str, Any], bool]:
-        # Thinking-template models emit reasoning before </think>. The
-        # opening tag is often inserted by the chat template, so it is
-        # usually absent from the sampled text. OpenAI-shaped clients render
-        # content verbatim, so reasoning must ride the standard
-        # reasoning_content field — otherwise every consumer downstream
-        # (agents, judges, user simulators) sees chain-of-thought as the
-        # reply. Training tensors are captured from the raw token stream and
-        # are unaffected by this presentation split. The split follows
-        # SGLang's Qwen3 reasoning parser (``split_reasoning``). SGLang forces
-        # reasoning whenever enable_thinking is not false, so a closing tag
-        # also starts the split: it only appears when thinking is on. A reply
-        # without a closing tag hit its token cap mid-thought, so all of it is
-        # reasoning: a judge that scored it as content would score the wrong text.
+        # A buffered reply can infer reasoning from a closing tag. The live stream has already sent
+        # unmarked text in the answer channel by the time it sees a closing tag.
         reasoning = ""
         if cls.SPLIT_REASONING:
-            reasoning, text = split_reasoning(text, pre_opened=force_reasoning)
+            reasoning, text = split_reasoning(
+                text, pre_opened=force_reasoning, infer_from_closing_tag=infer_from_closing_tag
+            )
         message: dict[str, Any] = {"role": "assistant", "content": text}
         if reasoning:
             message["reasoning_content"] = reasoning

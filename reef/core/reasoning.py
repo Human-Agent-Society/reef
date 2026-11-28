@@ -43,14 +43,16 @@ def leading_think_tags_end(text: str) -> int:
     return end
 
 
-def split_reasoning(text: str, *, pre_opened: bool) -> tuple[str, str]:
+def split_reasoning(text: str, *, pre_opened: bool, infer_from_closing_tag: bool = True) -> tuple[str, str]:
     """The reasoning and the answer of the sampled reply ``text``; the reasoning is "" when the reply has none.
 
     The reply starts in reasoning when the prompt pre-opened it or when the reply begins with opening tags.
-    An unmarked prefix also counts as reasoning if the first boundary is a closing tag. A tool call ends known
-    reasoning, and otherwise belongs to the answer. Opening tags inside visible text are literal.
+    With ``infer_from_closing_tag``, the first closing tag can identify a previously unmarked prefix as reasoning.
+    A live stream must choose its channel before that tag arrives. A tool call ends known reasoning. Opening tags inside visible text are literal.
     """
     start = leading_think_tags_end(text)
+    if not pre_opened and not start and not infer_from_closing_tag:
+        return "", text
     body = text[start:]
     boundary = REASONING_BOUNDARY.search(body)
     if boundary is None:
