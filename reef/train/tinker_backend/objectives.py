@@ -23,8 +23,9 @@ from reef.train.tinker_backend.signals import TrainingSignal
 class TinkerObjective(ABC):
     """A method's data preparation and its Tinker loss family.
 
-    Values: a subclass declares a non-empty ``name`` and ``loss_family``, the
-    name of a loss family that ``resolve_loss_family`` resolves.
+    Values: a subclass declares a non-empty ``name``, the registered name that
+    a job's ``objective`` gives, and ``loss_family``, the name of a loss
+    family that ``resolve_loss_family`` resolves.
     ``supports_multiple_epochs`` is whether the loss stays valid when a job
     trains its data more than once. ``rollout_unit`` is the
     rows that one optimizer step keeps together: ``"sample"`` or
@@ -32,7 +33,7 @@ class TinkerObjective(ABC):
 
     Purpose: ``prepare_tinker_job`` calls ``prepare`` with a job's complete data.
     ``prepare`` returns the proposed objective state; the component commits it
-    with the job's last checkpoint.
+    with the job's last checkpoint. Model-dependent terms stay in the loss family.
     """
 
     name: str = ""
@@ -41,7 +42,10 @@ class TinkerObjective(ABC):
     rollout_unit: RolloutUnit = "sample"
 
     def validate_scheduling(self, scheduling: StepScheduling) -> None:
-        """Raise ``ValueError`` for a job schedule whose passes this objective's loss cannot train correctly."""
+        """Raise ``ValueError`` for a job schedule whose passes this objective's loss cannot train correctly.
+
+        The default refuses ``epochs`` above 1 without ``supports_multiple_epochs``.
+        """
         if scheduling.epochs > 1 and not self.supports_multiple_epochs:
             raise ValueError(
                 f"objective {self.name!r} does not support {scheduling.epochs} epochs per job: "

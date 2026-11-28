@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.sft.processor import SFTJobData, SFTSamples
-from reef.storage.samples import SampleKind
+from reef.storage.scenario.samples import SampleKind
 from reef.train.pipeline import PipelineSpec
 
 

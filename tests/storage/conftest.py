@@ -11,7 +11,7 @@ def postgres_config():
     from sqlalchemy import create_engine
     from sqlalchemy.schema import DropSchema
 
-    from reef.storage.postgres import postgres_url
+    from reef.storage.sql.postgres import postgres_url
 
     url = os.environ.get("REEF_TEST_POSTGRES_URL")
     if not url:
@@ -32,7 +32,7 @@ def postgres_config():
 
 @pytest.fixture
 def postgres_database(postgres_config):
-    from reef.storage.postgres import PostgresRecordDatabase
+    from reef.storage.sql.postgres import PostgresRecordDatabase
 
     url, schema = postgres_config
     database = PostgresRecordDatabase(url, schema=schema)

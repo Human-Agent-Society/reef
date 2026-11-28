@@ -64,8 +64,8 @@ from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
+from reef.storage.data.job_data import JobDataKind
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
@@ -120,7 +120,7 @@ class HarnessTrainingComponent(LocalJobComponent):
     templates write it into each evaluation run, so neither the seed nor a kept tree ever carries a provider.
 
     Purpose: the service builds one for each harness recipe of the deployment (``from_settings``, in
-    ``reef.service.assembly.with_harness_components``); the dispatcher queues its jobs, and the training service
+    ``reef.api.assembly.with_harness_components``); the dispatcher queues its jobs, and the training service
     runs them. Code that already holds the method and the scorer as objects calls the constructor.
     """
 

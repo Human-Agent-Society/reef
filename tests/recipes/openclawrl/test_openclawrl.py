@@ -18,17 +18,17 @@ from recipes.openclawrl.prm import PRMJudge
 from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
+from reef.api.training import training_recipe_config
+from reef.control.scenario.live_objects import scenario_components
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
-from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
-from reef.record2sample.staleness import ServedArtifacts
-from reef.scenario.live_objects import scenario_components
-from reef.service.deploy.training import training_recipe_config
+from reef.samples.context import PipelineContext
+from reef.samples.staleness import ServedArtifacts
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
@@ -432,7 +432,7 @@ def test_the_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline
 
 @pytest.mark.unit
 def test_the_batches_need_the_openclawrl_sample_stage() -> None:
-    recipe = openclawrl_recipe({"record2sample": {"module": "reef.record2sample:NoSamples"}})
+    recipe = openclawrl_recipe({"record2sample": {"module": "reef.samples:NoSamples"}})
     with pytest.raises(PluginConfigError, match="OpenClawRLJobData needs OpenClawRLSamples"):
         recipe.stages().build(PipelineContext("s"))
 

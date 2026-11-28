@@ -1,7 +1,7 @@
 """Training requests in the training request queue, not in the record store (RFC #1054).
 
 A training request (``POST /reef/train``) is control's work, not an observed record. Each request is one item
-of the ``requests`` work queue (``reef.storage.work_queue``):
+of the ``training_requests`` work queue (``reef.storage.coordination.work_queue``):
 
 - ``id`` is the request ID: the client's ``agent_record_id``, or a new one;
 - ``scenario`` and ``serial_key`` are its scenario, so the requests of one scenario settle in the order they came;
@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from reef.core.training_request import TrainingRequest
-from reef.storage.records import RecordConflictError
-from reef.storage.work_queue import JsonValue, NewWork, WorkConflictError, WorkItem, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, NewWork, WorkConflictError, WorkItem, WorkQueue
+from reef.storage.scenario.records import RecordConflictError
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)

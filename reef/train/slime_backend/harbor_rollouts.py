@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import math
+import os
 import random
 import threading
 from collections import Counter
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from reef.core.job_data import TrajectorySample
-from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.task_environment import task_images_from_environ
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
@@ -400,6 +401,8 @@ class HarborRolloutSession:
     string on success or a nonempty error string on failure. ``built`` starts an attempt for a new path and shares
     every pending attempt. It keeps successful attempts for the session. After failure, only a group with a larger
     index can replace the attempt. Cancelling a waiter leaves the shared attempt running.
+
+    When the deployment supplies prepared task images, rollouts use them without building an environment.
     """
 
     def __init__(
@@ -428,6 +431,7 @@ class HarborRolloutSession:
             verifier_timeout_reward=settings.verifier_timeout_reward,
             lab=lab,
             concurrency=settings.concurrency,
+            task_images=task_images_from_environ(settings.environment, os.environ),
         )
 
     def close(self) -> None:
@@ -447,8 +451,8 @@ class HarborRolloutSession:
         return await self.on_own_loop(self.rollout(task, task_path, group_index))
 
     async def built(self, task_path: Path, group_index: int) -> str:
-        """Wait for a shared environment build. A later group can retry a failed build."""
-        if self.runner.environment not in REMOTE_TASK_ENVIRONMENTS:
+        """Wait for a shared remote build unless the task has prepared images. A later group can retry a failed build."""
+        if not self.runner.builds_environment_first(task_path):
             return ""
         attempt = self.builds.get(task_path)
         if attempt is None or (group_index > attempt[0] and attempt[1].done() and attempt[1].result()):

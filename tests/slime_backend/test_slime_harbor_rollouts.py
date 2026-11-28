@@ -406,6 +406,53 @@ def test_a_failed_build_removes_the_tasks_samples_after_a_second_try(tmp_path, s
     assert lab.builds == ["add", "add", "add"] and lab.runs == 4
 
 
+class EnvironmentLab(AgentLab):
+    """An ``AgentLab`` that keeps the Harbor environment config of each rollout in ``environments``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.environments: list[dict[str, Any]] = []
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.environments.append(overrides["environment"])
+        return await super().run(task_path, agent, key=key, tags=tags, overrides=overrides)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("listed", [True, False])
+def test_rollouts_of_a_task_with_prepared_images_start_with_no_build_first(
+    tmp_path, sessions, monkeypatch, listed
+) -> None:
+    source = source_of(tmp_path, environment="e2b", concurrency=2)
+    ((name, path),) = source.tasks
+    image = {
+        "directory": "environment",
+        "source_image": None,
+        "image": "registry.example/tasks/add@sha256:" + "b" * 64,
+        "template_id": None,
+        "start": None,
+        "ready": None,
+    }
+    images_file = tmp_path / "task-images.json"
+    images_file.write_text(json.dumps({path if listed else str(tmp_path / "other" / "add"): [image]}))
+    monkeypatch.setenv("REEF_AGENTENV_TASK_IMAGES", str(images_file))
+    lab = EnvironmentLab()
+    session = sessions(source, lab)
+
+    async def scenario() -> list[SampleFields]:
+        return list(await asyncio.gather(*(session.run(name, Path(path), index) for index in range(3))))
+
+    results = asyncio.run(scenario())
+    # The image is ready to start: the rollouts of the task, also three at once, make no extra start before theirs.
+    assert lab.builds == []
+    if listed:
+        assert lab.runs == 3 and not any(fields.remove_sample for fields in results)
+        assert [environment["kwargs"]["prepared_images"] for environment in lab.environments] == [[image]] * 3
+    else:
+        # A task that the deployment's file does not list runs no rollout.
+        assert lab.runs == 0 and all("list no task at" in fields.error for fields in results)
+
+
 class Args(SimpleNamespace):
     """Build the Slime options that task admission reads.
 

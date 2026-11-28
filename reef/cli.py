@@ -60,8 +60,8 @@ def main(argv=None):
         print(_help_text(), file=sys.stderr)
         sys.exit(2)
 
-    from reef.service.deploy import DeployConfigError, DeployStartupError
-    from reef.service.deploy import main as _serve_main
+    from reef.deploy import DeployConfigError, DeployStartupError
+    from reef.deploy import main as _serve_main
 
     try:
         _serve_main(rest)

@@ -45,7 +45,8 @@ class ActivationRule(ConfiguredPlugin, ABC):
     ``activates_evaluated(artifact_id, evaluation)`` is true when Reef activates the artifact ``artifact_id``
     once ``evaluation``, an evaluation of it, finished; the default is false. Both decide from their arguments
     alone. Purpose: the scenario's committer and the artifact evaluation service ask the rule of the scenario's
-    recipe, and activate the artifact when it says so.
+    recipe, and activate the artifact when it says so. Reef builds the rule from the config of the ``activation``
+    section with the class method ``from_config(config)``; the inherited one takes no config.
     """
 
     @abstractmethod

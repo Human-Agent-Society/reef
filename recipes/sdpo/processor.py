@@ -27,11 +27,11 @@ from reef.core.chat_rendering import TeacherRequest
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import make_trajectory, trajectory_reward
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.distill import student_call, student_sample
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.samples.distill import student_call, student_sample
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 #: The reference's reprompt strings (``sdpo.yaml`` at the pin), used verbatim.

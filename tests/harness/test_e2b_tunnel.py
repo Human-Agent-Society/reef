@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from reef.execution.sandbox import relay as relay_module
 from reef.execution.sandbox.e2b import TRAFFIC_ACCESS_TOKEN_HEADER, E2BExecutor, E2BSession, template_alias
 from reef.execution.sandbox.process import (
     ProcessOutcome,
@@ -93,7 +94,7 @@ def test_reconnecting_does_not_extend_the_command_deadline(tmp_path, monkeypatch
     rpc = pytest.importorskip("connectrpc.errors")
     from connectrpc.code import Code
 
-    import reef.execution.sandbox.e2b as executor
+    import reef.execution.sandbox.e2b.executor as executor
 
     monkeypatch.setattr(executor, "time", SimpleNamespace(monotonic=Mock(side_effect=[0.0, 61.0])))
     sandbox = Mock()
@@ -268,6 +269,35 @@ def test_a_request_inside_the_sandbox_reaches_the_reef_port_and_its_answer_strea
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("target_form", ["@127.0.0.1:{port}/collect", "http://127.0.0.1:{port}/collect", "*"])
+def test_a_request_target_that_is_not_a_path_never_leaves_the_reef_port(tunnel, target_form: str) -> None:
+    """The sandbox chooses the request target. ``@host/`` after the Reef port's address would name another host, so
+    the pump answers 400 and sends nothing."""
+    _, local_port, _ = tunnel
+    reached: list[str] = []
+
+    class Other(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            reached.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    other = serve(Other)
+    connection = http.client.HTTPConnection("127.0.0.1", local_port, timeout=10)
+    connection.putrequest("GET", target_form.format(port=other.server_port))
+    connection.endheaders()
+    response = connection.getresponse()
+    assert response.status == 400 and b"is not a path of the Reef host's port" in response.read()
+    connection.close()
+    other.shutdown()
+    assert reached == []
+
+
+@pytest.mark.unit
 def test_the_tunnel_answers_no_one_without_the_secret(tunnel) -> None:
     _, _, tunnel_port = tunnel
     for secret in (None, "wrong"):
@@ -286,6 +316,32 @@ def test_an_interrupted_upstream_stream_is_not_reported_as_complete(tunnel) -> N
         pytest.raises(http.client.IncompleteRead),
     ):
         response.read()
+
+
+@pytest.mark.unit
+def test_a_request_that_expires_before_polling_releases_its_body(monkeypatch) -> None:
+    monkeypatch.setattr(relay_module, "ANSWER_SECONDS", 0.05)
+    monkeypatch.setattr(relay_module, "POLL_SECONDS", 0.05)
+    relay = Relay("test-secret")
+    local_server = serve(relay.local_handler())
+    tunnel_server = serve(relay.tunnel_handler())
+    try:
+        request = post(f"http://127.0.0.1:{local_server.server_port}/model", {"prompt": "x" * 65536})
+        with pytest.raises(urllib.error.HTTPError) as expired:
+            urllib.request.urlopen(request, timeout=5)
+        assert expired.value.code == 504
+        assert not relay.open
+        assert not relay.waiting
+
+        poll = urllib.request.Request(
+            f"http://127.0.0.1:{tunnel_server.server_port}/next", headers={"x-relay-secret": "test-secret"}
+        )
+        with urllib.request.urlopen(poll, timeout=5) as response:
+            assert response.status == 204
+    finally:
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
 
 
 @pytest.mark.unit
@@ -322,6 +378,77 @@ def test_a_lost_reply_acknowledgement_does_not_duplicate_stream_content(lost_ack
                 with pytest.raises(http.client.IncompleteRead):
                     response.read()
         assert len(lost) == lost_acknowledgements
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
+
+
+@pytest.mark.unit
+def test_a_request_whose_handout_was_lost_goes_out_again_and_reaches_the_gateway_once(monkeypatch) -> None:
+    # The pump's first poll loses the answer that carried the request, as a failed sandbox exchange does.
+    monkeypatch.setattr(relay_module, "REOFFER_SECONDS", 0.3)
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    lost: list[str] = []
+
+    class LoseHandout(relay.tunnel_handler()):
+        def answer(self, status: int, body: bytes = b"") -> None:
+            if self.path == "/next" and status == 200 and not lost:
+                lost.append(json.loads(body)["id"])
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            super().answer(status, body)
+
+    local_server = serve(relay.local_handler())
+    tunnel_server = serve(LoseHandout)
+    pump = TunnelPump(f"http://127.0.0.1:{tunnel_server.server_port}", "test-secret", gateway.port, pollers=2)
+    try:
+        pump.start(timeout=10)
+        with urllib.request.urlopen(
+            post(f"http://127.0.0.1:{local_server.server_port}/echo", {"x": 1}), timeout=10
+        ) as r:
+            assert r.status == 201 and json.loads(r.read())["body"] == {"x": 1}
+        assert len(lost) == 1
+        assert len(gateway.received) == 1
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
+
+
+@pytest.mark.unit
+def test_a_slow_answer_goes_out_again_but_reaches_the_gateway_once(monkeypatch) -> None:
+    monkeypatch.setattr(relay_module, "REOFFER_SECONDS", 0.1)
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    local_server = serve(relay.local_handler())
+    tunnel_server = serve(relay.tunnel_handler())
+    pump = TunnelPump(f"http://127.0.0.1:{tunnel_server.server_port}", "test-secret", gateway.port, pollers=3)
+    waited: list[bytes] = []
+    try:
+        pump.start(timeout=10)
+        waiter = threading.Thread(
+            target=lambda: waited.append(
+                urllib.request.urlopen(
+                    post(f"http://127.0.0.1:{local_server.server_port}/wait", {}), timeout=10
+                ).read()
+            )
+        )
+        waiter.start()
+        assert gateway.waiting.wait(10)
+        # The relay gives the unanswered request out again several times while the gateway holds it.
+        threading.Event().wait(0.6)
+        urllib.request.urlopen(post(f"http://127.0.0.1:{local_server.server_port}/arrive", {}), timeout=10).read()
+        waiter.join(10)
+        assert waited == [b"waited"]
+        assert len(gateway.received) == 2
+        assert not relay.given and not relay.waiting
     finally:
         pump.stop()
         for server in (local_server, tunnel_server):

@@ -93,7 +93,10 @@ class TokenRow:
         return cls(tuple(training.get("tokens", ())), mask, logprobs, advantage, topk_indices, topk_log_probs)
 
     def inputs(self, advantages: Sequence[float]) -> dict[str, list[Any] | MatrixInput]:
-        """The ``loss_fn_inputs`` of ``importance_sampling`` for one response-token advantage each."""
+        """The ``loss_fn_inputs`` of ``importance_sampling`` for one response-token advantage each.
+
+        The targets are the tokens after the first. ``logprobs`` and ``advantages`` hold 0 at each prompt position.
+        """
         if len(advantages) != len(self.mask):
             raise ValueError("Tinker advantages must cover every response token")
         # Position i predicts token i+1; prompt positions contribute zero loss.
@@ -162,7 +165,12 @@ class TinkerLoss(ABC):
     @abstractmethod
     def inputs(
         self, rows: Sequence[TokenRow], base_logprobs: Sequence[Sequence[float]], *, kl_coef: float
-    ) -> list[dict[str, list[Any] | MatrixInput]]: ...
+    ) -> list[dict[str, list[Any] | MatrixInput]]:
+        """The ``loss_fn_inputs`` that ``loss_fn`` reads: one dictionary per row of ``rows``, in their order.
+
+        The model's input is a row's tokens but the last, so a per-token value has one entry per token after the
+        first: position ``i`` predicts token ``i + 1``.
+        """
 
 
 class ImportanceSamplingLoss(TinkerLoss):
@@ -283,4 +291,9 @@ class TinkerCustomLoss(TinkerLoss):
     loss_fn = "custom"
 
     @abstractmethod
-    def loss(self, data: Sequence[Any], logprobs: Sequence[Any]) -> tuple[Any, Mapping[str, float]]: ...
+    def loss(self, data: Sequence[Any], logprobs: Sequence[Any]) -> tuple[Any, Mapping[str, float]]:
+        """The loss tensor of one optimizer step and its metrics.
+
+        ``data`` holds the step's SDK ``Datum`` values, one per row with the row's ``inputs``. ``logprobs`` holds
+        the token log probabilities of each.
+        """
