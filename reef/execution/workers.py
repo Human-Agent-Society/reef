@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -17,22 +18,22 @@ from dataclasses import dataclass, field
 from reef.core.errors import ConfigError, InternalError
 from reef.core.plugins import PluginConfigError
 from reef.execution.work_logs import capture_log
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
+from reef.storage.coordination.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 
-#: The services of a deployment. ``reef serve --component NAME`` runs one in a process; the one-process layout runs
+#: The services of a deployment. ``reef serve --service NAME`` runs one in a process; the one-process layout runs
 #: all of them in one process, on the same interfaces.
-SERVICE_COMPONENTS = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
+SERVICE_NAMES = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
 
 
-def service_components(names: object) -> frozenset[str]:
+def service_names(names: object) -> frozenset[str]:
     """``names`` as a set of service names; raise ``ValueError`` for an empty set or an unknown name."""
     if isinstance(names, str) or not isinstance(names, (set, frozenset, tuple, list)) or not names:
-        raise ValueError(f"name one or more services of {SERVICE_COMPONENTS}")
-    unknown = sorted(str(name) for name in names if name not in SERVICE_COMPONENTS)
+        raise ValueError(f"name one or more services of {SERVICE_NAMES}")
+    unknown = sorted(str(name) for name in names if name not in SERVICE_NAMES)
     if unknown:
-        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_COMPONENTS}")
+        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_NAMES}")
     return frozenset(names)
 
 
@@ -40,7 +41,7 @@ def service_components(names: object) -> frozenset[str]:
 class ServiceSet:
     """The services that one process runs.
 
-    Values: ``names`` is a non-empty subset of ``SERVICE_COMPONENTS`` (``service_components``). Each ``runs_*``
+    Values: ``names`` is a non-empty subset of ``SERVICE_NAMES`` (``service_names``). Each ``runs_*``
     property is whether ``names`` holds that service.
 
     Purpose: assembly makes it for a process (``ServiceSet.of``); the dispatcher, the routes and the apps read the
@@ -50,17 +51,17 @@ class ServiceSet:
     names: frozenset[str]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "names", service_components(self.names))
+        object.__setattr__(self, "names", service_names(self.names))
 
     @classmethod
     def of(cls, names: object) -> ServiceSet:
-        """The set of ``names``; ``ValueError`` as ``service_components``."""
-        return cls(service_components(names))
+        """The set of ``names``; ``ValueError`` as ``service_names``."""
+        return cls(service_names(names))
 
     @classmethod
     def every(cls) -> ServiceSet:
         """Every service: the one-process layout."""
-        return cls(frozenset(SERVICE_COMPONENTS))
+        return cls(frozenset(SERVICE_NAMES))
 
     @property
     def runs_control(self) -> bool:
@@ -121,6 +122,11 @@ class ItemFailedError(InternalError):
     """The work of an item ran and failed, so a retry fails again: the item fails for good with this message."""
 
 
+class ItemDeferredError(InternalError):
+    """The work of an item found no capacity of a service that it needs, and a later try can pass: the item goes back
+    to the queue with this message, and waits before a worker takes it again (``QueueWorker``)."""
+
+
 class QueueWorker(ServiceWorker):
     """A worker that takes the items of some kinds from one queue and runs each one, until it stops.
 
@@ -142,6 +148,12 @@ class QueueWorker(ServiceWorker):
       ``PluginConfigError``, which fails as retryable;
     - ``WorkerStoppedError``: the item goes back to the queue at once, and the attempt does not count
       (``WorkQueue.give_back``);
+    - ``ItemDeferredError``: the item goes back to the queue with the error's message, and the attempt does not
+      count. No worker takes the item for ``first_deferral_seconds``, doubled for each earlier give-back of the item
+      for want of capacity (``WorkItem.deferred_attempt_count``), at most ``max_deferral_seconds``. A give-back of a
+      worker that stopped does not make the wait longer. The worker goes on to take other items, so one item that
+      finds no capacity does not hold back work that can run. After ``max_deferrals`` such give-backs, the error
+      fails the item as retryable;
     - ``WorkLeaseLostError``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
@@ -154,6 +166,9 @@ class QueueWorker(ServiceWorker):
 
     permanent_errors: tuple[type[Exception], ...] = (ValueError,)
     keeps_log = False
+    first_deferral_seconds = 30.0
+    max_deferral_seconds = 600.0
+    max_deferrals = 24
 
     def __init__(
         self,
@@ -240,7 +255,7 @@ class QueueWorker(ServiceWorker):
             item = self.queue.take(self.queue_name, self.worker_id, list(self.kinds))
             if item is not None and self.stopped.is_set():
                 # The stop began during the take: the item has not started, so another worker runs it at once.
-                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+                self.queue.give_back(self.queue_name, item.id, self.worker_id, attempt=item.attempt_count)
                 item = None
         except BaseException:
             self.free_slots.release()
@@ -282,12 +297,15 @@ class QueueWorker(ServiceWorker):
             return
         except WorkerStoppedError:
             try:
-                self.queue.give_back(self.queue_name, item.id, self.worker_id)
+                self.queue.give_back(self.queue_name, item.id, self.worker_id, attempt=item.attempt_count)
             except WorkLeaseLostError:
                 logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
         except ItemFailedError as exc:
             self.fail(item, str(exc), retryable=False)
+            return
+        except ItemDeferredError as exc:
+            self.defer(item, str(exc))
             return
         except Exception as exc:
             logger.exception("worker %s could not run %s", self.worker_id, item.id)
@@ -300,13 +318,38 @@ class QueueWorker(ServiceWorker):
             return
         self.item_finished(item, result)
 
+    def defer(self, item: WorkItem, reason: str) -> None:
+        """Give ``item`` back with ``reason``, to wait as ``ItemDeferredError`` says. ``item`` is the item as this
+        attempt took it, so its deferral count is the stored one: only this attempt can change it while it holds
+        the item."""
+        deferrals = item.deferred_attempt_count
+        if deferrals >= self.max_deferrals:
+            self.fail(item, f"{reason} (given back {deferrals} times)", retryable=True)
+            return
+        delay_seconds = min(self.first_deferral_seconds * 2**deferrals, self.max_deferral_seconds)
+        logger.info("worker %s gives %s back for %.0f s: %s", self.worker_id, item.id, delay_seconds, reason)
+        try:
+            self.queue.give_back(
+                self.queue_name,
+                item.id,
+                self.worker_id,
+                available_at=time.time() + delay_seconds,
+                error=reason,
+                deferred=True,
+                attempt=item.attempt_count,
+            )
+        except WorkLeaseLostError:
+            logger.warning("worker %s lost %s", self.worker_id, item.id)
+
     def fail(self, item: WorkItem, error: str, *, retryable: bool) -> None:
         """Fail ``item`` with ``error`` (``WorkQueue.fail``) and log a warning when it failed for good; nothing
         happens when another worker holds it now. The queue refuses an error text with surrounding spaces or none,
         and an exception's message can have them, so the worker strips ``error`` first."""
         error = error.strip() or "the work item failed"
         try:
-            failed = self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
+            failed = self.queue.fail(
+                self.queue_name, item.id, self.worker_id, error, retryable=retryable, attempt=item.attempt_count
+            )
         except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
@@ -382,12 +425,13 @@ class ServiceWorkers:
 
 
 __all__ = [
-    "SERVICE_COMPONENTS",
+    "SERVICE_NAMES",
+    "ItemDeferredError",
     "ItemFailedError",
     "QueueWorker",
     "ServiceSet",
     "ServiceWorker",
     "ServiceWorkers",
     "WorkerStoppedError",
-    "service_components",
+    "service_names",
 ]

@@ -47,7 +47,7 @@ from recipes.beta.autoenvscaling.designer import (
     repository_snapshot,
 )
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.record2sample.generator.designer import HARBOR_OUTPUT_TEXT, SYSTEM_PROMPT
+from reef.samples.generator.designer import HARBOR_OUTPUT_TEXT, SYSTEM_PROMPT
 
 
 class HeldChecks(CandidateChecks):

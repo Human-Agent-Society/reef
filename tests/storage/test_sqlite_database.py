@@ -16,10 +16,10 @@ from tests.support.records import report
 
 from reef.artifact import SnapshotRef
 from reef.core.errors import ReefError
-from reef.storage import sql_setup
-from reef.storage.commits import CommitRecord
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.store import ScenarioSettings
+from reef.storage.sql import setup as sql_setup
+from reef.storage.sql.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 
 def commit(step: int = 1) -> CommitRecord:

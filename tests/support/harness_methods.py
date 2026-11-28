@@ -18,6 +18,7 @@ from typing import Any
 
 from tests.support.harness_jobs import configured_live, make_pi_binary
 
+from reef.control.scenario.live_objects import LiveObjects
 from reef.evaluation.harness import TaskScorer
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskResult
@@ -25,7 +26,6 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
-from reef.scenario.live_objects import LiveObjects
 
 #: What the scorer looks for in the rules a run completed with.
 MARKER = "META-HARNESS-WINNER"

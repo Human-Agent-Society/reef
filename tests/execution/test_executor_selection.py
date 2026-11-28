@@ -7,12 +7,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from reef.deploy.execution import service_executor_config, service_executor_selection
 from reef.execution.executor import Executor
 from reef.execution.executor.config import ExecutorSettings, WorkerResources, executor_settings, select_executor
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.executor.uniproc import UniProcExecutor
-from reef.service.deploy.execution import service_executor_config, service_executor_selection
 from reef.train.slime_backend.reef_adapters.executors.config import DEFAULT_EXECUTOR_BACKEND, slime_executor_class
 
 

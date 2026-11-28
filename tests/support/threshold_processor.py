@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
-from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.staleness import ServedArtifacts, lags_behind
-from reef.sample2job import Sample2Job, Sample2JobSettings
+from reef.samples import Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.assembly import SampleAssembly, SampleAssemblySettings
+from reef.samples.context import PipelineContext
+from reef.samples.staleness import ServedArtifacts, lags_behind
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample
 
 

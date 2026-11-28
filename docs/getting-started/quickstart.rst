@@ -1,194 +1,56 @@
 Quickstart: serve inference and report feedback
 ===============================================
 
-Start Reef locally, send an inference request through a hosted provider,
-report feedback on the response, and inspect the snapshot history. This
-quickstart needs no GPU; the final section links to recipes that learn
-from the records you collect.
-
-A typical Reef workflow includes the following steps:
-
-1. **Request.** Harness sends a request with a *scenario*.
-2. **Response.** Reef forwards the response from the model to the harness, with
-   a *receipt* attached to it.
-3. **Report.** An entity provides a *report* containing feedback for the
-   response associated with the *receipt* to Reef.
-4. **Learn.** Reef runs the training / learning process against the reports in
-   training jobs according to its *recipe*.
-5. **Evolve.** Reef potentially creates a new version of the *artifact*, which
-   may become immediately effective (e.g. model evolution) or requires a pull
-   from the harness to take effect (e.g. harness evolution).
-6. **Update.** Harness can view the history of served artifacts (*snapshot
-   chain*) and potentially pull a new harness tree.
-
-This workflow touches a few key concepts:
-
-- **scenario** - A specific type of workload. For example, a code reviewer, or a
-  math problem solver. Reef manages the training of each scenario separately,
-  i.e. records, training state and snapshot chain.
-- **receipt** - The id of a recorded inference exchange. It identifies the
-  request, the response, and the snapshot that produced it.
-- **report** - A feedback quoting one or more receipts.
-- **recipe** - How Reef use the report to evolve new versions of artifacts. A
-  deployment serves one recipe, and every scenario on it evolves under that
-  recipe.
-- **artifact** - The content a snapshot selects: model weights, or a harness
-  tree of rules, prompts, skills, and config. Versioned.
-- **snapshot** - One accepted publication in a scenario. The chain of them is
-  the scenario's history.
-
-We will explore these concepts in greater depth later. For now, it's time to
-get our hands dirty and experience these steps ourselves.
+Record a model response and grade it with a hosted model and a local Reef service.
+Install Reef with the `laptop instructions <installation.rst#laptop-no-gpu>`__ and set your provider API key.
 
 Run the loop
 ------------
 
-This runs the serving half of the loop against a hosted provider, on a laptop,
-with no GPU.
-
 .. container:: steps
 
-   #. **Install.** Follow the laptop path in `Installation
-      <installation.rst>`__.
-
-   #. **Serve.** Connect an OpenAI-compatible provider and record what it
-      serves, without a YAML file or GPU.
+   #. **Start Reef.** In the first terminal, run:
 
       .. code:: bash
 
          export REEF_TOKEN=reef-local
          export REEF_UPSTREAM_API_KEY=sk-...
+         reef serve --inference.upstream-url https://api.openai.com --inference.upstream-model gpt-4o
 
-         reef serve \
-           --inference.upstream-url https://api.openai.com \
-           --inference.upstream-model gpt-4o
-
-      Reef listens on ``127.0.0.1:8900`` and writes state under ``.reef/`` in
-      the directory where you run it. The upstream key and Reef token come
-      from the environment. Without ``-c``, no config file is read. To connect
-      another provider, change the URL and model. Existing deployments can
-      still use ``reef serve -c recipes/basic/external-provider.yaml``.
-
-      ``reef serve`` runs in the foreground and holds the terminal until
-      Ctrl-C. Leave it running and open a second terminal for everything below.
+   #. **Create a scenario** to hold this workload's records. In a second terminal, run:
 
       .. code:: bash
 
-         curl -f http://127.0.0.1:8900/healthz     # {"ok": true}
+         REEF=http://127.0.0.1:8900
+         AUTH='Authorization: Bearer reef-local'
+         curl -fsS "$REEF/reef/scenarios" -H "$AUTH" -H 'Content-Type: application/json' \
+           -d '{"name":"hello-reef"}'
+         curl -fsS "$REEF/reef/scenarios/hello-reef/inference/status" -H "$AUTH"
 
-   #. **Create a scenario.** Reef answers inference only for a scenario that
-      exists, and a request for an unknown scenario gets HTTP 404.
+      Repeat the status request until ``state`` is ``ready``. If it is ``failed``, read ``error``.
 
-      .. code:: bash
-
-         curl -sS -X POST http://127.0.0.1:8900/reef/scenarios \
-           -H "Authorization: Bearer reef-local" \
-           -H "Content-Type: application/json" \
-           -d '{"name": "hello-reef"}'
-
-   #. **Send a request and report on it.** The body is the provider's;
-      ``x-reef-scenario`` is the only thing Reef adds. The response header
-      ``x-reef-agent-record-id`` carries the **receipt**, which names the
-      stored exchange. Tests, a verifier, a rubric, a thumbs-down, or any other
-      grader you already have can report feedback against it.
-
-      .. code:: python
-
-         import httpx
-
-         reef = httpx.Client(
-             base_url="http://127.0.0.1:8900",
-             headers={"Authorization": "Bearer reef-local", "x-reef-scenario": "hello-reef"},
-         )
-
-         response = reef.post(
-             "/v1/chat/completions",
-             json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Return exactly: reef is ready"}]},
-         )
-         response.raise_for_status()
-         receipt = response.headers["x-reef-agent-record-id"]  # e.g. ee5aa401634b4567bf9dae21816abde4
-         matched = response.json()["choices"][0]["message"]["content"].strip() == "reef is ready"
-
-         report = reef.post(
-             "/reef/report",
-             json={"score": float(matched), "feedback": "matched" if matched else "wrong answer", "references": [receipt]},
-         )
-         print(report.json())
-         # {"agent_record_id": "cce17dd7...", "scenario": "hello-reef", "request_type": "report"}
-
-      Reports are records too, so the response carries the report's own record
-      id. Only inference-record ids are receipts, and they appear only
-      in ``references``.
-
-   #. **Or use the wire client.** Install the stdlib-only ``reef-client`` with
-      ``pip install reef-client``. It keeps the receipt for you.
+   #. **Send a request and grade the answer.** Run this Python example in the Reef environment.
+      The receipt identifies the exchange you are grading.
 
       .. code:: python
 
          from reef_client import ReefClient
 
          client = ReefClient("http://127.0.0.1:8900", token="reef-local")
-
          body, receipt = client.inference_with_record(
-             "hello-reef",                                   # the scenario
-             "/v1/chat/completions",
-             {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+             "hello-reef", "/v1/chat/completions",
+             {"model": "gpt-4o", "messages": [{"role": "user", "content": "Reply with exactly: reef is ready"}]},
          )
          answer = body["choices"][0]["message"]["content"]
+         score = float(answer.strip() == "reef is ready")
+         report = client.report("hello-reef", {"score": score}, references=[receipt])
+         print(report["agent_record_id"])
 
-         # ... whatever already judges your agent decides this score ...
-         client.report("hello-reef", {"score": 1.0}, references=[receipt])
-
-      With an OpenAI SDK instead, point ``base_url`` at
-      ``http://127.0.0.1:8900/v1``, send ``x-reef-scenario`` as a default
-      header, and read ``x-reef-agent-record-id`` off the raw response.
-
-      On the wire it is an ordinary provider request with one added header, and
-      the receipt comes back in a response header:
-
-      .. code:: bash
-
-         curl -sS -D - -o /dev/null \
-           http://127.0.0.1:8900/v1/chat/completions \
-           -H "Authorization: Bearer reef-local" \
-           -H "x-reef-scenario: hello-reef" \
-           -H "Content-Type: application/json" \
-           -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
-         # x-reef-agent-record-id: ee5aa401634b4567bf9dae21816abde4
-
-   #. **Read the artifacts.**
-
-      .. code:: bash
-
-         curl -sS -H "Authorization: Bearer reef-local" \
-           http://127.0.0.1:8900/reef/scenarios/hello-reef/artifacts
-         # {"scenario": "hello-reef", "artifacts": [{"artifact_id": "...", "operation": "creation", "active": true, ...}]}
-
-      One artifact, and it will stay at one: this deployment's recipe is the
-      core ``recipe``, which records and trains nothing.
-
-To make the chain advance, bind a recipe that learns. To use a weight recipe,
-start from ``recipes/sao/examples/imo_answerbench/serve.yaml``. It selects
-``recipe.implementation: recipes.sao.recipe:SAORecipe`` and configures the
-Slime training workers and the serving engine.
-Weight recipes need GPUs (`Evolve your model
-<../user-guide/evolve-your-model.rst>`__).
-
-A harness recipe runs on a laptop with only a model endpoint. Bind
-``reef.recipe.harness:HarnessEvolutionRecipe`` and give it a **preset**
-naming your method (``evolution.method``), the seed tree, and the evaluation's
-tasks and scorer (``evolution.evaluation``). ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
-together. Run it, then read `Evolve your harness
-<../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
+The printed ID identifies the feedback report. The default recipe stores both records without training.
+For raw HTTP requests, see `Inference and feedback <../reference/http-api-inference.rst>`__.
 
 Choose your next step
 ---------------------
 
-- `Compare learning recipes <../user-guide/recipes.rst>`__ to choose between
-  model training and harness evolution based on the feedback you have.
-- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ for a
-  worked harness example, or `SAO rollout training
-  <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
-- Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
-  your own agent: it covers inference headers, feedback reports, and artifact
-  management.
+- `Update a coding agent's rules <harness-tutorial.rst>`__.
+- `Train model weights <../user-guide/evolve-your-model.rst>`__.

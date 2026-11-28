@@ -23,7 +23,7 @@ image_arguments=()
 if [[ -n $sr_image ]]; then
     [[ $sr_image =~ ^([^[:space:]@]+@)?sha256:[[:xdigit:]]{64}$ ]] ||
         { echo "SR_IMAGE requires repository@sha256:<digest> or sha256:<image ID>" >&2; exit 1; }
-    expected_revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+    expected_revision=$("$python" -c 'from reef.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
     image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sr_image")
     [[ $image_revision == "$expected_revision" ]] || { echo "SR_IMAGE must have revision $expected_revision" >&2; exit 1; }
     image_arguments=(--image "$sr_image")
@@ -56,7 +56,7 @@ cleanup() {
     for id in $children; do kill -TERM "$id" 2>/dev/null; done
     for id in $children; do wait "$id" 2>/dev/null; done
     if [[ -d "$XDG_STATE_HOME/reef/routing/$deployment_id" ]]; then
-        if ! "$python" -m reef.service.deploy.routing.cli cleanup --deployment-id "$deployment_id" >"$run_dir/cleanup.log" 2>&1; then
+        if ! "$python" -m reef.deploy.routing.cli cleanup --deployment-id "$deployment_id" >"$run_dir/cleanup.log" 2>&1; then
             echo "Reef cleanup failed. Inspect $run_dir/cleanup.log." >&2
             result=1
         fi
@@ -180,7 +180,7 @@ storage:
   agent_record_dir: '\${QWEN_RUN_DIR:?}/records'
   task_file_dir: '\${QWEN_RUN_DIR:?}/task-files'
 YAML
-"$python" -m reef.service.deploy.routing.cli validate --config "$run_dir/reef.yaml"
+"$python" -m reef.deploy.routing.cli validate --config "$run_dir/reef.yaml"
 "$python" -m reef.cli serve -c "$run_dir/reef.yaml" >"$run_dir/reef.log" 2>&1 &
 reef_pid=$!
 # The first start without SR_IMAGE builds the router image, for up to image_build_timeout_seconds (3600).
