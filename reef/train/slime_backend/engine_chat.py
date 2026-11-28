@@ -13,8 +13,6 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any
 
 from reef.core.values import JsonValue
@@ -45,29 +43,28 @@ REQUEST_OPTIONS = frozenset(
 DEFAULT_MAX_TOKENS = 1024
 
 
-@dataclass(frozen=True)
 class TrialEngineChat(RolloutChat):
-    """Bind one trial's Slime sampler options to a shared engine chat.
+    """One trial's engine connection and sampler options.
 
-    chat owns the tokenizer and engine connection. sampling_params maps SGLang
-    option names to their JSON values. max_new_tokens is absent, None, or
-    a positive integer. answer returns the shared chat's status and body
-    for the supplied path and request body.
+    The options have nonempty SGLang parameter names and finite JSON values. If present, max_new_tokens
+    is null or a positive integer. The trial keeps the JSON sent at construction, so later changes
+    by the rollout manager cannot change model calls already assigned to this trial.
     """
 
-    chat: EngineChat
-    sampling_params: Mapping[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.chat, EngineChat) or not isinstance(self.sampling_params, Mapping):
+    def __init__(self, chat: EngineChat, sampling_params: Mapping[str, JsonValue]) -> None:
+        if not isinstance(chat, EngineChat) or not isinstance(sampling_params, Mapping):
             raise TypeError("A trial chat needs an engine chat and a mapping of sampler options.")
-        limit = self.sampling_params.get("max_new_tokens")
+        if any(not isinstance(name, str) or not name for name in sampling_params):
+            raise ValueError("Each trial sampling option needs a nonempty name.")
+        limit = sampling_params.get("max_new_tokens")
         if limit is not None and (type(limit) is not int or limit <= 0):
             raise ValueError("Trial max_new_tokens must be a positive integer or None.")
-        object.__setattr__(self, "sampling_params", MappingProxyType(dict(self.sampling_params)))
+        self.chat = chat
+        self.sampling_json = json.dumps(dict(sampling_params), allow_nan=False)
 
     def answer(self, path: str, payload: Any) -> tuple[int, Mapping[str, Any]]:
-        return self.chat.answer(path, payload, sampling_params=self.sampling_params)
+        """Forward the request to the shared engine with this trial's recorded sampler options."""
+        return self.chat.answer(path, payload, sampling_params=json.loads(self.sampling_json))
 
 
 class EngineChat(RolloutChat):

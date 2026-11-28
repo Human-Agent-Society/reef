@@ -7,11 +7,11 @@ the fields against Slime's real ``Sample`` and ``BatchBuilder`` where Slime is i
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import threading
 import time
 import urllib.request
-from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -603,7 +603,7 @@ def test_the_generate_function_runs_the_recorded_jobs_session_and_refuses_an_old
     override_task = tmp_path / "tasks" / "override"
     override_task.mkdir()
     (override_task / "task.toml").write_text('version = "1.0"\n')
-    source = replace(source, tasks=(*source.tasks, ("override", str(override_task))))
+    source = dataclasses.replace(source, tasks=(*source.tasks, ("override", str(override_task))))
     write_json(tmp_path / "save" / DATASET_FILE, source.to_record())
     made = []
     requests = []
@@ -730,6 +730,16 @@ def test_the_engine_chat_answers_with_the_capture_of_the_engines_tokens() -> Non
         "slime:job",
         "3",
     )
+
+
+@pytest.mark.unit
+def test_a_trial_keeps_the_stop_list_it_received() -> None:
+    chat = Chat((200, GENERATED))
+    stops = ["end"]
+    trial = TrialEngineChat(chat, {"stop": stops})
+    stops.append("short")
+    assert trial.answer("/v1/chat/completions", CHAT)[0] == 200
+    assert chat.bodies[0]["sampling_params"]["stop"] == ["end"]
 
 
 @pytest.mark.unit
