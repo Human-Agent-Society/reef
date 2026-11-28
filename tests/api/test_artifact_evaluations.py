@@ -2306,6 +2306,80 @@ def test_after_a_failure_stop_a_retry_runs_the_failed_rollouts_and_a_resume_the_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("expire_completed", [False, True])
+def test_retry_after_a_failure_stop_leaves_unstarted_rollouts_for_resume(
+    tmp_path: Path, expire_completed: bool
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    async def taken() -> WorkItem:
+        for _ in range(200):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            if item is not None:
+                return item
+            await asyncio.sleep(0.05)
+        raise AssertionError("no rollout entered the queue")
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_failed_fraction": 0.5,
+                "max_concurrent_rollouts": 1,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            evaluation_id = accepted["evaluation_id"]
+            route = f"/reef/scenarios/s/evaluations/{evaluation_id}"
+            failed_ids = set()
+            completed = await taken()
+            queue.finish(EVALUATIONS_QUEUE, completed.id, "w", {"score": RolloutScore(1.0).to_json()})
+            cutoff = time.time()
+            for _ in range(FAILURE_CHECK_ROLLOUTS - 1):
+                item = await taken()
+                failed_ids.add(item.id)
+                queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox refused the task", retryable=False)
+            stopped = await finished(client, evaluation_id)
+            assert (stopped["progress"]["failed"], stopped["progress"]["cancelled"]) == (9, 0)
+
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            if expire_completed:
+                queue.delete_final(finished_before=cutoff)
+            retained = failed_ids if expire_completed else failed_ids | {completed.id}
+            for _ in range(FAILURE_CHECK_ROLLOUTS - 1):
+                item = await taken()
+                assert item.id in failed_ids and item.attempt_count == 2
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+
+            for _ in range(200):
+                settled = await (await client.get(route, headers=AUTH)).json()
+                assert {item.id for item in queue.items(EVALUATIONS_QUEUE, scenario="s")} == retained
+                if settled["state"] == "failed":
+                    break
+                await asyncio.sleep(0.05)
+            assert settled["state"] == "failed"
+            assert settled["error"] == "too many rollouts failed: 2 unstarted rollouts wait for a resume"
+            assert (settled["progress"]["scored"], settled["progress"]["cancelled"]) == (len(retained), 0)
+            assert (settled["progress"]["total"], settled["progress"]["ended"]) == (12, len(retained))
+
+            if expire_completed:
+                assert (await client.post(f"{route}/resume", headers=AUTH)).status == 409
+                return
+            assert (await client.post(f"{route}/resume", headers=AUTH)).status == 202
+            for _ in range(2):
+                item = await taken()
+                assert item.id not in failed_ids and item.attempt_count == 1
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            complete = await finished(client, evaluation_id)
+            assert (complete["state"], complete["mean_score"]) == ("finished", 1.0)
+
+    asyncio.run(run())
+
+
 @pytest.mark.integration
 def test_max_failed_fraction_stops_an_evaluation_when_402_refusals_are_followed_by_auxiliary_calls(
     tmp_path: Path,
