@@ -76,6 +76,8 @@ Send ``POST /reef/train`` with a Slime prompt dataset:
    {"text": "GRPO on the prompts", "session": "s", "artifact_id": "artifact-1",
     "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
 
-Use an absolute ``dataset.path`` on the Ray cluster. Each epoch runs ``len(dataset) // rollout-batch-size`` rollout iterations.
+Use an absolute ``dataset.path`` on the Ray cluster. Each epoch budgets one rollout per ``rollout-batch-size`` usable prompts.
+Reef checks the prompt count after Slime applies its length limit. Choose a batch size that divides that count.
+An incompatible dataset fails before generation. Oversampling and rollout filters can change which prompts contribute to training.
 ``save_interval`` counts rollout iterations. Omit it to save only at job end.
 Set Slime's dataset and reward plugin options under ``training.options``. Reef sets ``data-source-path`` from the request.
