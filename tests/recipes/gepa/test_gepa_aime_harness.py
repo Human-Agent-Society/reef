@@ -97,6 +97,29 @@ def test_scorer_matches_the_upstream_expected_string(aime, response, score):
     assert aime.evaluate("problem", pi_run(response)) == score
 
 
+@pytest.mark.parametrize(
+    ("gold", "response", "score"),
+    [
+        # The pinned train split zero-pads 20 of its 90 answers: the same
+        # value written without the padding is the same answer.
+        ("### 072", "reasoning\n### 72", 1.0),
+        ("### 72", "### 072", 1.0),
+        # ... and a gold that is a prefix of the model's number is not.
+        ("### 033", "### 0335", 0.0),
+        ("### 033", "### 33", 1.0),
+        # A later restatement is the answer; an earlier one is scratch work.
+        ("### 72", "first I got ### 5, then corrected it\n### 72", 1.0),
+        # Non-integer answers keep the upstream containment rule.
+        ("### 1/2", "The answer is ### 1/2", 1.0),
+        ("### 12", "### 1/2", 0.0),
+    ],
+)
+def test_a_zero_padded_gold_answer_is_compared_by_value(aime, gold, response, score):
+    aime.register([{"input": "problem", "answer": gold}])
+
+    assert aime.evaluate("problem", pi_run(response)) == score
+
+
 @pytest.mark.parametrize(("exit_code", "residue"), [(1, ()), (0, ("pi-agent/stray.json",))])
 def test_a_dirty_run_scores_zero_however_it_answered(aime, exit_code, residue):
     aime.register([{"input": "problem", "answer": "### 17"}])
