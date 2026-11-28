@@ -109,6 +109,33 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             self.initialized_loss_families.add(loss_family)
         self.args.reef_learning_rate_schedule_state = worker_switch["learning_rate_schedule_state"]
 
+    def check_step_plan(self, rollout_data: Mapping[str, Any]) -> None:
+        """Raise ``RuntimeError`` on every rank before a rollout trains if one of its steps trains no token.
+
+        Each data-parallel rank holds a part of each step, so the ranks sum their counts first. ``raw_reward`` holds
+        one entry per sample that Slime converted; Reef's own data carries none. A plan that leaves out converted
+        samples only logs a warning: a rollout function or a filter can return a rollout count that is not a
+        multiple of the step, and Slime then drops the trailing rollouts by design.
+        """
+        loss_masks = rollout_data["loss_masks"]
+        loss_token_counts = torch.stack([mask.sum() for mask in loss_masks]).tolist()
+        counts = rank_step_counts(
+            loss_token_counts, rollout_data["micro_batch_indices"], rollout_data["num_microbatches"]
+        )
+        summed = torch.tensor(counts, dtype=torch.long, device=loss_masks[0].device)
+        torch.distributed.all_reduce(summed, group=mpu.get_data_parallel_group())
+        planned = check_step_counts(summed.tolist(), rollout_data["global_batch_sizes"])
+        converted = len(rollout_data.get("raw_reward", ()))
+        if planned < converted and torch.distributed.get_rank() == 0:
+            logger.warning(
+                "Slime's step plan of the rollout trains %d of its %d samples, in steps of %s rollouts: Slime drops "
+                "the rollouts after the last full step. Set --rollout-batch-size times --n-samples-per-prompt to a "
+                "multiple of --global-batch-size",
+                planned,
+                converted,
+                list(rollout_data["global_batch_sizes"]),
+            )
+
     def parallel_layout(self) -> dict[str, Any]:
         """Return this rank's training parallel layout, which the component's batch split reads.
 
@@ -164,33 +191,6 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 )
             ]
         return rollout_data
-
-    def check_step_plan(self, rollout_data: Mapping[str, Any]) -> None:
-        """Raise ``RuntimeError`` on every rank before a rollout trains if one of its steps trains no token.
-
-        Each data-parallel rank holds a part of each step, so the ranks sum their counts first. ``raw_reward`` holds
-        one entry per sample that Slime converted; Reef's own data carries none. A plan that leaves out converted
-        samples only logs a warning: a rollout function or a filter can return a rollout count that is not a
-        multiple of the step, and Slime then drops the trailing rollouts by design.
-        """
-        loss_masks = rollout_data["loss_masks"]
-        loss_token_counts = torch.stack([mask.sum() for mask in loss_masks]).tolist()
-        counts = rank_step_counts(
-            loss_token_counts, rollout_data["micro_batch_indices"], rollout_data["num_microbatches"]
-        )
-        summed = torch.tensor(counts, dtype=torch.long, device=loss_masks[0].device)
-        torch.distributed.all_reduce(summed, group=mpu.get_data_parallel_group())
-        planned = check_step_counts(summed.tolist(), rollout_data["global_batch_sizes"])
-        converted = len(rollout_data.get("raw_reward", ()))
-        if planned < converted and torch.distributed.get_rank() == 0:
-            logger.warning(
-                "Slime's step plan of the rollout trains %d of its %d samples, in steps of %s rollouts: Slime drops "
-                "the rollouts after the last full step. Set --rollout-batch-size times --n-samples-per-prompt to a "
-                "multiple of --global-batch-size",
-                planned,
-                converted,
-                list(rollout_data["global_batch_sizes"]),
-            )
 
     def pop_metrics(self) -> dict[str, float]:
         return drain_worker_metrics()
