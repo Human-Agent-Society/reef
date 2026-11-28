@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import asyncio
+
+from aiohttp import web
+
+from reef.api.request_handling import RequestHandling
+from reef.api.routes.payload import read_object
+from reef.control.operations.artifact_imports import ArtifactImports
+
+
+def register_artifact_import_routes(
+    app: web.Application, *, request_handling: RequestHandling, imports: ArtifactImports
+) -> None:
+    async def import_artifact(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        refused = web.HTTPBadRequest(
+            text='an import is the object {"source": "<uri>"} or {"item": "<artifact item ID>"}'
+        )
+        if set(payload) == {"source"}:
+            key = "source"
+        elif set(payload) == {"item"}:
+            key = "item"
+        else:
+            raise refused
+        value = payload[key]
+        if not isinstance(value, str) or not value.strip():
+            raise refused
+        scenario, component = request.match_info["scenario"], request.query.get("component")
+        if key == "source":
+            receipt = await asyncio.to_thread(
+                imports.import_source, request_handling.dispatcher, scenario, component, value.strip()
+            )
+        else:
+            receipt = await asyncio.to_thread(
+                imports.import_item, request_handling.dispatcher, scenario, component, value
+            )
+        return web.json_response(receipt, status=201)
+
+    app.router.add_post("/reef/scenarios/{scenario}/artifacts", import_artifact)
+
+
+__all__ = ["register_artifact_import_routes"]

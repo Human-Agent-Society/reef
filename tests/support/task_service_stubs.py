@@ -11,7 +11,7 @@ from pathlib import Path
 from reef.core.tasks import HarborTask, HarborTaskConflictError, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.harness.harbor.rollouts import RolloutTurn, TaskRollout
 from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, StoredGeneratorState
-from reef.record2sample.generator import (
+from reef.samples.generator import (
     DesignerRequest,
     DuplicateTaskError,
     Generator,
@@ -22,7 +22,7 @@ from reef.record2sample.generator import (
     WrittenTask,
     content_hash,
 )
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 DOCUMENT = {
     "instruction": (

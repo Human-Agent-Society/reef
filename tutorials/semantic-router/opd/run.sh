@@ -19,7 +19,7 @@ python=$("${REEF_PYTHON:-python3}" -c 'import sys; print(sys.executable)')
 export REEF_PYTHON="$python"
 deployment_section="{}"
 if [[ -n $sr_image ]]; then
-    revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+    revision=$("$python" -c 'from reef.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
     installed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sr_image")
     [[ $installed == "$revision" ]] || { echo "SR_IMAGE must have revision $revision." >&2; exit 1; }
     deployment_section="{semantic_router_image: '$sr_image'}"
@@ -83,7 +83,7 @@ storage:
   task_file_dir: '\${OPD_ROUTING_RUN_DIR:?}/task-files'
 YAML
 outer_env=(env -u REEF_TOKEN -u OPD_TEACHER_API_KEY)
-"${outer_env[@]}" "$python" -m reef.service.deploy.routing.cli validate --config "$run_dir/reef.yaml"
+"${outer_env[@]}" "$python" -m reef.deploy.routing.cli validate --config "$run_dir/reef.yaml"
 
 bridge_pid= reef_pid= driver_pid=
 cleanup() {
@@ -97,7 +97,7 @@ cleanup() {
         fi
     done
     if [[ -d $XDG_STATE_HOME/reef/routing/$deployment_id ]]; then
-        "${outer_env[@]}" "$python" -m reef.service.deploy.routing.cli cleanup --deployment-id "$deployment_id" \
+        "${outer_env[@]}" "$python" -m reef.deploy.routing.cli cleanup --deployment-id "$deployment_id" \
             >"$run_dir/cleanup.log" 2>&1 || { echo "See $run_dir/cleanup.log" >&2; status=1; }
     fi
     exit "$status"

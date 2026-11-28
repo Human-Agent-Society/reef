@@ -15,10 +15,10 @@ from reef.artifact.components import ScenarioComponents
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger
-from reef.storage.data import DataStore
-from reef.storage.records import RecordStore
-from reef.storage.samples import SampleKind, SampleStore, TrainerSamples
-from reef.storage.tasks import TaskStorage, TaskStore
+from reef.storage.data.store import DataStore
+from reef.storage.data.tasks import TaskStorage, TaskStore
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import SampleKind, SampleStore, TrainerSamples
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingComponent, component_root
 from reef.train.jobs import JobLoop
@@ -39,7 +39,7 @@ class TrainerSpec:
     records. ``data_store`` keeps the data directory of each job; None keeps them in a temporary directory
     (``JobLoop``).
 
-    Purpose: the scenario factory reads one from a recipe (``reef.scenario.factory.read_trainer_specs``), and
+    Purpose: the scenario factory reads one from a recipe (``reef.control.scenario.factory.read_trainer_specs``), and
     ``build_trainer`` builds the trainer.
     """
 
@@ -168,7 +168,7 @@ def build_trainers(
     Raise ``ValueError`` when one ``TrainerSpec`` is given for a scenario that serves several components.
 
     Purpose: the scenario factory calls it once for each scenario that it recovers, with the specs that it reads
-    from the deployment's recipe (``reef.scenario.factory.read_trainer_specs``).
+    from the deployment's recipe (``reef.control.scenario.factory.read_trainer_specs``).
     """
     if isinstance(specs, ComponentTrainerSpecs):
         trainers = []

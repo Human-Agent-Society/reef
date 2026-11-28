@@ -21,22 +21,22 @@ from tests.support.runtime_stubs import (
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
-from reef.pipeline_context import PipelineContext
+from reef.control.dispatcher import Dispatcher
+from reef.control.operations.data_service import DataWorker, data_jobs
+from reef.control.operations.data_transfer import ArchiveWriters
+from reef.control.scenario.live_objects import LiveObjects
 from reef.recipe import Recipe
 from reef.recipe.base import WeightTrainingRecipe
-from reef.record2sample import NoSamples, Record2Sample
-from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.scenario.live_objects import LiveObjects
-from reef.service.data_service import DataWorker, data_jobs
-from reef.service.data_transfer import ArchiveWriters
-from reef.service.task_import import DataScenarioStorage
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sql_data import SQLiteDataStore
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import LocalTaskFileStore
+from reef.samples import NoSamples, Record2Sample
+from reef.samples.context import PipelineContext
+from reef.storage.data.tasks import LocalTaskFileStore
+from reef.storage.scenario.task_import import DataScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.data import SQLiteDataStore
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 from reef.train import JobData
 from reef.train.pipeline import PipelineSpec
+from reef.train.sample2job import Sample2Job, Sample2JobSettings
 
 TOKEN = "upload-test-token"
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
