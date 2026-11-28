@@ -375,7 +375,11 @@ def test_dp_packaging_splices_reef_step_sizes_with_a_partial_tail(monkeypatch: p
 @pytest.mark.unit
 def test_packing_many_steps_visits_each_rollout_row_a_bounded_number_of_times(monkeypatch: pytest.MonkeyPatch) -> None:
     class RolloutIds(list[int]):
-        """Record how many IDs a traversal of the input reads."""
+        """An ordered list of integer rollout IDs, with repeats allowed.
+
+        Each instance starts with zero visits. Each iterator yields IDs in list order and increments
+        the same instance counter once per ID yielded, including on repeated or partial traversals.
+        """
 
         visits = 0
 
