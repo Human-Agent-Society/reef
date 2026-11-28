@@ -328,8 +328,9 @@ class TaskRolloutResult:
     """What one rollout of a task job came to.
 
     Values: ``token`` names the driver whose rollout it was, ``task`` the task's name, and ``group_index`` Slime's
-    prompt group. ``reward`` is the rollout's score, or None when the infrastructure failed. ``assembled`` holds if and
-    only if the rollout's sample trains, which implies a reward. ``error`` is why the sample does not train, and "" if
+    prompt group. ``reward`` holds the verifier score, including zero. It is None when the trial could not run or
+    completed without a score. An unscored trial contributes no sample and no value to the reward mean.
+    ``assembled`` holds exactly when the rollout's sample trains, which requires a score. ``error`` is why the sample does not train, and "" if
     it does. Purpose: ``HarborRolloutSession`` appends it to ``TASK_ROLLOUTS_FILE``, and the driver reads it to check
     each Slime rollout and to report ``rollout_rewards``.
     """
@@ -481,7 +482,11 @@ class HarborRolloutSession:
         return self.finish(task, group_index, fields, reward)
 
     def finish(self, task: str, group_index: int, fields: SampleFields, reward: float | None) -> SampleFields:
-        """Append the rollout's result and return ``fields``. ``reward`` is None when the infrastructure failed."""
+        """Append the rollout's result and return ``fields`` unchanged.
+
+        Store None for a failed trial or a completed trial without a verifier score. A scored trial retains its
+        numeric reward even when its tokens could not be assembled into a sample.
+        """
         result = TaskRolloutResult(
             self.source.token, task, group_index, reward, not fields.remove_sample, fields.error
         )
