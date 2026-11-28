@@ -1,51 +1,35 @@
 Codebase structure
 ==================
 
-Find the package that owns your change, then read its ``__init__.py`` for the contract.
-
 Layers
 ------
 
-Packages may import their own layer and lower layers.
+Packages can import from their own layer and the layers below.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 15 35 50
+.. container:: layer-map
 
-   * - Layer
-     - Main packages
-     - Responsibility
-   * - Entry
-     - ``deploy``, ``api``
-     - Start deployments and receive HTTP requests.
-   * - Control
-     - ``control``
-     - Coordinate scenarios, their lifecycle, commits and recovery.
-   * - Domain
-     - ``samples``, ``train``, ``evaluation``, ``inference``, ``harness``, ``recipe``, ``routing``
-     - Select samples, train and evaluate candidates, serve models, run harnesses and route requests.
-   * - Foundation
-     - ``core``, ``storage``, ``artifact``, ``execution``, ``observability``, ``tinker``
-     - Provide shared types, persistence, artifact files and execution.
+   .. container:: flow
 
-These layers describe code dependencies. The `seven services
-<../user-guide/split-services.rst>`__ describe how a deployment runs that code
-and exchanges work through the shared store.
+      Entry
+          ``deploy`` starts services. ``api`` handles HTTP.
 
-Keep HTTP parsing in ``reef/api/routes/``. Control operations live in ``reef/control/operations/`` and work without HTTP.
-Put method-specific code in ``recipes/<name>/``. Use the owning package's tests.
-``tests/contributing/test_dependency_boundaries.py`` checks the import boundaries.
+      Control
+          ``control`` manages scenario state, commits and recovery.
+
+      Domain
+          Learning (``recipe``, ``samples``, ``train``, ``evaluation``), model serving (``inference``, ``routing``) and agents (``harness``).
+
+      Foundation
+          Types (``core``), persistence (``storage``), files (``artifact``), workers (``execution``), telemetry (``observability``) and the Tinker SDK (``tinker``).
+
+For runtime boundaries, see the `seven-service diagram <../user-guide/split-services.rst>`__.
 
 Extending Reef
 --------------
 
-- `Write a recipe <../developer-guide/write-a-recipe.rst>`__ or
-  `a harness method <../developer-guide/write-a-harness-method.rst>`__.
-- Add a `training backend <../developer-guide/training-backends.rst>`__ or
-  `serving runtime <../developer-guide/serving-runtimes.rst>`__.
-- Add a `harness adapter <../developer-guide/harness-adapters.rst>`__ or
-  `task generator <../developer-guide/task-generators.rst>`__.
-- Define a `snapshot component <../developer-guide/components.rst>`__ or
-  `worker executor <../developer-guide/executors.rst>`__.
+Read the package's ``__init__.py`` for its contract. Put method-specific code in ``recipes/<name>/``.
 
-For setup and checks, see `Development <development.rst>`__. For review and RFC policy, read `CONTRIBUTING.md <../../CONTRIBUTING.md>`__.
+- `Recipes <../developer-guide/write-a-recipe.rst>`__ and `harness methods <../developer-guide/write-a-harness-method.rst>`__
+- `Training backends <../developer-guide/training-backends.rst>`__ and `serving runtimes <../developer-guide/serving-runtimes.rst>`__
+- `Harness adapters <../developer-guide/harness-adapters.rst>`__ and `task generators <../developer-guide/task-generators.rst>`__
+- `Snapshot components <../developer-guide/components.rst>`__ and `worker executors <../developer-guide/executors.rst>`__
