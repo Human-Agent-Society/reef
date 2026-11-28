@@ -659,6 +659,20 @@ def test_each_round_gives_the_generator_at_most_its_share_of_tagged_sessions(tmp
     assert store.generation(2).source_record_ids == ()
 
 
+def test_a_round_waits_until_its_least_share_of_sessions_waits(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator()
+    p, _ = rounds(tmp_path, task_generator, min_source_records_per_round=2, **SOURCES)
+    sessions(p, "a", "b", "c")
+    for _ in range(3):
+        looked(p)
+    # One session waits after the first round: no round starts with it alone, and none starts with no session.
+    assert [source_ids(request) for request in task_generator.requests] == [["rec-a", "rep-a", "rec-b", "rep-b"]]
+    assert p.operational_metrics()["waiting_source_sessions"] == 1
+    sessions(p, "d")
+    looked(p)
+    assert source_ids(task_generator.requests[-1]) == ["rec-c", "rep-c", "rec-d", "rep-d"]
+
+
 def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tmp_path: Path) -> None:
     worker = DeferredWorker()
     p, _ = rounds(tmp_path, ScriptedGenerator(), worker=worker, **SOURCES)
@@ -726,6 +740,7 @@ def test_replayed_sessions_of_a_complete_generation_are_not_used_again_and_do_no
         ({"rounds": 1, "description": "x"}, "pipeline.record2sample.config.generator"),
         ({"source_records_per_round": 1}, "needs a source_tag"),
         ({"source_tag": "session"}, "name=value"),
+        ({**SOURCES, "min_source_records_per_round": 3}, "from 0 to source_records_per_round"),
     ],
 )
 def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str, int], message: str) -> None:

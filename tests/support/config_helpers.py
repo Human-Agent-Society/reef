@@ -40,6 +40,9 @@ def deployment_layout(config):
             "REEF_AUTOENVSCALING_MODEL_PATH": os.environ.get("REEF_AUTOENVSCALING_MODEL_PATH") or "/tmp/reef-model",
             "REEF_AUTOENVSCALING_STATE_DIR": os.environ.get("REEF_AUTOENVSCALING_STATE_DIR") or "/tmp/reef-aes",
             "REEF_AUTOENVSCALING_SEEDS_PATH": os.environ.get("REEF_AUTOENVSCALING_SEEDS_PATH") or "/tmp/reef-seeds",
+            # The paths that the continual-environments Slime example reads from the shell.
+            "REEF_CONTINUAL_ENVS_MODEL_PATH": os.environ.get("REEF_CONTINUAL_ENVS_MODEL_PATH") or "/tmp/reef-model",
+            "REEF_CONTINUAL_ENVS_STATE_DIR": os.environ.get("REEF_CONTINUAL_ENVS_STATE_DIR") or "/tmp/reef-ce",
         },
     ):
         return resolve_deployment_config(config, None, Path(__file__).resolve().parents[2] / "<example>")[0]
