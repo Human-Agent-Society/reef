@@ -2,7 +2,7 @@ Sandbox environments
 ====================
 
 Use ``ProgramExecutor`` to run programs and Harbor to run task trials.
-Program backends are ``local``, ``sandbox``, ``e2b`` and ``modal``.
+Program backends are ``local``, ``sandbox``, ``e2b``, ``modal`` and ``boxd``.
 
 Run a command
 -------------

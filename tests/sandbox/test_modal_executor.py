@@ -118,7 +118,7 @@ def test_the_factory_builds_each_provider_from_its_own_options(monkeypatch) -> N
     assert chosen.owner == deployment_owner(Path("/x"))
     with pytest.raises(SandboxUnavailableError, match="unknown cloud sandbox 'docker'"):
         remote_executor("docker", {}, {})
-    with pytest.raises(Exception, match="use one of 'local', 'sandbox', 'e2b', 'modal'"):
+    with pytest.raises(Exception, match="use one of 'local', 'sandbox', 'boxd', 'e2b', 'modal'"):
         build_executor({"executor": "docker"})
 
 

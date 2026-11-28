@@ -657,10 +657,10 @@ The keys of ``recipe.config.evolution`` for ``reef.recipe.harness:HarnessEvoluti
        The most runs a method's services.evaluate starts in one job; reused runs and the job's own evaluation do not count. 0 sets no limit.
 
    ``recipe.config.evolution.executor`` : string : local
-       Where tasks run: local, sandbox, e2b or modal.
+       Where tasks run: local, sandbox, e2b, modal or boxd.
 
    ``recipe.config.evolution.sandbox`` : object : unset
-       The sandbox settings of the run executor: egress_hosts, limits and env_from for sandbox; the e2b or modal options, forward_ports and env_from for a cloud sandbox.
+       The sandbox settings of the run executor: egress_hosts, limits and env_from for sandbox; the e2b, modal or boxd options, forward_ports and env_from for a cloud sandbox.
 
    ``recipe.config.evolution.agent`` : object : unset
        The coding agent a method runs: adapter, binary, sandbox and timeout_s. Unset runs no agent, and startup refuses a method that needs one.
