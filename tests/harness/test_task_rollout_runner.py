@@ -24,7 +24,7 @@ from reef.execution.sandbox.task_environment import (
     HARBOR_MODAL_ENVIRONMENT,
     environment_config,
 )
-from reef.harness.capture import CaptureObserver, TaggedStore
+from reef.harness.capture import CaptureObserver, CaptureProxy, TaggedStore
 from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
     ReefEvalLab,
@@ -834,6 +834,35 @@ def test_an_unrecorded_rollout_without_turns_keeps_no_call_body_and_its_observer
     assert refused_ran.failed_calls == 2 and refused_ran.turns == ()
     assert refused_ran.error.startswith("2 model calls failed; the first answered 401")
     assert len(refused_observed.turns) == 2
+
+
+@pytest.mark.parametrize(("unrecorded", "keep"), [(False, True), (True, True), (True, False)])
+def test_a_reward_after_only_a_failed_stream_is_never_reported(reef, tmp_path, monkeypatch, unrecorded, keep):
+    failed = {"status": 200, "receipt": "r1", "stream_failed": True, "request": {}, "response": {}}
+    monkeypatch.setattr(CaptureProxy, "drain", lambda self: [failed])
+    task = written_task(tmp_path / "tasks", "t1")
+    trial = runner(
+        reef,
+        tmp_path,
+        StandInLab({"reward": 1.0}, turns=0),
+        is_reporting=not unrecorded,
+        is_unrecorded=unrecorded,
+        keeps_turns=keep,
+    )
+    result = trial.run(task)
+    assert result.failed_calls == 1 and "stream reported an error" in result.error
+    assert result.is_infrastructure_failure and result.rewards == {}
+    assert not result.receipts and not result.turns and not reef.reports
+
+
+def test_a_later_answer_can_earn_a_reward_after_a_stream_failure(reef, tmp_path, monkeypatch):
+    failed = {"status": 200, "receipt": "failed", "stream_failed": True}
+    answered = {"status": 200, "receipt": "complete"}
+    monkeypatch.setattr(CaptureProxy, "drain", lambda self: [failed, answered])
+    trial = runner(reef, tmp_path, StandInLab({"reward": 1.0}, turns=0))
+    result = trial.run(written_task(tmp_path / "tasks", "t1"))
+    assert result.reward == 1.0 and result.failed_calls == 1
+    assert result.receipts == ("complete",) and len(reef.reports) == 1
 
 
 def test_a_store_without_bodies_keeps_an_error_body_and_gives_the_observer_the_whole_call() -> None:

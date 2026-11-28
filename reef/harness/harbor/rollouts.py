@@ -222,12 +222,19 @@ def task_identity(task_path: Path) -> dict[str, str]:
     return identity
 
 
+def call_answered(turn: Mapping[str, object]) -> bool:
+    """Whether the captured model call answered HTTP 200 and its stream emitted no failure."""
+    return turn.get("status") == 200 and not turn.get("stream_failed", False)
+
+
 def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
     """Why no model call got a receipt: the count of failed calls and what the service answered the first one."""
-    failed = [turn for turn in turns if turn.get("status") != 200 or not turn.get("receipt")]
+    failed = [turn for turn in turns if not call_answered(turn) or not turn.get("receipt")]
     if not failed:
         return ""
     first = failed[0]
+    if first.get("stream_failed"):
+        return f"{len(failed)} model calls failed; the first stream reported an error after HTTP {first.get('status')}"
     response = first.get("response")
     if isinstance(response, Mapping):
         error = response.get("error")
@@ -240,10 +247,12 @@ def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
 
 def unrecorded_call_failure(turns: Sequence[Mapping[str, object]]) -> str:
     """Why no model call of a rollout answered: the count of failed calls and the first answer."""
-    failed = [turn for turn in turns if turn.get("status") != 200]
+    failed = [turn for turn in turns if not call_answered(turn)]
     if not failed:
         return "the agent made no model call"
     first = failed[0]
+    if first.get("stream_failed"):
+        return f"{len(failed)} model calls failed; the first stream reported an error after HTTP {first.get('status')}"
     response = first.get("response")
     detail = json.dumps(response)[:200] if isinstance(response, Mapping) else str(response or "no body")[:200]
     return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
@@ -562,19 +571,17 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             answered = tuple(
                 RolloutTurn(turn["request"], turn["response"])
                 for turn in turns
-                if turn.get("status") == 200
+                if call_answered(turn)
                 and isinstance(turn.get("request"), Mapping)
                 and isinstance(turn.get("response"), Mapping)
             )
             failed_calls = len(turns) - len(answered)
             error = row.error or ("" if answered else unrecorded_call_failure(turns))
         elif self.is_unrecorded:
-            failed_calls = sum(turn.get("status") != 200 for turn in turns)
+            failed_calls = sum(not call_answered(turn) for turn in turns)
             error = row.error or ("" if failed_calls < len(turns) else unrecorded_call_failure(turns))
         else:
-            receipts = tuple(
-                str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200
-            )
+            receipts = tuple(str(turn["receipt"]) for turn in turns if turn.get("receipt") and call_answered(turn))
             failed_calls = len(turns) - len(receipts)
             error = row.error or ("" if receipts else call_failure(turns))
         if not turns and not row.error:
@@ -582,11 +589,14 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             exited = agent_command_exit(row.trial_uri)
             if exited:
                 error = f"the agent made no model call: {exited}"
-        reward = rollout_reward(row.rewards)
+        rewards = dict(row.rewards)
+        reward = rollout_reward(rewards)
         if row.rewards and primary_reward(row.rewards) is None and not error:
             error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"
         if reward is None and self.verifier_timeout_reward is not None and verifier_timed_out(row.trial_uri):
             reward = self.verifier_timeout_reward
+        if any(turn.get("stream_failed") for turn in turns) and not any(call_answered(turn) for turn in turns):
+            reward, rewards = None, {}
         report_ids: tuple[str, ...] = ()
         if self.is_reporting and reward is not None and receipts:
             try:
@@ -600,7 +610,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             name=task_path.name,
             rollout_id=rollout_id,
             reward=reward,
-            rewards=dict(row.rewards),
+            rewards=rewards,
             error=error,
             receipts=receipts,
             failed_calls=failed_calls,
