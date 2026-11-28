@@ -1432,9 +1432,7 @@ class ArtifactEvaluations:
                     if any(
                         key not in by_id
                         or by_id[key].attempt_count < count
-                        or (
-                            by_id[key].attempt_count == count and rollout_ended(by_id[key]) and key not in failed_ids
-                        )
+                        or (by_id[key].attempt_count == count and rollout_ended(by_id[key]) and key not in failed_ids)
                         for key, count in expected_attempts.items()
                     ):
                         raise ValueError("the expected attempts must belong to failed rollouts of this evaluation")
