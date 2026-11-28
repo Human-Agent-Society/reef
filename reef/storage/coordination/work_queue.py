@@ -423,23 +423,32 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def write_metadata(
-        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: tuple[str, int] | None = None
+        self, queue: str, item_id: str, name: str, value: JsonValue, *, lease: WorkItem | tuple[str, int] | None = None
     ) -> WorkItem | None:
         """Set ``metadata[name]`` of the item to ``value``, whatever the item's state, and return the item; None
         when it does not exist.
 
         A reader of the item uses it to record a fact about the work that it learns after the item exists, such as
         the experiment run that records a training job (``reef.train.job_queue``). If ``lease`` specifies a worker ID
-        and attempt count, raise ``WorkLeaseLostError`` unless that attempt holds the item. The state, payload,
+        and attempt count, or the claimed work item, raise ``WorkLeaseLostError`` unless that attempt holds the item. The state, payload,
         progress, result, error and times do not change. When ``metadata[name]`` already equals
         ``value``, nothing changes; otherwise the change gets the next change sequence. ``name`` is a non-empty
         string.
         """
 
     @abstractmethod
-    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+    def append_log(
+        self,
+        queue: str,
+        item_id: str,
+        attempt: int,
+        lines: Sequence[WorkLogLine],
+        *,
+        created_sequence: int | None = None,
+    ) -> None:
         """Keep ``lines`` as log lines of attempt ``attempt`` (from 1) of the item. Each line's number is new in the
-        attempt. No lease is needed: the worker of the attempt is the only writer."""
+        attempt. A flush can follow completion. With a creation sequence, discard lines for a deleted or replaced item.
+        """
 
     @abstractmethod
     def read_log(

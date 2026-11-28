@@ -118,7 +118,7 @@ class ItemSelection(Selection):
             "samples_created": samples_created,
             "at": time.time(),
         }
-        self.queue.write_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress)
+        self.queue.write_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress, lease=self.item)
 
 
 def selection_key(scenario: str, component: str) -> str:

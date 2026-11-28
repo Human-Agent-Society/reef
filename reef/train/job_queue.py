@@ -859,7 +859,7 @@ class TrainingJobWorker(QueueWorker):
                     self.store_records(item, job)
                 if job_progress != written_progress:
                     value = None if job_progress is None else cast(JsonValue, dict(job_progress))
-                    self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
+                    self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value, lease=item)
                     written_progress = job_progress
                 for checkpoint in status.checkpoints:
                     if checkpoint.step in reported:
@@ -884,7 +884,7 @@ class TrainingJobWorker(QueueWorker):
                         item.id,
                         STORED_CONTENT_KEY,
                         cast(JsonValue, list(stored_names)),
-                        lease=(self.worker_id, item.attempt_count),
+                        lease=item,
                     )
                     backend = self.backends(job.scenario)
                     backend.store_content(content, Path(checkpoint.artifact_path))
@@ -915,7 +915,7 @@ class TrainingJobWorker(QueueWorker):
                 if status.state == "failed":
                     if status.metrics:
                         self.queue.write_metadata(
-                            JOBS_QUEUE, item.id, FAILED_METRICS_KEY, cast(JsonValue, dict(status.metrics))
+                            JOBS_QUEUE, item.id, FAILED_METRICS_KEY, cast(JsonValue, dict(status.metrics)), lease=item
                         )
                     raise ItemFailedError(status.error or "the job failed")
                 if self.stopped.wait(self.poll_seconds):
