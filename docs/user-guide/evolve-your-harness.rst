@@ -81,9 +81,10 @@ Set ``recipe.config.evolution.evaluation.policy``:
    * - ``none``
      - The candidate is valid. No evaluation tasks or scorer are needed.
 
-``compare`` defaults to pairwise ``wins``; ``mean`` compares mean scores.
-Completed runs without answers score 0. Infrastructure failures are unscored:
-``wins`` drops the pair; ``mean`` excludes the failed run.
+With ``compare``, Reef pairs the candidate and current harness by task and repeat.
+The default ``wins`` counts wins and losses. The ``mean`` option compares both means on pairs with two scores.
+Reef drops a pair if either run failed and rejects the candidate if no complete pair remains.
+Completed runs without answers score 0. The mean comparison reports the numbers of complete and dropped pairs.
 
 See `harness configuration <../reference/configuration-harness.rst>`__ for task
 sources and executors. The default ``local`` executor provides no isolation.

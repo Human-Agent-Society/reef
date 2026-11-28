@@ -5,12 +5,11 @@ decides whether it serves. ``evolution.evaluation.policy`` names one policy:
 
 ``compare``
     Score the candidate and the head tree on the same (task, repeat) pairs.
-    ``statistic: wins`` keeps the candidate when wins minus losses exceed
-    ``min_margin``, by ``compare_scores``: a pair with a failed run is
-    dropped. ``statistic: mean`` keeps it when its mean exceeds the head's
-    mean by more than ``min_margin``, by ``mean_score``: each mean averages
-    the runs that did not fail. The head's scores usually come from the
-    score cache.
+    Both statistics drop pairs with a failed run. ``statistic: wins`` keeps
+    the candidate when wins minus losses exceed ``min_margin``.
+    ``statistic: mean`` keeps it when its mean exceeds the head's mean by
+    more than ``min_margin`` over the remaining pairs. The head's scores
+    usually come from the score cache.
 ``floor``
     Score the candidate alone; keep it when every task meets ``floor_score``,
     by ``check_floor``: a failed run does not fail its task, but a task
@@ -33,7 +32,7 @@ from reef.core.evaluation import (
     UpdateCandidate,
     mean_score,
 )
-from reef.evaluation.evaluators import check_floor, compare_scores
+from reef.evaluation.evaluators import check_floor, compare_scores, pair_rollouts
 from reef.evaluation.harness.evaluator import EVALUATION_SIDES, HarnessCandidateEvaluator
 
 #: The ``evolution.evaluation.policy`` names, and the ``statistic`` names of ``compare``.
@@ -67,10 +66,11 @@ class ComparePolicy(TaskScorePolicy):
     Values: ``statistic`` is one of ``STATISTICS``; ``min_margin`` ≥ 0 is
     the margin the candidate must exceed: in wins minus losses for ``wins``,
     in mean score for ``mean``.
-    Operations: ``decide`` selects exactly when the evaluation scored at least
-    one task and, for ``wins``, ``compare_scores`` gives wins minus losses
-    above ``min_margin``; for ``mean``, both sides have a ``mean_score`` and
-    the candidate's exceeds the head's by more than ``min_margin``.
+    Operations: ``decide`` selects exactly when the evaluation has at least
+    one complete pair and the statistic exceeds ``min_margin``. ``wins``
+    uses wins minus losses. ``mean`` uses the difference between the means
+    of the two sides on the complete pairs and reports the paired and dropped
+    counts.
     """
 
     def __init__(self, evaluator: HarnessCandidateEvaluator, *, statistic: str = "wins", min_margin: float = 0.0):
@@ -84,7 +84,8 @@ class ComparePolicy(TaskScorePolicy):
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
         if not evaluation.metrics.get("candidate_scores"):
-            return SelectionDecision(False, "compare", "no evaluation task was scored", evaluation)
+            counts = {"paired": 0, "dropped": 0} if self.statistic == "mean" else {}
+            return SelectionDecision(False, "compare", "no evaluation task was scored", evaluation, counts)
         candidate_scores = RolloutScores.from_json(evaluation.metrics["candidate_scores"])
         current_scores = RolloutScores.from_json(evaluation.metrics["current_scores"])
         metrics: dict[str, Any] = {"statistic": self.statistic, "min_margin": self.min_margin}
@@ -101,19 +102,29 @@ class ComparePolicy(TaskScorePolicy):
             if comparison.dropped:
                 reason += f"; {comparison.dropped} pairings with a failed run were dropped"
             return SelectionDecision(selected, "compare", reason, evaluation, metrics)
-        candidate_mean = mean_score(candidate_scores.rollouts())
-        current_mean = mean_score(current_scores.rollouts())
+        complete_pairs = [
+            (mine, theirs)
+            for mine, theirs in pair_rollouts(candidate_scores, current_scores)
+            if not mine.is_failed and not theirs.is_failed
+        ]
+        paired = len(complete_pairs)
+        dropped = len(candidate_scores.tasks) * candidate_scores.count - paired
+        metrics.update({"paired": paired, "dropped": dropped})
+        candidate_mean = mean_score(mine for mine, _ in complete_pairs)
+        current_mean = mean_score(theirs for _, theirs in complete_pairs)
         if candidate_mean is None or current_mean is None:
-            side = "candidate" if candidate_mean is None else "current tree"
             return SelectionDecision(
-                False, "compare", f"every run of the {side} failed, so it has no mean", evaluation, metrics
+                False,
+                "compare",
+                f"No rollout pair has two scores. Dropped {dropped} pairs.",
+                evaluation,
+                metrics,
             )
         metrics.update({"candidate_mean": candidate_mean, "current_mean": current_mean})
         selected = candidate_mean - current_mean > self.min_margin
-        reason = (
-            f"candidate scored {candidate_mean:.4f} against {current_mean:.4f} "
-            f"over {len(candidate_scores.rollouts())} runs"
-        )
+        reason = f"candidate scored {candidate_mean:.4f} against {current_mean:.4f} over {paired} rollout pairs"
+        if dropped:
+            reason += f". Dropped {dropped} pairs."
         return SelectionDecision(selected, "compare", reason, evaluation, metrics)
 
 

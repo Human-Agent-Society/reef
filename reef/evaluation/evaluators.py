@@ -8,9 +8,10 @@ side against a floor score.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
-from reef.core.evaluation import RolloutScores
+from reef.core.evaluation import RolloutScore, RolloutScores
 
 
 @dataclass(frozen=True)
@@ -34,19 +35,26 @@ class ScoreComparison:
         return self.wins, self.losses, self.ties, self.dropped
 
 
+def pair_rollouts(candidate: RolloutScores, current: RolloutScores) -> Iterator[tuple[RolloutScore, RolloutScore]]:
+    """Pair each candidate rollout with the current rollout for the same task and repeat.
+
+    Raise ``ValueError`` if the task order or repeat count differs.
+    """
+    if [task for task, _ in candidate.tasks] != [
+        task for task, _ in current.tasks
+    ] or candidate.count != current.count:
+        raise ValueError("compared artifacts run the same tasks the same number of times")
+    return zip(candidate.rollouts(), current.rollouts(), strict=True)
+
+
 def compare_scores(candidate: RolloutScores, current: RolloutScores) -> ScoreComparison:
     """Compare two snapshots' rollouts pair by pair: the same task and the same run on each side.
 
     The rollouts of a pair rank by their values. A pair with a failed side is dropped: the environment, not
     either policy, decided it. ``ValueError`` when the two did not run the same tasks the same number of times.
     """
-    if [task for task, _ in candidate.tasks] != [
-        task for task, _ in current.tasks
-    ] or candidate.count != current.count:
-        raise ValueError("compared artifacts run the same tasks the same number of times")
-
     wins = losses = ties = dropped = 0
-    for mine, theirs in zip(candidate.rollouts(), current.rollouts(), strict=True):
+    for mine, theirs in pair_rollouts(candidate, current):
         if mine.value is None or theirs.value is None:
             dropped += 1
         elif mine.value > theirs.value:
