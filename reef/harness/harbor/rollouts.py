@@ -269,9 +269,10 @@ class TaskRollout:
     """One rollout of a task: what the verifier said and what reached Reef.
 
     ``turns`` holds the answered model calls of a rollout, in call order; a rollout that reports to
-    Reef has none, because its calls are records. The training runner reads the final HTTP status of the
-    tool-bearing calls when it captured any, otherwise the final status of all calls. A run without
-    captured calls has no final status. A captured HTTP status is an integer from 100 through 599.
+    Reef has none, because its calls are records. When the runner keeps turns for training, ``model_call_statuses``
+    contains their HTTP statuses, including failed calls, in completion order. It selects tool-bearing calls if any
+    exist. If the trial returned an error, its final call also counts. Each status is an integer from 100 through
+    599. A runner that discards turns leaves this tuple empty.
     """
 
     task_path: Path
@@ -285,13 +286,13 @@ class TaskRollout:
     report_agent_record_ids: tuple[str, ...]
     trial_uri: str | None
     turns: tuple[RolloutTurn, ...] = ()
-    last_model_status: int | None = None
+    model_call_statuses: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.last_model_status is not None and (
-            not isinstance(self.last_model_status, int) or not 100 <= self.last_model_status <= 599
+        if not isinstance(self.model_call_statuses, tuple) or any(
+            not isinstance(status, int) or not 100 <= status <= 599 for status in self.model_call_statuses
         ):
-            raise ValueError("the final model status must be an HTTP status or None")
+            raise ValueError("the captured model statuses must be a tuple of HTTP statuses")
 
     @property
     def is_infrastructure_failure(self) -> bool:
@@ -604,14 +605,14 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 # A refused report is this rollout's failure, not the caller's: the rollout comes back unreported
                 # with the reason, and the other rollouts in flight go on.
                 error = str(exc)
-        last_model_call = next(
-            (
-                turn
-                for turn in reversed(turns)
-                if isinstance(turn.get("request"), Mapping) and turn["request"].get("tools")
-            ),
-            turns[-1] if turns else None,
-        )
+        statuses: tuple[int, ...] = ()
+        if self.is_unrecorded and self.keeps_turns and turns:
+            tool_calls = [
+                turn for turn in turns if isinstance(turn.get("request"), Mapping) and turn["request"].get("tools")
+            ]
+            if tool_calls and row.error and tool_calls[-1] is not turns[-1]:
+                tool_calls.append(turns[-1])
+            statuses = tuple(turn["status"] for turn in (tool_calls or turns))
         return TaskRollout(
             task_path=task_path,
             name=task_path.name,
@@ -624,7 +625,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             report_agent_record_ids=report_ids,
             trial_uri=row.trial_uri,
             turns=answered,
-            last_model_status=last_model_call["status"] if last_model_call is not None else None,
+            model_call_statuses=statuses,
         )
 
     def report(

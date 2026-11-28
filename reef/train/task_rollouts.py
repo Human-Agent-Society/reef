@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -63,7 +64,7 @@ class HarborSettings:
     environment: str = "docker"
     agent_host: str | None = None
     concurrency: int = 2
-    verifier_timeout_reward: float | None = 0.0
+    verifier_timeout_reward: float | None = None
     scaffold_tolerance: int = 8
 
     def __post_init__(self) -> None:
@@ -80,8 +81,10 @@ class HarborSettings:
         if self.agent_host is not None and (not isinstance(self.agent_host, str) or not self.agent_host):
             raise ValueError("agent_host must be a non-empty host or None")
         reward = self.verifier_timeout_reward
-        if reward is not None and (isinstance(reward, bool) or not isinstance(reward, (int, float))):
-            raise ValueError("verifier_timeout_reward must be a number or None")
+        if reward is not None and (
+            isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)
+        ):
+            raise ValueError("verifier_timeout_reward must be a finite number or None")
 
 
 @dataclass(frozen=True)
@@ -295,10 +298,19 @@ def task_name(task: TaskSample) -> str:
 
 
 def training_rollout(rollout: TaskRollout) -> TaskRollout:
-    """Keep a verifier score only if the last model call could run, including an actual zero score."""
-    status = rollout.last_model_status
-    if status is not None and (status in (401, 402, 429) or status >= 500):
-        return replace(rollout, reward=None, error=rollout.error or f"the final model call returned HTTP {status}")
+    """Exclude missing scores, access and payment refusals, and a rate or service failure that ends the trial."""
+    statuses = rollout.model_call_statuses
+    for status in reversed(statuses):
+        if status in (401, 402):
+            return replace(
+                rollout, reward=None, error=rollout.error or f"the model provider refused a call with HTTP {status}"
+            )
+    if statuses and (statuses[-1] in (403, 429) or statuses[-1] >= 500):
+        return replace(
+            rollout, reward=None, error=rollout.error or f"the final model call returned HTTP {statuses[-1]}"
+        )
+    if any(inference_aborted(turn.response) for turn in rollout.turns):
+        return replace(rollout, reward=None, error=rollout.error or "the model aborted a response")
     if rollout.reward is None and not rollout.error:
         return replace(rollout, error="the verifier returned no finite primary reward")
     return rollout

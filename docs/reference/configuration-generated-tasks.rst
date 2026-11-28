@@ -17,6 +17,9 @@ Under ``recipe.config.job-parameters``, set an ``objective`` and the backend's r
 - With Slime, use ``harbor`` for the rollout configuration and set ``training.options.n-samples-per-prompt`` for repeats.
   See `Task jobs on Slime <configuration-training.rst#task-jobs-on-slime>`__.
 
+Both training backends exclude verifier timeouts by default. To score a timeout, set
+``rollout.verifier_timeout_reward`` on Tinker or ``harbor.verifier_timeout_reward`` on Slime to a number.
+
 Both configurations use underscore keys. The agent defaults to ``terminus-2``. Its model calls must use text chat without tools.
 Set ``environment`` for the sandbox provider and ``agent_host`` if a sandboxed agent needs to reach the rollout host.
 

@@ -36,6 +36,7 @@ from reef.core.job_data import TrajectorySample
 from reef.execution.sandbox.task_environment import task_images_from_environ
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.storage.durable_files import read_json
+from reef.train import task_rollouts
 from reef.train.slime_backend.dataset import DATASET_FILE, save_root
 from reef.train.slime_backend.engine_chat import EngineChat
 from reef.train.slime_backend.native import DATASET_SOURCE_PATH, SLIME_DEFAULT_SOURCE_PATH
@@ -47,7 +48,6 @@ from reef.train.task_rollouts import (
     RolloutChat,
     rollout_assembly,
     rollout_sample,
-    training_rollout,
 )
 
 logger = logging.getLogger(__name__)
@@ -462,11 +462,12 @@ class HarborRolloutSession:
     async def rollout(self, task: str, task_path: Path, group_index: int) -> SampleFields:
         """Run and assemble one rollout on this thread's own loop."""
         try:
-            rollout = training_rollout(await self.runner.run_async(task_path))
+            rollout = await self.runner.run_async(task_path)
         # Harbor and the agent raise their own types, and one rollout must not stop the Slime rollout's other samples.
         except Exception as exc:
             logger.warning("a rollout of task %s failed", task, exc_info=True)
             return self.finish(task, group_index, removed_fields(f"the rollout raised: {exc!r}", self.top_k), None)
+        rollout = task_rollouts.training_rollout(rollout)
         if rollout.reward is None:
             return self.finish(task, group_index, removed_fields(rollout.error, self.top_k), None)
         reward = rollout.reward
