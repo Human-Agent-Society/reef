@@ -54,24 +54,31 @@ else:
         unrelated.wait()
 
 
-@pytest.mark.parametrize("worker_alive", [True, False])
-def test_a_missing_guard_retires_its_group_once_the_worker_is_gone(tmp_path, monkeypatch, worker_alive):
+@pytest.mark.parametrize("alive_checks", [0, 3, None])
+def test_a_missing_guard_retires_its_group_once_the_worker_is_gone(tmp_path, monkeypatch, alive_checks):
     from reef.execution.executor import process_guard
 
     pytest.importorskip("psutil")
     retired: list[tuple[int, float | None]] = []
+    checks = iter(range(1000000))
     monkeypatch.setattr(process_guard, "_directory", lambda token: tmp_path)
-    monkeypatch.setattr(process_guard, "_worker_alive", lambda group: group == 12345 and worker_alive)
+    # The worker still runs at its first ``alive_checks`` checks (None: it never exits), as a worker that frees its
+    # GPU memory after Ray killed its guard does.
+    monkeypatch.setattr(
+        process_guard,
+        "_worker_alive",
+        lambda group: group == 12345 and (alive_checks is None or next(checks) < alive_checks),
+    )
     monkeypatch.setattr(process_guard, "_kill_group", lambda group, started: retired.append((group, started)))
     monkeypatch.setattr(process_guard, "_group_alive", lambda group: False)
     # Ray kills an exiting worker's children, its guard among them, so the guard can be gone before it confirms.
     (tmp_path / "12345.json").write_text(json.dumps({"guard_pid": 99999999, "guard_started": 0}))
-    if worker_alive:
-        with pytest.raises(RuntimeError, match="before confirming cleanup"):
-            retire("unused")
+    if alive_checks is None:
+        with pytest.raises(TimeoutError, match="1 of 1 groups had no guard"):
+            retire("unused", timeout_s=0.2)
         assert retired == []
     else:
-        retire("unused")
+        assert retire("unused")["missing_guards"] == 1
         # The worker's other processes, such as compile workers, outlive it and its guard: retire them here.
         assert retired == [(12345, None)] and (tmp_path / "12345.done").exists()
 
