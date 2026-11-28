@@ -108,21 +108,16 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.record2sample.generator.client import (
+from reef.samples.generator.client import (
     DuplicateTaskError,
     Generator,
     GeneratorError,
     HttpGenerator,
     TaskNameConflictError,
 )
-from reef.record2sample.generator.designer import parse_harbor_reply
-from reef.record2sample.generator.harbor import (
-    GeneratedHarborTask,
-    OracleResult,
-    dockerfile_logical_lines,
-    harbor_task,
-)
-from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.samples.generator.designer import parse_harbor_reply
+from reef.samples.generator.harbor import GeneratedHarborTask, OracleResult, dockerfile_logical_lines, harbor_task
+from reef.samples.generator.inputs import TaskGenerationRequest
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +301,7 @@ def admitted_task(
 
     The reply goes through the generator service's parser and authoring checks, the rules a prompt Designer's
     reply is held to; a task they refuse raises ``ValueError`` (a
-    :class:`~reef.record2sample.generator.designer.DesignerReplyError` from the parser). The Dockerfile gets
+    :class:`~reef.samples.generator.designer.DesignerReplyError` from the parser). The Dockerfile gets
     :data:`HISTORY_STEP` for the repository at ``checkout_path`` as its last step. The step runs as root; a final
     stage that switched to another user switches back after it. A task with no repository (a ``checkout_path`` of
     None: a variant of a seeded parent) gets no step, since its ``cd`` would fail the build. The task's config is

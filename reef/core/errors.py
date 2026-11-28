@@ -6,10 +6,14 @@ catch any domain error with one exception type. Each class name ends in
 :class:`InternalError` is the base of every failure that the caller's
 request did not cause. ``inference_aborted`` reads how a response reports
 an engine abort, for the service, the training pipeline and the training
-components alike.
+components alike. ``UpstreamLimit`` names the provider limit that refused a
+request, for the handler that reads the provider's reply and for the evaluation
+that acts on it.
 """
 
+import math
 from collections.abc import Mapping
+from enum import Enum
 
 
 class ReefError(Exception):
@@ -70,6 +74,21 @@ class TrainingStartRefusedError(ReefError):
     """A trainer cannot start training from the artifact it was given; nothing changed."""
 
 
+class UpstreamLimit(Enum):
+    """The kind of limit that refused a request, as the provider's status, ``Retry-After`` and structured fields say.
+
+    Values: ``RATE`` is a limit that ends with time, so the same request can pass later unchanged. ``PAYMENT`` is a
+    payment the provider requires for this request, so the same request does not pass again on its own. Each value is
+    also the error ``code`` with which the evaluation endpoint answers such a refusal.
+
+    Purpose: ``reef.inference.http.upstream_limit`` makes it from a provider's reply. The evaluation endpoint sends a
+    call that ``RATE`` refused again, and sends no call again that ``PAYMENT`` refused.
+    """
+
+    RATE = "rate_limit"
+    PAYMENT = "payment_required"
+
+
 class UpstreamStatusError(ReefError):
     """An upstream service answered an inference request with an error status.
 
@@ -79,11 +98,29 @@ class UpstreamStatusError(ReefError):
     (shrinking ``max_tokens`` when the engine reports a context overflow, for
     instance), and an opaque 500 leaves them retrying the identical request
     until they give up.
+
+    ``retry_after_seconds`` is the wait that the upstream asked for before the next try, from its ``Retry-After``
+    header: a finite number of seconds of at least 0, or None when the upstream named no valid wait. ``limit`` is the
+    limit that refused the request (``UpstreamLimit``), or None when the reply names none. The constructor raises
+    ``ValueError`` for another ``retry_after_seconds`` and ``TypeError`` for another ``limit``.
     """
 
-    def __init__(self, message: str, *, status: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        retry_after_seconds: float | None = None,
+        limit: UpstreamLimit | None = None,
+    ) -> None:
         super().__init__(message)
+        if retry_after_seconds is not None and not (math.isfinite(retry_after_seconds) and retry_after_seconds >= 0):
+            raise ValueError("retry_after_seconds is a finite number of seconds of at least 0, or None")
+        if limit is not None and not isinstance(limit, UpstreamLimit):
+            raise TypeError("limit is an UpstreamLimit or None")
         self.status = status
+        self.retry_after_seconds = retry_after_seconds
+        self.limit = limit
 
 
 class RuntimeConfigError(ConfigError):

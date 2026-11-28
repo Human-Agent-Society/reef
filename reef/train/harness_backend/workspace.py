@@ -280,7 +280,8 @@ class Workspace:
 
     def host(self) -> Mapping[str, Any]:
         """The host facts: ``adapter``, ``parts`` (each part of the adapter's tree, with its ``path``, ``format``,
-        ``renders``, ``holds`` and ``review``), ``config_targets`` and ``tasks_are_directories``."""
+        ``renders``, ``holds`` and ``review``), ``config_targets`` and ``tasks_are_directories``. The adapter's
+        ``TreeLayout`` is ``reef.harness.adapters.get_adapter(host()["adapter"]).layout``."""
         return json.loads((self.material / HOST_FILE).read_text(encoding="utf-8"))
 
     def history(self) -> History:
@@ -298,7 +299,9 @@ class Workspace:
 
         An empty argument writes no file. ``ValueError``, before any file is
         written, when ``notes`` is not a JSON object or an item of
-        ``requires`` is not a requirement.
+        ``requires`` is not a requirement. The commit keeps the summary as
+        ``method_summary`` and the notes as ``method_notes``. Reef reads
+        ``requires`` on a request job only.
         """
         checked = JobOutput(summary=summary, notes=notes or {}, requires=tuple(requires))
         self.output.mkdir(parents=True, exist_ok=True)

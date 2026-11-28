@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Hashable
 from dataclasses import replace
+
 import pytest
 from tests.support.records import inference, report
 from tests.support.samples import made_task
 
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
-from reef.sample2job import Sample2Job
+from reef.samples import GroupDecision, ReportContext, ReportGrouping, ReportSamples
+from reef.samples.context import PipelineContext
 from reef.train.pipeline import TrainingPipeline
+from reef.train.sample2job import Sample2Job
 from reef.train.types import JobData, Sample, TrajectorySample
 
 

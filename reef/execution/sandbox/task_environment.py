@@ -3,7 +3,8 @@
 A Harbor task environment is the ``-e`` type of ``harbor run``, or the ``environment.type`` of a trial. Harbor starts
 it, builds the task's image in it, runs the agent and the verifier there, and stops it. This module names the
 environment types, checks what the host needs for each, and gives the Harbor environment config of a task's trial in
-each (``environment_config``); it starts nothing.
+each (``environment_config``), with the prepared images that a training process's deployment names for its tasks
+(``task_images_from_environ``); it starts nothing.
 
 An executor is a different thing: a ``ProgramExecutor`` (:mod:`reef.execution.sandbox.process`) launches one program, such as
 a harness's pinned binary, and ``ExecutorEnvironment`` (:mod:`reef.execution.sandbox.environment`) adapts one to Harbor's
@@ -23,10 +24,11 @@ import subprocess
 import sys
 import tomllib
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
+from reef.execution.sandbox.prepared_images import PreparedImage, PreparedImageJson, TaskImages
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
 #: Every Harbor task environment type Reef passes to Harbor: local Docker, and each cloud type in
@@ -46,8 +48,13 @@ SANDBOX_LIFETIME_MARGIN_S = 3600
 SANDBOX_LIFETIME_MAX_S = 24 * 60 * 60
 #: The lifetime of the Modal sandbox of a trial whose agent has no time limit, in seconds.
 MODAL_SANDBOX_DEFAULT_S = 2 * 60 * 60
-#: The Harbor environment class of an ``e2b`` trial: Harbor's own, with its sandbox deleted at its timeout.
+#: E2B trial environment stored in Harbor configurations. It deletes the sandbox at its timeout.
 HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+#: Modal trial environment stored in Harbor configurations. It reports capacity refusals as Reef sandbox errors.
+HARBOR_MODAL_ENVIRONMENT = "reef.execution.sandbox.modal.trial:ModalTrialEnvironment"
+#: The variable of a training process that names the manifest of its tasks' prepared images
+#: (``task_images_from_environ``).
+TASK_IMAGES_VARIABLE = "REEF_AGENTENV_TASK_IMAGES"
 
 
 class ReadinessProbe(ABC):
@@ -288,42 +295,57 @@ class HarborEnvironmentConfig(TypedDict):
     """The ``environment`` section of a Harbor trial config, as ``environment_config`` makes it.
 
     Values: ``type`` is the Harbor environment type that the caller selected. ``import_path`` is present if and only
-    if ``type`` is ``e2b``, and then it is ``HARBOR_E2B_ENVIRONMENT``. ``kwargs`` is present if and only if it is not
-    empty. Its keys are ``sandbox_timeout_secs``, on ``e2b`` and ``modal``, an integer number of seconds at most
-    ``SANDBOX_LIFETIME_MAX_S``; ``modal_vm_runtime``, on ``modal`` only, True; and ``builds_templates``, on ``e2b``
-    only, False. A ``modal`` value always has ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if the
-    trial's agent has a time limit.
+    if ``type`` is ``e2b`` or ``modal``, and then it is ``HARBOR_E2B_ENVIRONMENT`` or ``HARBOR_MODAL_ENVIRONMENT``
+    respectively. ``kwargs`` is present if and only if it is not empty. Its keys are ``sandbox_timeout_secs``, on
+    ``e2b`` and ``modal``, an integer number of seconds at most ``SANDBOX_LIFETIME_MAX_S``; ``modal_vm_runtime``, on
+    ``modal`` only, True; ``builds_templates``, on ``e2b`` only, False; and, on ``e2b`` only and together,
+    ``prepared_images``, a non-empty JSON list of ``PreparedImage`` objects, and ``task_directory``, the absolute
+    path of the task. A ``modal`` value always has ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if
+    the trial's agent has a time limit.
     Purpose: ``environment_config`` makes one, and two callers read it. The task rollout runner gives the whole value
     to an in-process Harbor trial as its environment config, through reef-eval's overrides. Harbor then makes the
-    class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check reads
-    ``import_path`` and ``kwargs`` for the ``-e`` and ``--ek`` options of its ``harbor run`` child. The config that
-    Harbor's command line makes from those options has the import path and no ``type``.
+    class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check on
+    ``e2b`` reads ``import_path`` and ``kwargs`` for the ``-e`` and ``--ek`` options of its ``harbor run`` child. The
+    config that Harbor's command line makes from those options has the import path and no ``type``.
     """
 
     type: str
     import_path: NotRequired[str]
-    kwargs: NotRequired[dict[str, bool | int]]
+    kwargs: NotRequired[dict[str, bool | int | str | list[PreparedImageJson]]]
 
 
 def environment_config(
-    environment: str, task_path: Path, agent: Mapping[str, object] | None = None, *, builds_templates: bool = True
+    environment: str,
+    task_path: Path,
+    agent: Mapping[str, object] | None = None,
+    *,
+    builds_templates: bool = True,
+    prepared_images: Sequence[PreparedImage] = (),
 ) -> HarborEnvironmentConfig:
     """The Harbor environment config of a trial of the task ``task_path`` in the Harbor environment type
     ``environment``, with the Harbor agent config ``agent``.
 
     ``agent`` has the field names of Harbor's ``AgentConfig``. None is an agent that sets no time limit of its own,
     such as the ``oracle`` and ``nop`` agents of the generator's checks. ``builds_templates`` false makes an ``e2b``
-    trial start only from templates that exist: it fails instead of building a missing one. Raise ``ValueError`` for
-    ``builds_templates`` false on any other type.
+    trial start only from templates that exist: it fails instead of building a missing one. ``prepared_images`` are
+    the images that a deployment verified for this version of the task; only a trusted caller gives them, never the
+    task's files. An ``e2b`` trial starts each environment that has one from it, and builds nothing for it. Raise
+    ``ValueError`` for ``builds_templates`` false or for prepared images on any other type.
 
     It is ``{"type": environment}`` for any type but ``e2b`` and ``modal``. For those two it adds:
 
     - ``import_path`` on ``e2b``: ``HARBOR_E2B_ENVIRONMENT``, Harbor's E2B environment with its sandbox deleted at its
-      timeout (:mod:`reef.execution.sandbox.e2b`). Harbor's own class leaves the timeout to the service, and a
-      self-hosted service can pause the sandbox instead. Harbor makes the class of ``import_path`` and does not read
-      ``type`` then. That class is an ``e2b`` environment too.
+      timeout (:mod:`reef.execution.sandbox.e2b.trial`). Harbor's own class leaves the timeout to the
+      service, and a self-hosted service can pause the sandbox instead. Harbor makes the class of ``import_path`` and
+      does not read ``type`` then. That class is an ``e2b`` environment too.
+    - ``import_path`` on ``modal``: ``HARBOR_MODAL_ENVIRONMENT``, Harbor's Modal environment whose sandbox creation
+      raises Reef's sandbox errors for Modal's refusals (:mod:`reef.execution.sandbox.modal.trial`). That
+      class is a ``modal`` environment too.
     - ``kwargs.builds_templates`` on ``e2b``: False when ``builds_templates`` is false. Harbor gives it to the class of
       the trial's environment and of each of its separate verifier environments.
+    - ``kwargs.prepared_images`` and ``kwargs.task_directory`` on ``e2b``, when ``prepared_images`` is not empty: the
+      JSON list of the images, and the absolute path of ``task_path``. Harbor gives both to the same classes, and
+      each one selects the image of its own directory and ``docker_image``.
     - ``kwargs.modal_vm_runtime`` on ``modal``: True when the task has ``environment/docker-compose.yaml`` and its
       ``task.toml`` asks for no GPU. Modal's default runtime puts each Compose service on the host network, and
       Compose refuses that for a service that names its networks. The VM runtime keeps the task's networks and their
@@ -352,6 +374,8 @@ def environment_config(
     """
     if not builds_templates and environment != "e2b":
         raise ValueError(f"only an e2b trial can refuse to build its templates, not a {environment!r} trial")
+    if prepared_images and environment != "e2b":
+        raise ValueError(f"only an e2b trial starts from prepared images, not a {environment!r} trial")
     if environment not in ("e2b", "modal"):
         return {"type": environment}
     # Imported here: only a cloud trial needs Harbor's trial models. Only the two time limits go to the model. The
@@ -369,13 +393,18 @@ def environment_config(
     task = tomllib.loads((task_path / "task.toml").read_text())
     task_environment = task.get("environment", {})
     config: HarborEnvironmentConfig = {"type": environment}
-    kwargs: dict[str, bool | int] = {}
+    kwargs: dict[str, bool | int | str | list[PreparedImageJson]] = {}
     if environment == "e2b":
         config["import_path"] = HARBOR_E2B_ENVIRONMENT
         if not builds_templates:
             kwargs["builds_templates"] = False
-    elif (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
-        kwargs["modal_vm_runtime"] = True
+        if prepared_images:
+            kwargs["prepared_images"] = [image.to_json() for image in prepared_images]
+            kwargs["task_directory"] = os.path.abspath(task_path)
+    else:
+        config["import_path"] = HARBOR_MODAL_ENVIRONMENT
+        if (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
+            kwargs["modal_vm_runtime"] = True
     # Harbor 0.25.0 (``Trial._compute_agent_timeout_sec``): the override, or the task's limit; None is no limit.
     agent_timeout_seconds = agent_limits.override_timeout_sec or task.get("agent", {}).get("timeout_sec")
     if agent_timeout_seconds is None:
@@ -400,11 +429,31 @@ def environment_config(
     return config
 
 
+def task_images_from_environ(environment: str, environ: Mapping[str, str]) -> TaskImages | None:
+    """The prepared images of the tasks of a training process whose trials run in the Harbor environment type
+    ``environment``: the manifest that ``TASK_IMAGES_VARIABLE`` names in ``environ`` (``TaskImages.from_manifest``).
+
+    None on any type but ``e2b``, the only type that starts prepared images (``environment_config``), and when the
+    variable is unset or empty. Raise ``OSError`` for a manifest that cannot be read, and ``ValueError``, which names
+    the variable, for a manifest that is not valid.
+    """
+    if environment != "e2b":
+        return None
+    path = environ.get(TASK_IMAGES_VARIABLE, "").strip()
+    if not path:
+        return None
+    try:
+        return TaskImages.from_manifest(Path(path))
+    except ValueError as error:
+        raise ValueError(f"{TASK_IMAGES_VARIABLE}: {error}") from error
+
+
 __all__ = [
     "DOCKER_PROBE_TIMEOUT_S",
     "HARBOR_BUILD_TIMEOUT_S",
     "HARBOR_E2B_ENVIRONMENT",
     "HARBOR_E2B_NAMES",
+    "HARBOR_MODAL_ENVIRONMENT",
     "HARBOR_TASK_ENVIRONMENTS",
     "HARBOR_VERIFIER_TIMEOUT_S",
     "MODAL_SANDBOX_DEFAULT_S",
@@ -412,6 +461,7 @@ __all__ = [
     "SANDBOX_LIFETIME_MARGIN_S",
     "SANDBOX_LIFETIME_MAX_S",
     "TASK_ENVIRONMENT_PROBES",
+    "TASK_IMAGES_VARIABLE",
     "DockerProbe",
     "DockerTaskEnvironment",
     "E2BTaskEnvironment",
@@ -425,4 +475,5 @@ __all__ = [
     "checked_task_environment",
     "environment_config",
     "task_environment_probes",
+    "task_images_from_environ",
 ]

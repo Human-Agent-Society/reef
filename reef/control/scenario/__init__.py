@@ -1,0 +1,49 @@
+"""Scenario state, commit, and recovery contracts.
+
+A scenario owns one runtime binding, trainer, artifact chain, and store session.
+The modules follow these responsibilities:
+
+- ``scenario`` exposes operations on one instance; ``binding`` freezes its
+  deployment-selected components with their admission checks, and the runtime.
+- ``registry`` owns loaded instances, per-scenario locks, and scenario
+  archival coordination. It keeps each scenario's settings through the
+  injected storage. It asks its ``admission.ScenarioAdmission`` before it
+  creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
+- ``live_objects`` holds the runtime, the training components, the data store
+  and the served endpoint that one process builds for the recipe
+  (``LiveObjects``), and the functions that need both a recipe and one of
+  those objects. A recipe is configuration and holds none of them.
+- ``factory`` writes a new scenario's root snapshot (the recipe's default
+  start, or an artifact item), opens storage, reconciles committed state, synchronizes and
+  activates the checkpoint, builds the trainer, and replays retained records.
+  It returns a complete ``Scenario`` and closes owned resources on failure.
+- ``committer`` orders commits, activations, new training starts, retries, and artifact publication
+  around store settlement. Trainer state is exposed only after settlement.
+- ``snapshots`` queries snapshots, artifact content, and committed training metadata.
+  It shares the committer's publication lock. Writers take the operation lock
+  before the publication lock; readers never take the operation lock, so long
+  training preparation does not block serving. ``history`` pages retained
+  records and commits for the dispatcher.
+Persisted values and metadata encoding belong to ``reef.storage.scenario.commits``.
+Recovery reads a ``CommitRecord`` (none at initial registration). Storage
+contracts and implementations never import this package.
+
+The aggregate never reaches back to its recipe; the factory and registry
+compose recipes at construction. Application assembly supplies
+its storage service; the dispatcher owns its lifecycle and each
+scenario owns one opened session. Artifact publication and recovery ordering
+remain in this package.
+"""
+
+from reef.control.scenario.binding import ScenarioBinding
+from reef.control.scenario.committer import ScenarioCommitter
+from reef.control.scenario.registry import ScenarioRegistry
+from reef.control.scenario.scenario import Scenario, SnapshotNotRestorableError
+
+__all__ = [
+    "Scenario",
+    "ScenarioBinding",
+    "ScenarioCommitter",
+    "ScenarioRegistry",
+    "SnapshotNotRestorableError",
+]

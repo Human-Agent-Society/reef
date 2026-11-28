@@ -27,6 +27,7 @@ def slime_args(**overrides):
         "offload_train": False,
         "disable_grad_buffers_cpu_backup": False,
         "disable_param_buffers_cpu_backup": False,
+        "train_env_vars": {},
         "megatron_lora_rank": 0,
         "megatron_lora_alpha": None,
         "megatron_lora_dropout": 0.0,
@@ -131,6 +132,9 @@ def component_args(**overrides):
         "colocate": False,
         "offload_train": False,
         "offload_rollout": False,
+        "disable_grad_buffers_cpu_backup": False,
+        "disable_param_buffers_cpu_backup": False,
+        "train_env_vars": {},
         "release_train": False,
         "megatron_lora_rank": 0,
         "rollout_num_gpus": 0,
@@ -179,6 +183,126 @@ def test_slime_args_refuse_what_the_training_component_cannot_run(overrides, ref
 
     with pytest.raises(ValueError, match=re.escape(refusal)):
         validate_slime_args(component_args(**overrides), None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("allocator_settings", "enabled"),
+    [
+        ("expandable_segments:True", True),
+        ("expandable_segments:true", True),
+        (" max_split_size_mb:512 , expandable_segments : True ", True),
+        ("roundup_power2_divisions:[64:8,256:4],expandable_segments:True", True),
+        # Readers can take either pair of a repeated key.
+        ("expandable_segments:True,expandable_segments:False", True),
+        ("expandable_segments:False,expandable_segments:True", True),
+        ("expandable_segments:False", False),
+        ("max_split_size_mb:512", False),
+        ("expandable_segments", False),
+        ("", False),
+    ],
+)
+def test_allocator_settings_turn_on_expandable_segments_with_a_true_pair(allocator_settings, enabled) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import enables_expandable_segments
+
+    assert enables_expandable_segments(allocator_settings) is enabled
+
+
+EXPANDABLE_SEGMENTS_ENVIRONMENTS = [
+    {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
+    {"PYTORCH_ALLOC_CONF": "max_split_size_mb:512,expandable_segments:true"},
+    {"SLIME_ENABLE_EXPANDABLE_SEGMENTS": "1"},
+]
+# Slime turns off the CPU copy of the buffers of a trainer it offloads.
+NO_CPU_COPY = {"disable_grad_buffers_cpu_backup": True, "disable_param_buffers_cpu_backup": True}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "trainer",
+    [
+        # Slime offloads the trainer with --colocate, with --offload or --offload-train, and with a ppo critic.
+        {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 4, **NO_CPU_COPY},
+        {"offload_train": True, **NO_CPU_COPY},
+        # The critic's role gets the CPU copy of its parameter buffers back, but not of its gradient buffers.
+        {"use_critic": True, "offload_train": True, "disable_grad_buffers_cpu_backup": True},
+        # A role that turns off the CPU copy of its parameter buffers only.
+        {"offload_train": True, "disable_param_buffers_cpu_backup": True},
+    ],
+)
+@pytest.mark.parametrize("environ", EXPANDABLE_SEGMENTS_ENVIRONMENTS)
+def test_an_offloaded_trainer_without_a_cpu_copy_refuses_expandable_segments(trainer, environ) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_training_worker_environment
+
+    [(name, value)] = environ.items()
+    with pytest.raises(ValueError) as refusal:
+        validate_training_worker_environment(component_args(**trainer), environ)
+    message = str(refusal.value)
+    assert f"({name}={value} in the environment)" in message
+    assert "writes the zeros into the weights" in message
+    fix = (
+        f"set {name} to 0" if name == "SLIME_ENABLE_EXPANDABLE_SEGMENTS" else f"remove expandable_segments from {name}"
+    )
+    assert f"To fix this, {fix}, or keep the workers on the GPU" in message
+
+
+@pytest.mark.unit
+def test_the_refusal_names_the_train_env_vars_that_reach_the_workers() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_training_worker_environment
+
+    trainer = component_args(
+        offload_train=True, train_env_vars={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}, **NO_CPU_COPY
+    )
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "(PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True in --train-env-vars, "
+            "SLIME_ENABLE_EXPANDABLE_SEGMENTS=1 in the environment)"
+        ),
+    ):
+        validate_training_worker_environment(
+            trainer, {"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512", "SLIME_ENABLE_EXPANDABLE_SEGMENTS": "1"}
+        )
+    # Slime's --train-env-vars go over the environment.
+    trainer.train_env_vars = {"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512"}
+    validate_training_worker_environment(trainer, {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("environ", EXPANDABLE_SEGMENTS_ENVIRONMENTS)
+def test_a_trainer_that_keeps_its_weights_keeps_expandable_segments(environ) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_training_worker_environment
+
+    # The trainer stays on the GPU.
+    validate_training_worker_environment(component_args(rollout_num_gpus=2, **NO_CPU_COPY), environ)
+    # The trainer sleeps, but every page keeps its CPU copy.
+    validate_training_worker_environment(component_args(use_critic=True, offload_train=True), environ)
+    # An offloaded trainer keeps the allocator settings that do not turn them on.
+    validate_training_worker_environment(
+        component_args(offload_train=True, **NO_CPU_COPY),
+        {"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512", "SLIME_ENABLE_EXPANDABLE_SEGMENTS": "0"},
+    )
+
+
+@pytest.mark.unit
+def test_a_critic_refuses_expandable_segments_only_when_slime_turns_off_the_cpu_copy() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_training_worker_environment
+
+    environ = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+    # Slime's ppo critic offloads the trainer without the CPU copy.
+    ppo = slime_args(advantage_estimator="ppo", use_critic=True, offload_train=True, **NO_CPU_COPY)
+    finalize_reef_slime_args(ppo, [])
+    with pytest.raises(ValueError, match="cannot use expandable segments"):
+        validate_training_worker_environment(ppo, environ)
+    # --use-critic with --no-offload-train keeps the actor and the critic on the GPU.
+    resident = slime_args(advantage_estimator="ppo", use_critic=True, offload_train=True, **NO_CPU_COPY)
+    finalize_reef_slime_args(resident, ["--use-critic", "--no-offload-train"])
+    validate_training_worker_environment(resident, environ)
+    # Reef's --use-critic offloads a grpo trainer, as SAO's imo_answerbench example does, with the CPU copy.
+    offloaded = slime_args()
+    finalize_reef_slime_args(offloaded, ["--use-critic"])
+    assert offloaded.offload_train is True
+    validate_training_worker_environment(offloaded, environ)
 
 
 @pytest.mark.unit

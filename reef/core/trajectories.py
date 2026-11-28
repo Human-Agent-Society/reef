@@ -24,7 +24,7 @@ from reef.core.atif_payloads import (
 )
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
-from reef.core.trajectory_index import atif_form
+from reef.core.trajectory_index import atif_form, value_bytes
 
 
 def source_record_id(item: TrajectorySample) -> str:
@@ -115,7 +115,9 @@ def same_history_message(previous: Mapping[str, Any], current: Mapping[str, Any]
     # Python treats several numeric types as equal. Only use direct equality for the string/null wire shape.
     if simple_history_message(previous) and simple_history_message(current) and previous == current:
         return True
-    return canonical_json(atif_form(previous, provider)) == canonical_json(atif_form(current, provider))
+    return value_bytes(previous) == value_bytes(current) or canonical_json(
+        atif_form(previous, provider)
+    ) == canonical_json(atif_form(current, provider))
 
 
 @dataclass
@@ -169,8 +171,9 @@ class TrajectoryBuilder:
         self.last = record
 
     def sample(self, reward: float | None = None, feedback: str | Mapping[str, Any] | None = None) -> TrajectorySample:
-        """The ATIF trajectory of the records added, with ``reward`` and ``feedback``. ``ValueError`` when no record
-        was added."""
+        """The ATIF trajectory of the records added, with ``reward`` and ``feedback``. Its ``schema_version`` is
+        ``ATIF-v1.7``, and its agent's ``tool_definitions`` come from the ``tools`` of the last record.
+        ``ValueError`` when no record was added."""
         first, last = self.first, self.last
         if first is None or last is None:
             raise ValueError("an ATIF trajectory requires at least one inference record")
@@ -250,6 +253,11 @@ def has_image_content(payload: Mapping[str, object]) -> bool:
 
 
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """The request messages and the response messages of one provider payload.
+
+    An explicit ``response.training.response_message`` takes precedence over the provider's response. A completed
+    text-only streaming response contributes its aggregated ``response.message``.
+    """
     response = payload.get("response", {})
     response = response if isinstance(response, Mapping) else {"content": response}
     training = response.get("training", {})
