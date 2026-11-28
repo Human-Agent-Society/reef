@@ -57,7 +57,9 @@ Use these training and recipe options:
 - Set ``rollout-num-gpus`` for separate GPUs or ``colocate`` to share training GPUs. LoRA actors cannot use rollout engines.
 - Use the ``slime`` loss family for the deployment and objective. It accepts task and dataset jobs.
 - Each job runs ``ceil(tasks / rollout-batch-size)`` rollout iterations. The last batch repeats tasks to fill it. ``save_interval`` counts iterations.
-- Engines accept system, user and assistant text only. Slime controls temperature, top-p, top-k and maximum response length.
+- Engines accept system, user and assistant text only. Slime supplies temperature, top-p, top-k, stop conditions and the trial seed.
+  Trial settings override matching agent options. The smallest agent, trial or job response-token limit applies.
+  Set template defaults with ``apply-chat-template-kwargs``. An agent can override individual keys.
 - If an iteration has no trainable group, the job fails with its first rollout error. Score centering records the top ``score-centering-top-k`` log probabilities per sampled token.
 - Install Harbor and the selected environment on the Ray actor's host. Set ``agent_host`` for sandboxed agents.
   The actor inherits E2B credentials, API and sandbox URLs, domain, and Modal credentials from the training service.

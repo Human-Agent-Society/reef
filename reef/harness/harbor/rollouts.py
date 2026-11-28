@@ -526,7 +526,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             return RolloutScore.failed()
         return RolloutScore.scored(0.0 if rollout.reward is None else rollout.reward)
 
-    async def run_async(self, task_path: Path) -> TaskRollout:
+    async def run_async(self, task_path: Path, *, inference_url: str | None = None) -> TaskRollout:
+        """Run a trial. Route its model calls to inference_url when supplied."""
         task_path = Path(task_path)
         if not (task_path / "task.toml").is_file():
             raise TaskRolloutError(f"{task_path} is not a Harbor task directory: no task.toml")
@@ -534,7 +535,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         tags = {**self.labels, "task": task_path.name, "rollout": rollout_id}
         listen_host = "0.0.0.0" if self.agent_host else "127.0.0.1"
         proxy = CaptureProxy(
-            self.reef_url,
+            inference_url if inference_url is not None else self.reef_url,
             self.scenario,
             self.token,
             tags=tags,
