@@ -6,7 +6,7 @@ import json
 from contextlib import closing
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from tests.support.conversations import conversation
 
 from reef.api.assembly import build_dispatcher
@@ -187,6 +187,30 @@ def test_maintain_moves_waiting_content_into_segments_and_reads_stay_exact(open_
         assert store.record_links("acme", ["coding/call-4"])["coding/call-4"].parent == "coding/call-3"
 
 
+def test_maintain_reads_the_waiting_content_of_postgres_a_few_rows_at_a_time(postgres_config, monkeypatch, tmp_path):
+    url, schema = postgres_config
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    items = calls(1, 2, 3)
+    with closing(PostgresDataStore(url, task_files, schema=schema)) as store:
+        store.create("acme", items)
+    monkeypatch.setattr(sql_data, "PACK_BYTES", 1)
+    segments = LocalSegmentStore(tmp_path / "segments")
+    with closing(PostgresDataStore(url, task_files, schema=schema, segments=segments)) as store:
+        content_cursors = []
+
+        @event.listens_for(store.engine, "before_cursor_execute")
+        def keep_cursor(connection, cursor, statement, parameters, context, executemany):
+            if statement.startswith("SELECT") and "call_json" in statement:
+                content_cursors.append(type(cursor).__name__)
+
+        store.maintain()
+        # A client-side cursor holds every waiting row of the owner at once, which can be many segments.
+        assert content_cursors and set(content_cursors) == {"ServerCursor"}
+        assert waiting_rows(store) == (0, 0)
+        assert [item.content for item in store.query("acme")] == [item.content for item in items]
+    task_files.close()
+
+
 def test_maintain_merges_the_segments_of_small_writes_and_reads_stay_exact(open_store, monkeypatch, tmp_path):
     created = [trajectory(f"t{number}", str(number)) for number in range(3)]
     size = len(json.dumps(created[0].content, separators=(",", ":")))
@@ -288,3 +312,123 @@ def test_a_replaced_trajectory_goes_to_a_new_segment_and_maintain_deletes_the_ol
         # No row uses the old segment, so maintain deletes it; the new one stays.
         assert old_segment not in segment_files(tmp_path) and len(segment_files(tmp_path)) == 1
         assert store.read("acme", "t1").content == replaced
+
+
+def test_pack_preserves_a_concurrent_trajectory_replacement(open_store, monkeypatch):
+    original = trajectory("t", "A" * 1024)
+    replacement = trajectory("t", "B")
+    monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", 8192)
+    monkeypatch.setattr(sql_data, "PACK_BYTES", 1024)
+    with closing(open_store()) as store:
+        store.create("acme", [original])
+        write = store.write_segment
+
+        def replace_before_publish(partition, lines):
+            places = write(partition, lines)
+            store.replace_trajectory("acme", "t", replacement.content)
+            return places
+
+        monkeypatch.setattr(store, "write_segment", replace_before_publish)
+        assert store.pack("acme") == 0
+        assert store.read("acme", "t").content == replacement.content
+
+
+def test_merging_small_segments_counts_only_the_items_still_at_their_old_locations(open_store, tmp_path, monkeypatch):
+    with closing(open_store()) as store:
+        for item_id in ("first", "second"):
+            store.create("acme", [trajectory(item_id, "original")])
+        sizes = [path.stat().st_size for path in segment_files(tmp_path)]
+        monkeypatch.setattr(sql_data, "CREATE_SEGMENT_BYTES", sum(sizes))
+        monkeypatch.setattr(sql_data, "PACK_BYTES", sum(sizes) - len(sizes))
+        write = store.write_segment
+
+        def delete_before_publish(partition, lines):
+            places = write(partition, lines)
+            assert store.delete("acme", "first")
+            return places
+
+        monkeypatch.setattr(store, "write_segment", delete_before_publish)
+        assert store.merge_small_segments("acme") == 1
+        assert store.read("acme", "second").content == trajectory("second", "original").content
+
+
+def test_failed_segment_sync_leaves_no_staged_file(tmp_path, monkeypatch):
+    import os
+
+    store = LocalSegmentStore(tmp_path)
+    target = store.path("acme", "s")
+    target.parent.mkdir()
+
+    def fail_sync(descriptor):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(os, "fsync", fail_sync)
+    with pytest.raises(OSError, match="disk error"):
+        store.write("acme", "s", b"payload")
+    assert list(target.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_create_refuses_a_staged_segment_that_cleanup_reclaimed(open_store, monkeypatch, interrupted):
+    with closing(open_store()) as store:
+        write = store.write_segment
+
+        def reclaim_before_publish(partition, lines):
+            places = write(partition, lines)
+            if interrupted:
+                remove = partition.store.delete
+
+                def unlink_then_fail(owner, segment_id):
+                    remove(owner, segment_id)
+                    raise OSError("interrupted after unlink")
+
+                monkeypatch.setattr(partition.store, "delete", unlink_then_fail)
+                with pytest.raises(OSError, match="after unlink"):
+                    store.delete_unused_segments()
+            else:
+                assert store.delete_unused_segments() == 1
+            return places
+
+        monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+        monkeypatch.setattr(store, "write_segment", reclaim_before_publish)
+        with pytest.raises(SegmentNotFoundError):
+            store.create("acme", [trajectory("t", "A")])
+        assert store.read("acme", "t") is None
+
+
+def test_cleanup_waits_for_a_postgres_reader_of_a_replaced_segment(postgres_config, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    url, schema = postgres_config
+    files = LocalTaskFileStore(tmp_path / "tasks")
+    segments = LocalSegmentStore(tmp_path / "segments")
+    with (
+        closing(PostgresDataStore(url, files, schema=schema, segments=segments)) as store,
+        ThreadPoolExecutor(2) as pool,
+    ):
+        selected, fetch = Event(), Event()
+        read = segments.read
+
+        def paused_read(partition, lines):
+            if not selected.is_set():
+                selected.set()
+                assert fetch.wait(10)
+            return read(partition, lines)
+
+        a, b = trajectory("t", "A"), trajectory("t", "B")
+        store.create("acme", [a])
+        monkeypatch.setattr(segments, "read", paused_read)
+        reader = pool.submit(store.read, "acme", "t")
+        try:
+            assert selected.wait(10)
+            store.replace_trajectory("acme", "t", b.content)
+            monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+            cleanup = pool.submit(store.delete_unused_segments)
+            with pytest.raises(TimeoutError):
+                cleanup.result(timeout=0.15)
+        finally:
+            fetch.set()
+        assert reader.result(timeout=10).content == a.content
+        assert cleanup.result(timeout=10) == 1
+        assert store.read("acme", "t").content == b.content

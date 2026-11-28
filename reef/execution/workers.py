@@ -152,8 +152,8 @@ class QueueWorker(ServiceWorker):
       count. No worker takes the item for ``first_deferral_seconds``, doubled for each earlier give-back of the item
       for want of capacity (``WorkItem.deferred_attempt_count``), at most ``max_deferral_seconds``. A give-back of a
       worker that stopped does not make the wait longer. The worker goes on to take other items, so one item that
-      finds no capacity does not hold back work that can run. After ``max_deferrals`` such give-backs, the error
-      fails the item as retryable;
+      finds no capacity does not hold back work that can run. The item never fails for want of capacity: it waits
+      until an attempt finds capacity or its producer cancels it;
     - ``WorkLeaseLostError``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
@@ -168,7 +168,6 @@ class QueueWorker(ServiceWorker):
     keeps_log = False
     first_deferral_seconds = 30.0
     max_deferral_seconds = 600.0
-    max_deferrals = 24
 
     def __init__(
         self,
@@ -322,11 +321,9 @@ class QueueWorker(ServiceWorker):
         """Give ``item`` back with ``reason``, to wait as ``ItemDeferredError`` says. ``item`` is the item as this
         attempt took it, so its deferral count is the stored one: only this attempt can change it while it holds
         the item."""
-        deferrals = item.deferred_attempt_count
-        if deferrals >= self.max_deferrals:
-            self.fail(item, f"{reason} (given back {deferrals} times)", retryable=True)
-            return
-        delay_seconds = min(self.first_deferral_seconds * 2**deferrals, self.max_deferral_seconds)
+        # The item can wait without limit, so the exponent has a bound: a float holds no ``2**1024``.
+        doublings = min(item.deferred_attempt_count, 32)
+        delay_seconds = min(self.first_deferral_seconds * 2**doublings, self.max_deferral_seconds)
         logger.info("worker %s gives %s back for %.0f s: %s", self.worker_id, item.id, delay_seconds, reason)
         try:
             self.queue.give_back(

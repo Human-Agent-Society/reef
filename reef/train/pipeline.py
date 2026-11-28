@@ -52,7 +52,7 @@ from dataclasses import dataclass, field, replace
 from itertools import batched
 from typing import Any
 
-from reef.core.job_data import JobOutcome
+from reef.core.job_data import SAMPLE_KINDS, JobOutcome, SampleKind
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -63,7 +63,7 @@ from reef.samples.context import PipelineContext
 from reef.samples.service import Selection
 from reef.samples.staleness import ServedArtifacts
 from reef.storage.data.store import MAX_QUERY_LIMIT
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, StoredSample, consumed_sample_id, memory_samples
+from reef.storage.scenario.samples import StoredSample, consumed_sample_id, memory_samples
 from reef.train.sample2job import NoJobData, Sample2Job
 from reef.train.types import JobData, Sample, TrajectorySample
 

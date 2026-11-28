@@ -170,6 +170,8 @@ class TaskSample:
 #: out. The record-to-sample stage makes samples, ``job_samples`` and ``buffer_size`` count them, and
 #: ``JobData.samples`` holds them.
 Sample = TrajectorySample | TaskSample
+SampleKind = Literal["trajectory", "task"]
+SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
 
 
 def check_record_ids(record_ids: tuple[str, ...]) -> None:

@@ -12,6 +12,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.core.trajectory_index import (
     CallKey,
+    RequestValues,
     TrajectoryIndex,
     call_key,
     conversations,
@@ -43,10 +44,10 @@ def test_prefix_hashes_are_equal_exactly_as_long_as_the_shape_the_tools_and_the_
     for other in others:
         assert other is not None and set(other.prefix_sha256).isdisjoint(first.prefix_sha256)
     anthropic = call_key({"system": "Be precise", "messages": [USER]})
-    assert anthropic is not None and anthropic.request == (
+    assert anthropic is not None and [value.form for value in anthropic.request] == [
         [{"source": "system", "message": "Be precise"}],
         [{"source": "user", "message": "海 🐟"}],
-    ), "each request value is in its ATIF form"
+    ], "each request value is in its ATIF form"
     assert call_key({"prompt": "hi"}) is None
     empty = call_key({"messages": []})
     assert empty is not None and empty.list_sha256 == empty.trajectory_sha256
@@ -91,11 +92,41 @@ def test_a_key_checks_its_hashes() -> None:
     with pytest.raises(ValueError, match="chained SHA-256"):
         replace(key, trajectory_sha256=sha256_text("other"))
     with pytest.raises(ValueError, match="one prefix hash"):
-        replace(key, request=(USER,))
+        replace(key, request=key.request[:1])
+    with pytest.raises(ValueError, match="chained SHA-256"):
+        replace(key, request=tuple(reversed(key.request)))
     with pytest.raises(ValueError, match="a hash and at least one message"):
         CallKey(key.trajectory_sha256, key.request, key.prefix_sha256, 1, None)
     with pytest.raises(TypeError, match="JSON-serializable"):
         call_key({"messages": [object()]})
+
+
+def test_kept_request_values_change_the_work_and_not_the_keys() -> None:
+    """A reader of one rollout keeps the request values, so a message that each call resends is hashed once."""
+    reply = {"role": "assistant", "content": "ok"}
+    first = {"messages": [SYSTEM, USER], "tools": TOOLS, "response": {"choices": [{"message": reply}]}}
+    second = {"messages": [SYSTEM, USER, reply, {"role": "user", "content": 1}], "tools": TOOLS}
+    third = {"messages": [SYSTEM, USER, reply, {"role": "user", "content": True}], "tools": TOOLS}
+    values = RequestValues()
+    keys = [call_key(payload, values) for payload in (first, second, third)]
+    assert keys == [call_key(payload) for payload in (first, second, third)]
+    assert keys[1] is not None and keys[2] is not None
+    assert keys[1].request[1] is keys[2].request[1], "a resent message has one request value"
+    assert keys[1].list_sha256 != keys[2].list_sha256, "1 and true are two JSON values"
+    assert len(values.made) == 5
+    anthropic = call_key({"system": "海 🐟", "messages": [{"role": "user", "content": "海 🐟"}]}, values)
+    assert anthropic is not None and anthropic.request[0].form != anthropic.request[1].form
+    with pytest.raises(TypeError, match="JSON-serializable"):
+        call_key({"messages": [object()]}, values)
+    records = [
+        AgentRecord(name, "s", RequestType.INFERENCE, payload, float(index))
+        for index, (name, payload) in enumerate([("a", first), ("b", second), ("c", third)])
+    ]
+    plain, kept = TrajectoryIndex(), TrajectoryIndex()
+    for record in records:
+        plain.add(record)
+        kept.add(record, values)
+    assert kept == plain and kept.trajectory("b") == ("a", "b")
 
 
 def test_a_retry_takes_the_place_of_the_call_with_the_same_request() -> None:
@@ -197,8 +228,9 @@ def test_a_shadow_call_with_the_primarys_messages_has_a_trajectory_of_its_own(tm
                 assert records.trajectory("math", record_id) == trajectory
     assert {record.agent_record_id: record.payload for record in stored}["shadow"] == shadow.payload
     rebuilt = TrajectoryIndex()
+    values = RequestValues()
     for record in stored:
-        rebuilt.add(record)
+        rebuilt.add(record, values)
     assert {record_id: rebuilt.trajectory(record_id) for record_id in expected} == expected
 
 

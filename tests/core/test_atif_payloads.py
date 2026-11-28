@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from harbor.models.trajectories import Trajectory
 
+from reef.core import trajectories
 from reef.core.atif_payloads import (
     atif_call,
     canonical_json,
@@ -16,6 +17,7 @@ from reef.core.atif_payloads import (
 )
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import has_image_content, make_trajectory
+from reef.core.trajectory_index import atif_form
 
 CHAT = {
     "model": "m",
@@ -323,6 +325,83 @@ def test_a_trajectory_of_records_keeps_each_response_metrics_on_its_agent_step()
     Trajectory.model_validate(trajectory)
 
 
+READ_CALL = {"id": "r1", "type": "function", "function": {"name": "read", "arguments": '{"path": "a.txt"}'}}
+
+
+def test_a_chat_reply_gives_its_reasoning_field_as_the_reasoning_of_its_step() -> None:
+    # vLLM writes a reply's reasoning as ``reasoning``, not ``reasoning_content``.
+    message = {"role": "assistant", "content": "", "reasoning": "Read it first", "tool_calls": [READ_CALL]}
+    payload = {"messages": [{"role": "user", "content": "Read"}], "response": {"choices": [{"message": message}]}}
+    call = atif_call(payload)
+    assert call is not None
+    assert call.reply[0][0]["reasoning_content"] == "Read it first"
+    assert canonical_json(provider_payload(call)) == canonical_json(payload), "the patch restores the reply's field"
+    both = atif_call({**payload, "response": {"choices": [{"message": {**message, "reasoning_content": "Other"}}]}})
+    assert both is not None and both.reply[0][0]["reasoning_content"] == "Other"
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+def test_a_trajectory_holds_once_a_reply_that_the_agent_resends_with_its_reasoning(field: str) -> None:
+    question = {"role": "user", "content": "Read"}
+    first = {
+        "messages": [question],
+        "response": {
+            "choices": [
+                {"message": {"role": "assistant", "content": "", field: "Read it first", "tool_calls": [READ_CALL]}}
+            ]
+        },
+    }
+    second = {
+        "messages": [
+            question,
+            # An agent sends the reasoning back as ``reasoning_content``, whichever field the engine wrote.
+            {"role": "assistant", "content": "", "reasoning_content": "Read it first", "tool_calls": [READ_CALL]},
+            {"role": "tool", "tool_call_id": "r1", "content": "file"},
+        ],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "Done"}}]},
+    }
+    records = [
+        AgentRecord(f"r{index}", "s", RequestType.INFERENCE, payload, float(index))
+        for index, payload in enumerate((first, second))
+    ]
+    trajectory = make_trajectory(records).trajectory
+    agent = [step for step in trajectory["steps"] if step["source"] == "agent"]
+    assert [step["message"] for step in agent] == ["", "Done"]
+    assert not any(step.get("is_copied_context") for step in agent)
+    assert agent[0]["reasoning_content"] == "Read it first"
+    assert agent[0]["observation"]["results"][0]["content"] == "file"
+    Trajectory.model_validate(trajectory)
+
+
+def test_a_responses_call_with_a_string_input_gives_its_output_items_as_agent_steps() -> None:
+    # The Responses API takes one user message as a string ``input``, so the payload has no message list.
+    payload = {
+        "model": "m",
+        "instructions": "Be brief",
+        "input": "List the files",
+        "tools": [{"type": "function", "name": "ls", "parameters": {"type": "object", "properties": {}}}],
+        "response": {
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Run ls"}]},
+                {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "ls", "arguments": "{}"},
+            ]
+        },
+    }
+    record = AgentRecord("r0", "s", RequestType.INFERENCE, payload, 0.0)
+    trajectory = make_trajectory([record]).trajectory
+    steps = trajectory["steps"]
+    assert [(step["source"], step["message"]) for step in steps] == [
+        ("system", "Be brief"),
+        ("user", "List the files"),
+        ("agent", ""),
+        ("agent", ""),
+    ]
+    assert steps[2]["reasoning_content"] == "Run ls"
+    assert steps[3]["tool_calls"] == [{"tool_call_id": "c1", "function_name": "ls", "arguments": {}}]
+    assert [tool["function"]["name"] for tool in trajectory["agent"]["tool_definitions"]] == ["ls"]
+    Trajectory.model_validate(trajectory)
+
+
 IMAGE_URL = "data:image/png;base64,AAAA"
 ANTHROPIC_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
 
@@ -369,3 +448,69 @@ def test_has_image_content_finds_an_image(payload) -> None:
 )
 def test_has_image_content_ignores_text_and_tools(payload) -> None:
     assert not has_image_content(payload)
+
+
+@pytest.mark.parametrize(
+    ("before_args", "after_args", "shared"),
+    [
+        ('{"count":2,"flag":true}', '{"count":2,"flag":true}', True),
+        ('{"count":2,"flag":true}', '{"flag":true, "count":2}', True),
+        ('{"flag":true}', {"flag": True}, True),
+        ({"flag": True, "args": ["a", 1]}, {"args": ["a", 1], "flag": True}, True),
+        ({"flag": True}, {"flag": 1}, False),
+        ({"count": 2}, {"count": 2.0}, False),
+        ({"zero": -0.0}, {"zero": 0.0}, False),
+    ],
+)
+def test_trajectory_history_matches_the_canonical_provider_comparison(monkeypatch, before_args, after_args, shared):
+    def request(arguments, *, alternate=False):
+        function = {"name": "inspect", "arguments": arguments}
+        if alternate:
+            function = dict(reversed(list(function.items())))
+        return [
+            {"role": "user", "content": "Read the file."},
+            {
+                "role": "assistant",
+                "reasoning_content": "Check the contents first.",
+                "tool_calls": [{"type": "function", "id": "read-1", "function": function}],
+                "content": None,
+            },
+            {"role": "tool", "tool_call_id": "read-1", "content": "result" * 2048},
+        ]
+
+    response = {"role": "assistant", "content": "The file is ready."}
+    records = [
+        AgentRecord(
+            "first",
+            "scenario",
+            RequestType.INFERENCE,
+            {"messages": request(before_args), "response": {"choices": [{"message": response}]}},
+            0.0,
+        ),
+        AgentRecord(
+            "second",
+            "scenario",
+            RequestType.INFERENCE,
+            {
+                "messages": [
+                    *request(after_args, alternate=True),
+                    {"content": [{"type": "text", "text": response["content"]}], "role": "assistant"},
+                    {"role": "user", "content": "Summarize it."},
+                ],
+                "response": {"choices": [{"message": {"role": "assistant", "content": "Done."}}]},
+            },
+            1.0,
+        ),
+    ]
+    actual = make_trajectory(records)
+
+    def canonical_match(previous, current, provider):
+        return canonical_json(atif_form(previous, provider)) == canonical_json(atif_form(current, provider))
+
+    monkeypatch.setattr(trajectories, "same_history_message", canonical_match)
+    reference = make_trajectory(records)
+    assert canonical_json(actual.trajectory) == canonical_json(reference.trajectory)
+    assert actual.source_agent_record_ids == reference.source_agent_record_ids == ("first", "second")
+    repeated_calls = [step for step in actual.trajectory["steps"] if step.get("tool_calls")]
+    assert len(repeated_calls) == (1 if shared else 2)
+    assert all(step["is_copied_context"] for step in repeated_calls)

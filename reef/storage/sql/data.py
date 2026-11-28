@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, replace
 from itertools import batched
 from pathlib import Path
 from threading import Event, Lock, RLock
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from sqlalchemy import (
     URL,
@@ -79,8 +79,16 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.records_types import RecordLoss
 from reef.core.trajectory_index import call_key
+from reef.core.values import canonical_json
 from reef.storage.data.item_kinds import TaskFilesReference, task_partition
-from reef.storage.data.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
+from reef.storage.data.segments import (
+    LocalSegmentStore,
+    SegmentLine,
+    SegmentNotFoundError,
+    SegmentPartition,
+    SegmentStore,
+    segment_lines,
+)
 from reef.storage.data.store import (
     HOLD_ITEM_KINDS,
     JOB_DIRECTORY_TTL_SECONDS,
@@ -133,6 +141,8 @@ from reef.storage.sql.setup import enable_wal, postgres_url, prefix_range, valid
 
 #: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
 PACK_BYTES = 64 * 2**20
+#: The rows that ``pack`` reads from the database at a time.
+PACK_READ_ROWS = 16
 #: The content bytes of the new trajectory items of one ``create`` call from which the call writes them as a segment.
 CREATE_SEGMENT_BYTES = 2**20
 #: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
@@ -655,10 +665,6 @@ DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (
 )
 
 
-def canonical_json(value: Mapping[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
 def deleted_item(row: RowMapping) -> DeletedItem:
     """The ``DeletedItem`` of a row of ``data_deleted_item``, without content."""
     return DeletedItem(
@@ -755,11 +761,14 @@ class SQLDataStore(DataStore):
 
     @abstractmethod
     @contextmanager
-    def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
+    def transaction(
+        self, *, read_only: bool = False, segment_access: Literal["read", "reclaim"] | None = None
+    ) -> Iterator[Connection]:
         """One transaction: commit when the block ends, roll back when it raises.
 
         A ``read_only`` transaction reads one snapshot in all its statements, so a concurrent ``delete`` cannot
-        remove a row between two of them."""
+        remove a row between two of them. A segment read protects its selected files through that snapshot.
+        Reclamation excludes those readers and rechecks the catalog before deleting a file."""
 
     @abstractmethod
     def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -906,6 +915,27 @@ class SQLDataStore(DataStore):
         """The trajectory nodes of the record items of ``owner``."""
         return TrajectoryNodes(ScopedTable(self.nodes_table, {"owner": owner}), self.partition(owner))
 
+    def check_segments(self, connection: Connection, owner: str, segment_ids: Iterable[str]) -> None:
+        """Keep each staged file available until its publication commits.
+
+        Cleanup can unlink a file and then lose its database transaction. Its catalog entry survives that rollback.
+        Check one byte of each file while holding the row locks that exclude cleanup.
+        """
+        segment = self.segment_table
+        for batch in batches(sorted(set(segment_ids))):
+            held = connection.scalars(
+                select(segment.c.segment_id)
+                .where(segment.c.owner == owner, segment.c.segment_id.in_(batch))
+                .order_by(segment.c.segment_id)
+                .with_for_update(read=True)
+            )
+            missing = set(batch).difference(held)
+            if missing:
+                raise SegmentNotFoundError(f"segment {min(missing)!r} of {owner!r} was reclaimed before publication")
+            if self.segments is None:
+                raise ReefError("a segment pointer needs a segment store")
+            self.segments.read(owner, [SegmentLine(segment_id, 0, 1) for segment_id in batch])
+
     def write_segment(self, partition: SegmentPartition, lines: Sequence[str]) -> tuple[SegmentLine, ...]:
         """Write ``lines`` as a new segment of ``partition``, and return the place of each line.
 
@@ -920,7 +950,16 @@ class SQLDataStore(DataStore):
                     owner=partition.partition, segment_id=segment_id, created_at=time.time(), byte_count=len(data)
                 )
             )
-        partition.store.write(partition.partition, segment_id, data)
+        with self.transaction() as connection:
+            segment = self.segment_table
+            staged = connection.scalar(
+                select(segment.c.segment_id)
+                .where(segment.c.owner == partition.partition, segment.c.segment_id == segment_id)
+                .with_for_update(read=True)
+            )
+            if staged is None:
+                raise SegmentNotFoundError(f"segment {segment_id!r} was reclaimed before its write")
+            partition.store.write(partition.partition, segment_id, data)
         return places
 
     def stored_items(
@@ -1271,6 +1310,7 @@ class SQLDataStore(DataStore):
             for origin, generation in checked:
                 if current[origin] != generation:
                     raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
+            self.check_segments(connection, owner, (row["segment_id"] for row in values.values() if row["segment_id"]))
             sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             inserted = {item_id: (sequence, metadata_of[item_id]) for item_id, sequence in sequences.items()}
@@ -1326,7 +1366,7 @@ class SQLDataStore(DataStore):
     def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
         check_owner(owner)
         unique_ids = list(dict.fromkeys(item_ids))
-        with self.transaction(read_only=True) as connection:
+        with self.transaction(read_only=True, segment_access="read" if content else None) as connection:
             # One query for the rows, and one segment read for the content of all of them.
             rows = self.rows(connection, owner, unique_ids)
             found = [rows[item_id] for item_id in unique_ids if item_id in rows]
@@ -1397,7 +1437,7 @@ class SQLDataStore(DataStore):
         order = sequence if before is None else sequence.desc()
         if before is not None:
             statement = statement.where(sequence < before)
-        with self.transaction(read_only=True) as connection:
+        with self.transaction(read_only=True, segment_access="read" if content else None) as connection:
             found = connection.execute(statement.order_by(order).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
 
@@ -1565,7 +1605,7 @@ class SQLDataStore(DataStore):
         )
         if excluding_origin is not None:
             statement = statement.where(~uses.c.item_id.startswith(f"{excluding_origin}/", autoescape=True))
-        with self.transaction(read_only=True) as connection:
+        with self.transaction(read_only=True, segment_access="read" if content else None) as connection:
             found = connection.execute(statement).mappings().all()
             stored = self.stored_items(connection, owner, found, content=content)
         return tuple(
@@ -2032,6 +2072,8 @@ class SQLDataStore(DataStore):
             stored = StoredItem(row["sequence"], owner, item_id, json.loads(row["metadata_json"]), row["digest"])
             if digest == stored.digest:
                 return stored
+            if place is not None:
+                self.check_segments(connection, owner, [place.segment_id])
             items = self.items_table
             connection.execute(
                 update(items)
@@ -2244,57 +2286,61 @@ class SQLDataStore(DataStore):
             is_items = table is self.items_table
             key = table.c.sequence if is_items else table.c.node_sequence
             texts = (
-                (table.c.content_json,) if is_items else (table.c.entries_json, table.c.shape_json, table.c.call_json)
+                (table.c.content_json, table.c.digest)
+                if is_items
+                else (table.c.entries_json, table.c.shape_json, table.c.call_json)
             )
             condition = and_(table.c.owner == owner, waiting)
             while True:
-                rows: list[RowMapping] = []
+                rows: list[dict[str, object]] = []
+                lines: list[str] = []
                 total = 0
                 with self.transaction() as connection:
                     if (connection.scalar(select(func.sum(size)).where(condition)) or 0) < PACK_BYTES:
                         break
+                    # The query selects all the waiting content of the owner, which can fill many segments. The
+                    # rows come ``PACK_READ_ROWS`` at a time, so the process holds the content of one segment only.
                     result = connection.execute(
-                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key)
+                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key),
+                        execution_options={"yield_per": PACK_READ_ROWS},
                     ).mappings()
                     for row in result:
-                        rows.append(row)
+                        parameters = {"row_key": row["key"]}
+                        rows.append(parameters)
+                        if is_items:
+                            parameters["expected_digest"] = row["digest"]
+                            lines.append(row["content_json"])
+                        else:
+                            lines.append(node_line(row["entries_json"], row["shape_json"], row["call_json"]))
                         total += int(row["size"])
                         if total >= PACK_BYTES:
                             break
                     result.close()
-                lines = [
-                    (
-                        row["content_json"]
-                        if is_items
-                        else node_line(row["entries_json"], row["shape_json"], row["call_json"])
-                    )
-                    for row in rows
-                ]
+                if not rows:
+                    break
                 places = self.write_segment(partition, lines)
                 cleared = (
                     {"content_json": None}
                     if is_items
                     else {"entries_json": None, "shape_json": None, "call_json": None}
                 )
-                with self.transaction() as connection:
-                    connection.execute(
-                        update(table)
-                        .where(condition, key == bindparam("row_key"))
-                        .values(
-                            **cleared,
-                            **{name: bindparam(f"new_{name}") for name in SEGMENT_COLUMNS},
-                        ),
-                        [
-                            {
-                                "row_key": row["key"],
-                                "new_segment_id": place.segment_id,
-                                "new_segment_offset": place.offset,
-                                "new_segment_length": place.length,
-                            }
-                            for row, place in zip(rows, places, strict=True)
-                        ],
+                matches = condition & (key == bindparam("row_key"))
+                if is_items:
+                    matches &= table.c.digest == bindparam("expected_digest")
+                for parameters, place in zip(rows, places, strict=True):
+                    parameters.update(
+                        new_segment_id=place.segment_id,
+                        new_segment_offset=place.offset,
+                        new_segment_length=place.length,
                     )
-                moved += len(rows)
+                with self.transaction() as connection:
+                    self.check_segments(connection, owner, [places[0].segment_id])
+                    moved += connection.execute(
+                        update(table)
+                        .where(matches)
+                        .values(**cleared, **{name: bindparam(f"new_{name}") for name in SEGMENT_COLUMNS}),
+                        rows,
+                    ).rowcount
         return moved
 
     def small_segment_items(self) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
@@ -2311,8 +2357,7 @@ class SQLDataStore(DataStore):
         of at least ``PACK_BYTES``, oldest first, while at least ``PACK_BYTES`` of it is there; return the number of
         rows moved. A read of many items then sends fewer requests to the segment store.
 
-        A reader that holds the old place of a line still reads it: ``delete_unused_segments`` keeps the old
-        segment for ``UNUSED_SEGMENT_SECONDS``. The caller holds ``pack_lock(owner)``.
+        A reader keeps its snapshot and its segment lines until the read transaction ends. The caller holds ``pack_lock(owner)``.
         """
         partition = self.partition(owner)
         if partition is None:
@@ -2325,7 +2370,7 @@ class SQLDataStore(DataStore):
         while True:
             rows: list[RowMapping] = []
             total = 0
-            with self.transaction() as connection:
+            with self.transaction(read_only=True, segment_access="read") as connection:
                 waiting = select(func.sum(items.c.segment_length)).select_from(source).where(condition)
                 if (connection.scalar(waiting) or 0) < PACK_BYTES:
                     break
@@ -2341,13 +2386,18 @@ class SQLDataStore(DataStore):
                     if total >= PACK_BYTES:
                         break
                 result.close()
-            lines = [
-                SegmentLine(row["segment_id"], int(row["segment_offset"]), int(row["segment_length"])) for row in rows
-            ]
-            places = self.write_segment(partition, partition.read_text(lines))
+                lines = [
+                    SegmentLine(row["segment_id"], int(row["segment_offset"]), int(row["segment_length"]))
+                    for row in rows
+                ]
+                if not lines:
+                    break
+                text = partition.read_text(lines)
+            places = self.write_segment(partition, text)
             with self.transaction() as connection:
+                self.check_segments(connection, owner, [places[0].segment_id])
                 # A row that another write moved meanwhile keeps its new place.
-                connection.execute(
+                moved += connection.execute(
                     update(items)
                     .where(
                         items.c.owner == owner,
@@ -2365,8 +2415,7 @@ class SQLDataStore(DataStore):
                         }
                         for row, place in zip(rows, places, strict=True)
                     ],
-                )
-            moved += len(rows)
+                ).rowcount
         return moved
 
     def maintain(self) -> None:
@@ -2407,26 +2456,29 @@ class SQLDataStore(DataStore):
         """Delete each segment older than ``UNUSED_SEGMENT_SECONDS`` that no item, deleted item or node uses; return
         the count.
 
-        New rows only use new segments, so a segment that is old and unused stays unused. A restore moves a row
-        with its segment line, so a segment that a deleted item uses stays used until the purge.
+        Recheck references after acquiring the cleanup lock. Active readers finish before the file is removed.
         """
         if self.segments is None:
             return 0
         segment, items, nodes, deleted = self.segment_table, self.items_table, self.nodes_table, self.deleted_table
-        with self.transaction() as connection:
-            unused = connection.execute(
-                select(segment.c.owner, segment.c.segment_id).where(
-                    segment.c.created_at < time.time() - UNUSED_SEGMENT_SECONDS,
-                    ~exists().where(items.c.owner == segment.c.owner, items.c.segment_id == segment.c.segment_id),
-                    ~exists().where(deleted.c.owner == segment.c.owner, deleted.c.segment_id == segment.c.segment_id),
-                    ~exists().where(nodes.c.owner == segment.c.owner, nodes.c.segment_id == segment.c.segment_id),
-                )
-            ).all()
+        candidates = select(segment.c.owner, segment.c.segment_id).where(
+            segment.c.created_at < time.time() - UNUSED_SEGMENT_SECONDS,
+            ~exists().where(items.c.owner == segment.c.owner, items.c.segment_id == segment.c.segment_id),
+            ~exists().where(deleted.c.owner == segment.c.owner, deleted.c.segment_id == segment.c.segment_id),
+            ~exists().where(nodes.c.owner == segment.c.owner, nodes.c.segment_id == segment.c.segment_id),
+        )
+        with self.transaction(read_only=True) as connection:
+            unused = connection.execute(candidates).all()
+        removed = 0
         for owner, segment_id in unused:
-            self.segments.delete(owner, segment_id)
-            with self.transaction() as connection:
-                connection.execute(delete(segment).where(segment.c.owner == owner, segment.c.segment_id == segment_id))
-        return len(unused)
+            key = and_(segment.c.owner == owner, segment.c.segment_id == segment_id)
+            with self.transaction(segment_access="reclaim") as connection:
+                if connection.execute(candidates.where(key)).first() is None:
+                    continue
+                self.segments.delete(owner, segment_id)
+                connection.execute(delete(segment).where(key))
+                removed += 1
+        return removed
 
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":
@@ -2523,7 +2575,9 @@ class SQLiteDataStore(SQLDataStore):
         return cls(directory, task_files, segments, job_directory_ttl_seconds=job_directory_ttl_seconds)
 
     @contextmanager
-    def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
+    def transaction(
+        self, *, read_only: bool = False, segment_access: Literal["read", "reclaim"] | None = None
+    ) -> Iterator[Connection]:
         # The lock and the write lock already run each transaction alone, so a read sees one state.
         with self.lock:
             if self.connection is None:
@@ -2531,7 +2585,10 @@ class SQLiteDataStore(SQLDataStore):
             with self.connection.begin():
                 # Another process can hold the file: take the write lock now, within the busy timeout, so a read
                 # never has to upgrade to a write, which SQLite refuses at once under contention.
-                self.connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin = (
+                    "BEGIN" if read_only and (self.segments is None or segment_access is None) else "BEGIN IMMEDIATE"
+                )
+                self.connection.exec_driver_sql(begin)
                 yield self.connection
 
     def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -2631,11 +2688,18 @@ class PostgresDataStore(SQLDataStore):
         )
 
     @contextmanager
-    def transaction(self, *, read_only: bool = False) -> Iterator[Connection]:
+    def transaction(
+        self, *, read_only: bool = False, segment_access: Literal["read", "reclaim"] | None = None
+    ) -> Iterator[Connection]:
         if self.engine is None:
             raise ReefError("the data store is closed")
         isolation = "REPEATABLE READ" if read_only else "READ COMMITTED"
         with self.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
+            if self.segments is not None and segment_access is not None:
+                # LOCK precedes the first snapshot. Readers and publishers can overlap. Only reclamation waits.
+                mode = "EXCLUSIVE" if segment_access == "reclaim" else "ROW SHARE"
+                table = connection.dialect.identifier_preparer.format_table(self.segment_table)
+                connection.exec_driver_sql(f"LOCK TABLE {table} IN {mode} MODE")
             yield connection
 
     def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:

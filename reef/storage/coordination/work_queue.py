@@ -24,7 +24,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from reef.core.errors import ReefError
@@ -79,7 +79,7 @@ class WorkItem:
       retry count of a serving request (``ServedModelsWriter.request``), or when a worker gives it back for want of
       capacity (``DEFERRED_ATTEMPTS``).
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
-      change.
+      change except lease-only extensions (``WorkQueue.extend_lease``).
 
     Purpose: a ``WorkQueue`` makes it; workers read the payload and progress, and readers read the result, the
     times and the metadata.
@@ -232,10 +232,10 @@ class WorkQueue(ABC):
     """A set of work queues in one store.
 
     Values: the state is a finite set of ``WorkItem`` values with distinct ``(queue, id)`` pairs, and a sequence
-    counter that numbers every change across the store. ``lease_seconds`` is the lease length that ``take`` and
-    ``extend_lease`` give. A worker can take one item of a queue ``max_attempts[queue]`` times, or
-    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int. An attempt
-    that its worker gave back (``give_back``) is not one of these times.
+    counter that numbers every change across the store except lease-only extensions (``extend_lease``).
+    ``lease_seconds`` is the lease length that ``take`` and ``extend_lease`` give. A worker can take one item of a
+    queue ``max_attempts[queue]`` times, or ``default_attempts`` times for a queue that ``max_attempts`` does not
+    name; each is a positive int. An attempt that its worker gave back (``give_back``) is not one of these times.
 
     Purpose: control and the services add work (``append``, ``request``); workers take, extend, progress, finish,
     fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``read``)
@@ -319,8 +319,8 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item; else raise
-        ``WorkLeaseLostError``."""
+        """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item, without changing
+        ``changed_sequence``; else raise ``WorkLeaseLostError``."""
 
     @abstractmethod
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
@@ -397,9 +397,10 @@ class WorkQueue(ABC):
     def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
         """Make a final item ``queued`` again, for the producer that added it, so that a worker takes it once more.
 
-        The item keeps its payload, its progress, its metadata, its ``started_at`` and its attempt counts. It loses
-        its result and its ``ended_at``, keeps the error of a failed item as its last error, and is available at
-        ``now``. A worker can take it whatever its ``attempt_count`` is, so the item gets at least one more attempt;
+        The item keeps its payload, its progress, its ``started_at``, its attempt counts and its metadata except
+        ``metadata[DEFERRED_ATTEMPTS]``: the retry can wait for capacity as often as a new item
+        (``WorkItem.deferred_attempt_count`` is 0 again). It loses its result and its ``ended_at``, keeps the error
+        of a failed item as its last error, and is available at ``now``. A worker can take it whatever its ``attempt_count`` is, so the item gets at least one more attempt;
         a retryable failure of that attempt queues it again only while ``has_attempts_left``. Return the item, or
         None when it does not exist; an item that is not final does not change.
         """
@@ -440,12 +441,14 @@ class WorkQueue(ABC):
     def read(self, queue: str, item_id: str) -> WorkItem | None:
         """The item, or None."""
 
-    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+    def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         """The items in ``queue`` in the order of ``item_ids``.
 
-        Include one result per occurrence of an ID that exists in the queue. Skip missing IDs.
+        Include one result per occurrence of an ID that exists in the queue. Skip missing IDs. Without ``payload``,
+        each item has an empty payload, as for ``items``.
         """
-        return tuple(item for item_id in item_ids if (item := self.read(queue, item_id)) is not None)
+        found = (self.read(queue, item_id) for item_id in item_ids)
+        return tuple(item if payload else replace(item, payload={}) for item in found if item is not None)
 
     @abstractmethod
     def read_changes(self, queue: str, after_sequence: int, *, limit: int = 1000) -> tuple[WorkItem, ...]:
@@ -453,11 +456,21 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def items(
-        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+        self,
+        queue: str,
+        *,
+        scenario: str | None = None,
+        kind: str | None = None,
+        id_prefix: str | None = None,
+        payload: bool = True,
     ) -> tuple[WorkItem, ...]:
         """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order. ``id_prefix``,
         a non-empty string, keeps only the items whose ID starts with it; a store reads only those. Raise
-        ``ValueError`` for another ``id_prefix``."""
+        ``ValueError`` for another ``id_prefix``.
+
+        Without ``payload``, each item has an empty payload: a store does not read the stored payloads. A reader of
+        the states or the results of many items asks for this, so the read does not grow with the payloads. Such an
+        item is not the stored one: do not add it to a queue again."""
 
     def prefix_state_counts(
         self, queue: str, *, scenario: str, kind: str, id_prefix: str, marker: str
@@ -541,12 +554,18 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
+#: The longest wait before retrying a lease extension after a transient failure, in seconds.
+LEASE_RETRY_MAX_SECONDS = 2.0
+
+
 class LeaseExtender:
     """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
 
     Values: ``queue`` holds the item; ``item`` is the item that ``worker_id`` holds; ``done`` ends the extension.
-    The thread ends at ``stop`` or when the worker no longer holds the item, and then sets ``lease_lost``; a failed
-    extension that is no lost lease is logged and tried again at the next third.
+    The thread ends at ``stop`` or when the worker no longer holds the item, and then sets ``lease_lost``.
+    After a transient failure that is not ``WorkLeaseLostError``, it logs the error and retries after
+    ``min(LEASE_RETRY_MAX_SECONDS, queue.lease_seconds / 10)`` seconds until extension succeeds, ``stop`` runs,
+    or the lease is lost.
 
     Purpose: a worker opens one around work that can take longer than the lease (``with LeaseExtender(...)``).
     """
@@ -573,7 +592,10 @@ class LeaseExtender:
             self.thread.join()
 
     def run(self) -> None:
-        while not self.done.wait(self.queue.lease_seconds / 3):
+        normal_wait_seconds = self.queue.lease_seconds / 3
+        retry_wait_seconds = min(LEASE_RETRY_MAX_SECONDS, self.queue.lease_seconds / 10)
+        wait_seconds = normal_wait_seconds
+        while not self.done.wait(wait_seconds):
             try:
                 self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
             except WorkLeaseLostError:
@@ -581,12 +603,16 @@ class LeaseExtender:
                 return
             except Exception:
                 logger.exception("could not extend the lease of %s", self.item.id)
+                wait_seconds = retry_wait_seconds
+            else:
+                wait_seconds = normal_wait_seconds
 
 
 __all__ = [
     "DEFERRED_ATTEMPTS",
     "FINAL_STATES",
     "HELD_STATES",
+    "LEASE_RETRY_MAX_SECONDS",
     "MAX_LOG_LINES",
     "MAX_LOG_MESSAGE",
     "WORK_STATES",

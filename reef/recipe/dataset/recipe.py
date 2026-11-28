@@ -6,9 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.dataset.processor import DatasetJobData
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 

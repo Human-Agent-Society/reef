@@ -72,8 +72,8 @@ class SandboxUnavailableError(ReefError):
 class SandboxCapacityError(ReefError):
     """A sandbox service refused a new sandbox for want of capacity now. On E2B: no node or no memory for it (HTTP
     503), too many requests (HTTP 429), or no placement before a gateway or the client stopped waiting (HTTP 504, or a
-    request timeout). On Modal: its ``ResourceExhaustedError`` when it creates the sandbox. A later try can pass, and
-    an evaluation tries again a bounded number of times (``QueueWorker.max_deferrals``)."""
+    request timeout). On Modal: its ``ResourceExhaustedError`` when it creates the sandbox. A later try can pass, so
+    a rollout of an evaluation waits in the queue and tries again (``ItemDeferredError``)."""
 
 
 class SandboxRequestError(ReefError):

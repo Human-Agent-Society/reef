@@ -719,6 +719,26 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
     assert "OPENCODE_ENABLE_EXA" not in OPENCODE.env
 
 
+def test_opencode_disables_title_generation_by_default_and_allows_override() -> None:
+    """Headless runs disable opencode's hidden title agent in opencode.json by default so they do not make an extra
+    title-generation model call; a tree can explicitly re-enable it in config/primary.json (which Reef's plugin
+    merges over opencode.json), and a layer leaves the user's config alone."""
+    default_tree = HarnessTree({})
+    assert validate_tree(default_tree, OPENCODE).passed
+    rendered = render({}, OPENCODE)
+    assert json.loads(rendered["opencode/opencode.json"])["agent"] == {"title": {"disable": True}}
+    assert json.loads(rendered["plugin/config.json"]) == {}
+
+    override_files = config({"agent": {"title": {"disable": False}}})
+    assert validate_tree(HarnessTree(override_files), OPENCODE).passed
+    assert json.loads(render(override_files, OPENCODE)["plugin/config.json"]) == {
+        "agent": {"title": {"disable": False}}
+    }
+
+    layer_files = render_tree(default_tree, OPENCODE, layer=True)
+    assert "agent" not in json.loads(layer_files["opencode/opencode.json"])
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
@@ -872,11 +892,12 @@ def test_opencode_command_file_keeps_its_own_name() -> None:
 def test_opencode_tree_keeps_an_agent_that_starts_a_run() -> None:
     """With no default_agent opencode starts a run with its first agent that is neither a subagent nor hidden, and
     fails every run when none is left; its title, summary and compaction agents stay hidden unless the tree says
-    otherwise. An agent given another name is looked up by that name and fails the run that uses it."""
+    otherwise, and title is disabled in run defaults unless the tree explicitly sets disable: false. An agent given
+    another name is looked up by that name and fails the run that uses it."""
     off = {"build": {"disable": True}, "plan": {"disable": True}}
     for data in (
         {"agent": {**off, "chat": {"prompt": "You chat."}}},
-        {"agent": {**off, "title": {"hidden": False}}},
+        {"agent": {**off, "title": {"disable": False, "hidden": False}}},
         {"agent": off, "mode": {"chat": {"prompt": "You chat."}}},
         {"agent": {"build": {"name": "build"}}},
     ):
@@ -885,6 +906,7 @@ def test_opencode_tree_keeps_an_agent_that_starts_a_run() -> None:
         {"agent": off},
         {"agent": {"build": {"mode": "subagent"}, "plan": {"disable": True}}},
         {"agent": {"build": {"hidden": True}, "plan": {"disable": True}}},
+        {"agent": {**off, "title": {"hidden": False}}},
         {"agent": {**off, "title": {"prompt": "Name it."}}},
         {"agent": {**off, "chat": {"prompt": "You chat.", "mode": "subagent"}}},
     ):
@@ -947,8 +969,11 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
         return {"commands/hi.md": f"---\nagent: {agent}\n---\nSay hi to $ARGUMENTS."}
 
     chat = {"mode": "primary", "permission": {"*": "deny", "websearch": "allow"}}
-    for agent in ("build", "plan", "general", "explore", "title"):
+    for agent in ("build", "plan", "general", "explore"):
         render(command(agent), OPENCODE)
+    with pytest.raises(RenderError, match="command 'hi' names agent 'title', which the tree does not define"):
+        render(command("title"), OPENCODE)
+    render({**config({"agent": {"title": {"disable": False}}}), **command("title")}, OPENCODE)
     render({**config({"agent": {"chat": chat}}), **command("chat")}, OPENCODE)
     render({**config({"mode": {"chat": chat}}), **command("chat")}, OPENCODE)
     with pytest.raises(RenderError, match="command 'hi' names agent 'ghost', which the tree does not define"):
@@ -958,6 +983,10 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
     inline = {"command": {"hi": {"template": "Hi.", "agent": "ghost"}}}
     with pytest.raises(RenderError, match=r"command 'hi' in config\.json names agent 'ghost'"):
         render(config(inline), OPENCODE)
+    inline_title = {"command": {"hi": {"template": "Hi.", "agent": "title"}}}
+    with pytest.raises(RenderError, match=r"command 'hi' in config\.json names agent 'title'"):
+        render(config(inline_title), OPENCODE)
+    render(config({**inline_title, "agent": {"title": {"disable": False}}}), OPENCODE)
     with pytest.raises(RenderError, match="command 'hi' must not choose a model"):
         render({"commands/hi.md": "---\nmodel: evil/m\n---\nSay hi."}, OPENCODE)
 

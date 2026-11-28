@@ -10,62 +10,54 @@ The repository's sibling ``recipes`` tree is a cookbook and is not part of the
 installed Reef package.
 """
 
-# isort: skip_file
+from importlib import import_module
+
 from reef.core.version import __version__
 
-from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
-from reef.api.wire import ReportPayload, RequestHeaders, parse_request_headers
-from reef.storage.scenario.records import RecordStore
-from reef.evaluation import (
-    ActivationRule,
-    CandidateEvaluationPlugin,
-    CandidateEvaluator,
-    CandidateSelector,
-    EvaluationResult,
-    MadeArtifact,
-    SelectionDecision,
-    UpdateCandidate,
-)
-from reef.storage.scenario.commits import SCENARIO_METADATA_KEY
-from reef.control.scenario import Scenario
-from reef.recipe import (
-    RecipeConfigError,
-    Recipe,
-)
-from reef.control.dispatcher import Dispatcher, build_default_dispatcher
-from reef.train import Sample2Job, Trainer, TrainingPipeline
-from reef.inference.interfaces import InferenceRuntime
-from reef.train.component import TrainingComponent, TrainingJob
+export_modules = {
+    "ActivationRule": "reef.evaluation",
+    "AgentRecord": "reef.core",
+    "CandidateEvaluationPlugin": "reef.evaluation",
+    "CandidateEvaluator": "reef.evaluation",
+    "CandidateSelector": "reef.evaluation",
+    "Dispatcher": "reef.control.dispatcher",
+    "EvaluationResult": "reef.evaluation",
+    "InferenceRuntime": "reef.inference.interfaces",
+    "MadeArtifact": "reef.evaluation",
+    "Recipe": "reef.recipe",
+    "RecipeConfigError": "reef.recipe",
+    "RecordStore": "reef.storage.scenario.records",
+    "ReefError": "reef.core",
+    "ReportBase": "reef.core",
+    "ReportPayload": "reef.api.wire",
+    "ReportValidationError": "reef.core",
+    "RequestHeaders": "reef.api.wire",
+    "RequestType": "reef.core",
+    "SCENARIO_METADATA_KEY": "reef.storage.scenario.commits",
+    "Sample2Job": "reef.train",
+    "Scenario": "reef.control.scenario",
+    "SelectionDecision": "reef.evaluation",
+    "Trainer": "reef.train",
+    "TrainingComponent": "reef.train.component",
+    "TrainingJob": "reef.train.component",
+    "TrainingPipeline": "reef.train",
+    "UpdateCandidate": "reef.evaluation",
+    "build_default_dispatcher": "reef.control.dispatcher",
+    "parse_request_headers": "reef.api.wire",
+}
 
-__all__ = [
-    "SCENARIO_METADATA_KEY",
-    "ActivationRule",
-    "AgentRecord",
-    "CandidateEvaluationPlugin",
-    "CandidateEvaluator",
-    "CandidateSelector",
-    "Dispatcher",
-    "EvaluationResult",
-    "InferenceRuntime",
-    "MadeArtifact",
-    "Recipe",
-    "RecipeConfigError",
-    "RecordStore",
-    "ReefError",
-    "ReportBase",
-    "ReportPayload",
-    "ReportValidationError",
-    "RequestHeaders",
-    "RequestType",
-    "Sample2Job",
-    "Scenario",
-    "SelectionDecision",
-    "Trainer",
-    "TrainingComponent",
-    "TrainingJob",
-    "TrainingPipeline",
-    "UpdateCandidate",
-    "__version__",
-    "build_default_dispatcher",
-    "parse_request_headers",
-]
+
+def __getattr__(name: str) -> object:
+    """Resolve a public name on first access and retain the original object."""
+    if name not in export_modules:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = vars(import_module(export_modules[name]))[name]
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()).union(__all__))
+
+
+__all__ = [*export_modules, "__version__"]

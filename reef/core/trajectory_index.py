@@ -24,6 +24,7 @@ other payload has the shape above.
 from __future__ import annotations
 
 import hashlib
+import pickle
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -85,21 +86,70 @@ def reply_sha256(values: Sequence[Any]) -> str:
     return sha256_text(canonical_json(list(values)))
 
 
+def value_bytes(value: Any) -> bytes:
+    """The pickle of the JSON value ``value``. Two values with the same bytes are equal, with equal types, so they
+    have one ATIF form. Two equal values can have different bytes, for example two objects with another key order."""
+    return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+@dataclass(frozen=True)
+class RequestValue:
+    """One request value of a call: its ATIF form and the hash of that form.
+
+    Values: ``form`` is the ATIF form of the request value (``atif_form``), a JSON value. ``sha256`` is the SHA-256
+    of ``canonical_json(form)``. The constructor computes it, so it always fits the form.
+
+    Purpose: ``call_key`` makes one for each request value of a payload, or takes it from a ``RequestValues``.
+    ``CallKey`` chains the hashes into its prefix hashes, and ``best_parent`` compares the forms with a reply.
+    """
+
+    form: Any
+    sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sha256", sha256_text(canonical_json(self.form)))
+
+
+@dataclass
+class RequestValues:
+    """The request values that a reader of calls has made, each kept by the bytes of its provider value.
+
+    Values: ``made`` maps ``(provider, system, value_bytes(value))`` to the ``RequestValue`` of the provider value
+    ``value``, where ``system`` says whether ``value`` is a top-level ``system`` or ``instructions`` value.
+
+    Purpose: an agent sends its whole conversation again in each call. A reader of the calls of one rollout gives
+    one ``RequestValues`` to each ``TrajectoryIndex.add``, so ``call_key`` converts and hashes each message once,
+    not once for each call that resends it. It holds every distinct message of those calls, so a reader that lives as
+    long as its service does not keep one.
+    """
+
+    made: dict[tuple[str, bool, bytes], RequestValue] = field(default_factory=dict)
+
+    def value(self, value: Any, provider: str, *, system: bool = False) -> RequestValue:
+        """The ``RequestValue`` of the provider value ``value``: the one made before for the same bytes, else a new
+        one, which it keeps."""
+        name = (provider, system, value_bytes(value))
+        found = self.made.get(name)
+        if found is None:
+            found = self.made[name] = RequestValue(atif_form(value, provider, system=system))
+        return found
+
+
 @dataclass(frozen=True)
 class CallKey:
     """The hashes that place one call ``P`` in its trajectory, as the module docstring defines them.
 
-    Values: ``request`` holds the request values of ``P``, and ``prefix_sha256`` one chained hash per value, the
-    first chained onto ``trajectory_sha256``. ``reply_count`` and ``reply_sha256`` describe the reply messages of
-    ``P`` (``reply_messages``): their number and ``reply_sha256``, or ``0`` and ``None`` without a reply. The
-    constructor checks the hashes and the lengths.
+    Values: ``request`` holds the request values of ``P``, each a ``RequestValue``, and ``prefix_sha256`` one chained
+    hash per value, the first chained onto ``trajectory_sha256``. ``reply_count`` and ``reply_sha256`` describe the
+    reply messages of ``P`` (``reply_messages``): their number and ``reply_sha256``, or ``0`` and ``None`` without a
+    reply. The constructor checks the hashes and the lengths; it chains the hash that each value holds.
 
     Purpose: ``call_key`` makes it; a record store and ``TrajectoryIndex`` find a call's parent with it
     (``best_parent``).
     """
 
     trajectory_sha256: str
-    request: tuple[Any, ...]
+    request: tuple[RequestValue, ...]
     prefix_sha256: tuple[str, ...]
     reply_count: int
     reply_sha256: str | None
@@ -111,7 +161,7 @@ class CallKey:
             raise ValueError("a reply has a hash and at least one message, or neither")
         previous = self.trajectory_sha256
         for value, prefix in zip(self.request, self.prefix_sha256, strict=True):
-            previous = sha256_text(previous + sha256_text(canonical_json(value)))
+            previous = sha256_text(previous + value.sha256)
             if previous != prefix:
                 raise ValueError("a prefix hash is not the chained SHA-256 of the request values before it")
 
@@ -129,12 +179,13 @@ class CallKey:
     def continues(self, entry_count: int, reply_count: int, reply: str | None) -> bool:
         """Whether this request resends, right after its first ``entry_count`` values, a reply of ``reply_count``
         messages whose hash is ``reply``."""
-        following = self.request[entry_count : entry_count + reply_count]
+        following = [value.form for value in self.request[entry_count : entry_count + reply_count]]
         return reply is not None and len(following) == reply_count and reply_sha256(following) == reply
 
 
-def call_key(payload: Mapping[str, Any]) -> CallKey | None:
-    """The key of ``payload``, or ``None`` when the payload has no message list.
+def call_key(payload: Mapping[str, Any], values: RequestValues | None = None) -> CallKey | None:
+    """The key of ``payload``, or ``None`` when the payload has no message list. With ``values``, a request value
+    that ``values`` made before is not converted and hashed again; the key is the same either way.
 
     Raise ``TypeError`` when the payload holds a value that is not JSON.
     """
@@ -145,9 +196,9 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
     system_field = next(
         (name for name in ("system", "instructions") if name in payload and provider != OPENAI_CHAT), None
     )
-    request = [atif_form(message, provider) for message in payload[message_field]]
+    provider_values = [(message, False) for message in payload[message_field]]
     if system_field is not None:
-        request.insert(0, atif_form(payload[system_field], provider, system=True))
+        provider_values.insert(0, (payload[system_field], True))
     shape: dict[str, Any] = {"provider": provider, "message_field": message_field, "system_field": system_field}
     if "tools" in payload:
         shape["tools"] = payload["tools"]
@@ -156,13 +207,17 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
         shape["shadow_request_id"] = shadow
     try:
         trajectory = sha256_text("trajectory:" + canonical_json(shape))
-        prefixes: list[str] = []
-        previous = trajectory
-        for value in request:
-            previous = sha256_text(previous + sha256_text(canonical_json(value)))
-            prefixes.append(previous)
-    except (TypeError, ValueError) as exc:
+        if values is None:
+            request = [RequestValue(atif_form(value, provider, system=system)) for value, system in provider_values]
+        else:
+            request = [values.value(value, provider, system=system) for value, system in provider_values]
+    except (TypeError, ValueError, pickle.PicklingError) as exc:
         raise TypeError("a record must contain JSON-serializable values") from exc
+    prefixes: list[str] = []
+    previous = trajectory
+    for value in request:
+        previous = sha256_text(previous + value.sha256)
+        prefixes.append(previous)
     replies = [atif_form(message, provider) for message in reply_messages(payload.get("response")) or []]
     return CallKey(
         trajectory, tuple(request), tuple(prefixes), len(replies), reply_sha256(replies) if replies else None
@@ -200,7 +255,7 @@ def best_parent(key: CallKey, candidates: Iterable[ParentCandidate]) -> ParentCa
         if candidate.reply_sha256 is None:
             return False
         if candidate.reply_count not in resent:
-            following = key.request[longest : longest + candidate.reply_count]
+            following = [value.form for value in key.request[longest : longest + candidate.reply_count]]
             resent[candidate.reply_count] = (
                 reply_sha256(following) if len(following) == candidate.reply_count else None
             )
@@ -253,7 +308,8 @@ class TrajectoryIndex:
     Purpose: a record-to-sample stage adds each inference record that it reads (``add``) and asks for the trajectory that a
     record ends (``trajectory``), and whether it ends a trajectory now (``is_end``). A replay of the retained
     records rebuilds it. A reader of a stored rollout adds each record and drops its body, then reads the
-    ``conversations`` of the record IDs, so it holds one body at a time.
+    ``conversations`` of the record IDs, so it holds one body at a time. It gives ``add`` one ``RequestValues`` for
+    the rollout, because each call of a rollout resends the messages of the calls before it.
     """
 
     calls: dict[str, IndexedCall] = field(default_factory=dict)
@@ -261,13 +317,13 @@ class TrajectoryIndex:
     keyless: set[str] = field(default_factory=set)
     next_sequence: int = 0
 
-    def add(self, record: AgentRecord) -> None:
+    def add(self, record: AgentRecord, values: RequestValues | None = None) -> None:
         """Link an inference record into its trajectory; a record added before, or that is not an inference, is
-        ignored."""
+        ignored. ``values`` goes to ``call_key``: it changes the work, not the links."""
         record_id = record.agent_record_id
         if record.request_type is not RequestType.INFERENCE or record_id in self.calls or record_id in self.keyless:
             return
-        key = call_key(record.payload)
+        key = call_key(record.payload, values)
         if key is None:
             self.keyless.add(record_id)
             return
@@ -357,6 +413,8 @@ __all__ = [
     "SHADOW_PURPOSE",
     "CallKey",
     "ParentCandidate",
+    "RequestValue",
+    "RequestValues",
     "TrajectoryIndex",
     "atif_form",
     "best_parent",
@@ -366,4 +424,5 @@ __all__ = [
     "sha256_text",
     "shadow_request_id",
     "trajectory_calls",
+    "value_bytes",
 ]

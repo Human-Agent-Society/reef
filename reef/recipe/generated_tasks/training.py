@@ -18,10 +18,9 @@ from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
-from reef.core.atif_payloads import canonical_json
 from reef.core.job_data import TaskSample
 from reef.core.tasks import read_harbor_task
-from reef.core.values import require_integer, require_text
+from reef.core.values import canonical_json, require_integer, require_text
 from reef.recipe.generated_tasks.generator import check_rewards
 from reef.storage.data.tasks import GenerationState, StoredTask, TaskStore
 from reef.storage.scenario.samples import StoredSample, TrainerSamples

@@ -20,6 +20,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import CommitPendingError, TrainingStartRefusedError
+from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -33,7 +34,7 @@ from reef.storage.data.tasks import TaskStorage
 from reef.storage.scenario.commits import CommitRecord
 from reef.storage.scenario.record_items import used_record, used_records
 from reef.storage.scenario.records import RecordStore
-from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
+from reef.storage.scenario.samples import TrainerSamples, memory_samples
 from reef.train.component import JobCheckPendingError, ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline

@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlparse
 
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings, Plugin
+from reef.storage.durable_files import fsync_dir, mkdir_durable
 
 
 class SegmentNotFoundError(ReefError):
@@ -182,13 +183,17 @@ class LocalSegmentStore(SegmentStore):
 
     def write(self, partition: str, segment_id: str, data: bytes) -> None:
         target = self.path(partition, segment_id)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_durable(target.parent.resolve())
         staging = target.with_name(f".{segment_id}.partial")
-        with staging.open("wb") as file:
-            file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
-        staging.replace(target)
+        try:
+            with staging.open("wb") as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
+            staging.replace(target)
+            fsync_dir(target.parent)
+        finally:
+            staging.unlink(missing_ok=True)
 
     def read(self, partition: str, lines: Sequence[SegmentLine]) -> tuple[bytes, ...]:
         found: list[bytes] = []
@@ -205,7 +210,9 @@ class LocalSegmentStore(SegmentStore):
         return tuple(found)
 
     def delete(self, partition: str, segment_id: str) -> None:
-        self.path(partition, segment_id).unlink(missing_ok=True)
+        target = self.path(partition, segment_id)
+        target.unlink(missing_ok=True)
+        target.with_name(f".{segment_id}.partial").unlink(missing_ok=True)
 
     def directory_path(self, key: str) -> Path:
         return (self.directory / "directories" / directory_key(key)).resolve()
