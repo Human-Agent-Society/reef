@@ -9,7 +9,7 @@ Slime's training options
 Set native flags under ``training.options``, without the leading ``--``.
 Malformed options fail startup. Worker-specific errors fail the first job.
 
-- Set ``global-batch-size`` explicitly. It counts samples per optimizer step.
+- Set ``global-batch-size`` explicitly. It counts samples per optimizer step. A step with zero tokens contributing to loss fails the job before the iteration trains.
 - ``hf-checkpoint`` must match ``inference.model-path``. Explicit architecture flags override the model's Hugging Face config.
 - ``actor-num-nodes`` and ``actor-num-gpus-per-node`` allocate training GPUs. ``num-gpus-per-node`` gives each node's physical GPU count.
 - ``rollout-num-gpus``, ``colocate``, ``sglang-*`` and ``router-*`` configure Slime's rollout engines. Configure serving engines under ``inference.options``.
@@ -58,7 +58,7 @@ Use these training and recipe options:
 - Use the ``slime`` loss family for the deployment and objective. It accepts task and dataset jobs.
 - Each job runs ``ceil(tasks / rollout-batch-size)`` rollout iterations. The last batch repeats tasks to fill it. ``save_interval`` counts iterations.
 - Engines accept system, user and assistant text only. Slime controls temperature, top-p, top-k and maximum response length.
-- If an iteration has no trainable group, the job fails with its first rollout error. An optimizer step with no tokens contributing to loss also fails the job. Score centering records the top ``score-centering-top-k`` log probabilities per sampled token.
+- If an iteration has no trainable group, the job fails with its first rollout error. Score centering records the top ``score-centering-top-k`` log probabilities per sampled token.
 - Install Harbor and the selected environment on the Ray actor's host. Set ``agent_host`` for sandboxed agents.
   The actor inherits E2B credentials, API and sandbox URLs, domain, and Modal credentials from the training service.
 
@@ -82,4 +82,3 @@ Set Slime's dataset and reward plugin options under ``training.options``. Reef s
 
 Slime drops trailing rollouts that do not fill a step. Choose ``rollout-batch-size`` times ``n-samples-per-prompt`` as a multiple of ``global-batch-size``.
 When Slime drops converted samples, the worker logs the planned and converted sample counts.
-A step with zero tokens contributing to loss fails the job before the iteration trains.
