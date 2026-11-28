@@ -153,9 +153,11 @@ def mean_score(scores: Iterable[RolloutScore]) -> float | None:
 
 
 def mean_benchmark_score(benchmark_means: Iterable[float | None]) -> float | None:
-    """Give each benchmark with a score equal weight. Return None if none have a score."""
-    means = [score for score in benchmark_means if score is not None]
-    return math.fsum(means) / len(means) if means else None
+    """The mean of ``benchmark_means``, with equal weight for each benchmark. Return None if a benchmark has no
+    score, because the mean of the other benchmarks does not cover the collection."""
+    means = list(benchmark_means)
+    values = [mean for mean in means if mean is not None]
+    return math.fsum(values) / len(values) if values and len(values) == len(means) else None
 
 
 #: How an evaluation on a collection computes its mean score: ``task`` is the mean of every rollout, and ``benchmark``
@@ -262,7 +264,7 @@ class EvaluationCollection:
 
     def mean_score(self, scores: RolloutScores) -> float | None:
         """The mean score of ``scores`` by ``average``: the mean of every rollout for ``task``; for ``benchmark``, the
-        mean of the benchmark means that are not None, or None when there is none."""
+        mean of the benchmark means, or None when a benchmark mean is None."""
         if self.average == "task":
             return mean_score(scores.rollouts())
         return mean_benchmark_score(entry["mean_score"] for entry in self.benchmark_scores(scores))

@@ -101,7 +101,8 @@ defaulting to 50. Add ``/{evaluation_id}`` for one evaluation:
 - ``policy_evaluation``: ``{harness, model, scores}`` when finished.
   Failed evaluations contain ``error``.
 - ``mean_score``: mean of scored rollouts; missing scores never count as zero.
-  Collection ``benchmark`` averaging averages benchmark means; ``task`` averages rollouts.
+  Collection ``benchmark`` averaging gives a null mean until every benchmark has a score.
+  Otherwise it averages the benchmark means. The ``task`` average uses all scored rollouts.
   ``benchmark_scores`` lists each benchmark's task count and mean; otherwise empty.
 - ``progress``: ``total``, ``ended``, ``scored``, ``failed``, ``cancelled``,
   ``running``, ``mean_score``, ``eta_seconds`` and per-benchmark counts.

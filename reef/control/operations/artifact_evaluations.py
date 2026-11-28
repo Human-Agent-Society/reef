@@ -2220,6 +2220,16 @@ class ArtifactEvaluations:
             kept, progress = self.ended_progress.read(scenario, stored)
             if not kept and stored.evaluation_id in stored_progress:
                 progress = stored_progress[stored.evaluation_id]
+                collection = stored.request.collection
+                if progress is not None and collection is not None and collection.average == "benchmark":
+                    # Older progress averaged only the benchmarks with scores. Their separate means survived retention.
+                    benchmarks = cast(list[dict[str, JsonValue]], progress["benchmarks"])
+                    progress = {
+                        **progress,
+                        "mean_score": mean_benchmark_score(
+                            cast(float | None, row["mean_score"]) for row in benchmarks
+                        ),
+                    }
                 self.ended_progress.add(scenario, stored, (), progress)
             elif not kept:
                 items = self.results.rollouts(stored.evaluation_id, scenario, payload=False)

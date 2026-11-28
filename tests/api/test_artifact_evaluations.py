@@ -1386,7 +1386,8 @@ class RolloutMeanActivation(EvaluatedActivation):
         ("benchmark", (0.0, 1.0, 1.0), 0.6, EvaluatedActivation, 0.5, False),
         ("benchmark", (1.0, 0.0, 0.0), 0.4, EvaluatedActivation, 0.5, True),
         ("task", (0.0, 1.0, 1.0), 0.6, EvaluatedActivation, 2 / 3, True),
-        ("benchmark", (None, 1.0, 1.0), 0.6, EvaluatedActivation, 1.0, True),
+        # Every rollout of the benchmark lite fails, so the benchmark average has no mean.
+        ("benchmark", (None, 1.0, 1.0), 0.6, EvaluatedActivation, None, False),
         ("benchmark", (None, None, None), 0.6, EvaluatedActivation, None, False),
         ("benchmark", (0.0, 1.0, 1.0), 0.6, RolloutMeanActivation, 0.5, True),
     ],
@@ -1438,6 +1439,17 @@ def test_collection_average_controls_progress_and_activation(
                 [artifact_id] if activates else [],
             )
             assert answer["mean_score"] == expected_score
+
+            if average == "benchmark" and scores == (None, 1.0, 1.0):
+                # Earlier versions kept the mean of the scored benchmarks after the evaluation ended.
+                with dispatcher.locked_scenario("s") as current:
+                    store = current.store.evaluations
+                    stored = store.read(evaluation_id)
+                    kept = store.ended_progress([evaluation_id])[evaluation_id]
+                    store.keep_ended_progress(evaluation_id, stored.finished_at, {**kept, "mean_score": 1.0})
+                later = ArtifactEvaluations(dispatcher)
+                assert later.status_json("s", [stored], score_levels=True)[0]["progress"]["mean_score"] is None
+                assert later.summaries_json("s")[0]["progress"]["mean_score"] is None
 
     asyncio.run(run())
 
