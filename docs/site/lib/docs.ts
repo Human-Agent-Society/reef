@@ -159,9 +159,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     title: "Contributing",
     files: [
       "contributing/codebase-structure.rst",
-      "contributing/adding-components.rst",
       "contributing/development.rst",
-      "contributing/testing.rst",
     ],
   },
 ];
@@ -504,21 +502,21 @@ function tableOfContents(html: string) {
 // Pages without an authored summary continue to use their first paragraph.
 const docDescriptions: Partial<Record<string, string>> = {
   "getting-started/intro":
-    "Learn how Reef connects inference, feedback, and continual learning to evolve model weights or agent harnesses.",
+    "Train model weights or update an agent's harness from feedback.",
   "getting-started/installation":
-    "Install Reef for harness evolution on a laptop, GPU-based model training, or client-only access to an existing deployment.",
+    "Install the service, GPU training image, or client.",
   "getting-started/quickstart":
-    "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the snapshot history.",
+    "Send a model request and report a score using its receipt.",
   "getting-started/harness-tutorial":
-    "Start Reef, connect your coding agent, give feedback on a session, and see Reef evolve the agent's harness from it.",
+    "Use feedback from a pi session to update its rules.",
   "user-guide/recipes":
-    "Compare Reef recipes for model training and harness evolution. Choose a method based on your workload, feedback, and compute requirements.",
+    "Choose a recipe for your workload, feedback and compute budget.",
   "user-guide/evolve-your-harness":
-    "Evolve agent rules, prompts, skills, and configuration with Reef. Evaluate candidate changes and publish accepted harness versions without a GPU.",
+    "Propose, test and publish changes to an agent's harness.",
   "user-guide/evolve-your-model":
-    "Configure Reef to train model weights from feedback and serve accepted updates through the same inference endpoint.",
+    "Train model weights from feedback and serve selected checkpoints.",
   "reference/http-api":
-    "Use the Reef HTTP API to send inference requests, report feedback, inspect scenarios, and manage model and harness artifacts.",
+    "Find routes for inference, feedback, scenarios, data and artifacts.",
 };
 
 function loadDoc(sourcePath: string): Doc {

@@ -192,7 +192,7 @@ pre-commit checks and CI. The structural check does not judge translation
 quality, so its success does not replace human review of meaning and wording.
 
 The full test suite needs the supported container environment and training
-dependencies. See the [testing guide](https://reefinfra.ai/docs/contributing/testing/) for
+dependencies. See the [development checks](https://reefinfra.ai/docs/contributing/development/#checks) for
 focused commands and dependency details.
 
 ## Understand the codebase
@@ -202,10 +202,9 @@ decide which package owns a change. Each package's `__init__` docstring states
 the invariants inside its area; the map is the repository-wide routing guide.
 
 When adding a recipe, training integration, runtime, component, artifact type,
-service route, or harness adapter, follow the
-[component playbooks](https://reefinfra.ai/docs/contributing/adding-components/). They list the
-implementation location, registration point, tests, configuration, and
-documentation expected in the same pull request.
+service route, or harness adapter, use
+[Extending Reef](https://reefinfra.ai/docs/contributing/codebase-structure/#extending-reef)
+to find the owning package and its developer guide.
 
 ## Python coding style
 

@@ -39,6 +39,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    Select,
     String,
     Table,
     Text,
@@ -49,6 +50,7 @@ from sqlalchemy import (
     exists,
     func,
     insert,
+    literal,
     not_,
     select,
     update,
@@ -945,6 +947,15 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
+def item_columns(table: Table, payload: bool) -> Select[tuple[object, ...]]:
+    """The read of the columns of ``table`` that ``item_from_row`` reads. Without ``payload``, the read gives an
+    empty JSON object for each payload, so the database does not read the stored payloads."""
+    if payload:
+        return select(*table.c)
+    others = (column for column in table.c if column.name != "payload_json")
+    return select(*others, literal("{}").label("payload_json"))
+
+
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -1407,11 +1418,11 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
-    def read_items(self, queue: str, item_ids: Sequence[str]) -> tuple[WorkItem, ...]:
+    def read_items(self, queue: str, item_ids: Sequence[str], *, payload: bool = True) -> tuple[WorkItem, ...]:
         if not item_ids:
             return ()
         found = {}
-        query = select(self.table).where(self.table.c.queue == queue)
+        query = item_columns(self.table, payload).where(self.table.c.queue == queue)
         with self.database.read() as connection:
             for batch in batches(dict.fromkeys(item_ids)):
                 rows = connection.execute(query.where(self.table.c.item_id.in_(batch))).mappings()
@@ -1431,7 +1442,13 @@ class SQLWorkQueue(WorkQueue):
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
     def items(
-        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+        self,
+        queue: str,
+        *,
+        scenario: str | None = None,
+        kind: str | None = None,
+        id_prefix: str | None = None,
+        payload: bool = True,
     ) -> tuple[WorkItem, ...]:
         conditions = [self.table.c.queue == queue]
         if scenario is not None:
@@ -1441,7 +1458,7 @@ class SQLWorkQueue(WorkQueue):
         if id_prefix is not None:
             check_id_prefix(id_prefix)
             conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
-        query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
+        query = item_columns(self.table, payload).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
