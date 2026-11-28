@@ -733,6 +733,35 @@ def test_a_worker_gives_an_item_without_capacity_back_and_waits_longer_each_time
 
 
 @pytest.mark.unit
+def test_a_retried_item_waits_for_capacity_as_a_new_item_does(monkeypatch):
+    clock = {"wall": 1000.0}
+    monkeypatch.setattr(workers.time, "time", lambda: clock["wall"])
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
+        queue.append(job("a"))
+        queue.write_metadata("jobs", "a", "run", "r1")
+        worker = FailingWorker(queue, ItemDeferredError("waiting for sandbox capacity"))
+        worker.max_deferrals = 2
+        for delay_seconds in (30, 60):
+            assert worker.run_once()
+            clock["wall"] += delay_seconds
+        # The refusal after the last give-back fails the item.
+        assert worker.run_once()
+        failed = queue.read("jobs", "a")
+        assert (failed.state, failed.deferred_attempt_count) == ("failed", 2)
+
+        again = queue.retry("jobs", "a")
+        # The retry keeps the attempt counts and the other metadata, and counts the refusals from zero.
+        assert (again.attempt_count, again.stopped_attempt_count, again.deferred_attempt_count) == (3, 2, 0)
+        assert again.metadata == {"run": "r1"}
+        assert worker.run_once()
+        item = queue.read("jobs", "a")
+        assert (item.state, item.error) == ("queued", "waiting for sandbox capacity")
+        assert item.available_at == clock["wall"] + 30
+        assert (item.stopped_attempt_count, item.deferred_attempt_count) == (3, 1)
+
+
+@pytest.mark.unit
 def test_a_worker_runs_other_items_while_an_item_without_capacity_waits():
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database)

@@ -397,9 +397,10 @@ class WorkQueue(ABC):
     def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
         """Make a final item ``queued`` again, for the producer that added it, so that a worker takes it once more.
 
-        The item keeps its payload, its progress, its metadata, its ``started_at`` and its attempt counts. It loses
-        its result and its ``ended_at``, keeps the error of a failed item as its last error, and is available at
-        ``now``. A worker can take it whatever its ``attempt_count`` is, so the item gets at least one more attempt;
+        The item keeps its payload, its progress, its ``started_at``, its attempt counts and its metadata except
+        ``metadata[DEFERRED_ATTEMPTS]``: the retry can wait for capacity as often as a new item
+        (``WorkItem.deferred_attempt_count`` is 0 again). It loses its result and its ``ended_at``, keeps the error
+        of a failed item as its last error, and is available at ``now``. A worker can take it whatever its ``attempt_count`` is, so the item gets at least one more attempt;
         a retryable failure of that attempt queues it again only while ``has_attempts_left``. Return the item, or
         None when it does not exist; an item that is not final does not change.
         """
