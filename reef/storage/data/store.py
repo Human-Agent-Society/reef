@@ -1223,6 +1223,13 @@ def prepared_items(
     return prepared
 
 
+def item_snapshot(item: StoredItem, *, content: bool) -> StoredItem:
+    """An independent copy of the requested fields of a memory-store item."""
+    return replace(
+        item, metadata=copy.deepcopy(item.metadata), content=copy.deepcopy(item.content) if content else None
+    )
+
+
 class MemoryDataStore(DataStore):
     """A data store in memory, for tests and for a deployment that keeps nothing.
 
@@ -1384,17 +1391,18 @@ class MemoryDataStore(DataStore):
                     )
                 )
             result.append(replace(created, inserted=True))
-        return tuple(replace(item, content=None) for item in result)
+        return tuple(item_snapshot(item, content=False) for item in result)
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
-        return self.items.get(owner, {}).get(item_id)
+        item = self.items.get(owner, {}).get(item_id)
+        return None if item is None else item_snapshot(item, content=True)
 
     def read_many(self, owner: str, item_ids: Sequence[str], *, content: bool = True) -> tuple[StoredItem, ...]:
         check_owner(owner)
         stored = self.items.get(owner, {})
         found = (stored[item_id] for item_id in dict.fromkeys(item_ids) if item_id in stored)
-        return tuple(item if content else replace(item, content=None) for item in found)
+        return tuple(item_snapshot(item, content=content) for item in found)
 
     def query(
         self,
@@ -1444,7 +1452,7 @@ class MemoryDataStore(DataStore):
             key=lambda item: item.sequence,
             reverse=before is not None,
         )
-        return tuple(item if content else replace(item, content=None) for item in matched[:limit])
+        return tuple(item_snapshot(item, content=content) for item in matched[:limit])
 
     def count(
         self,
@@ -1523,7 +1531,7 @@ class MemoryDataStore(DataStore):
         return tuple(
             ItemUse(
                 sequence,
-                stored[item_id] if content else replace(stored[item_id], content=None),
+                item_snapshot(stored[item_id], content=content),
                 split,
                 held_set or None,
             )
@@ -1573,7 +1581,7 @@ class MemoryDataStore(DataStore):
         for item in updated:
             stored[item.item_id] = item
             self.write_uses(owner, item.item_id, item.metadata)
-        return tuple(replace(item, content=None) for item in updated)
+        return tuple(item_snapshot(item, content=False) for item in updated)
 
     def replace_task(self, owner: str, item_id: str, files: Path | TaskFilesReference) -> StoredItem:
         check_owner(owner)
@@ -1587,7 +1595,7 @@ class MemoryDataStore(DataStore):
             stored[item_id] = item
             for key in sorted(key for key in self.uses if key[:2] == (owner, item_id)):
                 self.uses[key] = self.take_sequence()
-        return replace(item, content=None)
+        return item_snapshot(item, content=False)
 
     def replace_trajectory(self, owner: str, item_id: str, content: Mapping[str, Any]) -> StoredItem:
         check_owner(owner)
@@ -1601,7 +1609,7 @@ class MemoryDataStore(DataStore):
             stored[item_id] = item
             for key in sorted(key for key in self.uses if key[:2] == (owner, item_id)):
                 self.uses[key] = self.take_sequence()
-        return replace(item, content=None)
+        return item_snapshot(item, content=False)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
@@ -1625,13 +1633,13 @@ class MemoryDataStore(DataStore):
             key=lambda entry: entry[0].sequence,
             reverse=True,
         )
-        return tuple(DeletedItem(replace(item, content=None), deleted_at) for item, deleted_at in found[:limit])
+        return tuple(DeletedItem(item_snapshot(item, content=False), deleted_at) for item, deleted_at in found[:limit])
 
     def read_deleted(self, owner: str, item_ids: Sequence[str]) -> tuple[DeletedItem, ...]:
         check_owner(owner)
         deleted = self.deleted.get(owner, {})
         return tuple(
-            DeletedItem(replace(deleted[item_id][0], content=None), deleted[item_id][1])
+            DeletedItem(item_snapshot(deleted[item_id][0], content=False), deleted[item_id][1])
             for item_id in dict.fromkeys(item_ids)
             if item_id in deleted
         )
@@ -1650,7 +1658,7 @@ class MemoryDataStore(DataStore):
         for item in restored:
             stored[item.item_id] = item
             self.write_uses(owner, item.item_id, item.metadata)
-        return tuple(replace(item, content=None) for item in restored)
+        return tuple(item_snapshot(item, content=False) for item in restored)
 
     def purge(self, owner: str, item_id: str) -> bool:
         check_owner(owner)

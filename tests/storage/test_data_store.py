@@ -1886,3 +1886,20 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 8")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()
+
+
+def test_changes_to_returned_content_and_metadata_do_not_edit_the_stored_item(store):
+    item = trajectory("t", scenarios={"coding": "train"})
+    (created,) = store.create("owner", [item])
+    created.metadata["scenarios"].clear()
+    found = store.read("owner", "t")
+    found.content["steps"][0]["message"] = "caller edit"
+    (query_item,) = store.query("owner", scenario="coding")
+    assert query_item.content == item.content
+    query_item.metadata["scenarios"].clear()
+    (summary,) = store.read_many("owner", ["t"], content=False)
+    assert summary.content is None and summary.metadata["scenarios"] == {"coding": "train"}
+    summary.metadata["scenarios"].clear()
+    (use,) = store.scenario_items("owner", "coding", kinds=["trajectory"])
+    assert use.item.metadata["scenarios"] == {"coding": "train"}
+    assert json_digest(use.item.content) == created.digest
