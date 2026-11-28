@@ -14,9 +14,9 @@ import yaml
 reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef checkout")
 
 from reef.core.plugins import PluginConfigError
-from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
+from reef.samples.context import PipelineContext
 from reef.train.slime_backend.objectives import resolve_objective
 
 

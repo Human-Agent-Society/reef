@@ -8,8 +8,8 @@ from typing import Any, Self
 
 from reef.core.chat_rendering import normalize_messages_for_template
 from reef.core.config import config_option
-from reef.pipeline_context import PipelineContext
-from reef.record2sample.distill import DistillSamples, DistillSamplesSettings
+from reef.samples.context import PipelineContext
+from reef.samples.distill import DistillSamples, DistillSamplesSettings
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
 DEFAULT_CONTEXT_TEMPLATE = (

@@ -13,9 +13,9 @@ from bridge import MARKER, NATIVE_URL, SCENARIO, sampling_digest
 from reef_client import ReefClient, ReefClientError
 
 from recipes.opd.examples.math.run import Question, load_questions, report_id, write_json
-from reef.storage.records import RecordStore
-from reef.storage.samples import consumed_sample_id
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.records import RecordStore
+from reef.storage.scenario.samples import consumed_sample_id
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 SCENARIO_PATH = f"/reef/scenarios/{quote(SCENARIO, safe='')}"
 

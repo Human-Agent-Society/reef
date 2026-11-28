@@ -8,10 +8,23 @@ import json
 import os
 import stat
 import sys
+from collections.abc import Sequence
+from http import HTTPStatus
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
+from tests.support.e2b_trials import E2B_TASK_TOML, TASK_IMAGE, VERIFIER_IMAGE, harbor_e2b_environments, prepared_image
 
+from reef.execution.sandbox.agentenv.compose import TransientStartError
+from reef.execution.sandbox.prepared_images import PreparedImage
+from reef.execution.sandbox.process import (
+    SANDBOX_CAPACITY_ERRORS,
+    SANDBOX_REQUEST_ERRORS,
+    SandboxCapacityError,
+    SandboxRequestError,
+)
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import (
     HARBOR_TASK_ENVIRONMENTS,
@@ -109,69 +122,6 @@ def test_a_probe_answers_with_a_reason_and_never_raises(tmp_path: Path) -> None:
     assert reason.startswith(f"{docker} version did not answer:"), reason
 
 
-#: A task with time limits, resources and an environment variable of its own.
-E2B_TASK_TOML = """\
-[agent]
-timeout_sec = 900
-
-[verifier]
-timeout_sec = 300
-
-[environment]
-build_timeout_sec = 120
-cpus = 2
-memory_mb = 4096
-
-[environment.env]
-TASK_SETTING = "from-the-task"
-"""
-
-
-def harbor_e2b_environments(
-    tmp_path: Path,
-    agent: dict[str, object] | None = None,
-    dockerfile: str = "FROM python:3.12-slim\nWORKDIR /app\n",
-) -> dict[str, object]:
-    """Reef's E2B environment and Harbor's, made by Harbor's factory for one task as a trial makes them.
-
-    ``reef`` has the config of ``environment_config`` for the Harbor agent config ``agent``; ``harbor`` has the same
-    config without its ``import_path``, which is Harbor's own class. Both have the same session, trial environment and
-    network allowlist. The task's environment has ``dockerfile`` and a file ``tool``.
-    """
-    from harbor.environments.factory import EnvironmentFactory
-    from harbor.models.task.config import NetworkMode, NetworkPolicy
-    from harbor.models.task.task import Task
-    from harbor.models.trial.config import EnvironmentConfig
-    from harbor.models.trial.paths import TrialPaths
-
-    task_path = tmp_path / "task"
-    (task_path / "environment").mkdir(parents=True)
-    (task_path / "environment" / "Dockerfile").write_text(dockerfile)
-    (task_path / "environment" / "tool").write_text("#!/bin/sh\n")
-    (task_path / "tests").mkdir()
-    (task_path / "tests" / "test.sh").write_text("#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n")
-    (task_path / "instruction.md").write_text("Write nothing.\n")
-    (task_path / "task.toml").write_text(E2B_TASK_TOML)
-    task = Task(task_path)
-    reef_config = environment_config("e2b", task_path, agent)
-    configs = {
-        "reef": reef_config,
-        "harbor": {key: value for key, value in reef_config.items() if key != "import_path"},
-    }
-    return {
-        name: EnvironmentFactory.create_environment_from_config(
-            config=EnvironmentConfig.model_validate({**config, "env": {"TRIAL_SETTING": "from-the-trial"}}),
-            environment_dir=task.paths.environment_dir,
-            environment_name=task.short_name,
-            session_id="t__env",
-            trial_paths=TrialPaths(tmp_path / name),
-            task_env_config=task.config.environment.model_copy(deep=True),
-            network_policy=NetworkPolicy(network_mode=NetworkMode.ALLOWLIST, allowed_hosts=["pypi.org"]),
-        )
-        for name, config in configs.items()
-    }
-
-
 @pytest.mark.unit
 def test_an_e2b_trial_gets_reefs_class_on_harbors_template_with_the_tasks_limits(tmp_path: Path) -> None:
     pytest.importorskip("e2b")
@@ -198,6 +148,20 @@ def test_an_e2b_trial_gets_reefs_class_on_harbors_template_with_the_tasks_limits
     resources = EnvironmentFactory.resource_capabilities(config.type, config.import_path)
     assert resources == E2BEnvironment.resource_capabilities()
     EnvironmentFactory.validate_resource_policies(config)
+
+
+@pytest.mark.unit
+def test_saved_e2b_trial_path_and_executor_imports() -> None:
+    from harbor.utils.import_path import import_class
+
+    from reef.execution.sandbox import e2b
+    from reef.execution.sandbox.e2b import executor, trial
+    from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT
+
+    assert HARBOR_E2B_ENVIRONMENT == "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
+    assert import_class(HARBOR_E2B_ENVIRONMENT) is trial.KillOnTimeoutE2BEnvironment
+    assert (e2b.E2BExecutor, e2b.SANDBOX_MAX_TIMEOUT_S) == (executor.E2BExecutor, 3600)
+    assert callable(e2b.build_image) and callable(e2b.prepare_guest)
 
 
 @pytest.mark.unit
@@ -232,6 +196,310 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
     assert harbor_call["timeout"] == 120 + 900 + 300 + 3600 and "lifecycle" not in harbor_call
     # Every argument of Harbor's call, and one more: delete the sandbox at its timeout, never pause it.
     assert calls["reef"][-1] == {**harbor_call, "lifecycle": {"on_timeout": "kill"}}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("refusal", ["busy", "rate", "gateway", "client"])
+def test_reefs_e2b_sandbox_that_the_service_refuses_for_want_of_capacity_raises_sandbox_capacity_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    errors = {
+        # A generic "no nodes available" says nothing of the sandbox's size: it is a refusal for want of capacity.
+        "busy": e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available"),
+        "rate": e2b.RateLimitException("429: too many requests"),
+        # A gateway's 504 answer has an HTML body, which the SDK cannot read as JSON.
+        "gateway": json.JSONDecodeError("Expecting value", "<html>504 Gateway Time-out</html>", 0),
+        "client": httpx.ReadTimeout("timed out"),
+    }
+    calls: list[dict[str, object]] = []
+
+    async def create(**options: object) -> object:
+        calls.append(options)
+        raise errors[refusal]
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    with pytest.raises(SandboxCapacityError) as raised:
+        asyncio.run(environment._create_sandbox())
+    assert raised.value.__cause__ is errors[refusal] and len(calls) == 1
+    # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it.
+    assert type(raised.value).__name__ in SANDBOX_CAPACITY_ERRORS
+    assert TransientStartError.__name__ in SANDBOX_CAPACITY_ERRORS and issubclass(
+        TransientStartError, SandboxCapacityError
+    )
+
+
+@pytest.mark.unit
+def test_reefs_e2b_create_skips_retry_for_capacity_errors_and_retries_other_transient_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    capacity_environment = harbor_e2b_environments(tmp_path)["reef"]
+    capacity_calls: list[dict[str, object]] = []
+
+    async def refuse_capacity(**options: object) -> object:
+        capacity_calls.append(options)
+        raise e2b.ServiceBusyException("503: Service temporarily unavailable - no nodes available")
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(refuse_capacity))
+    with pytest.raises(SandboxCapacityError):
+        asyncio.run(capacity_environment._create_sandbox())
+    assert len(capacity_calls) == 1
+
+    transient_environment = harbor_e2b_environments(tmp_path / "other")["reef"]
+    transient_calls: list[dict[str, object]] = []
+    created = object()
+
+    async def fail_once(**options: object) -> object:
+        transient_calls.append(options)
+        if len(transient_calls) == 1:
+            raise RuntimeError("transient connection drop")
+        return created
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(fail_once))
+    asyncio.run(transient_environment._create_sandbox())
+    assert transient_environment._sandbox is created and len(transient_calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "raised", "creates"),
+    [
+        # A bad request fails at once, with the service's reason, and is not sent again.
+        (400, SandboxRequestError, 1),
+        # A credential error stays the SDK's, with Harbor's one more try.
+        (401, None, 2),
+    ],
+    ids=["bad-request", "credentials"],
+)
+def test_reefs_e2b_create_reads_the_status_of_the_services_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, raised: type[Exception] | None, creates: int
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from e2b.api import handle_api_exception
+    from e2b.api.client.types import Response
+
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    # The SDK's own error of the create call's answer.
+    body = json.dumps({"code": status, "message": "the template needs 64 vCPUs"}).encode()
+    error = handle_api_exception(Response(status_code=HTTPStatus(status), content=body, headers={}, parsed=None))
+    calls: list[dict[str, object]] = []
+
+    async def create(**options: object) -> object:
+        calls.append(options)
+        raise error
+
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    with pytest.raises(type(error) if raised is None else raised) as created:
+        asyncio.run(environment._create_sandbox())
+    assert len(calls) == creates
+    if raised is None:
+        assert created.value is error
+    else:
+        assert isinstance(error, e2b.SandboxException) and error.status_code == 400
+        assert created.value.__cause__ is error and "the template needs 64 vCPUs" in str(created.value)
+        assert type(created.value).__name__ in SANDBOX_REQUEST_ERRORS
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("session", "refusals", "pauses", "created"),
+    [
+        # A separate verifier waits for capacity, so the agent's work is kept.
+        ("t__verifier__tests", 2, [15, 30], True),
+        # Its wait ends before 80% of its start time limit (96 of 120 s), without repeating the wait loop.
+        ("t__verifier__tests", 99, [15, 30], False),
+        # The agent's environment does not wait: its rollout goes back to the queue (EvaluationRolloutWorker).
+        ("t__env", 99, [], False),
+    ],
+    ids=["verifier-gets-capacity", "verifier-gives-up", "agent-environment"],
+)
+def test_reefs_e2b_verifier_sandbox_waits_for_capacity_within_its_start_time_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, refusals: int, pauses: list[int], created: bool
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox.e2b import trial as reef_e2b
+
+    environment = harbor_e2b_environments(tmp_path)["reef"]
+    environment.session_id = session
+    clock = {"seconds": 1000.0}
+    environment.started_at = clock["seconds"]
+    slept: list[float] = []
+    calls: list[int] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["seconds"] += seconds
+
+    async def create(**options: object) -> object:
+        calls.append(1)
+        if len(calls) <= refusals:
+            raise e2b.ServiceBusyException("503: Service temporarily unavailable, please retry. - no nodes available")
+        return "sandbox"
+
+    monkeypatch.setattr(reef_e2b, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(reef_e2b, "time", SimpleNamespace(monotonic=lambda: clock["seconds"]))
+    monkeypatch.setattr(e2b.AsyncSandbox, "create", staticmethod(create))
+    if created:
+        asyncio.run(environment._create_sandbox())
+        assert environment._sandbox == "sandbox"
+    else:
+        with pytest.raises(SandboxCapacityError):
+            asyncio.run(environment._create_sandbox())
+    assert slept == pauses
+
+
+def harbor_modal_environment(tmp_path: Path) -> object:
+    """Reef's Modal environment, made by Harbor's factory as a trial makes it, from the config of
+    ``environment_config`` for one task with a Dockerfile."""
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.config import NetworkMode, NetworkPolicy
+    from harbor.models.task.task import Task
+    from harbor.models.trial.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    task_path = tmp_path / "task"
+    (task_path / "environment").mkdir(parents=True)
+    (task_path / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    (task_path / "tests").mkdir()
+    (task_path / "tests" / "test.sh").write_text("#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n")
+    (task_path / "instruction.md").write_text("Write nothing.\n")
+    (task_path / "task.toml").write_text(E2B_TASK_TOML)
+    task = Task(task_path)
+    return EnvironmentFactory.create_environment_from_config(
+        config=EnvironmentConfig.model_validate(environment_config("modal", task_path)),
+        environment_dir=task.paths.environment_dir,
+        environment_name=task.short_name,
+        session_id="t__env",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=task.config.environment.model_copy(deep=True),
+        network_policy=NetworkPolicy(network_mode=NetworkMode.PUBLIC),
+    )
+
+
+@pytest.mark.unit
+def test_a_modal_trial_gets_reefs_class_on_harbors_modal_environment(tmp_path: Path) -> None:
+    pytest.importorskip("modal")
+    from harbor.environments.modal import ModalEnvironment
+    from harbor.utils.import_path import import_class
+
+    from reef.execution.sandbox.modal.trial import ModalTrialEnvironment
+    from reef.execution.sandbox.task_environment import HARBOR_MODAL_ENVIRONMENT
+
+    environment = harbor_modal_environment(tmp_path)
+    assert type(environment) is ModalTrialEnvironment and isinstance(environment, ModalEnvironment)
+    assert environment.type() == ModalEnvironment.type() == "modal"
+    # A trial config names the class by its module, and Harbor resolves that path.
+    assert HARBOR_MODAL_ENVIRONMENT == "reef.execution.sandbox.modal.trial:ModalTrialEnvironment"
+    assert import_class(HARBOR_MODAL_ENVIRONMENT) is ModalTrialEnvironment
+
+
+def modal_errors() -> dict[str, Exception]:
+    """One Modal error of each kind that the tests of Reef's Modal class raise, by name."""
+    modal = pytest.importorskip("modal")
+    return {
+        "no-resources": modal.exception.ResourceExhaustedError("no machine has 64 CPUs free"),
+        "invalid-request": modal.exception.InvalidError("a sandbox has at most 64 CPUs"),
+        "credentials": modal.exception.AuthError("the token was refused"),
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("refusal", "raised", "names"),
+    [
+        ("no-resources", SandboxCapacityError, SANDBOX_CAPACITY_ERRORS),
+        ("invalid-request", SandboxRequestError, SANDBOX_REQUEST_ERRORS),
+        # Any other error of the creation stays Modal's, and an evaluation counts it as an ordinary failed attempt.
+        ("credentials", None, frozenset()),
+    ],
+    ids=["no-resources", "invalid-request", "credentials"],
+)
+def test_reefs_modal_sandbox_creation_raises_reefs_error_for_modals_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+    raised: type[Exception] | None,
+    names: frozenset[str],
+) -> None:
+    modal = pytest.importorskip("modal")
+
+    error = modal_errors()[refusal]
+    created = object()
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    async def create_sandbox(*entrypoint: str, **options: object) -> object:
+        calls.append((entrypoint, options))
+        if len(calls) > 1:
+            raise error
+        return created
+
+    monkeypatch.setattr(modal.Sandbox, "create", SimpleNamespace(aio=create_sandbox))
+    environment = harbor_modal_environment(tmp_path)
+    creation = environment._create_sandbox(
+        entrypoint=["sleep", "60"], block_network=True, experimental_options={"probe": 1}
+    )
+    assert asyncio.run(creation) is created
+    entrypoint, options = calls[0]
+    assert entrypoint == ("sleep", "60")
+    assert options["block_network"] is True and options["experimental_options"] == {"probe": 1}
+    with pytest.raises(type(error) if raised is None else raised) as refused:
+        asyncio.run(environment._create_sandbox())
+    assert len(calls) == 3  # Harbor retries the failed create once.
+    if raised is None:
+        assert refused.value is error
+        assert type(error).__name__ not in SANDBOX_CAPACITY_ERRORS | SANDBOX_REQUEST_ERRORS
+    else:
+        # Harbor keeps the class name of the error that ended a trial, and an evaluation reads it; the message keeps
+        # Modal's reason.
+        assert type(refused.value).__name__ in names
+        assert refused.value.__cause__ is error and str(error) in str(refused.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("step", "refusal", "raised"),
+    [
+        # Modal refuses the sandbox itself.
+        ("creation", "no-resources", SandboxCapacityError),
+        ("creation", "invalid-request", SandboxRequestError),
+        # A step after the creation, such as the image's stream or the setup, fails with Modal's error: it stays
+        # Modal's, so a rollout whose sandbox exists does not fail for good or wait for capacity.
+        ("after-creation", "invalid-request", None),
+        ("after-creation", "no-resources", None),
+    ],
+    ids=["refused-creation", "rejected-creation", "invalid-after-creation", "exhausted-after-creation"],
+)
+def test_reefs_modal_start_names_only_the_refusals_of_the_sandbox_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, refusal: str, raised: type[Exception] | None
+) -> None:
+    pytest.importorskip("modal")
+    from harbor.environments.modal import ModalEnvironment
+
+    error = modal_errors()[refusal]
+
+    async def create_sandbox(environment: ModalEnvironment, **options: object) -> object:
+        if step == "creation":
+            raise error
+        return object()
+
+    environment = harbor_modal_environment(tmp_path)
+
+    async def start_strategy(*arguments: object, **options: object) -> None:
+        # Harbor's start strategy creates the sandbox, then runs its later steps.
+        await environment._create_sandbox()
+        raise error
+
+    monkeypatch.setattr(ModalEnvironment, "_create_sandbox", create_sandbox)
+    # Harbor's own start runs, and calls its strategy.
+    monkeypatch.setattr(environment._strategy, "start", start_strategy)
+    with pytest.raises(type(error) if raised is None else raised) as started:
+        asyncio.run(environment.start(force_build=False))
+    if raised is None:
+        assert started.value is error
+    else:
+        assert started.value.__cause__ is error
 
 
 @pytest.mark.unit
@@ -388,12 +656,45 @@ def test_reefs_e2b_template_is_harbors_and_keeps_the_modes_of_copy_chmod(
 
 
 @pytest.mark.unit
+def test_a_cancelled_template_build_ends_and_is_not_built_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that stops, such as a process at its shutdown, cancels the build. The build's retry must not take the
+    cancellation as a failed attempt: the build would run again, and its caller would never end."""
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    reef = harbor_e2b_environments(tmp_path)["reef"]
+    builds: list[DockerfileBuild] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        builds.append(build)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+
+    async def cancelled() -> bool:
+        task = asyncio.create_task(reef._create_template())
+        while not builds:
+            await asyncio.sleep(0)
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=5)
+        return bool(done) and task.cancelled()
+
+    assert asyncio.run(cancelled()) and len(builds) == 1
+
+
+@pytest.mark.unit
 def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example/")
@@ -437,7 +738,7 @@ def test_a_task_template_built_before_the_trials_is_the_template_of_a_trial(
 ) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -466,7 +767,7 @@ def test_the_template_of_a_separate_verifier_environment_is_built_before_the_tri
     from harbor.models.trial.paths import TrialPaths
 
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -502,7 +803,7 @@ def test_the_template_of_a_separate_verifier_environment_is_built_before_the_tri
 @pytest.mark.unit
 def test_a_task_template_that_exists_is_not_built_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("e2b")
-    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.e2b import trial as reef_e2b
 
     monkeypatch.delenv("REEF_E2B_DOCKERFILE_BUILD", raising=False)
     trial = harbor_e2b_environments(tmp_path)["reef"]
@@ -535,9 +836,12 @@ class SandboxCreatedError(Exception):
     """A stand-in ``_create_sandbox`` raises it: the template part of ``start`` passed, and the sandbox starts."""
 
 
-def trial_environments(tmp_path: Path, *, builds_templates: bool) -> list[object]:
+def trial_environments(
+    tmp_path: Path, *, builds_templates: bool, prepared_images: Sequence[PreparedImage] = ()
+) -> list[object]:
     """The environment of a trial of the task under ``tmp_path`` and its separate verifier environment, made by
-    Harbor's factory from one config of ``environment_config``, as Harbor's trial makes them."""
+    Harbor's factory from one config of ``environment_config`` with ``prepared_images``, as Harbor's trial makes
+    them."""
     from harbor.environments.factory import EnvironmentFactory
     from harbor.models.task.task import Task
     from harbor.models.task.verifier_mode import resolve_verifier_environment_definition
@@ -548,7 +852,9 @@ def trial_environments(tmp_path: Path, *, builds_templates: bool) -> list[object
     task = Task(task_path)
     verifier = resolve_verifier_environment_definition(task.config, task.paths)
     assert verifier is not None
-    config = EnvironmentConfig.model_validate(environment_config("e2b", task_path, builds_templates=builds_templates))
+    config = EnvironmentConfig.model_validate(
+        environment_config("e2b", task_path, builds_templates=builds_templates, prepared_images=prepared_images)
+    )
     return [
         EnvironmentFactory.create_environment_from_config(
             config=config,
@@ -631,7 +937,7 @@ def test_on_agentenv_a_trial_that_builds_no_template_starts_only_from_a_ready_te
 ) -> None:
     pytest.importorskip("e2b")
     from reef.execution.sandbox import e2b as reef_e2b
-    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild, TemplateState
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild, TemplateState
 
     monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
     monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
@@ -656,3 +962,443 @@ def test_on_agentenv_a_trial_that_builds_no_template_starts_only_from_a_ready_te
         with pytest.raises(SandboxCreatedError if starts else reef_e2b.TemplateNotPreparedError):
             asyncio.run(trial_environment.start(force_build=False))
     assert len(read) == 2 and all(alias.endswith(reef_e2b.AENV_TEMPLATE_SUFFIX) for alias in read)
+
+
+#: The Compose file of a task with a second service that the agent reaches by name.
+TASK_COMPOSE = (
+    "services:\n  main:\n    networks: [task]\n  server:\n    image: registry.example/server:1\n"
+    "    networks:\n      task:\n        aliases: [challenge]\nnetworks:\n  task: {}\n"
+)
+
+
+class ComposeGuest:
+    """A stand-in for the E2B SDK's sandbox of a Compose project's guest. It records each command that the
+    environment runs in the guest, and answers each with ``results``, in order; then with success."""
+
+    def __init__(self) -> None:
+        self.sandbox_id = "sandbox-1"
+        self.commands = self
+        self.ran: list[dict[str, object]] = []
+        self.results: list[SimpleNamespace] = []
+        self.killed = False
+
+    async def run(self, **options: object) -> ComposeGuest:
+        self.ran.append(options)
+        return self
+
+    async def wait(self) -> SimpleNamespace:
+        return self.results.pop(0) if self.results else SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    async def kill(self) -> None:
+        self.killed = True
+
+
+def compose_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    builds_templates: bool = True,
+    build: str = "aenv",
+    compose: str | None = "aenv",
+    prepared_images: Sequence[PreparedImage] = (),
+) -> object:
+    """Reef's E2B environment of a trial of the task of ``harbor_e2b_environments`` with ``TASK_COMPOSE``, with
+    ``REEF_E2B_DOCKERFILE_BUILD`` ``build`` and ``REEF_E2B_COMPOSE`` ``compose`` (unset for None). Harbor's factory
+    makes it from ``environment_config`` with ``prepared_images``."""
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.task import Task
+    from harbor.models.trial.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", build)
+    if compose is None:
+        monkeypatch.delenv("REEF_E2B_COMPOSE", raising=False)
+    else:
+        monkeypatch.setenv("REEF_E2B_COMPOSE", compose)
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    task_path = tmp_path / "task"
+    if not task_path.exists():
+        harbor_e2b_environments(tmp_path)
+    (task_path / "environment" / "docker-compose.yaml").write_text(TASK_COMPOSE)
+    task = Task(task_path)
+    config = environment_config("e2b", task_path, builds_templates=builds_templates, prepared_images=prepared_images)
+    return EnvironmentFactory.create_environment_from_config(
+        config=EnvironmentConfig.model_validate(config),
+        environment_dir=task.paths.environment_dir,
+        environment_name=task.short_name,
+        session_id="t__env",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=task.config.environment.model_copy(deep=True),
+    )
+
+
+def compose_stand_ins(monkeypatch: pytest.MonkeyPatch, *, image_exists: bool) -> tuple[list[object], ComposeGuest]:
+    """Stand-ins for the AgentENV deployment of a Compose start. Return the calls, in order, and the guest that the
+    E2B SDK connects to. The first ``aenv compose up`` finds no image of ``main`` unless ``image_exists``."""
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates, DockerfileBuild
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox, ImageNotFoundError
+
+    calls: list[object] = []
+    guest = ComposeGuest()
+    missing = [] if image_exists else [ImageNotFoundError("image tag 't:latest' was not found")]
+
+    async def start(sandbox: ComposeSandbox, templates: AgentEnvTemplates) -> str:
+        calls.append(sandbox)
+        if missing:
+            raise missing.pop()
+        return guest.sandbox_id
+
+    async def build_image(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        calls.append(build)
+
+    async def prepare_guest(templates: AgentEnvTemplates, sandbox_id: str) -> None:
+        calls.append(("prepare", sandbox_id))
+
+    async def connect(sandbox_id: str, timeout: int) -> ComposeGuest:
+        calls.append(("connect", sandbox_id, timeout))
+        return guest
+
+    async def delete_sandbox(templates: AgentEnvTemplates, sandbox_id: str) -> None:
+        calls.append(("delete", sandbox_id))
+
+    monkeypatch.setattr(ComposeSandbox, "start", start)
+    monkeypatch.setattr(reef_e2b, "build_image", build_image)
+    monkeypatch.setattr(reef_e2b, "prepare_guest", prepare_guest)
+    monkeypatch.setattr(reef_e2b, "delete_sandbox", delete_sandbox)
+    monkeypatch.setattr(e2b.AsyncSandbox, "connect", staticmethod(connect))
+    return calls, guest
+
+
+@pytest.mark.unit
+def test_on_agentenv_a_task_with_a_compose_file_runs_its_project_and_the_trial_works_in_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox.agentenv.build import DockerfileBuild
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox, main_image
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    calls, guest = compose_stand_ins(monkeypatch, image_exists=False)
+    name, reference = main_image(environment._template_name)
+    # AgentENV does not tell whether it has the image, so the template part of a start always builds.
+    assert asyncio.run(environment._does_template_exist()) is False
+    asyncio.run(environment.start(force_build=False))
+
+    # The start builds the image only after AgentENV refused the project for it, then starts the project again.
+    first, build, second, *rest = calls
+    assert first == second and isinstance(first, ComposeSandbox)
+    assert (first.cpu_count, first.memory_mb, first.startup_seconds) == (2, 4096, 120)
+    assert first.lifetime_seconds == environment._sandbox_timeout
+    services = first.project["services"]
+    assert services["main"]["image"] == reference and services["main"]["networks"] == ["task"]
+    assert services["main"]["environment"] == {"TASK_SETTING": "from-the-task"}
+    assert services["server"]["networks"] == {"task": {"aliases": ["challenge"]}}
+    environment_dir = tmp_path / "task" / "environment"
+    assert build == DockerfileBuild(
+        context_dir=environment_dir,
+        dockerfile=environment_dir / "Dockerfile",
+        alias=name,
+        cpu_count=None,
+        memory_mb=None,
+        timeout_seconds=120,
+        start_command=True,
+        image=True,
+    )
+    assert build.command()[-1] == "--image"
+    assert rest == [("prepare", "sandbox-1"), ("connect", "sandbox-1", environment._sandbox_timeout)]
+
+    # A command of the trial runs in main, in the Dockerfile's directory, with the trial's variables and user.
+    guest.ran.clear()
+    guest.results.append(SimpleNamespace(stdout="out", stderr="err", exit_code=3))
+    result = asyncio.run(environment.exec("make test", env={"MODE": "a b"}, timeout_sec=30, user="solver"))
+    assert (result.stdout, result.stderr, result.return_code) == ("out", "err", 3)
+    (ran,) = guest.ran
+    assert ran["cmd"] == (
+        "docker compose --project-name aenv exec -T -w /app -e TASK_SETTING=from-the-task -e 'MODE=a b' -u solver "
+        "main bash -c 'make test'"
+    )
+    # The guest runs it as root, outside the task's directory, which only main has.
+    assert (ran["user"], ran["cwd"], ran["envs"], ran["timeout"]) == ("root", None, None, 30)
+
+    asyncio.run(environment.stop(delete=True))
+    assert guest.killed
+
+
+@pytest.mark.unit
+def test_a_compose_trial_that_builds_no_template_needs_the_image_of_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox
+
+    environment = compose_environment(tmp_path, monkeypatch, builds_templates=False)
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
+    with pytest.raises(reef_e2b.TemplateNotPreparedError):
+        asyncio.run(environment.start(force_build=False))
+    assert len(calls) == 1 and isinstance(calls[0], ComposeSandbox)
+
+    # With the image, it starts.
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
+    asyncio.run(environment.start(force_build=False))
+    assert [call for call in calls if not isinstance(call, ComposeSandbox)] == [
+        ("prepare", "sandbox-1"),
+        ("connect", "sandbox-1", environment._sandbox_timeout),
+    ]
+
+
+@pytest.mark.unit
+def test_a_compose_start_that_fails_after_the_sandbox_exists_deletes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv.compose import ComposeStartError
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
+
+    async def prepare_guest(templates: object, sandbox_id: str) -> None:
+        raise ComposeStartError("could not prepare the guest")
+
+    monkeypatch.setattr(reef_e2b, "prepare_guest", prepare_guest)
+    with pytest.raises(ComposeStartError):
+        asyncio.run(environment.start(force_build=False))
+    assert calls[-1] == ("delete", "sandbox-1") and environment._sandbox is None
+
+
+@pytest.mark.unit
+def test_a_compose_file_changes_nothing_unless_the_deployment_selects_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    # The default is off, also on AgentENV: a Compose start writes image records to the deployment's repository.
+    for build in ("aenv", "e2b"):
+        for compose in (None, "off"):
+            assert compose_environment(tmp_path, monkeypatch, build=build, compose=compose).compose_ops is None
+    with pytest.raises(ValueError, match="REEF_E2B_COMPOSE=aenv needs REEF_E2B_DOCKERFILE_BUILD=aenv"):
+        compose_environment(tmp_path, monkeypatch, build="e2b")
+    with pytest.raises(ValueError, match="REEF_E2B_COMPOSE must be one of off, aenv, not 'docker'"):
+        compose_environment(tmp_path, monkeypatch, compose="docker")
+
+
+@pytest.mark.unit
+def test_the_image_of_main_is_built_before_the_trials_of_a_compose_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox.agentenv.build import DockerfileBuild
+    from reef.execution.sandbox.agentenv.compose import main_image
+    from reef.execution.sandbox.e2b import build_task_main_image, build_task_template
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
+    name, reference = main_image(environment._template_name)
+    assert asyncio.run(build_task_main_image(tmp_path / "task")) == reference
+    # build_task_template builds it too, and returns the alias as for a task with a template.
+    assert asyncio.run(build_task_template(tmp_path / "task")) == environment._template_name
+    assert [call.alias for call in calls if isinstance(call, DockerfileBuild)] == [name, name]
+
+    # A task whose trials run no Compose project has no such image.
+    (tmp_path / "task" / "environment" / "docker-compose.yaml").unlink()
+    assert asyncio.run(build_task_main_image(tmp_path / "task")) is None
+    assert len(calls) == 2
+
+
+#: A fake ``docker`` for the guest: ``compose --project-name aenv cp`` copies between the guest and the directory
+#: FAKE_MAIN_ROOT, which stands in for the filesystem of ``main``.
+FAKE_DOCKER = """#!/bin/sh
+[ "$1 $2 $3 $4" = "compose --project-name aenv cp" ] || exit 64
+main() { case "$1" in main:*) printf '%s' "$FAKE_MAIN_ROOT${1#main:}" ;; *) printf '%s' "$1" ;; esac; }
+source=$(main "$5"); target=$(main "$6")
+mkdir -p "$(dirname "$target")" && cp -R "$source" "$target"
+"""
+
+
+@pytest.mark.unit
+def test_a_compose_trial_moves_files_through_the_guest_to_and_from_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guest is a directory of this test: its commands run here, with its paths under that directory."""
+    import subprocess
+
+    from harbor.environments.base import ExecResult
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    guest_root, main_root, bin_dir = tmp_path / "guest", tmp_path / "main", tmp_path / "bin"
+    for directory in (guest_root / "tmp", main_root, bin_dir):
+        directory.mkdir(parents=True)
+    (bin_dir / "docker").write_text(FAKE_DOCKER)
+    (bin_dir / "docker").chmod(0o755)
+    path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+    async def host_exec(command: str, timeout_sec: int | None = None) -> ExecResult:
+        done = subprocess.run(
+            ["sh", "-c", command.replace("/tmp/harbor_", f"{guest_root}/tmp/harbor_")],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": path, "FAKE_MAIN_ROOT": str(main_root)},
+        )
+        return ExecResult(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode)
+
+    async def host_write(guest_path: str, data: bytes) -> None:
+        (guest_root / guest_path.lstrip("/")).write_bytes(data)
+
+    async def host_read(guest_path: str) -> bytes:
+        return (guest_root / guest_path.lstrip("/")).read_bytes()
+
+    monkeypatch.setattr(environment, "host_exec", host_exec)
+    monkeypatch.setattr(environment, "host_write", host_write)
+    monkeypatch.setattr(environment, "host_read", host_read)
+
+    source = tmp_path / "source"
+    (source / "empty").mkdir(parents=True)
+    (source / "bin").mkdir()
+    (source / "bin" / "run.sh").write_text("#!/bin/sh\n")
+    (source / "bin" / "run.sh").chmod(0o755)
+    asyncio.run(environment.upload_dir(source, "/logs/agent/files"))
+    asyncio.run(environment.upload_file(source / "bin" / "run.sh", "/logs/agent/one.sh"))
+    uploaded = main_root / "logs" / "agent"
+    # An empty directory and a file's mode arrive in main.
+    assert (uploaded / "files" / "empty").is_dir() and (uploaded / "one.sh").read_text() == "#!/bin/sh\n"
+    assert stat.S_IMODE((uploaded / "files" / "bin" / "run.sh").stat().st_mode) == 0o755
+
+    asyncio.run(environment.download_dir("/logs/agent/files", tmp_path / "back"))
+    asyncio.run(environment.download_file("/logs/agent/one.sh", tmp_path / "one.sh"))
+    assert (tmp_path / "back" / "empty").is_dir() and (tmp_path / "one.sh").read_text() == "#!/bin/sh\n"
+    assert stat.S_IMODE((tmp_path / "back" / "bin" / "run.sh").stat().st_mode) == 0o755
+    # Nothing stays in the guest.
+    assert list((guest_root / "tmp").iterdir()) == []
+
+
+@pytest.mark.unit
+def test_a_compose_command_as_root_names_root_by_its_uid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent can overwrite /etc/passwd in main. Docker then finds no user named root, but it still runs UID 0."""
+    import shlex
+
+    from harbor.environments.base import ExecResult
+
+    environment = compose_environment(tmp_path, monkeypatch)
+    commands: list[list[str]] = []
+
+    async def host_exec(command: str, timeout_sec: int | None = None) -> ExecResult:
+        commands.append(shlex.split(command))
+        return ExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(environment, "host_exec", host_exec)
+    for user in ("root", "agent", 1000):
+        asyncio.run(environment.exec("true", user=user))
+    users = [command[command.index("-u") + 1] for command in commands]
+    assert users == ["0", "agent", "1000"]
+
+
+@pytest.mark.unit
+def test_only_an_e2b_config_carries_prepared_images(tmp_path: Path) -> None:
+    pytest.importorskip("e2b")
+    from harbor.models.task.task import Task
+    from harbor.models.trial.paths import TrialPaths
+
+    from reef.execution.sandbox.e2b import KillOnTimeoutE2BEnvironment, TemplateNotPreparedError
+
+    harbor_e2b_environments(tmp_path)
+    task_path = tmp_path / "task"
+    image = prepared_image()
+    kwargs = environment_config("e2b", task_path, prepared_images=[image])["kwargs"]
+    assert (kwargs["prepared_images"], kwargs["task_directory"]) == ([image.to_json()], str(task_path))
+    assert "prepared_images" not in environment_config("e2b", task_path).get("kwargs", {})
+    for other in ("docker", "modal"):
+        with pytest.raises(ValueError, match="only an e2b trial starts from prepared images"):
+            environment_config(other, task_path, prepared_images=[image])
+    # A forged list, or a list without its task, fails the environment before it starts.
+    task = Task(task_path)
+    options = {
+        "environment_dir": task.paths.environment_dir,
+        "environment_name": task.short_name,
+        "session_id": "t__env",
+        "trial_paths": TrialPaths(tmp_path / "forged"),
+        "task_env_config": task.config.environment,
+    }
+    for forged_image in ("registry.example/tasks/task:latest", "aenv/task@sha256:" + "c" * 64):
+        forged = {**image.to_json(), "image": forged_image}
+        with pytest.raises(ValueError, match="host/repository@sha256"):
+            KillOnTimeoutE2BEnvironment(**options, prepared_images=[forged], task_directory=str(task_path))
+    with pytest.raises(ValueError, match="given together"):
+        KillOnTimeoutE2BEnvironment(**options, prepared_images=[image.to_json()])
+    # A list without the image of the task's environment fails it, and the environment builds nothing instead.
+    other = prepared_image("tests", VERIFIER_IMAGE).to_json()
+    with pytest.raises(TemplateNotPreparedError, match=r"have no image of .*environment \(source image None\)"):
+        KillOnTimeoutE2BEnvironment(**options, prepared_images=[other], task_directory=str(task_path))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("force_build", [False, True])
+def test_each_environment_of_a_trial_starts_its_own_prepared_image_and_builds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force_build: bool
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv.build import AgentEnvTemplates
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    write_separate_verifier_task(tmp_path)
+    started: list[object] = []
+
+    async def never(*arguments: object, **options: object) -> None:
+        raise AssertionError("a prepared image builds no template and reads no alias")
+
+    async def create_sandbox(environment: reef_e2b.KillOnTimeoutE2BEnvironment) -> None:
+        started.append(environment.prepared_image)
+        raise SandboxCreatedError
+
+    monkeypatch.setattr(e2b.AsyncTemplate, "alias_exists", staticmethod(never))
+    monkeypatch.setattr(e2b.AsyncTemplate, "build", staticmethod(never))
+    monkeypatch.setattr(AgentEnvTemplates, "state", never)
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", never)
+    monkeypatch.setattr(reef_e2b.KillOnTimeoutE2BEnvironment, "_create_sandbox", create_sandbox)
+    images = (prepared_image(), prepared_image("tests", VERIFIER_IMAGE, template_id=None))
+    # Also a trial that builds no template, and a forced build: the deployment prepared the images.
+    for builds_templates in (True, False):
+        for environment in trial_environments(tmp_path, builds_templates=builds_templates, prepared_images=images):
+            with pytest.raises(SandboxCreatedError):
+                asyncio.run(environment.start(force_build=force_build))
+    assert started == [*images, *images]
+    # A list without an image of the task's environment, or of its verifier, or with another source image, fails the
+    # trial before its agent runs: the environment does not go back to its template or its Dockerfile.
+    pinned = prepared_image(source_image="registry.example/tasks/task:1")
+    for partial in (images[1:], images[:1], [pinned, images[1]]):
+        with pytest.raises(reef_e2b.TemplateNotPreparedError, match="a task with prepared images builds none"):
+            trial_environments(tmp_path, builds_templates=True, prepared_images=partial)
+
+
+@pytest.mark.unit
+def test_a_compose_task_starts_its_project_and_its_plain_verifier_starts_its_prepared_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reef.execution.sandbox.agentenv.compose import ComposeSandbox, ImageNotFoundError
+    from reef.execution.sandbox.e2b import TemplateNotPreparedError
+
+    images = [prepared_image(), prepared_image("tests", VERIFIER_IMAGE)]
+    write_separate_verifier_task(tmp_path)
+    environment = compose_environment(tmp_path, monkeypatch, prepared_images=images)
+    # The project of a Compose task starts as before; its separate verifier has no Compose file.
+    assert environment.compose_ops is not None and environment.prepared_image == images[0]
+    calls, _ = compose_stand_ins(monkeypatch, image_exists=True)
+    asyncio.run(environment.start(force_build=False))
+    assert calls[0].project["services"]["main"]["image"] == TASK_IMAGE
+    assert [call for call in calls if not isinstance(call, ComposeSandbox)] == [
+        ("prepare", "sandbox-1"),
+        ("connect", "sandbox-1", environment._sandbox_timeout),
+    ]
+    verifier = trial_environments(tmp_path, builds_templates=False, prepared_images=images)[1]
+    assert verifier.compose_ops is None and verifier.prepared_image == images[1]
+    for forced in (False, True):
+        missing = compose_environment(tmp_path, monkeypatch, prepared_images=images)
+        calls, _ = compose_stand_ins(monkeypatch, image_exists=False)
+        with pytest.raises(ImageNotFoundError):
+            asyncio.run(missing.start(force_build=forced))
+        assert len(calls) == 1 and calls[0].project["services"]["main"]["image"] == TASK_IMAGE
+    # Without Compose the main service runs as an ordinary environment and needs its own verified image.
+    single = compose_environment(tmp_path, monkeypatch, compose=None, prepared_images=images)
+    assert single.compose_ops is None and single.prepared_image == images[0]
+    rewritten = [prepared_image(source_image="registry.example/tasks/task@sha256:" + "e" * 64), images[1]]
+    with pytest.raises(TemplateNotPreparedError, match="have no image of"):
+        compose_environment(tmp_path, monkeypatch, compose=None, prepared_images=rewritten)

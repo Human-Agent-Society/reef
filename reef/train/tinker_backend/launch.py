@@ -2,7 +2,7 @@
 
 Tinker trains in the HTTP service's process: ``TinkerTrainingComponent`` runs
 each job. Serving is the deployment's ``inference`` section
-(``reef.service.deploy.serving``). By default Tinker samples too
+(``reef.api.serving``). By default Tinker samples too
 (``inference.serving: trainer``, ``reef.inference.tinker``). Reef's engines can
 serve the checkpoints instead: they load each snapshot's adapter, which
 ``reef.tinker.weights.TinkerSamplerWeights`` downloads from the manifest's

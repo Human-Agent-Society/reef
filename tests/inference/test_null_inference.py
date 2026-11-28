@@ -31,7 +31,7 @@ def test_the_factory_builds_a_runtime_that_serves_nothing_and_loads_nothing(tmp_
 
 
 def test_admission_and_the_handler_refuse_every_request(tmp_path):
-    # The HTTP contract (503 on every inference route) is in tests/reef_service/inference/test_runtime_registry.py.
+    # The HTTP contract (503 on every inference route) is in tests/api/inference/test_runtime_registry.py.
     runtime = NullInferenceRuntime()
     with pytest.raises(InferenceUnavailableError, match=r"inference\.backend: none"):
         asyncio.run(runtime.acquire_inference())
