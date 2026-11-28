@@ -19,8 +19,8 @@ from pathlib import Path
 from reef.artifact.components import ComponentChecks, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
-from reef.harness.tasks.harness_models import HarnessModels
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.harness_models import HarnessModels
+from reef.harness.runs.model_binding import ModelBinding
 from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import WEIGHTS_COMPONENT, Recipe, WeightTrainingRecipe, every_check
 from reef.recipe.composite import CompositeRecipe, component_recipes

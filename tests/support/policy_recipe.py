@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Any
 
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.recipe.base import WeightTrainingRecipe
 from reef.storage.scenario.samples import SAMPLE_KINDS, SampleKind

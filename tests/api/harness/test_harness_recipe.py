@@ -81,8 +81,8 @@ from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime

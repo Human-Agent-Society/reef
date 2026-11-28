@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from recipes.opd.processor import OPDSamples
+from recipes.opd.stages import OPDSamples
 from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe

@@ -18,8 +18,8 @@ from reef.core.evaluation import RolloutScore
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.tasks import primary_reward
 from reef.execution.executor.requirements import ExecutionRequirements
-from reef.harness.tasks.model_binding import ModelBindings
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.model_binding import ModelBindings
+from reef.harness.runs.run import TaskResult
 
 
 class TaskScorer(ConfiguredPlugin, ABC):

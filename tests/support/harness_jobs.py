@@ -33,8 +33,8 @@ from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe

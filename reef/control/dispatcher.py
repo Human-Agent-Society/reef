@@ -662,8 +662,8 @@ class Dispatcher(
             schemas = {kind: None if component is None else component.parameters_schema(kind) for kind in SAMPLE_KINDS}
             return {
                 "scenario": scenario,
-                # The key keeps its name for callers; the value names the recipe's sample-to-job stage.
-                "processor": type(pipeline.sample2job).__name__,
+                # The class name of the recipe's sample-to-job stage.
+                "sample2job": type(pipeline.sample2job).__name__,
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
@@ -1408,8 +1408,8 @@ class Dispatcher(
             self.record_operational_metrics()
         replaced = self.local_workers.take_replaced()
         for scenario in (*replaced, *self.registry.loaded_scenarios()):
-            # Use scenario.close(), not records.close(). The processors must
-            # stop before the store closes, or a processor worker in flight
+            # Use scenario.close(), not records.close(). The stages must
+            # stop before the store closes, or a stage's worker in flight
             # finds a closed store.
             try:
                 scenario.close()

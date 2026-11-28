@@ -60,7 +60,7 @@ from reef.evaluation.harness import (
     RunRecord,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.runs.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
 from reef.train.backend import ArtifactTextFiles, PreparedHarnessJob

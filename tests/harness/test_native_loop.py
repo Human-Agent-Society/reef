@@ -47,9 +47,9 @@ from reef.harness.runners.native.enforce import ToolFailedError
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.selftools import SelfTools, ServeState
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
-from reef.harness.tasks.run import TaskResult
-from reef.harness.tasks.trajectory import stage_path
+from reef.harness.runs.model_binding import ModelBinding, ModelBindings
+from reef.harness.runs.run import TaskResult
+from reef.harness.runs.trajectory import stage_path
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
 from reef.train.harness_backend.backend import HarnessBackend

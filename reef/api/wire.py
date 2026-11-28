@@ -1,4 +1,4 @@
-"""The HTTP wire shapes: ``x-reef-*`` request headers and the report body.
+"""The HTTP wire shapes: ``x-reef-*`` request headers, the report body, and the older keys of two answers.
 
 Only the service reads these. ``AgentRecord`` — what a request becomes once
 stored — lives in ``reef.core``; this module is the boundary between an
@@ -16,7 +16,7 @@ from reef.core.errors import ReefError
 from reef.core.records_types import SCENARIO_HEADER, RequestType, parse_references
 
 #: Harness-stamped side-channel context. The
-#: service carries each pair through to the INFERENCE record so a processor
+#: service carries each pair through to the INFERENCE record so a record-to-sample stage
 #: can correlate on it, and reads no value itself. Header-free correlation stays the
 #: fallback; a tag is what a harness offers when its agent does not resend
 #: the transcript it is continuing.
@@ -71,7 +71,7 @@ class ReportPayload:
     multi-dimensional scores, or whatever a given recipe cares about) when a recipe
     wants richer content. Reef's core only validates that it is a string or a JSON
     object — never a specific internal shape. Interpretation is left to whichever
-    recipe's processor reads ``report.payload["feedback"]``, the same way ``metadata``,
+    recipe's record-to-sample stage reads ``report.payload["feedback"]``, the same way ``metadata``,
     ``TrainingSignal.metrics`` are opaque payloads
     interpreted by consumers rather than validated centrally.
     """
@@ -120,7 +120,7 @@ def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Map
     """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
 
     Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. This stores
+    stages that read one correlate on the inference side. This stores
     every pair as sent; the service reads no value.
     """
     if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
@@ -128,3 +128,36 @@ def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Map
     metadata = dict(payload.get("metadata") or {})
     metadata["tags"] = {**(metadata.get("tags") or {}), **parsed.tags}
     return {**payload, "metadata": metadata}
+
+
+def status_with_older_keys(status: Mapping[str, Any]) -> dict[str, Any]:
+    """``status`` as ``GET /reef/status`` answers it, for callers that read the older key.
+
+    Each scenario block, and each block of its ``components``, holds its ``pipeline`` object also under
+    ``processor``, the older name of that key. Only the route calls this function: no other code reads
+    ``processor``.
+    """
+
+    def with_older_key(block: Mapping[str, Any]) -> dict[str, Any]:
+        answer = dict(block)
+        if "pipeline" in answer:
+            answer["processor"] = answer["pipeline"]
+        components = answer.get("components")
+        if isinstance(components, Mapping):
+            answer["components"] = {name: with_older_key(component) for name, component in components.items()}
+        return answer
+
+    answer = dict(status)
+    scenarios = answer.get("scenarios")
+    if isinstance(scenarios, Mapping):
+        answer["scenarios"] = {name: with_older_key(block) for name, block in scenarios.items()}
+    return answer
+
+
+def contract_with_older_keys(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """``contract`` as ``GET /reef/scenarios/{scenario}/contract`` answers it: ``sample2job`` also under
+    ``processor``, the older name of that key."""
+    answer = dict(contract)
+    if "sample2job" in answer:
+        answer["processor"] = answer["sample2job"]
+    return answer

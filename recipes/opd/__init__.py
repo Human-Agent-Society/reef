@@ -4,8 +4,8 @@ The recipe keeps requests unchanged, reuses the shared distillation stages
 and Slime backend, and trains only on the student's recorded samples.
 """
 
-from recipes.opd.processor import OPDSamples, OPDSettings
 from recipes.opd.recipe import OPDRecipe
+from recipes.opd.stages import OPDSamples, OPDSettings
 from reef.train.slime_backend.objectives import register_objective
 
 register_objective("opd", "recipes.opd.slime:OpdObjective")

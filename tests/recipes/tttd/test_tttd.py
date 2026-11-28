@@ -289,7 +289,7 @@ def test_tttd_accepts_one_artifact_id() -> None:
 @pytest.mark.unit
 def test_tttd_rejects_and_releases_a_step_spanning_artifact_ids(caplog) -> None:
     processor = _processor()
-    with caplog.at_level("WARNING", logger="recipes.tttd.processor"):
+    with caplog.at_level("WARNING", logger="recipes.tttd.stages"):
         for group in range(2):
             for rollout in range(3):
                 version = "checkpoint-1" if (group, rollout) != (1, 2) else "checkpoint-2"

@@ -4,7 +4,7 @@
   ``PipelineSpec``. Its report contract is ``report.SDPOReport``: the shared
   :class:`reef.core.reports.TeacherContextReport` plus the rollout's
   coordinates in the sampling step.
-- ``processor`` — the stages ``SDPOSamples`` (the grid, and the teacher's
+- ``stages`` — the stages ``SDPOSamples`` (the grid, and the teacher's
   renderer and windows) and ``SDPOJobData``, with
   a whole sampling step as one batch: the teacher's request is composed once
   the step's rollouts are known, from the reference's reprompt template.
@@ -15,9 +15,9 @@
   this package's public surface never loads it.
 """
 
-from recipes.sdpo.processor import SDPOJobData, SDPOSamples
 from recipes.sdpo.recipe import SDPORecipe
 from recipes.sdpo.report import SDPOReport
+from recipes.sdpo.stages import SDPOJobData, SDPOSamples
 from reef.train.slime_backend.objectives import register_objective
 
 register_objective("sdpo", "recipes.sdpo.slime:SdpoObjective")

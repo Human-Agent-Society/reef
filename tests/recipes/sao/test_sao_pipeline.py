@@ -31,7 +31,7 @@ from tests.support.stored_checkpoints import store_checkpoints
 from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOJobData, SAOSamples, SAOSettings
+from recipes.sao.stages import SAOJobData, SAOSamples, SAOSettings
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import SnapshotRef
 from reef.control.dispatcher import Dispatcher

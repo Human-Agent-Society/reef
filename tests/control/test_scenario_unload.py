@@ -11,7 +11,7 @@ from threading import Event, Thread
 import pytest
 from tests.support.polling import wait_until
 from tests.support.runtime_stubs import StubTrainingComponent, harness_live_objects, job_sized_stages
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.control.dispatcher import Dispatcher

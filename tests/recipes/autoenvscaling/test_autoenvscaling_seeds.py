@@ -76,7 +76,7 @@ from reef.deploy.orchestrator import resolve_deployment_config
 from reef.deploy.service_config import service_config_from_mapping
 from reef.execution.sandbox.process import ProcessOutcome
 from reef.recipe.generated_tasks.generator import HeldOutTask, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import split_source_ids
+from reef.recipe.generated_tasks.stages import split_source_ids
 from reef.samples.generator import OracleResult, WrittenTask
 
 # The session rules and prompts, rendered before seed tasks existed: a seeded run must not change them.

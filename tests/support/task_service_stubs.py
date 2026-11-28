@@ -10,7 +10,7 @@ from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflictError, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.harness.harbor.rollouts import RolloutTurn, TaskRollout
-from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, StoredGeneratorState
+from reef.recipe.generated_tasks.stages import TASK_STORE_NAME, StoredGeneratorState
 from reef.samples.generator import (
     DesignerRequest,
     DuplicateTaskError,

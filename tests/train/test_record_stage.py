@@ -14,7 +14,7 @@ from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import data_storage, made_task, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
-from tests.support.threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support.threshold_pipeline import ThresholdSamples, threshold_pipeline
 from tests.support.trajectories import policy_trajectory
 from tests.train.test_record_stage_job_data_parity import counting_jobs, inference, report
 

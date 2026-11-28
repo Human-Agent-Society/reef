@@ -11,7 +11,7 @@ Reproduction of [Single-Rollout Asynchronous Optimization](https://arxiv.org/abs
 ```text
 sao/
   recipe.py       SAORecipe: default objective, loss family "sao", default stages
-  processor.py    SAOSamples and SAOJobData: one scored rollout is one unit, the global batch size of units a step
+  stages.py       SAOSamples and SAOJobData: one scored rollout is one unit, the global batch size of units a step
   slime/          the Slime objective and the loss family: DIS ratio, critic (value model)
   examples/
     imo_answerbench/  the runnable loop: three IMOAnswerBench problems as Harbor tasks

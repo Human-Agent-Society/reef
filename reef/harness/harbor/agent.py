@@ -58,9 +58,9 @@ from reef.harness.harbor.node_runtime import (
 )
 from reef.harness.harbor.rollouts import COMMAND_FILE, ReefEvalLab, TaskLab, TaskRolloutError
 from reef.harness.harbor.uv_runtime import uv_archive, uv_build_name, uv_cache_directory
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import TaskResult, TaskRunError, headless_env, write_rendered
-from reef.harness.tasks.trajectory import reader_for
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import TaskResult, TaskRunError, headless_env, write_rendered
+from reef.harness.runs.trajectory import reader_for
 from reef.harness.tree import HarnessTree, render_tree
 
 logger = logging.getLogger(__name__)
@@ -519,7 +519,7 @@ class AdapterAgent(BaseInstalledAgent):
 
     def git_install_command(self) -> str:
         """The shell command that installs the agent from a checkout at the pinned ref, as Reef does on a person's
-        machine (``reef.harness.tasks.vendor_install``): editable into a venv, without the checkout's ``.git``. uv
+        machine (``reef.harness.runs.vendor_install``): editable into a venv, without the checkout's ``.git``. uv
         that ``install`` put in the container builds the venv with Python 3.12."""
         source, venv = f"{CONTAINER_GIT_AGENT}/src", f"{CONTAINER_GIT_AGENT}/venv"
         return (

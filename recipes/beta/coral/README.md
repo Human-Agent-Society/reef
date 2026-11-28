@@ -133,7 +133,7 @@ From a report to a gradient:
    cannot describe them. A group whose members trained on different
    revisions is discarded whole, because relative rewards only compare
    fairly within one policy version. A malformed attempt raises an explicit training data error; discarded
-   groups are visible in the processor's `status()` (`discarded_groups`).
+   groups are visible in the `status()` of the record-to-sample stage (`discarded_groups`).
 4. **The step.** A ready group trains in one job. The recipe
    reuses the `tttd` training objective (grouped leave-one-out advantages) and
    the `tttd` Slime loss family, CORAL sibling groups have the same shape
@@ -146,7 +146,7 @@ From a report to a gradient:
    `examples/coral_demo/serve.yaml`). Reef serves the new revision, and
    later attempts both run on it and are attributed to it.
 
-The design rationale lives next to the code: `processor.py` (the stages,
+The design rationale lives next to the code: `stages.py` (the stages,
 grouping, and guards), `recipe.py` (the stage binding, and why `tttd` is
 reused), `serve.yaml` (deployment knobs).
 

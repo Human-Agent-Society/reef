@@ -4,7 +4,7 @@
   its ``PipelineSpec``.
 - ``judging`` — the correlation and the judge: sessions correlated from
   record tags or, as a fallback, matching traces; turns judged on a PRM worker.
-- ``processor`` — the record-to-sample stage ``OpenClawRLSamples``, which runs
+- ``stages`` — the record-to-sample stage ``OpenClawRLSamples``, which runs
   the judging, and the sample-to-job stage: judged turns into samples and
   batches, and the PRM record file.
 - ``sessions`` / ``turns`` / ``prm`` — the derivation machinery the
@@ -16,8 +16,8 @@
 """
 
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
-from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.recipe import OpenClawRLRecipe
+from recipes.openclawrl.stages import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
 from reef.train.slime_backend.objectives import register_objective
 
 register_objective("openclawrl", "recipes.openclawrl.slime:OpenClawRLObjective")

@@ -84,7 +84,7 @@ integration changes in one place:
 2. Retain the returned `agent_record_id` as the generation receipt.
 3. After the existing evaluator computes a reward, send a Reef report that
    references that exact inference receipt.
-4. Include the rollout group's `comparison_set` so the scenario processor can
+4. Include the rollout group's `comparison_set` so the record-to-sample stage of the scenario can
    construct grouped training data.
 
 The ordinary harness and problem do not import `ReefClient`, know the scenario

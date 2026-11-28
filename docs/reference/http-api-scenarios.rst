@@ -63,7 +63,8 @@ Scenario routes
 - ``GET /reef/scenarios`` lists known scenarios and loaded selections.
   Harness entries include ``adapter``, even while loading.
 - ``GET /reef/scenarios/{scenario}/contract`` returns
-  ``{scenario, processor, required_request_types, training_mode, status, parameters_schema}``.
+  ``{scenario, sample2job, required_request_types, training_mode, status, parameters_schema}``.
+  ``sample2job`` names the recipe's sample-to-job stage. ``processor`` is the older name of the key and holds the same value.
   Mode and status are live. Parameter schemas are keyed by sample kind.
 - ``DELETE /reef/scenarios/{scenario}`` archives a scenario.
 - See `Training jobs <http-api-training.rst#training-jobs>`__ for job listing and cancellation.

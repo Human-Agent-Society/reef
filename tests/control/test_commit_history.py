@@ -26,7 +26,7 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.control.dispatcher import Dispatcher

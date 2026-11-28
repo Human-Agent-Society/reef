@@ -29,7 +29,8 @@ Status
 
 ``error`` and ``preload_errors`` report asynchronous failures.
 Each scenario shows active/training artifacts, committed progress, training mode
-and processor readiness. ``served_artifact_id`` stays null until a route publishes.
+and the state of the training pipeline (``pipeline``). ``served_artifact_id`` stays null until a route publishes.
+``processor`` is the older name of ``pipeline`` and holds the same object. Read ``pipeline`` in new code.
 For multiple trainers, inspect ``components``. Use the dedicated
 `job <http-api-training.rst#training-jobs>`__ and
 `startup <http-api-inference.rst#startup-status>`__ routes for details.

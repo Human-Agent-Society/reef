@@ -18,7 +18,7 @@ Install ``reef-infra[wandb]`` and provide W&B credentials to the service.
 
 Open ``experiment.url`` in the job response to inspect training metrics.
 W&B records ``operations/*`` metrics every ten seconds for each loaded scenario.
-Read ``operations/processor/ready_samples`` to see how many samples are ready for training.
+Read ``operations/pipeline/ready_samples`` to see how many samples are ready for training.
 
 Restarts resume the same run. Changing the project, entity, group prefix or name prefix starts a new run.
 For offline runs, set ``entity`` and run ``wandb sync`` to use the run URL.

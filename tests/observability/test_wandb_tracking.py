@@ -261,7 +261,7 @@ def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> N
 
 
 @pytest.mark.unit
-def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() -> None:
+def test_recipe_and_stage_share_the_scenario_logger_without_wandb_imports() -> None:
     client = _StubClient()
     tracker = _tracker(client)
     logger = tracker.bind_scenario(
@@ -271,17 +271,17 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
         run_segment=0,
     )
 
-    logger.log({"accepted": 2, "quality": {"mean": 0.75}, "label": "ignored"}, namespace="processor")
+    logger.log({"accepted": 2, "quality": {"mean": 0.75}, "label": "ignored"}, namespace="stage")
     logger.log({"temperature": 0.6}, namespace="recipe")
 
     assert len(client.runs) == 1
-    processor, processor_step = client.runs[0].logged[0]
+    stage, stage_step = client.runs[0].logged[0]
     recipe, recipe_step = client.runs[0].logged[1]
-    assert processor_step is None and recipe_step is None
-    assert processor == {
-        "processor/event": 0,
-        "processor/accepted": 2,
-        "processor/quality/mean": pytest.approx(0.75),
+    assert stage_step is None and recipe_step is None
+    assert stage == {
+        "stage/event": 0,
+        "stage/accepted": 2,
+        "stage/quality/mean": pytest.approx(0.75),
     }
     assert recipe == {"recipe/event": 0, "recipe/temperature": pytest.approx(0.6)}
 
@@ -294,11 +294,11 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
             start_artifacts=_context().source_artifacts,
         )
     )
-    logger.log({"accepted": 1}, namespace="processor")
+    logger.log({"accepted": 1}, namespace="stage")
 
     assert len(client.runs) == 2
     assert client.init_calls[1]["name"] == "smoke-segment-8"
-    assert client.runs[1].logged[0][0]["processor/event"] == 0
+    assert client.runs[1].logged[0][0]["stage/event"] == 0
 
 
 @pytest.mark.unit

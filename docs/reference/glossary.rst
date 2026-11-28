@@ -8,6 +8,17 @@ Artifact
 
 An immutable version of a component, identified by ``artifact_id``. Serving and training can select different artifacts.
 
+Service
+-------
+
+One of the seven parts of a deployment, each with one kind of work:
+``control``, ``inference``, ``samples``, ``training``, ``evaluation``, ``data``
+and ``harness``. ``reef serve`` runs all of them in one process, and
+``reef serve --service NAME`` runs one. No service calls another: each one
+reads and writes the deployment's shared store. A service is not a component.
+See `Run the services in separate processes
+<../user-guide/split-services.rst>`__.
+
 Component
 ---------
 

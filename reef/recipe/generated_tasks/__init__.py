@@ -11,7 +11,7 @@ generator's method:
   ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
   (``reef.samples.generator.inputs``).
-- ``processor``: the two stages. ``GeneratedTaskSamples`` holds the source
+- ``stages``: the two stages. ``GeneratedTaskSamples`` holds the source
   sessions, starts each task-generation round when it is due, and hands the saved train tasks
   to the sample store; and
   ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
@@ -43,13 +43,13 @@ from reef.recipe.generated_tasks.generator import (
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.processor import (
+from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
+from reef.recipe.generated_tasks.stages import (
     GeneratedTaskJobData,
     GeneratedTaskSamples,
     GeneratedTaskSettings,
     StoredGeneratorState,
 )
-from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 
 __all__ = [
     "FailedTask",

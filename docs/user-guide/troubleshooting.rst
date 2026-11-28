@@ -27,7 +27,7 @@ before retrying; provider 4xx responses keep their status.
 Reports and training
 --------------------
 
-- **Report accepted, no job:** check ``job_data_ready``, ``processor``,
+- **Report accepted, no job:** check ``job_data_ready``, ``pipeline``,
   ``job_samples`` and group completeness. Consumed or stale samples do not retrain.
 - **Report rejected:** 400 means invalid recipe fields. For 409, resend unchanged
   content or use another ``agent_record_id``.

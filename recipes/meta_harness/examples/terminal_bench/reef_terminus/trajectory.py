@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from reef.harness.tasks.trajectory import TrajectoryError, TrajectoryReader
+from reef.harness.runs.trajectory import TrajectoryError, TrajectoryReader
 
 
 class TrialReader(TrajectoryReader):

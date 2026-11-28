@@ -143,7 +143,7 @@ class ExperimentRun:
 class ExperimentLogger:
     """Scenario-scoped, provider-neutral metric logger.
 
-    Recipe and processor code choose a namespace but never import a concrete
+    Recipe and stage code choose a namespace but never import a concrete
     tracking SDK. Implementations must isolate provider failures internally;
     observability is never part of a scenario's update transaction.
     """

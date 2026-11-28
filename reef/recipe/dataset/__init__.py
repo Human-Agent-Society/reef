@@ -7,7 +7,7 @@ becomes one dataset job (``reef.train.slime_backend.dataset``): Slime rolls the
 dataset's prompts out, rewards them and trains them with its own options in
 ``training.options``.
 
-- ``processor``: ``DatasetJobData``, the job of one request, with no samples.
+- ``stages``: ``DatasetJobData``, the job of one request, with no samples.
 - ``recipe``: the default objective and the stage.
 
 The ``slime_dataset`` objective belongs to Slime
@@ -15,7 +15,7 @@ The ``slime_dataset`` objective belongs to Slime
 ``reef.train.slime_backend.native``; it leaves the training signal to Slime.
 """
 
-from reef.recipe.dataset.processor import DatasetJobData
 from reef.recipe.dataset.recipe import DatasetRecipe
+from reef.recipe.dataset.stages import DatasetJobData
 
 __all__ = ["DatasetJobData", "DatasetRecipe"]

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLSamples
+from recipes.openclawrl.stages import OpenClawRLJobData, OpenClawRLSamples
 from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.recipe.base import WeightTrainingRecipe
 from reef.train.pipeline import PipelineSpec

@@ -12,7 +12,7 @@ from typing import Any
 from tests.support.polling import became_true
 from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent, job_sized_stages
 from tests.support.samples import data_storage
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree

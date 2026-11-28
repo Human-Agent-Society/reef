@@ -11,7 +11,7 @@ Reproduction of [Learning to Discover at Test Time](https://arxiv.org/abs/2601.1
 ```text
 tttd/
   recipe.py        TTTDRecipe: default objective, loss family "tttd", default pipeline stages
-  processor.py     the stages: TTTDSamples owns the grid; TTTDJobData reads it
+  stages.py        the stages: TTTDSamples owns the grid; TTTDJobData reads it
   objective.py     grouped adaptive-entropic advantages, which each backend's objective trains
   report.py        TTTDGroupedRolloutReport, the declared report schema
   tinker.py        the Tinker objective, remote importance-sampling loss and centered frozen-base KL

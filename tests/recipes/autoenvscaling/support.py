@@ -46,7 +46,7 @@ from reef.execution.sandbox.process import (
 )
 from reef.harness.harbor.rollouts import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import StoredGeneratorState
+from reef.recipe.generated_tasks.stages import StoredGeneratorState
 from reef.samples.generator import GeneratorError, WrittenTask
 from reef.samples.generator.inputs import TaskGenerationRequest
 

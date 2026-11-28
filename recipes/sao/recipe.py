@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from recipes.sao.processor import SAOJobData, SAOSamples
+from recipes.sao.stages import SAOJobData, SAOSamples
 from reef.core.job_data import SAMPLE_KINDS, SampleKind
 from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe

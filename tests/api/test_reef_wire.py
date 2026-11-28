@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from reef.api.wire import HeaderError, ReportPayload, RequestHeaders, parse_request_headers
+from reef.api.wire import (
+    HeaderError,
+    ReportPayload,
+    RequestHeaders,
+    contract_with_older_keys,
+    parse_request_headers,
+    status_with_older_keys,
+)
 from reef.core import AgentRecord, RequestType
 
 
@@ -97,3 +104,35 @@ def test_report_feedback_rejects_invalid_types() -> None:
 
     with pytest.raises(ValueError, match="feedback must be a string or an object"):
         ReportPayload.from_dict({"feedback": 42})
+
+
+@pytest.mark.unit
+def test_the_status_answer_also_holds_each_pipeline_object_under_its_older_key() -> None:
+    status = {
+        "error": None,
+        "scenarios": {
+            "one": {"pipeline": {"ready_samples": 2}, "components": {"weights": {"pipeline": {"ready_samples": 1}}}},
+            "none": {"job_data_ready": False},
+        },
+    }
+    answer = status_with_older_keys(status)
+    block = answer["scenarios"]["one"]
+    assert block["pipeline"] == block["processor"] == {"ready_samples": 2}
+    component = block["components"]["weights"]
+    assert component["pipeline"] == component["processor"] == {"ready_samples": 1}
+    assert answer["scenarios"]["none"] == {"job_data_ready": False}
+    assert answer["error"] is None
+    # The value that control built holds the one key only.
+    assert "processor" not in status["scenarios"]["one"]
+    assert "processor" not in status["scenarios"]["one"]["components"]["weights"]
+
+
+@pytest.mark.unit
+def test_the_contract_answer_also_holds_the_stage_name_under_its_older_key() -> None:
+    contract = {"scenario": "one", "sample2job": "NoJobData"}
+    assert contract_with_older_keys(contract) == {
+        "scenario": "one",
+        "sample2job": "NoJobData",
+        "processor": "NoJobData",
+    }
+    assert "processor" not in contract

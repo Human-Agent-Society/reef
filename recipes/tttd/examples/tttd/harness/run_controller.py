@@ -63,7 +63,7 @@ class ScenarioTrainingStatus:
     non-negative int; one job trains one search step. ``running_job_id`` is
     the running job's ID, or ``None`` while no job runs. ``served_artifact_id``
     is the ID of the artifact that serves the scenario's requests, or ``None``. ``failed_steps`` are the TTTD steps
-    the processor discarded. ``failed_job_error`` is the error of the last
+    the record-to-sample stage discarded. ``failed_job_error`` is the error of the last
     commit's job when that job failed, or ``None``. ``ReefTrainingStatusClient``
     makes the value and ``TTTDRunController`` reads it.
     """
@@ -140,14 +140,14 @@ class ReefTrainingStatusClient(TrainingStatusReader):
             raise RuntimeError(
                 f"Reef status for scenario {scenario!r} has invalid served artifact ID {served_artifact_id!r}"
             )
-        processor = value.get("processor")
-        failed_values = processor.get("failed_steps", []) if isinstance(processor, Mapping) else []
+        pipeline = value.get("pipeline")
+        failed_values = pipeline.get("failed_steps", []) if isinstance(pipeline, Mapping) else []
         if not isinstance(failed_values, list):
-            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid processor failures")
+            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid pipeline failures")
         failed_steps: list[ScenarioTrainingFailure] = []
         for failure in failed_values:
             if not isinstance(failure, Mapping):
-                raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid processor failure")
+                raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid pipeline failure")
             failed_step = failure.get("step")
             reason = failure.get("reason")
             versions = failure.get("artifact_ids")
@@ -160,7 +160,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                 or not isinstance(versions, list)
                 or not all(isinstance(version, str) and version for version in versions)
             ):
-                raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid processor failure")
+                raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid pipeline failure")
             failed_steps.append(
                 ScenarioTrainingFailure(
                     step=failed_step,

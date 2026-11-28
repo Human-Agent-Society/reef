@@ -3,7 +3,7 @@
 The agent's model calls go through Reef's capture proxy, so every inference is a record on the service
 and its receipt comes back here. When the verifier scores the rollout, one report goes to
 ``/reef/report``: the reward as the score, the receipts as the references, and the task's name, path
-and digest under ``metadata.task``. A recipe's reported processor turns those records into training
+and digest under ``metadata.task``. A recipe's record-to-sample stage turns those records into training
 samples the way it does for any report. The agent is the caller's choice: any name Harbor knows
 (``terminus-2`` unless told otherwise) or an import path, with the served model and the proxy filled
 into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of its configuration. The proxy

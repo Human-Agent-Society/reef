@@ -7,7 +7,7 @@ import pytest
 
 from reef.core.tasks import primary_reward
 from reef.evaluation.harness import TaskScorer, VerifierRewardScorer, verifier_reward
-from reef.harness.tasks.run import TaskResult
+from reef.harness.runs.run import TaskResult
 
 TASK = "/tasks/openenv-00012-003-deduction"
 

@@ -21,7 +21,7 @@ from tests.support.runtime_stubs import StubFacts, StubTrainingComponent, job_si
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 
 from reef.api.app import create_app
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
@@ -1118,13 +1118,13 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         assert scenario.trainer is harness
         block = dispatcher.build_training_status()["scenarios"]["agent"]
         assert block["training_mode"] == "manual"
-        assert block["processor"] == {
+        assert block["pipeline"] == {
             **harness.pipeline_status(),
             "pending_requests": scenario.pending_requests(),
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "manual"
-        assert contract["processor"] == type(harness.pipeline.sample2job).__name__
+        assert contract["sample2job"] == type(harness.pipeline.sample2job).__name__
 
 
 @pytest.mark.unit

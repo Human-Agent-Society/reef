@@ -40,9 +40,9 @@ from reef.deploy.service_config import service_config_from_mapping
 from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
-from reef.harness.tasks.run import TaskResult
-from reef.harness.tasks.trajectory import final_assistant_text
+from reef.harness.runs.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.runs.run import TaskResult
+from reef.harness.runs.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, validate_patch
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout

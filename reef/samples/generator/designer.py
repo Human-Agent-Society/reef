@@ -344,7 +344,7 @@ class ReefDesigner(Designer):
         payload = {
             "score": score,
             "feedback": "task designer score",
-            # The report shares the scenario with the agent's rollouts; the role tells a processor them apart.
+            # The report shares the scenario with the agent's rollouts; the role tells a stage them apart.
             "metadata": {**dict(metadata), "role": "designer"},
         }
         try:

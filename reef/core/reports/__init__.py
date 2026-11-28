@@ -3,7 +3,7 @@
 A report is the second thing a harness sends Reef, after the inference it
 refers to (``AgentRecord``); both live in ``core`` because the service
 validates a report at ingress, the scenario binds its type, the recipe
-declares it, and the processors rehydrate it — packages that do not depend
+declares it, and the record-to-sample stages rehydrate it — packages that do not depend
 on each other. ``ReportBase`` is the contract; ``ScoredRolloutReport`` is
 the shared score-only vocabulary and ``TeacherContextReport`` the shared
 vocabulary of the distilling recipes (a rollout and the text its teacher

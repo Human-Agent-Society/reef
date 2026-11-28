@@ -4,7 +4,7 @@
   ``PipelineSpec``. Its report contract is the shared
   :class:`reef.core.reports.TeacherContextReport`: a rollout's receipt and
   its ``teacher_context``.
-- ``processor`` — ``SDFTSamples``, the shared ``DistillSamples`` with the
+- ``stages`` — ``SDFTSamples``, the shared ``DistillSamples`` with the
   demonstration appended to the recorded request, the reference's layout:
   one rollout with its demonstration, one record set unit.
 - ``slime`` — the Slime loss family: a thin family on the backend's
@@ -14,8 +14,8 @@
   loads it.
 """
 
-from recipes.sdft.processor import SDFTSamples
 from recipes.sdft.recipe import SDFTRecipe
+from recipes.sdft.stages import SDFTSamples
 from reef.train.slime_backend.objectives import register_objective
 
 register_objective("sdft", "recipes.sdft.slime:SdftObjective")

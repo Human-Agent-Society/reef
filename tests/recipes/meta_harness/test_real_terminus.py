@@ -23,7 +23,7 @@ from reef_terminus.trajectory import TrialReader
 from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.runs.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")

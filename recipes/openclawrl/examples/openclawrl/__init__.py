@@ -1,9 +1,9 @@
 """OpenClaw-RL example: the harness side of the cookbook recipe.
 
 The method itself (next-state binary reward, arXiv:2603.10165) lives
-entirely in the reef package — the ``openclawrl`` recipe's processor
+entirely in the reef package — the ``openclawrl`` recipe's record-to-sample stage
 correlates sessions from recorded traffic and judges turns with its
-private PRM worker (``recipes/openclawrl/processor.py``).
+private PRM worker (``recipes/openclawrl/stages.py``).
 
 This directory keeps the harness side: the reef-eval task stream (``run.sh``,
 ``harness/``, ``harbor-tasks/``) driving a real Hermes agent through 72

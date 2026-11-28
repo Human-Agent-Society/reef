@@ -38,8 +38,8 @@ from reef.inference.tinker import TinkerInferenceSettings
 from reef.observability.tracing import TracingSettings
 from reef.observability.wandb import WandbSettings
 from reef.recipe.base import WeightTrainingRecipe
-from reef.recipe.generated_tasks.processor import GeneratedTaskSettings
-from reef.recipe.sft.processor import SFTSettings
+from reef.recipe.generated_tasks.stages import GeneratedTaskSettings
+from reef.recipe.sft.stages import SFTSettings
 from reef.routing.settings import RoutingDeploymentSettings
 from reef.samples.distill import DistillSamplesSettings
 from reef.samples.trajectories import TrajectorySettings

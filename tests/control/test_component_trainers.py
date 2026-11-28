@@ -46,7 +46,7 @@ from tests.support.records import memory_records, report
 from tests.support.runtime_stubs import StubInferenceRuntime, harness_live_objects, job_sized_stages
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.threshold_pipeline import ThresholdJobData, ThresholdSamples
 from tests.support.trajectories import policy_trajectory
 
 from reef.api.app import create_app

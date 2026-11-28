@@ -327,11 +327,11 @@ def scenario_status(body: Mapping[str, Any], scenario: str) -> dict[str, Any] | 
 
 
 def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any] | None:
-    """Return this step's terminal processor failure, if present."""
-    processor = status.get("processor")
-    failed_steps = processor.get("failed_steps") if isinstance(processor, Mapping) else None
+    """Return this step's terminal failure in the status's ``pipeline`` object, if present."""
+    pipeline = status.get("pipeline")
+    failed_steps = pipeline.get("failed_steps") if isinstance(pipeline, Mapping) else None
     if not isinstance(failed_steps, list):
-        raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
+        raise RuntimeError(f"Reef returned invalid pipeline status: {status!r}")
     for failure in failed_steps:
         if (
             not isinstance(failure, Mapping)
@@ -339,7 +339,7 @@ def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any]
             or not failure["reason"]
             or not isinstance(failure.get("artifact_ids"), list)
         ):
-            raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
+            raise RuntimeError(f"Reef returned invalid pipeline status: {status!r}")
         if failure.get("step") == step:
             return dict(failure)
     return None
@@ -500,7 +500,7 @@ class GuidanceRunController:
                 any(reward != rewards[0] for reward in rewards[1:]) for rewards in grouped_rewards
             )
             valid_rollouts = sum(result.verification.valid for result in results)
-            # The TTTD processor keeps one group on an otherwise fully
+            # The TTTD record-to-sample stage keeps one group on an otherwise fully
             # constant step so the frozen-base KL transaction remains
             # well-defined. Mirror that cardinality in the qualification
             # checks instead of claiming that the trainer consumed no data.

@@ -79,16 +79,16 @@ class TrainingStatus:
         job_data_ready = stepping_trainer.job_data_ready()
         # The stepping trainer's status is read once and reported again in its component block.
         stepping_pipeline_status = stepping_trainer.pipeline_status()
-        processor = dict(stepping_pipeline_status)
+        pipeline = dict(stepping_pipeline_status)
         if "manual" in stepping_trainer.pipeline.supported_training_modes:
-            processor["pending_requests"] = current.pending_requests()
+            pipeline["pending_requests"] = current.pending_requests()
         block: dict[str, Any] = {
             **current.commit_status,
             # The artifact that answers the scenario's requests now: the one that served_models names.
             "served_artifact_id": current.served_artifact_id(),
             "job_data_ready": job_data_ready,
             "training_mode": stepping_trainer.pipeline.training_mode,
-            "processor": processor,
+            "pipeline": pipeline,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
             # Each component's active artifact and training start, by artifact_id.
             "artifacts": current.artifact_status(),
@@ -109,7 +109,7 @@ class TrainingStatus:
                 components[str(component_trainer.component)] = {
                     "job_data_ready": component_trainer.trainer.job_data_ready(),
                     "training_mode": component_trainer.trainer.pipeline.training_mode,
-                    "processor": dict(
+                    "pipeline": dict(
                         stepping_pipeline_status
                         if component_trainer.trainer is stepping_trainer
                         else component_trainer.trainer.pipeline_status()

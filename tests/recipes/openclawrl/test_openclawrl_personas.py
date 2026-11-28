@@ -17,7 +17,7 @@ from recipes.openclawrl.examples.openclawrl.user_sim.personas import (
     student_violations,
 )
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
-from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
+from recipes.openclawrl.stages import OpenClawRLJobSettings, OpenClawRLSamples
 from reef.samples.staleness import ServedArtifacts
 from reef.train.pipeline import TrainingPipeline
 

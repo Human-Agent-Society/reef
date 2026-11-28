@@ -52,9 +52,9 @@ from reef.harness.harbor.node_runtime import (
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.harbor.uv_runtime import UV_BUILDS, UV_VERSION, UvBuild, UvRuntimeError, uv_archive, uv_build_name
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.harness.tasks.run import TaskRunError
-from reef.harness.tasks.trajectory import failed_trial_error
+from reef.harness.runs.model_binding import ModelBinding
+from reef.harness.runs.run import TaskRunError
+from reef.harness.runs.trajectory import failed_trial_error
 from reef.harness.tree import HarnessTree, RenderError, render_tree
 
 SESSION_EVENT = {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "391"}]}}

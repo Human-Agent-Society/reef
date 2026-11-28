@@ -92,7 +92,7 @@ def tttd_advantages(data: JobData) -> tuple[tuple[float, ...], dict[str, Any]]:
         advantages.extend(group_advantages)
         betas.append(beta)
     normalized = tuple(advantages)
-    # The processor drops constant-reward groups but keeps one when every
+    # The record-to-sample stage drops constant-reward groups but keeps one when every
     # group is constant; flag that job's data (its advantages carry no signal).
     constant_groups = all(len({trajectory_reward(sample) for sample in group}) == 1 for group in comparison_sets)
     return normalized, {

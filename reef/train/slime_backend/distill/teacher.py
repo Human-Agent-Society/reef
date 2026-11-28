@@ -15,7 +15,7 @@ colocated actor sleeps between the two with its process groups retired,
 and the backup walks the model through them.
 
 The pass is Slime's own ``forward_only`` over the teacher sequences the
-processor built (the teacher's prompt ids followed by the student's response
+record-to-sample stage built (the teacher's prompt ids followed by the student's response
 ids verbatim), packed under the token budget. Its callback keeps, per sample,
 what the loss needs at every response position:
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe
-from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples
+from reef.recipe.generated_tasks.stages import GeneratedTaskJobData, GeneratedTaskSamples
 from reef.train.pipeline import PipelineSpec
 
 

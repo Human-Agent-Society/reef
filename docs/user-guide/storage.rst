@@ -79,7 +79,7 @@ Record retention
 and scenarios in a data store. It is not a disk quota: indexes and delayed
 cleanup need extra space. SQLite reuses pages without shrinking the file.
 
-Evictions appear in processor status. Reef skips pending reports whose referenced
+Evictions appear in the ``pipeline`` object of the status. Reef skips pending reports whose referenced
 records were removed and logs a warning. Keep separate backups for longer retention.
 
 Back up a deployment

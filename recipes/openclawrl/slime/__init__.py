@@ -93,7 +93,7 @@ def build_openclawrl_rollout_data(
       the ``prm_teacher_*_cand`` tensors from these before the loss runs;
       nothing numeric about the teacher rides the wire.
 
-    Every sample carries at least one candidate — the processor retires
+    Every sample carries at least one candidate — the record-to-sample stage retires
     candidate-less turns, matching upstream, so the builder treats an empty
     candidate list as a contract violation rather than something to repair.
     """
@@ -112,7 +112,9 @@ def build_openclawrl_rollout_data(
 
     for index, (cands, response_length) in enumerate(zip(cand_rows, response_lengths, strict=True)):
         if not cands:
-            raise ValueError(f"sample {index} carries no teacher candidate; the processor must retire such turns")
+            raise ValueError(
+                f"sample {index} carries no teacher candidate; the record-to-sample stage must retire such turns"
+            )
         sample_tokens: list[list[int]] = []
         for cand in cands:
             tokens = cand.get("teacher_tokens")

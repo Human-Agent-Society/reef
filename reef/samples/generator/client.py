@@ -1,4 +1,4 @@
-"""The generator service from the processor's side: one asynchronous method per step, jobs waited for by polling."""
+"""The generator service from the stage's side: one asynchronous method per step, jobs waited for by polling."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class WrittenTask:
 
 
 class Generator(ABC):
-    """What a task generating processor asks of the generator service."""
+    """What a stage that generates tasks asks of the generator service."""
 
     @abstractmethod
     async def propose(

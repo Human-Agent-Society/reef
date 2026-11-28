@@ -22,7 +22,7 @@ from recipes.reasoning_bank.method import FOCUS
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.runs.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe

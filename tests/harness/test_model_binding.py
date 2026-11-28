@@ -17,7 +17,7 @@ from tests.support.harness_jobs import evolution_config
 from reef.control.scenario.live_objects import LiveObjects, harness_models
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import (
+from reef.harness.runs.model_binding import (
     DEFAULT_CONTEXT_WINDOW,
     NO_KEY_PLACEHOLDER,
     ModelBinding,
@@ -362,7 +362,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
 
 
 def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
-    from reef.harness.tasks.model_binding import ModelBindingError
+    from reef.harness.runs.model_binding import ModelBindingError
 
     binding = ModelBinding("http://up", "m")
     _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "answer", "reasoning": "old"}}]})
@@ -374,7 +374,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 
 def test_a_failed_call_retains_reasoning_when_the_provider_returns_no_final_text(monkeypatch) -> None:
-    from reef.harness.tasks.model_binding import ModelBindingError
+    from reef.harness.runs.model_binding import ModelBindingError
     from reef.train.harness_backend.calls import BudgetedBinding, JobCalls
 
     record: list[dict[str, Any]] = []
@@ -646,7 +646,7 @@ def test_provider_metadata_is_selected_by_exact_model_and_cached(
     monkeypatch: pytest.MonkeyPatch, parameters: list[str], reasoning: bool
 ) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.tasks.model_binding import provider_model_metadata
+    from reef.harness.runs.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
     reply = {
@@ -675,7 +675,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.tasks.model_binding import provider_model_metadata
+    from reef.harness.runs.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
 
@@ -709,7 +709,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
 
 def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pytest.LogCaptureFixture) -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.harness.tasks.model_binding import provider_model_metadata
+    from reef.harness.runs.model_binding import provider_model_metadata
 
     complete_body = json.dumps(
         {"data": [{"id": "served", "context_length": 640_000, "supported_parameters": []}]}

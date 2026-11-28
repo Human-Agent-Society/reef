@@ -474,7 +474,7 @@ class ScenarioRegistry:
                 self._scenarios[scenario] = recovered
                 self.last_used_at[scenario] = time.monotonic()
             if dropped is not None:
-                # Close outside the state lock: teardown may join processor
+                # Close outside the state lock: teardown may join the stages'
                 # worker threads. Accepts reach the recovered instance, so
                 # nothing observes the dropped instance mid-close.
                 self.lifecycle.close_replaced(dropped)

@@ -67,7 +67,7 @@ from reef.core.tasks.split import TaskSplit, extend_split_by_source
 from reef.execution.sandbox.e2b import E2BSession
 from reef.execution.sandbox.process import ProcessOutcome
 from reef.recipe.generated_tasks.generator import RolledOutTask
-from reef.recipe.generated_tasks.processor import split_source_ids
+from reef.recipe.generated_tasks.stages import split_source_ids
 
 # Claude Code's result text when the model provider refused the run's last model call.
 SAFEGUARDS_TEXT = (

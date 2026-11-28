@@ -69,7 +69,7 @@ def generator_service(settings: ServiceSettings, generator: GeneratorSettings) -
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m reef.deploy.generator_process",
-        description="The generator service: writes and checks Harbor tasks and runs their rollouts for a task generating processor.",
+        description="The generator service: writes and checks Harbor tasks and runs their rollouts for a stage that generates tasks.",
     )
     parser.add_argument(
         "-c",

@@ -22,8 +22,8 @@ from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.recipe.generated_tasks.generator import RolledOutTask
 from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, pool_reviews, retired_tasks, task_uses
-from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
+from reef.recipe.generated_tasks.stages import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.training import TaskUse, task_items
 from reef.storage.data.tasks import TaskStore
 from reef.storage.scenario.samples import TrainerSamples, stage_item_id
