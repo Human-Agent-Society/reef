@@ -168,14 +168,16 @@ def retire(token: str, timeout_s: float = 30) -> dict[str, float | int]:
                 if group not in signaled:
                     guard.send_signal(signal.SIGTERM)
                     signaled.add(group)
-            except psutil.NoSuchProcess as exc:
+            except psutil.NoSuchProcess:
                 if record.with_suffix(".done").exists():
                     continue
                 # Ray kills an exiting worker's children, its guard among them, before the guard retires the
-                # worker's group, whose other processes then outlive both. With the worker gone, retire them here.
-                if _worker_alive(group):
-                    raise RuntimeError("model process guard disappeared before confirming cleanup") from exc
+                # worker's group, whose other processes then outlive both. The worker can take seconds more to
+                # exit while it frees GPU memory: wait for it until the deadline, then retire the rest here.
                 missing_guards.add(group)
+                if _worker_alive(group):
+                    waiting.append(group)
+                    continue
                 _kill_group(group, None)
                 if _group_alive(group):
                     waiting.append(group)
