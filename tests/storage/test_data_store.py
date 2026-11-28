@@ -1903,3 +1903,14 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 8")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()
+
+
+def test_sqlite_database_only_read_leaves_the_writer_slot_available(tmp_path):
+    import sqlite3
+
+    with closing(LocalTaskFileStore(tmp_path / "tasks")) as files, closing(SQLiteDataStore(tmp_path, files)) as store:
+        store.create("acme", [trajectory("t")])
+        with store.transaction(read_only=True) as reader:
+            assert reader.scalar(select(store.items_table.c.item_id)) == "t"
+            with closing(sqlite3.connect(tmp_path / "data-store.sqlite3", timeout=0)) as writer:
+                writer.execute("BEGIN IMMEDIATE")
