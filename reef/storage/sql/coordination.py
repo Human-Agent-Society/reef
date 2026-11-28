@@ -1341,8 +1341,19 @@ class SQLWorkQueue(WorkQueue):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or not item.final:
                 return item
+            # The retry waits for capacity as a new item does: an item that failed after its last deferral would
+            # otherwise fail again at the first refusal.
+            metadata = {name: value for name, value in item.metadata.items() if name != DEFERRED_ATTEMPTS}
             return self.write_item(
-                connection, counter, item, moment, state="queued", result=None, ended_at=None, available_at=moment
+                connection,
+                counter,
+                item,
+                moment,
+                state="queued",
+                result=None,
+                ended_at=None,
+                available_at=moment,
+                metadata_json=canonical_json(metadata),
             )
 
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
