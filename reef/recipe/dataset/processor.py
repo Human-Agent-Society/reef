@@ -7,9 +7,9 @@ from typing import Any, Self
 
 from reef.core.plugins import NoSettings
 from reef.core.values import deep_merge
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import Record2Sample
-from reef.sample2job.base import Sample2Job
+from reef.samples import Record2Sample
+from reef.samples.context import PipelineContext
+from reef.train.sample2job.base import Sample2Job
 from reef.train.types import JobData, Sample
 
 

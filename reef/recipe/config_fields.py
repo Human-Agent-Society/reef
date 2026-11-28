@@ -35,6 +35,9 @@ def config_field(
 ) -> Any:
     """Declare a recipe field with the same types and parser as public settings.
 
+    ``env`` names an environment variable that gives the value when the
+    config does not. The config wins over the environment, and the
+    environment over the default.
     Legacy recipe floats permit infinity (for example an unbounded score
     threshold). Set ``allow_nonfinite=False`` for a finite-only field.
     """

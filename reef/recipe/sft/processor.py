@@ -18,9 +18,9 @@ from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import make_trajectory
-from reef.pipeline_context import PipelineContext
-from reef.record2sample import ReportContext, ReportSamples
-from reef.sample2job import DistillJobData
+from reef.samples import ReportContext, ReportSamples
+from reef.samples.context import PipelineContext
+from reef.train.sample2job import DistillJobData
 
 #: ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response.
 SFT_TARGETS = ("demonstration", "response")

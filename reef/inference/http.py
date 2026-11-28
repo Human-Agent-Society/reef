@@ -8,10 +8,15 @@ streamed responses retain the provider's format.
 from __future__ import annotations
 
 import asyncio
+import email.utils
+import json
+import math
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any
 
 import aiohttp
@@ -19,7 +24,7 @@ from aiohttp import ClientTimeout, TCPConnector
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
-from reef.core.errors import UpstreamStatusError
+from reef.core.errors import UpstreamLimit, UpstreamStatusError
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import (
     FULL_WEIGHT_NAME_PREFIX,
@@ -43,11 +48,12 @@ def provider_session(timeout_s: float, *, auto_decompress: bool = True) -> aioht
     connector = (
         scoped[1] if scoped is not None and scoped[0] is asyncio.get_running_loop() and not scoped[1].closed else None
     )
-    # Each request keeps its own cookies and response settings.
+    # A pooled provider session must not replay provider cookies on redirect.
     return aiohttp.ClientSession(
         timeout=ClientTimeout(total=timeout_s),
         connector=connector,
         connector_owner=connector is None,
+        cookie_jar=aiohttp.DummyCookieJar() if connector is not None else None,
         auto_decompress=auto_decompress,
     )
 
@@ -73,6 +79,81 @@ PROVIDER_APIS = ("openai", "responses", "anthropic")
 #: The request header with the engine-side name of the weights that a request selects. A remote inference
 #: component that keeps each request on its weights admits the request only while it serves that name.
 SERVED_MODEL_HEADER = "x-reef-served-model"
+
+#: The ``error.metadata.limit_source`` of OpenRouter's temporary limit on the requests of a key in flight.
+OPENROUTER_IN_FLIGHT_LIMIT = "openrouter_in_flight_budget"
+#: The ``error.metadata.limit_source`` values of OpenRouter's credits and key limits, which the same request cannot
+#: pass again on its own.
+OPENROUTER_PAYMENT_LIMITS = ("openrouter_credits", "openrouter_key_limit")
+#: The ``error.metadata.reason`` of a request that costs more than OpenRouter's budget allows, alone or with
+#: ``limit_source`` ``openrouter_credits``.
+OPENROUTER_OVER_BUDGET = "weight_exceeds_budget"
+#: The ``error.metadata.limit_source`` values of OpenRouter's 403 for a spending cap: a guardrail's, a workspace's or
+#: the key's budget.
+OPENROUTER_BUDGET_LIMITS = ("openrouter_guardrail_budget", "openrouter_workspace_budget", "openrouter_key_limit")
+#: The error ``code`` and ``type`` with which OpenAI answers 429 for an account whose quota ran out.
+OPENAI_QUOTA_CODE = "insufficient_quota"
+
+# -- Provider refusals --------------------------------------------------------
+
+
+def retry_after_seconds(value: str | None, now: float) -> float | None:
+    """The wait in seconds that the ``Retry-After`` header value ``value`` asks for at the epoch time ``now``.
+
+    ``value`` is a number of whole seconds or an HTTP date (RFC 9110). A date that has passed asks for no wait (0).
+    None for no value and for any other value, also a number or a date out of range.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if text.isascii() and text.isdigit():
+        seconds = float(text)
+        return seconds if math.isfinite(seconds) else None
+    try:
+        moment = email.utils.parsedate_to_datetime(text)
+        # An HTTP date is in GMT; a date that names no zone reads as one.
+        epoch_seconds = (moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0.0, epoch_seconds - now)
+
+
+def upstream_limit(status: int, body: str, *, retry_after: float | None) -> UpstreamLimit | None:
+    """The limit that refused a request with ``status``, the error body ``body`` and the ``Retry-After`` wait
+    ``retry_after``. It reads structured fields only, never a message.
+
+    - A 429 is ``RATE``; one whose error ``code`` or ``type`` is ``OPENAI_QUOTA_CODE`` is ``PAYMENT``.
+    - A 402 whose ``error.metadata.limit_source`` is ``OPENROUTER_IN_FLIGHT_LIMIT`` is ``RATE``.
+    - A 402 whose ``limit_source`` is in ``OPENROUTER_PAYMENT_LIMITS``, or whose ``error.metadata.reason`` is
+      ``OPENROUTER_OVER_BUDGET``, is ``PAYMENT``, also with a ``Retry-After``.
+    - Any other 402 is ``RATE`` with a ``Retry-After`` wait, else ``PAYMENT``, whatever its body holds.
+    - A 403 whose ``limit_source`` is in ``OPENROUTER_BUDGET_LIMITS`` is ``PAYMENT``, also with a ``Retry-After``;
+      any other 403 is None.
+    - Any other status is None.
+    """
+    if status not in (402, 403, 429):
+        return None
+    try:
+        reply = json.loads(body)
+    except ValueError:
+        reply = None
+    error = reply.get("error") if isinstance(reply, dict) else None
+    error = error if isinstance(error, dict) else {}
+    if status == 429:
+        quota = OPENAI_QUOTA_CODE in (error.get("code"), error.get("type"))
+        return UpstreamLimit.PAYMENT if quota else UpstreamLimit.RATE
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    source = metadata.get("limit_source")
+    source = source if isinstance(source, str) else None
+    if status == 403:
+        return UpstreamLimit.PAYMENT if source in OPENROUTER_BUDGET_LIMITS else None
+    if source == OPENROUTER_IN_FLIGHT_LIMIT:
+        return UpstreamLimit.RATE
+    if source in OPENROUTER_PAYMENT_LIMITS or metadata.get("reason") == OPENROUTER_OVER_BUDGET or retry_after is None:
+        return UpstreamLimit.PAYMENT
+    return UpstreamLimit.RATE
+
 
 # -- Request headers ----------------------------------------------------------
 
@@ -153,10 +234,12 @@ class HttpInferenceHandler(InferenceHandler):
     errors reported to the caller.
 
     ``inference`` returns the provider's JSON object. A provider status of 400 or more raises
-    ``UpstreamStatusError`` with that status; a successful status whose body is not one JSON object raises
-    it with status 502, since the provider failed and not the caller. ``inference_stream`` owns its
-    provider session until it returns: on any failure or cancellation before then it closes the session
-    and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close`` releases it.
+    ``UpstreamStatusError`` with that status, the provider's ``Retry-After`` wait (``retry_after_seconds``) and the
+    limit that its reply names (``upstream_limit``); the handler sends each request once. A successful status
+    whose body is not one JSON object raises it with status 502, since the provider failed and not the caller.
+    ``inference_stream`` owns its provider session until it returns: on any failure or cancellation before then it
+    closes the session and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close``
+    releases it.
     In the inference service, sessions borrow the service connector.
     """
 
@@ -201,8 +284,15 @@ class HttpInferenceHandler(InferenceHandler):
             "headers": dict(headers),
         }
 
-    def _status_error(self, status: int, body: str) -> UpstreamStatusError:
-        return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
+    def _status_error(self, status: int, body: str, retry_after: str | None = None) -> UpstreamStatusError:
+        # Only the wait of the header leaves the reply: no other provider header reaches the error.
+        wait_seconds = retry_after_seconds(retry_after, time.time())
+        return UpstreamStatusError(
+            f"{self._error_label} returned {status}: {body[:400]}",
+            status=status,
+            retry_after_seconds=wait_seconds,
+            limit=upstream_limit(status, body, retry_after=wait_seconds),
+        )
 
     async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self.post_json(path, payload, artifact=artifact)
@@ -218,7 +308,9 @@ class HttpInferenceHandler(InferenceHandler):
             session.post(**self.post_arguments(artifact, path, payload)) as response,
         ):
             if response.status >= 400:
-                raise self._status_error(response.status, await response.text())
+                # An error body that is not UTF-8 keeps the provider's status, as a stream's error body does.
+                body = (await response.read()).decode(errors="replace")
+                raise self._status_error(response.status, body, response.headers.get("Retry-After"))
             try:
                 value = await response.json()
             except (ContentTypeError, ValueError) as exc:
@@ -251,11 +343,12 @@ class HttpInferenceHandler(InferenceHandler):
             await session.close()
 
         if response.status >= 400:
+            retry_after = response.headers.get("Retry-After")
             try:
                 body = (await response.read()).decode(errors="replace")
             finally:
                 await close()
-            raise self._status_error(response.status, body)
+            raise self._status_error(response.status, body, retry_after)
         return InferenceStream(
             status=response.status,
             headers={
@@ -429,4 +522,6 @@ __all__ = [
     "artifact_identity_headers",
     "provider_request_headers",
     "resolve_proxy_runtime",
+    "retry_after_seconds",
+    "upstream_limit",
 ]

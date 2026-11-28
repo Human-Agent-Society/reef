@@ -25,9 +25,9 @@ from typing import Any
 
 from aiohttp import ClientSession
 
+from reef.api.inference_service import BUCKET_COUNT, RECORD_HEADER
 from reef.core.records_types import AgentRecord
 from reef.core.values import JsonValue
-from reef.service.inference_service import BUCKET_COUNT, RECORD_HEADER
 
 #: The largest accepted difference between an engine's log probability and the Hugging Face float32 score.
 LOGPROB_TOLERANCE = 1e-3
@@ -617,7 +617,7 @@ def replay_records(directory: Path, scenario: str) -> list[AgentRecord]:
 
     Opening a store writes its settings, so the replay reads a copy and leaves the run's files unchanged.
     """
-    from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
     with tempfile.TemporaryDirectory(prefix="reef-native-records-") as scratch:
         copy = Path(scratch) / "records"

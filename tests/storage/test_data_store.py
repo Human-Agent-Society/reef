@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,16 +18,18 @@ from sqlalchemy import func, select
 from tests.support.conversations import conversation
 from tests.support.trajectories import policy_trajectory
 
+from reef.api.assembly import build_dispatcher
+from reef.api.settings import ServiceSettings
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
-from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceSettings
-from reef.storage import data as data_module
-from reef.storage.data import (
+from reef.storage.data import store as data_module
+from reef.storage.data.item_kinds import TaskFilesReference, json_digest, task_partition
+from reef.storage.data.job_data import job_data_key
+from reef.storage.data.store import (
     DeletedItem,
     ItemConflictError,
     ItemNotFoundError,
@@ -37,9 +40,9 @@ from reef.storage.data import (
     ScenarioHold,
     StoredItem,
 )
-from reef.storage.item_kinds import TaskFilesReference, json_digest, task_partition
-from reef.storage.job_data import job_data_key
-from reef.storage.record_items import (
+from reef.storage.data.task_collections import TaskCollection, collection_benchmarks
+from reef.storage.data.tasks import FilesDigest, LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.scenario.record_items import (
     evaluation_call_item,
     evaluation_call_items,
     evaluation_trajectory_item,
@@ -47,18 +50,16 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
-from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
-from reef.storage.sql_records import TrajectoryNodes
-from reef.storage.sql_setup import prefix_upper_bound
-from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import LocalTaskFileStore, TaskFilesNotFoundError, files_digest
+from reef.storage.sql.data import USES_TABLE, PostgresDataStore, SQLiteDataStore
+from reef.storage.sql.records import TrajectoryNodes
+from reef.storage.sql.setup import prefix_upper_bound
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
 
 
 def record_content(record_id: str) -> dict:
-    """The content of the record item of the inference ``record_id`` (``reef.storage.record_items``)."""
+    """The content of the record item of the inference ``record_id`` (``reef.storage.scenario.record_items``)."""
     return {
         "agent_record_id": record_id,
         "request_type": "inference",
@@ -144,6 +145,105 @@ def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_
     assert [item.item_id for item in store.query("acme")] == ["t1"]
 
 
+@pytest.mark.parametrize("store", ["sqlite-memory", "sqlite", "postgres"], indirect=True)
+def test_trajectory_publication_preserves_the_previous_revision_on_interruption_or_conflict(store):
+    def ids():
+        return [item.item_id for item in store.query("acme", trajectory_set="tests", content=False)]
+
+    old = trajectory("old", trajectory_sets=["tests"])
+    a = trajectory("a", trajectory_sets=["tests"])
+    b = trajectory("b", trajectory_sets=["tests"])
+    store.create("acme", [old, trajectory("conflict", "other")])
+
+    def interrupted():
+        yield a
+        assert ids() == ["old"]
+        raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        store.replace_trajectories("acme", interrupted(), ["old"])
+    with pytest.raises(ItemConflictError):
+        store.replace_trajectories("acme", iter([a, trajectory("conflict", "changed")]), ["old"])
+    assert ids() == ["old"] and store.read("acme", "a") is None
+
+    def revision():
+        yield a
+        assert ids() == ["old"]
+        yield b
+
+    store.replace_trajectories("acme", revision(), previous_ids=["old"])
+    assert ids() == ["a", "b"]
+    store.replace_trajectories("acme", iter([a, b]), ["old"])
+    assert ids() == ["a", "b"] and store.read("acme", "old") is None
+    store.replace_trajectories("acme", iter(()), ["a", "b"])
+    assert ids() == []
+
+
+def test_a_store_without_atomic_publication_keeps_its_existing_api(tmp_path):
+    with closing(LocalTaskFileStore(tmp_path)) as files, closing(MemoryDataStore(files)) as store:
+        store.create("acme", [trajectory("existing")])
+        with pytest.raises(NotImplementedError, match="atomic trajectory publication"):
+            store.replace_trajectories("acme", iter([trajectory("new")]), ["existing"])
+        assert [item.item_id for item in store.query("acme")] == ["existing"]
+
+
+def test_a_concurrent_unrelated_write_survives_trajectory_publication(open_durable_store):
+    with closing(open_durable_store()) as writer, closing(open_durable_store()) as other:
+        writer.create("acme", [trajectory("old")])
+        staged, resume = threading.Event(), threading.Event()
+
+        def revision():
+            yield trajectory("new")
+            staged.set()
+            assert resume.wait(5)
+
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(writer.replace_trajectories, "acme", revision(), ["old"])
+            try:
+                assert staged.wait(5)
+                other.create("acme", [trajectory("independent")])
+            finally:
+                resume.set()
+            job.result(timeout=5)
+        assert [item.item_id for item in other.query("acme")] == ["independent", "new"]
+
+
+def test_a_reader_sees_only_whole_trajectory_revisions(open_durable_store, monkeypatch):
+    with closing(open_durable_store()) as writer, closing(open_durable_store()) as reader:
+        writer.create("acme", [trajectory("old")])
+        inserted, resume = threading.Event(), threading.Event()
+        original = writer.write_new_items
+
+        def wait_after_first_insert(connection, values):
+            result = original(connection, values)
+            if not inserted.is_set():
+                inserted.set()
+                assert resume.wait(5)
+            return result
+
+        monkeypatch.setattr(writer, "write_new_items", wait_after_first_insert)
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(
+                writer.replace_trajectories, "acme", iter([trajectory("one"), trajectory("two")]), ["old"]
+            )
+            try:
+                assert inserted.wait(5)
+                if isinstance(reader, SQLiteDataStore):
+                    # SQLiteDataStore serializes API operations with BEGIN IMMEDIATE. A plain WAL reader
+                    # can inspect the previous committed revision while that writer is still running.
+                    table = reader.items_table
+                    with reader.engine.connect() as connection:
+                        assert list(connection.scalars(select(table.c.item_id).where(table.c.owner == "acme"))) == [
+                            "old"
+                        ]
+                else:
+                    assert [r.item_id for r in reader.query("acme", content=False)] == ["old"]
+            finally:
+                resume.set()
+            job.result(timeout=5)
+        assert [r.item_id for r in reader.query("acme", content=False)] == ["one", "two"]
+
+
 def test_each_owner_sees_only_its_own_items(store):
     store.create("acme", [trajectory("t1", "acme")])
     store.create("globex", [trajectory("t1", "globex")])
@@ -197,7 +297,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),
-        # The content of each kind follows its rules (reef.storage.item_kinds).
+        # The content of each kind follows its rules (reef.storage.data.item_kinds).
         (NewItem("x", {"steps": []}, {"kind": "trajectory"}), "ATIF"),
         (NewItem("coding/x", {"request": {}}, {"kind": "record", "origin": ORIGIN}), "exactly the keys"),
         (NewItem("other/r1", record_content("r1"), {"kind": "record", "origin": ORIGIN}), "has the ID"),
@@ -420,6 +520,34 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
         store.task_path(store.create("acme", [trajectory("t1")])[0])
 
 
+def test_a_legacy_task_retry_reuses_its_digest_only_with_the_same_executable_flags(store, tmp_path):
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    script = task / "run.sh"
+    body = b"#!/bin/sh\nexit 0\n"
+    script.write_bytes(body)
+    legacy = FilesDigest(task.name)
+    legacy.add_file(script.name, len(body))
+    legacy.update(body)
+    old_digest = legacy.hexdigest()
+    stored = store.task_files.scenario_directory(task_partition("acme")) / old_digest / task.name
+    shutil.copytree(task, stored)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (original,) = store.create("acme", [NewItem(task.name, TaskFilesReference(old_digest), metadata)])
+    used_before = store.scenario_items("acme", "coding", kinds=("task",))[0].sequence
+
+    assert store.create("acme", [NewItem(task.name, task, metadata)]) == (original,)
+    assert store.replace_task("acme", task.name, task) == original
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0].sequence == used_before
+
+    script.chmod(0o755)
+    changed = store.replace_task("acme", task.name, task)
+    assert changed.digest != old_digest
+    assert (store.task_path_for_digest("acme", changed.digest) / script.name).stat().st_mode & 0o111
+    assert (store.task_path_for_digest("acme", old_digest) / script.name).stat().st_mode & 0o111 == 0
+    assert store.replace_task("acme", task.name, task) == changed
+
+
 def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, tmp_path):
     def task(name: str, **metadata) -> NewItem:
         (tmp_path / name).mkdir()
@@ -435,11 +563,24 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
     assert [item.item_id for item in store.query("acme", kind="task", benchmark="lite")] == ["add"]
     assert store.query("acme", benchmark="unknown") == ()
     assert store.query("acme", kind="trajectory", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ()) == {}
+    with pytest.raises(ValueError, match="owner"):
+        store.benchmark_item_ids("", ())
+    assert store.benchmark_item_ids("acme", ["full", "lite", "unknown"]) == {
+        "full": {"add", "sort"},
+        "lite": {"add"},
+        "unknown": set(),
+    }
     # A patch replaces the list, and null removes it.
     store.update("acme", ["sort"], {"benchmarks": ["lite"]})
     store.update("acme", ["add"], {"benchmarks": None})
     assert [item.item_id for item in store.query("acme", benchmark="lite")] == ["sort"]
     assert store.query("acme", benchmark="full") == ()
+    assert store.benchmark_item_ids("acme", ["full", "lite"]) == {"full": set(), "lite": {"sort"}}
+    assert store.delete("acme", "sort")
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": set()}
+    assert store.restore("acme", ["sort"])
+    assert store.benchmark_item_ids("acme", ["lite"]) == {"lite": {"sort"}}
     for benchmarks in ("lite", ["lite", "lite"], [""], [1]):
         with pytest.raises(ValueError, match="benchmarks"):
             store.update("acme", ["sort"], {"benchmarks": benchmarks})
@@ -1069,7 +1210,7 @@ def deployment(tmp_path, **storage) -> ServiceSettings:
     [
         (None, SQLiteDataStore),
         ("sqlite", SQLiteDataStore),
-        ({"module": "reef.storage.data:MemoryDataStore"}, MemoryDataStore),
+        ({"module": "reef.storage.data.store:MemoryDataStore"}, MemoryDataStore),
     ],
 )
 def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, data_store, store_class):
@@ -1090,8 +1231,8 @@ def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, d
     ("data_store", "reason"),
     [
         ("unknown", "storage.data_store"),
-        ("reef.storage.data:DataStore", "abstract"),
-        ({"module": "reef.storage.sqlite:SQLiteScenarioStorage"}, "DataStore"),
+        ("reef.storage.data.store:DataStore", "abstract"),
+        ({"module": "reef.storage.sql.sqlite:SQLiteScenarioStorage"}, "DataStore"),
         ("postgres", "record_backend: postgres"),
     ],
 )
@@ -1190,10 +1331,66 @@ def test_the_calls_of_one_rollout_leave_out_the_other_rollouts_of_the_evaluation
         )
         return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
 
-    store.create("acme", [call_item(1, 1), call_item(1, 10), call_item(11, 1), call_item(1, 1, "verifier")])
+    store.create(
+        "acme",
+        [
+            call_item(1, 1, "verifier"),
+            call_item(1, 10),
+            call_item(11, 1),
+            call_item(1, 1),
+            trajectory("coding/e1:1:1:not-a-call"),
+            evaluation_call_item("other", "a1", "e1", evaluation_call(1, 1, 8)[0]),
+        ],
+    )
+    store.create("another-owner", [call_item(1, 1)])
     kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 1))
-    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:0", "coding/e1:1:1:1:verifier:0"]
+    assert [item.item_id for item in kept] == ["coding/e1:1:1:1:verifier:0", "coding/e1:1:1:1:0"]
+    assert not list(evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(1, 0)))
     assert len(list(evaluation_call_items(store, "acme", "coding", "e1", content=False))) == 4
+
+
+def test_sparse_rollout_reads_do_not_scan_the_other_calls_on_fresh_sqlite(tmp_path):
+    def call_item(task_index: int, index: int = 0) -> NewItem:
+        summary = EvaluationCallSummary(
+            task_index, 0, 1, index, "/v1/chat/completions", 200, 10.0, 0.5, None, None, None, 0
+        )
+        return evaluation_call_item("coding", "a1", "e1", EvaluationCall(summary, None, None))
+
+    with closing(SQLiteDataStore(None, LocalTaskFileStore(tmp_path))) as store:
+        with store.transaction(read_only=True) as connection:
+            sqlite = connection.connection.driver_connection
+        store.create("acme", [call_item(0), call_item(95)])
+
+        def read_sparse_rollouts() -> int:
+            progress = 0
+
+            def count() -> int:
+                nonlocal progress
+                progress += 1
+                return 0
+
+            sqlite.set_progress_handler(count, 100)
+            try:
+                found = [
+                    item.item_id
+                    for index in range(96)
+                    for item in evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(index, 0))
+                ]
+                assert found == ["coding/e1:0:0:1:0", "coding/e1:95:0:1:0"]
+                return progress
+            finally:
+                sqlite.set_progress_handler(None, 0)
+
+        sparse = read_sparse_rollouts()
+        store.create("acme", [call_item(index) for index in range(96, 2_096)])
+        crowded = read_sparse_rollouts()
+        assert crowded <= 2 * sparse + 10
+
+        # One rollout can span several storage pages. The cursor follows insertion order, not ID sort order.
+        new_calls = [call_item(0, index) for index in range(data_module.MAX_QUERY_LIMIT + 1, 0, -1)]
+        store.create("acme", new_calls)
+        kept = evaluation_call_items(store, "acme", "coding", "e1", content=False, rollout=(0, 0))
+        assert [item.item_id for item in kept] == ["coding/e1:0:0:1:0", *(call.item_id for call in new_calls)]
 
 
 def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_data(store):

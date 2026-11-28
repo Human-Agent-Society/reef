@@ -1,0 +1,58 @@
+"""``reef serve`` — start managed inference, connect a provider, or run a configured stack.
+
+A configuration file and CLI-only input describe components, not process definitions.
+Reef assembles inference, training and HTTP processes, and the generator service of a
+``generator`` section. Other method services are independently deployed; recipes consume
+their endpoints. All processes share the executor lifecycle, readiness and cleanup
+machinery. HTTP assembly lives in :mod:`reef.api.assembly`.
+
+Module responsibilities:
+    config_utils: YAML loading, environment interpolation and recipe source paths.
+    service_config: A deployment configuration becomes the typed settings of ``reef.api.settings``.
+    deployment_config: Selected component schemas, public layout and validation.
+    cli: CLI help, dotted override syntax and precedence.
+    inference / training: Component-specific process and runtime assembly.
+    generator: The generator service child a ``generator`` section adds before the HTTP service.
+    execution: Process definition validation and executor selection.
+    diagnostics: Resolved settings and their sources for the startup log.
+    process / guard: Worker process lifecycle and remote-owner cleanup.
+    orchestrator: Launch coordination and supervision. ``service_process`` is the HTTP child entrypoint.
+
+Shared type conversion lives in ``reef.core.config``; native argument encoding
+lives in ``reef.execution.executor.arguments``. Import those owners directly.
+"""
+
+from reef.api.settings import ServiceSettings
+from reef.artifact.git_lfs import GitLFSRepositoryBackend
+from reef.deploy.cli import build_parser
+from reef.deploy.config_utils import PROJECT_ROOT, DeployConfigError, load_config
+from reef.deploy.orchestrator import DeployStartupError, main, run_service
+from reef.deploy.service_config import service_config_from_mapping
+
+
+def build_app(settings, **kwargs):
+    from reef.api.assembly import build_app as _build_app
+
+    return _build_app(settings, **kwargs)
+
+
+def build_dispatcher(settings, **kwargs):
+    from reef.api.assembly import build_dispatcher as _build_dispatcher
+
+    return _build_dispatcher(settings, **kwargs)
+
+
+__all__ = [
+    "PROJECT_ROOT",
+    "DeployConfigError",
+    "DeployStartupError",
+    "GitLFSRepositoryBackend",
+    "ServiceSettings",
+    "build_app",
+    "build_dispatcher",
+    "build_parser",
+    "load_config",
+    "main",
+    "run_service",
+    "service_config_from_mapping",
+]
