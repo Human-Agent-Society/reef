@@ -849,7 +849,10 @@ def test_the_sweep_discards_the_stored_checkpoints_of_an_ended_job_that_no_commi
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("deleted", ["before the worker takes the job", "while the worker stores"])
+@pytest.mark.parametrize(
+    "deleted",
+    ["before the worker takes the job", "while the worker stores", "while a different scenario reuses the ID"],
+)
 def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
     deleted: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -873,6 +876,12 @@ def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
             super().store_content(name, directory)
             if control.has_registration("s"):
                 control.archive_registration("s")
+                if deleted == "while a different scenario reuses the ID":
+                    queue.cancel(JOBS_QUEUE, "j1", SCENARIO_DELETED_ERROR)
+                    queue.delete_final(finished_before=time.time() + 1)
+                    control("other").register(Artifact.local(root), metadata={})
+                    new_job = replace(job("j1"), scenario="other")
+                    queue.append(NewWork(JOBS_QUEUE, "j1", "other", job_kind("steps"), job_payload(new_job)))
 
     backend_type = GitLFSRepositoryBackend if deleted.startswith("before") else DeletedWhileStoring
     backends = backend_type.factory(remote, work_dir=tmp_path / "training", cache_dir=tmp_path / "t-cache")
@@ -888,7 +897,10 @@ def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
     assert worker.run_once()
 
     item = queue.read(JOBS_QUEUE, "j1")
-    assert (item.state, item.error, item.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
+    if deleted == "while a different scenario reuses the ID":
+        assert (item.scenario, item.state, item.error) == ("other", "queued", None)
+    else:
+        assert (item.state, item.error, item.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
     assert (
         "/contents/"
         not in subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True, text=True).stdout
@@ -898,6 +910,21 @@ def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
         with pytest.raises(KeyError):
             component.status("j1")
     worker.stop()
+    if deleted == "while a different scenario reuses the ID":
+        replacement = TrainingJobWorker(
+            StepComponent(tmp_path / "replacement"),
+            queue,
+            data_store,
+            backends,
+            checks=ACCEPT_ALL,
+            worker_id="replacement",
+            poll_seconds=0.02,
+        )
+        try:
+            assert replacement.run_once()
+            assert queue.read(JOBS_QUEUE, "j1").state == "finished"
+        finally:
+            replacement.stop()
 
 
 class LosingQueue:

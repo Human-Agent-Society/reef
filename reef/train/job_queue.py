@@ -75,6 +75,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1006,10 +1007,9 @@ class TrainingJobWorker(QueueWorker):
     def refuses_deleted_scenario(self, item: WorkItem) -> bool:
         """Whether the scenario of the job ``item`` has no registration in the artifact store
         (``RegistrationAwareRepositoryBackendFactory.has_registration``, which builds no backend for a scenario
-        that this process has not opened; else ``RepositoryBackend.metadata`` is None). Then the worker cancels the
-        item and discards every content of the scenario with one call (``RepositoryBackend.discard_all_content``):
-        the checkpoints that the item names, the job's record files, and any other content that a job stored after
-        the delete.
+        that this process has not opened; else ``RepositoryBackend.metadata`` is None). The worker fails the attempt
+        only while it holds the claim. It discards the deleted scenario's checkpoints, records, and other stored
+        content, including files written after deletion. An item that now uses the same ID stays with its owner.
 
         The delete of a scenario archives the registration first, as the scenario's mark, and control's sweep then
         cancels the jobs that it finds in the queue and discards the scenario's content. A job that the sweep did
@@ -1023,8 +1023,11 @@ class TrainingJobWorker(QueueWorker):
             registered = self.backends(item.scenario).metadata() is not None
         if registered:
             return False
-        logger.warning("training worker %s cancels job %s: its scenario was deleted", self.worker_id, item.id)
-        self.queue.cancel(JOBS_QUEUE, item.id, SCENARIO_DELETED_ERROR)
+        logger.warning(
+            "training worker %s stops job %s of deleted scenario %s", self.worker_id, item.id, item.scenario
+        )
+        with suppress(WorkLeaseLostError):
+            self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, SCENARIO_DELETED_ERROR, retryable=False, claim=item)
         self.backends(item.scenario).discard_all_content()
         self.backends.forget_scenario(item.scenario)
         return True
