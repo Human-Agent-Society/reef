@@ -100,7 +100,8 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         "loss_masks": masks,
         "distill_sample_weights": sample_weights,
         # The old-policy log-probabilities that the actor computes with the job's start weights.
-        "log_probs": list(sampler_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
+        "log_probs": list(probabilities.log().gather(-1, sampled[:, None])[:, 0].split(lengths)),
+        "rollout_log_probs": list(sampler_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
         "distill_teacher_topk_ids": list(teacher_head_ids.split(lengths)),
         "distill_teacher_topk_log_probs": list(teacher_log_probs.gather(-1, teacher_head_ids).split(lengths)),
         "distill_teacher_sampled_log_probs": list(teacher_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
@@ -148,10 +149,20 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         [mask * weight / mask.sum().clamp_min(1) for mask, weight in zip(effective_masks, sample_weights, strict=True)]
     )
     torch.testing.assert_close(logits.grad, expected * reduction_weights[:, None], atol=2e-6, rtol=2e-5)
+    if cap > 0:
+        metric_weights = torch.cat([mask / mask.sum().clamp_min(1) for mask in effective_masks])
+        torch.testing.assert_close(metrics["distill_is_weight"], (weights[rows, sampled] * metric_weights).sum())
+        disagreement = (probabilities.log() - sampler_log_probs).abs()[rows, sampled]
+        torch.testing.assert_close(metrics["distill_log_prob_abs_diff"], (disagreement * metric_weights).sum())
     assert teacher_log_probs.grad is None
     assert torch.equal(batch["loss_masks"][0], torch.tensor([1.0, 0.0, 1.0]))
     assert "advantages" not in batch
     torch.testing.assert_close(metrics["loss"], loss.detach())
+
+    if cap > 0:
+        without_sampler = {key: value for key, value in batch.items() if key != "rollout_log_probs"}
+        with pytest.raises(ValueError, match="requires sampler log-probs"):
+            distill_loss(args, without_sampler, logits, reduce)
 
     args.score_centering = False
     plain_loss, plain_metrics = distill_loss(args, batch, logits, reduce)
@@ -161,3 +172,30 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         torch.testing.assert_close(metrics["score_centering_term"], torch.zeros(()), atol=2e-6, rtol=0)
     else:
         assert abs(metrics["score_centering_term"].item()) > 1e-5
+
+
+@pytest.mark.unit
+def test_per_token_distillation_reports_sample_and_sequence_weights_over_active_tokens(cpu_batch_adapters) -> None:
+    args = Namespace(score_centering=False, calculate_per_token_loss=True)
+    SdftAlgorithm().apply_driver_options(
+        args,
+        SdftSettings(divergence="reverse", top_k=1, importance_sampling_cap=4.0, importance_sampling_level="sequence"),
+    )
+    lengths = [2, 3]
+    masks = [torch.tensor([0, 1]), torch.ones(3)]
+    # The student assigns probability 1/2 to every token. The two sequences have ratios 2 and 1.
+    sampler = [torch.full((2,), 0.25).log(), torch.full((3,), 0.5).log()]
+    batch = {
+        "total_lengths": [3, 4],
+        "response_lengths": lengths,
+        "unconcat_tokens": [torch.zeros(length + 1, dtype=torch.long) for length in lengths],
+        "loss_masks": masks,
+        "distill_sample_weights": [3.0, 0.5],
+        "rollout_log_probs": sampler,
+        "distill_teacher_topk_ids": [torch.zeros((length, 1), dtype=torch.long) for length in lengths],
+        "distill_teacher_topk_log_probs": [row[:, None] for row in sampler],
+        "distill_teacher_sampled_log_probs": sampler,
+    }
+    _, metrics = distill_loss(args, batch, torch.zeros((5, 2)), lambda values: (values * torch.cat(masks)).sum())
+    assert metrics["distill_is_weight"].item() == pytest.approx(2 + 3)
+    assert metrics["distill_sample_weight"].item() == pytest.approx(3 + 3 * 0.5)

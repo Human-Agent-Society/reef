@@ -40,6 +40,9 @@ The default loss is full-vocabulary forward KL. The teacher moves 1% toward
 the policy per step. The example instead sets ``sdft-teacher-update-rate: 0``;
 its moving-teacher runs collapsed.
 
+With ``calculate-per-token-loss``, leave ``sdft-skip-response-tokens`` at zero.
+Per-sample loss supports skipping response tokens at the start of each sample.
+
 Set ``pipeline.record2sample.config.max_teacher_tokens`` to fit training's
 context window and host memory. Its default, 0, disables the limit.
 Over-limit or unrenderable sequences do not train.

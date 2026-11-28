@@ -394,6 +394,9 @@ def distill_loss(
         raise NotImplementedError("the distill loss supports context parallel = 1 only")
     settings = settings_from_args(args)
     centering_settings = centering_settings_from_args(args)
+    sampler_log_probs = batch.get("rollout_log_probs")
+    if centering_settings is not None and settings.importance_sampling_cap > 0 and not sampler_log_probs:
+        raise ValueError("Score-centered distillation with importance sampling requires sampler log-probs.")
     total_lengths = batch["total_lengths"]
     response_lengths = batch["response_lengths"]
     unconcat_tokens = batch["unconcat_tokens"]
@@ -428,6 +431,8 @@ def distill_loss(
     divergence = torch.cat(per_sample_divergence, dim=0)
     scaled = per_sample_divergence
     metrics: dict[str, torch.Tensor] = {}
+    # Slime divides step metrics by active tokens in per-token mode and by samples otherwise.
+    metric_counts = torch.stack([mask.sum() for mask in loss_masks]) if args.calculate_per_token_loss else 1
     if settings.importance_sampling_cap > 0:
         with torch.no_grad():
             _, outputs = get_log_probs_and_entropy(
@@ -438,9 +443,10 @@ def distill_loss(
                 response_lengths=response_lengths,
                 with_entropy=False,
             )
-            # The old-policy log-probabilities of the weights of the job's start: the actor's when it computed them,
-            # else this step's own, which are the same, as a distill family trains one optimizer step per rollout.
-            rollout_log_probs = batch.get("log_probs") or [values.detach() for values in outputs["log_probs"]]
+            if sampler_log_probs:
+                rollout_log_probs = sampler_log_probs
+            else:
+                rollout_log_probs = batch.get("log_probs") or [values.detach() for values in outputs["log_probs"]]
             if settings.importance_sampling_level == "token":
                 # This is the correction's own f(p / q) = min(p / q, cap); the clamp on the log ratio only
                 # moves ratios below about 2e-9, where the weight is negligible and exp would underflow.
@@ -456,14 +462,11 @@ def distill_loss(
             student_log_probs = torch.cat(outputs["log_probs"], dim=0).float()
             engine_log_probs = torch.cat(rollout_log_probs, dim=0).float()
         scaled = [sample * weight for sample, weight in zip(per_sample_divergence, weights, strict=True)]
-        # Slime sums a micro-batch's metrics over its samples and divides the
-        # step's total by the global batch size, so every value here is a sum
-        # of per-sample means, as ``sum_of_sample_mean`` produces.
         if settings.importance_sampling_level == "token":
             metrics["distill_is_weight"] = sum_of_sample_mean(torch.cat(weights))
         else:
-            metrics["distill_is_weight"] = torch.stack(weights).sum()
-        # How far the policy moved from the job's start on the trained tokens.
+            metrics["distill_is_weight"] = (torch.stack(weights) * metric_counts).sum()
+        # Trainer and sampler disagreement on the active tokens.
         metrics["distill_student_log_prob"] = sum_of_sample_mean(student_log_probs)
         metrics["distill_rollout_log_prob"] = sum_of_sample_mean(engine_log_probs)
         metrics["distill_log_prob_abs_diff"] = sum_of_sample_mean((student_log_probs - engine_log_probs).abs())
@@ -497,7 +500,8 @@ def distill_loss(
         metrics.update(centering_metrics)
     metrics["loss"] = loss.detach().clone()
     metrics["distill_divergence"] = sum_of_sample_mean(divergence.detach())
-    metrics["distill_sample_weight"] = divergence.new_tensor([float(value) for value in sample_weights]).sum()
+    sample_weight_values = divergence.new_tensor([float(value) for value in sample_weights])
+    metrics["distill_sample_weight"] = (sample_weight_values * metric_counts).sum()
     return loss, metrics
 
 

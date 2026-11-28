@@ -68,6 +68,9 @@ Distillation
 Extend ``DistillAlgorithm`` and forward loss/pre-train hooks to
 ``reef.train.slime_backend.distill.objective``.
 Rows add teacher prompt tokens followed by student response tokens, and sample weight.
+For importance sampling, distillation uses recorded sampler log probabilities if every row supplies them.
+Otherwise it uses the actor’s job-start probabilities for the batch. Combining importance sampling
+with score centering requires recorded sampler log probabilities for every row.
 
 Teachers can follow student weights, retain a copy, load a checkpoint or use
 a compatible frozen engine. Teacher scoring precedes training; failure rejects the batch.
