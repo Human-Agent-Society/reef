@@ -1078,5 +1078,6 @@ def test_core_import_does_not_initialize_the_public_service_facade() -> None:
         "import sys; import reef.core.config; "
         "assert not any(name in sys.modules for name in ('reef.control', 'reef.train', 'reef.storage')); "
         "from reef import Dispatcher; from reef.control.dispatcher import Dispatcher as implementation; "
-        "assert Dispatcher is implementation; assert set(reef.__all__) <= set(dir(reef))"
+        "assert Dispatcher is implementation; assert set(reef.__all__) <= set(dir(reef)); "
+        "from reef import *; assert set(reef.__all__) <= globals().keys()"
     )
