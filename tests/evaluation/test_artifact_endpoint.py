@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import aiohttp
 import pytest
 from tests.support.polling import wait_until
 
@@ -280,10 +281,12 @@ def test_a_call_that_a_rate_limit_refused_is_sent_again_unchanged_until_it_is_an
         # A payment refusal is not sent again, also when an intermediary added a wait; the wait reaches the agent.
         (refused(402, limit=UpstreamLimit.PAYMENT, retry_after_seconds=5.0), 402, "payment_required", 5),
         (refused(429, limit=UpstreamLimit.PAYMENT), 429, "payment_required", None),
-        # An older handler's 402 that names no limit requires payment; its 403 names none.
+        # An older handler's 402 that names no limit requires payment, and its 401 refuses access. Only the handler
+        # that read a 403's body names its limit.
         (refused(402), 402, "payment_required", None),
+        (refused(401), 401, "access_denied", None),
         (refused(403), 403, None, None),
-        (refused(401), 401, None, None),
+        (refused(403, limit=UpstreamLimit.ACCESS), 403, "access_denied", None),
         # A 5xx keeps the provider's wait in its body, but no Retry-After header tells the agent to wait.
         (refused(503, retry_after_seconds=7.0), 503, None, 7),
         # A limit on a status that names none is no limit.
@@ -396,6 +399,30 @@ def test_a_streaming_agent_gets_one_stream_after_its_call_was_sent_again(short_w
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure",
+    [
+        aiohttp.ServerDisconnectedError(),
+        aiohttp.ClientPayloadError("the body ended early"),
+        OSError("the connection was reset"),
+        RuntimeError("the handler failed"),
+    ],
+)
+def test_a_handler_that_fails_without_a_status_gives_a_502_that_the_capture_keeps(failure) -> None:
+    runtime, _ = scripted(failure)
+    with ArtifactEndpoint(runtime, ARTIFACT) as endpoint:
+        proxy = CaptureProxy(endpoint.url, "s", is_unrecorded=True)
+        proxy.start()
+        try:
+            status, _ = call(f"http://127.0.0.1:{proxy.port}", "/v1/chat/completions", CHAT)
+            turns = proxy.drain()
+        finally:
+            proxy.stop()
+    # The capture keeps the failure, so the rollout counts it as a failure of the inference service.
+    assert (status, [turn["status"] for turn in turns]) == (502, [502])
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(("provider_wait", "held_seconds"), [(600.0, range(590, 601)), (None, range(10, 31))])
 def test_a_rate_limit_holds_the_calls_to_its_model_route_and_no_other(monkeypatch, provider_wait, held_seconds):
     # The last try's refusal holds the route for the provider's wait, or for a backoff of 15 to 30 s without one.
@@ -481,9 +508,12 @@ def test_a_call_that_its_route_holds_ends_with_its_rollout_and_sends_nothing(end
         (402, {"error": {"code": 402, "message": "refused"}}, UpstreamLimit.PAYMENT),
         (502, {"error": {"message": "the runtime could not answer from the artifact"}}, None),
         (503, {"error": {"code": "rate_limit"}}, None),
-        # Only a 403 with the code is a spending cap.
+        # A 403 names a limit only by its code. A 401 refuses access.
         (403, {"error": {"code": "payment_required"}}, UpstreamLimit.PAYMENT),
+        (403, {"error": {"code": "access_denied"}}, UpstreamLimit.ACCESS),
         (403, {"error": {"message": "Forbidden"}}, None),
+        (401, {"error": {"message": "invalid key"}}, UpstreamLimit.ACCESS),
+        (401, None, UpstreamLimit.ACCESS),
         # A 200 answer is no refusal, whatever error code its body holds.
         (200, {"choices": [], "error": {"code": "payment_required"}}, None),
         (200, {"error": {"code": "rate_limit"}}, None),

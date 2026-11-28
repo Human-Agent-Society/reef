@@ -612,7 +612,8 @@ def test_rollout_calls_number_the_calls_in_order_and_a_refused_call_does_not_sto
     assert "could not keep call 1 of rollout evaluation_rollout:e1:00002:00000" in caplog.text
 
 
-RATE, PAYMENT = UpstreamLimit.RATE, UpstreamLimit.PAYMENT
+RATE, PAYMENT, ACCESS = UpstreamLimit.RATE, UpstreamLimit.PAYMENT, UpstreamLimit.ACCESS
+ANSWER = (200, {"choices": [{"message": {"role": "assistant", "content": "5"}, "finish_reason": "stop"}]}, {})
 
 
 @pytest.mark.unit
@@ -626,20 +627,24 @@ RATE, PAYMENT = UpstreamLimit.RATE, UpstreamLimit.PAYMENT
         # A wait that is no number of seconds, and a body that is no object, name no wait.
         (402, {"error": {"retry_after_seconds": True}}, ModelCallRefusal(PAYMENT, 402, None)),
         (429, [], ModelCallRefusal(RATE, 429, None)),
+        # A 401, and a 403 that names no other limit, refuse access.
+        (401, {"error": {"message": "invalid key"}}, ModelCallRefusal(ACCESS, 401, None)),
+        (403, {"error": {"code": "access_denied"}}, ModelCallRefusal(ACCESS, 403, None)),
         # A 200 answer is no refusal, whatever its body names; nor is another failure.
         (200, {"choices": [], "error": {"code": "payment_required"}}, None),
         (502, {"error": {"message": "the engine stopped"}}, None),
     ],
 )
-def test_rollout_calls_keep_the_refusal_of_the_last_call_only(status, response, refusal):
+def test_rollout_calls_read_each_refusal_and_a_later_answer_clears_only_a_rate_limit(status, response, refusal):
     calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
-    calls.call_captured(turn("/v1/chat/completions", 429, {"error": {"code": "rate_limit"}}))
     calls.call_captured(turn("/v1/chat/completions", status, response))
+    assert calls.last_call_refusal == refusal
+    calls.call_captured(turn("/v1/chat/completions", 200, ANSWER[1]))
     calls.close()
-    assert calls.last_refusal == refusal
+    kept = None if refusal is None or refusal.limit is RATE else refusal
+    assert (calls.all_refusals.last, calls.last_call_refusal) == (kept, None)
 
 
-ANSWER = (200, {"choices": [{"message": {"role": "assistant", "content": "5"}, "finish_reason": "stop"}]}, {})
 # A gateway's wrapping of the provider's 402: its code is text, and the provider's number is in its message.
 WRAPPED_402 = (
     402,
@@ -652,11 +657,16 @@ IN_FLIGHT = (
     {"Retry-After": "1"},
 )
 RATE_LIMITED_ERROR = re.compile(
-    r"the model provider refused the last model call with HTTP 429 \(rate_limit\)\. Retry after (\d+) s\."
+    r"the model provider refused \d+ of the rollout's model calls, the last one with HTTP 429 \(rate_limit\)\. "
+    r"Retry after (\d+) s\."
 )
 PAYMENT_ERROR = (
-    "the model provider refused the last model call with HTTP 402 (payment_required). "
+    "the model provider refused 1 of the rollout's model calls, the last one with HTTP 402 (payment_required). "
     "Check the provider balance or key limit, or reduce the request size before retrying."
+)
+ACCESS_ERROR = (
+    "the model provider refused 1 of the rollout's model calls, the last one with HTTP {status} (access_denied). "
+    "Check the provider key and its permissions before retrying."
 )
 
 
@@ -859,6 +869,79 @@ def test_a_refused_last_call_fails_the_rollout_even_without_an_agent_error(tmp_p
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("replies", "error"),
+    [
+        # A later answer does not clear a refusal that reached the agent.
+        ([ANSWER, WRAPPED_402, ANSWER], PAYMENT_ERROR),
+        # A key revoked during the rollout: the agent stops on the 401.
+        ([ANSWER, (401, {"error": {"message": "invalid key"}}, {})], ACCESS_ERROR.format(status=401)),
+        # A 403 that names no spending cap refuses access.
+        ([ANSWER, (403, {"error": {"message": "Forbidden"}}, {}), ANSWER], ACCESS_ERROR.format(status=403)),
+    ],
+)
+def test_a_refusal_that_reached_the_agent_fails_the_rollout_once_whatever_calls_follow(tmp_path, replies, error):
+    lab = CallingLab(len(replies), reward=0.0)
+    with scripted_provider(replies) as (url, bodies):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    # The provider got each call once: the endpoint sends no refusal of payment or access again.
+    assert lab.statuses == [status for status, _, _ in replies] and len(bodies) == len(replies)
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.attempt_count, item.result, item.error) == ("failed", 1, None, error)
+
+
+@pytest.mark.unit
+def test_a_rate_limit_that_the_endpoint_sent_again_to_an_answer_keeps_the_score(tmp_path, monkeypatch):
+    monkeypatch.setattr(artifact_endpoint, "RATE_LIMIT_FIRST_WAIT_SECONDS", 0.01)
+    busy = (429, {"error": {"message": "busy"}}, {"Retry-After": "0"})
+    lab = CallingLab(2, reward=0.0)
+    with scripted_provider([ANSWER, busy, ANSWER]) as (url, bodies):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    # The agent never saw the 429, so the verifier's 0 is a score of the model.
+    assert lab.statuses == [200, 200] and len(bodies) == 3
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, RolloutScore.from_json(item.result["score"]).value) == ("finished", 0.0)
+
+
+#: A 429 that the endpoint tries ``RATE_LIMIT_TRIES`` times, so that the agent gets it.
+BUSY = [(429, {"error": {"message": "busy"}}, {"Retry-After": "0"})] * artifact_endpoint.RATE_LIMIT_TRIES
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("replies", "statuses", "error"),
+    [
+        # The agent sends a rate-limited call again on its own, so a later answer means that it lost no step.
+        ([ANSWER, *BUSY, ANSWER], [200, 429, 200], None),
+        ([ANSWER, *BUSY], [200, 429], RATE_LIMITED_ERROR),
+        # An agent does not send a refusal of payment or access again, so a later answer does not clear it.
+        ([ANSWER, WRAPPED_402, ANSWER], [200, 402, 200], PAYMENT_ERROR),
+        ([ANSWER, (401, {"error": {"message": "invalid key"}}, {}), ANSWER], [200, 401, 200], "access_denied"),
+    ],
+)
+def test_a_later_answer_clears_a_rate_limit_that_reached_the_agent_but_no_other_refusal(
+    tmp_path, monkeypatch, replies, statuses, error
+):
+    monkeypatch.setattr(artifact_endpoint, "RATE_LIMIT_FIRST_WAIT_SECONDS", 0.01)
+    lab = CallingLab(len(statuses), reward=0.0)
+    with scripted_provider(replies) as (url, bodies):
+        queue, (value,), worker, _ = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    assert lab.statuses == statuses and len(bodies) == len(replies)
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    if error is None:
+        assert (item.state, RolloutScore.from_json(item.result["score"]).value) == ("finished", 0.0)
+        return
+    assert (item.state, item.attempt_count, item.result) == ("failed", 1, None)
+    if isinstance(error, re.Pattern):
+        assert error.fullmatch(item.error) is not None
+    else:
+        assert error in item.error
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("replies", "tool_calls", "fails_after_refusal", "expected_state", "expected_error"),
     [
         # Main-loop 402 masked by a trailing 200 OK auxiliary title-generation call (no tools).
@@ -926,9 +1009,9 @@ def timed_turn(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("turns", "expected_refusal", "expected_answered"),
+    ("turns", "refused", "expected_answered"),
     [
-        # Transient recovered 429s (1/4, 4/9, and 7/10) followed by 200 OK main-loop completion clear last_refusal.
+        # The agent sent each 429 again on its own, and a later main-loop call answered: 1 of 4, 4 of 9, 7 of 10.
         ([(200, True), (429, True), (200, True), (200, True)], None, 3),
         (
             [
@@ -961,20 +1044,50 @@ def timed_turn(
             None,
             3,
         ),
-        # A trailing 200 OK auxiliary call (no tools or empty tools list) does not clear a terminal 402 on the main loop.
-        ([(402, True), (200, False)], ModelCallRefusal(PAYMENT, 402, None), 0),
-        ([(200, True), (402, True), (200, False)], ModelCallRefusal(PAYMENT, 402, None), 1),
-        ([(200, True), (402, True), (200, [])], ModelCallRefusal(PAYMENT, 402, None), 1),
+        # A trailing 200 OK auxiliary call (no tools or empty tools list) does not clear a 402 on the main loop.
+        ([(402, True), (200, False)], (ModelCallRefusal(PAYMENT, 402, None), 1), 0),
+        ([(200, True), (402, True), (200, False)], (ModelCallRefusal(PAYMENT, 402, None), 1), 1),
+        ([(200, True), (402, True), (200, [])], (ModelCallRefusal(PAYMENT, 402, None), 1), 1),
+        # A refused auxiliary call does not fail a main loop that the provider answered.
+        ([(402, False), (200, True), (200, True)], None, 2),
+        # A 429 with no later main-loop answer counts, also after an auxiliary answer.
+        ([(200, True), (429, True)], (ModelCallRefusal(RATE, 429, None), 1), 1),
+        ([(429, True), (200, False)], (ModelCallRefusal(RATE, 429, None), 1), 0),
+        # An answer clears the 429s before it, but no payment refusal.
+        ([(402, True), (429, True), (200, True)], (ModelCallRefusal(PAYMENT, 402, None), 1), 1),
+        ([(429, True), (402, True), (429, True)], (ModelCallRefusal(RATE, 429, None), 3), 0),
     ],
 )
-def test_rollout_calls_keep_recovered_transient_429s_and_ignore_trailing_auxiliary_calls(
-    turns, expected_refusal, expected_answered
+def test_rollout_calls_count_lasting_refusals_and_unanswered_rate_limits_and_ignore_auxiliary_calls(
+    turns, refused, expected_answered
 ):
     calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
     for index, (status, with_tools) in enumerate(turns):
         calls.call_captured(timed_turn(status, 1000.0 + index, 0.2, with_tools=with_tools))
     calls.close()
-    assert (calls.last_refusal, calls.answered) == (expected_refusal, expected_answered)
+    expected_refusal = None if refused is None else refused[0].reason(refused[1])
+    assert (calls.refusal(trial_failed=False), calls.answered) == (expected_refusal, expected_answered)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("turns", "refused"),
+    [
+        # A failed trial counts a refused last auxiliary call.
+        ([(200, True), (402, False)], (ModelCallRefusal(PAYMENT, 402, None), 1)),
+        ([(200, True), (429, False)], (ModelCallRefusal(RATE, 429, None), 1)),
+        # It does not count a refused auxiliary call that another call followed.
+        ([(402, False), (200, True), (429, False), (200, True)], None),
+        ([(402, False), (429, True), (200, True)], None),
+        ([(200, False), (200, True)], None),
+    ],
+)
+def test_a_failed_trial_counts_a_refused_last_call_when_no_tool_bearing_refusal_counts(turns, refused):
+    calls = RolloutCalls(UnreachableEndpoints(), rollout(), 1)
+    for index, (status, with_tools) in enumerate(turns):
+        calls.call_captured(timed_turn(status, 1000.0 + index, 0.2, with_tools=with_tools))
+    calls.close()
+    assert calls.refusal(trial_failed=True) == (None if refused is None else refused[0].reason(refused[1]))
 
 
 @pytest.mark.unit
@@ -985,6 +1098,8 @@ def test_rollout_calls_keep_recovered_transient_429s_and_ignore_trailing_auxilia
         ([(200, 0, 10), (429, 10, 1), (200, 11, 10)], None),
         # A short failure in a long run of calls leaves the score: 10 s of 1000 s.
         ([(200, 0, 500), (502, 500, 10), (200, 510, 490)], None),
+        # So do a few short failures: 30 s of 1000 s.
+        ([(200, 0, 300), (502, 300, 10), (200, 310, 300), (503, 610, 10), (500, 620, 10), (200, 630, 370)], None),
         # A call that waited out the request timeout took much of the time: 300 s of 1000 s.
         (
             [(200, 0, 400), (502, 400, 300), (200, 700, 300)],
@@ -1068,7 +1183,7 @@ def test_a_rate_limit_longer_than_a_call_can_wait_fails_the_rollout_once_and_sen
 
 @pytest.mark.unit
 @pytest.mark.parametrize("spending_cap", [True, False])
-def test_only_an_openrouter_spending_cap_403_fails_the_rollout_once(tmp_path, spending_cap):
+def test_a_403_fails_the_rollout_once_as_a_spending_cap_or_a_refusal_of_access(tmp_path, spending_cap):
     metadata = {"metadata": {"limit_source": "openrouter_workspace_budget"}} if spending_cap else {}
     lab = CallingLab(1, reward=0.0)
     with scripted_provider([(403, {"error": {"code": 403, "message": "Forbidden", **metadata}}, {})]) as (url, bodies):
@@ -1076,15 +1191,37 @@ def test_only_an_openrouter_spending_cap_403_fails_the_rollout_once(tmp_path, sp
         assert worker.run_once()
     item = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert lab.statuses == [403] and len(bodies) == 1
+    assert (item.state, item.attempt_count) == ("failed", 1)
     if spending_cap:
-        assert (item.state, item.attempt_count) == ("failed", 1)
         assert item.error == (
-            "the model provider refused the last model call with HTTP 403 (payment_required). "
-            "Check the provider's spending cap, or wait until it resets, before retrying."
+            "the model provider refused 1 of the rollout's model calls, the last one with HTTP 403 "
+            "(payment_required). Check the provider's spending cap, or wait until it resets, before retrying."
         )
         assert kept_codes(artifacts) == [(403, "payment_required")]
         return
-    # Any other 403 fails the attempt as before, and the queue runs the rollout again.
+    # Any other 403 refuses access, so another sandbox would meet the same refusal.
+    assert (item.error, kept_codes(artifacts)) == (ACCESS_ERROR.format(status=403), [(403, "access_denied")])
+
+
+#: OpenRouter's 403 for an input that its moderation flagged.
+MODERATED_403 = {
+    "error": {
+        "code": 403,
+        "message": "the input was flagged",
+        "metadata": {"reasons": ["violence"], "flagged_input": "...", "provider_name": "p", "model_slug": "m"},
+    }
+}
+
+
+@pytest.mark.unit
+def test_a_moderation_403_refuses_no_access_and_fails_only_the_attempt(tmp_path):
+    lab = CallingLab(1, reward=0.0)
+    with scripted_provider([(403, MODERATED_403, {})]) as (url, bodies):
+        queue, (value,), worker, artifacts = provider_rollouts(tmp_path, url, lab)
+        assert worker.run_once()
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    # The provider refused the content, not the key: the queue runs the rollout again, as after any failed attempt.
+    assert lab.statuses == [403] and len(bodies) == 1
     assert (item.state, item.attempt_count, kept_codes(artifacts)) == ("queued", 1, [(403, None)])
 
 

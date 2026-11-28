@@ -78,15 +78,18 @@ class UpstreamLimit(Enum):
     """The kind of limit that refused a request, as the provider's status, ``Retry-After`` and structured fields say.
 
     Values: ``RATE`` is a limit that ends with time, so the same request can pass later unchanged. ``PAYMENT`` is a
-    payment the provider requires for this request, so the same request does not pass again on its own. Each value is
-    also the error ``code`` with which the evaluation endpoint answers such a refusal.
+    payment the provider requires for this request, so the same request does not pass again on its own. ``ACCESS`` is
+    a refusal of the credential (a 401, or a 403 that names no other limit and no flagged content), so no request
+    passes until the credential or its permissions change. Each value is also the error ``code`` with which the
+    evaluation endpoint answers such a refusal.
 
     Purpose: ``reef.inference.http.upstream_limit`` makes it from a provider's reply. The evaluation endpoint sends a
-    call that ``RATE`` refused again, and sends no call again that ``PAYMENT`` refused.
+    call that ``RATE`` refused again, and sends no call again that ``PAYMENT`` or ``ACCESS`` refused.
     """
 
     RATE = "rate_limit"
     PAYMENT = "payment_required"
+    ACCESS = "access_denied"
 
 
 class UpstreamStatusError(ReefError):

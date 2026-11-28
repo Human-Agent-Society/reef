@@ -67,6 +67,8 @@ OPENROUTER_OVER_BUDGET = "weight_exceeds_budget"
 OPENROUTER_BUDGET_LIMITS = ("openrouter_guardrail_budget", "openrouter_workspace_budget", "openrouter_key_limit")
 #: The error ``code`` and ``type`` with which OpenAI answers 429 for an account whose quota ran out.
 OPENAI_QUOTA_CODE = "insufficient_quota"
+#: The ``error.metadata`` field of OpenRouter's 403 for an input that its moderation flagged.
+OPENROUTER_MODERATION_FIELD = "flagged_input"
 
 # -- Provider refusals --------------------------------------------------------
 
@@ -101,10 +103,14 @@ def upstream_limit(status: int, body: str, *, retry_after: float | None) -> Upst
     - A 402 whose ``limit_source`` is in ``OPENROUTER_PAYMENT_LIMITS``, or whose ``error.metadata.reason`` is
       ``OPENROUTER_OVER_BUDGET``, is ``PAYMENT``, also with a ``Retry-After``.
     - Any other 402 is ``RATE`` with a ``Retry-After`` wait, else ``PAYMENT``, whatever its body holds.
-    - A 403 whose ``limit_source`` is in ``OPENROUTER_BUDGET_LIMITS`` is ``PAYMENT``, also with a ``Retry-After``;
-      any other 403 is None.
+    - A 403 whose ``limit_source`` is in ``OPENROUTER_BUDGET_LIMITS`` is ``PAYMENT``, also with a ``Retry-After``.
+      A 403 whose ``error.metadata`` has ``OPENROUTER_MODERATION_FIELD`` refused the content, not the key, so it is
+      None. Any other 403 is ``ACCESS``.
+    - A 401 is ``ACCESS``.
     - Any other status is None.
     """
+    if status == 401:
+        return UpstreamLimit.ACCESS
     if status not in (402, 403, 429):
         return None
     try:
@@ -121,7 +127,9 @@ def upstream_limit(status: int, body: str, *, retry_after: float | None) -> Upst
     source = metadata.get("limit_source")
     source = source if isinstance(source, str) else None
     if status == 403:
-        return UpstreamLimit.PAYMENT if source in OPENROUTER_BUDGET_LIMITS else None
+        if source in OPENROUTER_BUDGET_LIMITS:
+            return UpstreamLimit.PAYMENT
+        return None if OPENROUTER_MODERATION_FIELD in metadata else UpstreamLimit.ACCESS
     if source == OPENROUTER_IN_FLIGHT_LIMIT:
         return UpstreamLimit.RATE
     if source in OPENROUTER_PAYMENT_LIMITS or metadata.get("reason") == OPENROUTER_OVER_BUDGET or retry_after is None:

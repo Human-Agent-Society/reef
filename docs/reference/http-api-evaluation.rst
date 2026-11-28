@@ -139,8 +139,11 @@ Given-back attempts increase ``stopped_attempt_count`` but do not consume the at
 
 Rate-limited calls retry up to five attempts in the same sandbox, honoring
 ``Retry-After``, within 60 seconds and the inference timeout.
-Final rate/payment refusals leave null scores. Auxiliary title calls cannot
-mask main-loop refusals; a refused trailing auxiliary call fails only an errored trial.
+Payment and access refusals that reach the agent leave a null score, even if a later call succeeds.
+A later successful call of the same kind clears a rate limit. When the agent declares tools,
+only calls that declare tools count, except that a refused final auxiliary call also fails an errored trial.
+The endpoint reports HTTP 401 and non-moderation HTTP 403 access failures as ``access_denied``.
+A 403 spending cap remains a payment refusal. An OpenRouter 403 with flagged input is a moderation response.
 HTTP 5xx failures invalidate an attempt when the last call fails or failed calls
 consume at least 5% of the first-to-last-call interval. Normal attempt retries apply.
 
