@@ -104,6 +104,11 @@ def check_task_job_options(args: SlimeArguments) -> None:
     ):
         if refused:
             raise ValueError(f"a task job cannot run with {message}")
+    trials = args.rollout_batch_size * args.n_samples_per_prompt
+    if trials % args.global_batch_size:
+        raise ValueError(
+            f"--global-batch-size ({args.global_batch_size}) must divide the number of trials per rollout ({trials})"
+        )
     if has_group_baseline(args) and args.n_samples_per_prompt < 2:
         raise ValueError(
             f"a task job with --advantage-estimator {args.advantage_estimator} needs --n-samples-per-prompt of at "
@@ -389,8 +394,15 @@ class HarborRolloutSession:
     Harbor lab. ``run`` gives the Slime fields of one rollout and appends its result; a failed rollout gives
     ``removed_fields``, and cancelling ``run`` cancels the rollout and waits for its cleanup. At most
     ``harbor.concurrency`` rollouts and environment builds run at a time. ``close`` closes the chat endpoint and lets
-    the threads end when their work ends. The rollouts start the prepared images that the deployment names for the
-    tasks, when it names them (``task_images_from_environ``).
+    the threads end when their work ends.
+
+    ``builds`` maps each remote task path to the current build attempt on Slime's event loop. Each entry holds
+    the nonnegative index of the prompt group that started the attempt and its future. The future returns an empty
+    string on success or a nonempty error string on failure. ``built`` starts an attempt for a new path and shares
+    every pending attempt. It keeps successful attempts for the session. After failure, only a group with a larger
+    index can replace the attempt. Cancelling a waiter leaves the shared attempt running.
+
+    When the deployment supplies prepared task images, rollouts use them without building an environment.
     """
 
     def __init__(
@@ -403,8 +415,7 @@ class HarborRolloutSession:
         self.results_path = Path(source.job_directory) / TASK_ROLLOUTS_FILE
         self.results_lock = threading.Lock()
         self.threads = ThreadPoolExecutor(max_workers=settings.concurrency, thread_name_prefix="task-rollout")
-        # One build of each task's remote environment; its rollouts wait for it. Keyed and read on Slime's loop.
-        self.builds: dict[Path, asyncio.Future[str]] = {}
+        self.builds: dict[Path, tuple[int, asyncio.Future[str]]] = {}
         self.endpoint = ChatEndpoint(chat)
         self.endpoint.__enter__()
         self.runner = TaskRolloutRunner(
@@ -429,7 +440,7 @@ class HarborRolloutSession:
 
     async def run(self, task: str, task_path: Path, group_index: int) -> SampleFields:
         """One rollout of ``task``, called on Slime's event loop."""
-        build_error = await self.built(task_path)
+        build_error = await self.built(task_path, group_index)
         if build_error:
             return self.finish(
                 task,
@@ -439,18 +450,16 @@ class HarborRolloutSession:
             )
         return await self.on_own_loop(self.rollout(task, task_path, group_index))
 
-    async def built(self, task_path: Path) -> str:
-        """Wait for the one build of the task's remote environment: "", or the error that stopped it.
-
-        Two concurrent rollouts of one task must not build its environment together, which E2B refuses. A task with
-        prepared images has nothing to build (``TaskRolloutRunner.builds_environment_first``).
-        """
+    async def built(self, task_path: Path, group_index: int) -> str:
+        """Wait for a shared remote build unless the task has prepared images. A later group can retry a failed build."""
         if not self.runner.builds_environment_first(task_path):
             return ""
-        if task_path not in self.builds:
-            self.builds[task_path] = asyncio.ensure_future(self.on_own_loop(self.build(task_path)))
-        # The shield: an aborted rollout must not cancel the build that other rollouts wait for.
-        return await asyncio.shield(self.builds[task_path])
+        attempt = self.builds.get(task_path)
+        if attempt is None or (group_index > attempt[0] and attempt[1].done() and attempt[1].result()):
+            attempt = group_index, asyncio.ensure_future(self.on_own_loop(self.build(task_path)))
+            self.builds[task_path] = attempt
+        # An aborted rollout must not cancel a build that other rollouts wait for.
+        return await asyncio.shield(attempt[1])
 
     async def build(self, task_path: Path) -> str:
         try:

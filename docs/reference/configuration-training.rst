@@ -62,6 +62,7 @@ Use these training and recipe options:
 - Install Harbor and the selected environment on the Ray actor's host. Set ``agent_host`` for sandboxed agents.
   The actor inherits E2B credentials, API and sandbox URLs, domain, and Modal credentials from the training service.
 
+Set ``global-batch-size`` to a divisor of ``rollout-batch-size * n-samples-per-prompt`` so every trial fits in an optimizer step.
 Set optimizer and learning-rate options in Slime. Use at least two samples per prompt with GRPO.
 Leave task generation and scoring to Reef. Custom data sources and generation functions conflict with Harbor task jobs.
 
