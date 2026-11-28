@@ -352,6 +352,10 @@ def test_pi_reader_parses_a_captured_real_session() -> None:
     final = events[-1]["message"]
     assert final["role"] == "assistant"
     assert final["content"] == [{"type": "text", "text": "READY"}]
+    # One session, one model call with no tool call; its usage is what the endpoint reported.
+    assert read_pi_session.agent_work(events) == {
+        "root": {"turns": 1, "steps": 1, "tool_calls": 0, "tool_errors": 0, "input_tokens": 1633, "output_tokens": 3}
+    }
 
 
 def test_claude_reader_reads_nested_sessions_in_path_order(tmp_path: Path) -> None:
@@ -481,6 +485,54 @@ def test_real_dsh_and_opencode_sessions_convert_to_atif_with_their_tool_call() -
     steps = atif_steps(opencode)
     assert steps[0][0] == "user" and task in steps[0][1]
     assert steps[1][2:] == (["bash"], ["reef-tool-ok\n"]) and steps[2] == ("agent", "READY", [], [])
+
+
+def test_dsh_and_hermes_readers_count_the_work_of_their_sessions(tmp_path: Path) -> None:
+    # The real dsh session: two model calls that each reported 5 input and 2 output tokens, and one bash call.
+    log = next((Path(__file__).parent / "data" / "dsh_session_real").rglob("session.jsonl")).read_text()
+    assert log.count('"isError":false') == 1
+    for name, text in (("ok", log), ("failed", log.replace('"isError":false', '"isError":true'))):
+        (tmp_path / "dsh" / name).mkdir(parents=True)
+        (tmp_path / "dsh" / name / "session.jsonl").write_text(text)
+    dsh = reader_for("deepseek-session-jsonl")
+    counts = {"turns": 1, "steps": 2, "tool_calls": 1, "tool_errors": 0, "input_tokens": 10, "output_tokens": 4}
+    assert dsh.agent_work(dsh(tmp_path / "dsh" / "ok")) == {"root": counts}
+    assert dsh.agent_work(dsh(tmp_path / "dsh" / "failed")) == {"root": {**counts, "tool_errors": 1}}
+    both = {"turns": 2, "steps": 4, "tool_calls": 2, "tool_errors": 1, "input_tokens": 20, "output_tokens": 8}
+    assert dsh.agent_work(dsh(tmp_path / "dsh")) == {"root": both}
+
+    call = {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "echo ok"}'}}
+    usage = {"prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240}
+    for session, answer_usage in (("s1", {"prompt_tokens": 1300, "completion_tokens": 9}), ("s2", None)):
+        answer = {"role": "assistant", "content": "READY", "finish_reason": "stop"}
+        snapshot = {
+            "session_id": session,
+            "messages": [
+                {"role": "user", "content": "Run echo"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [call],
+                    "finish_reason": "tool_calls",
+                    "usage": usage,
+                },
+                {"role": "tool", "tool_name": "terminal", "tool_call_id": "c1", "content": "ok"},
+                {**answer, **({"usage": answer_usage} if answer_usage else {})},
+            ],
+        }
+        (tmp_path / "hermes" / f"session_{session}.json").parent.mkdir(exist_ok=True)
+        (tmp_path / "hermes" / f"session_{session}.json").write_text(json.dumps(snapshot))
+    hermes = reader_for("hermes-session-json")
+    assert hermes.agent_work(hermes(tmp_path / "hermes")) == {
+        "root": {
+            "turns": 2,
+            "steps": 4,
+            "tool_calls": 2,
+            "tool_errors": 0,
+            "input_tokens": 1200 + 1300 + 1200,
+            "output_tokens": 40 + 9 + 40,
+        }
+    }
 
 
 def native_event(type_: str, **data: object) -> dict[str, object]:

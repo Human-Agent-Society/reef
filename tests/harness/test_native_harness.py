@@ -1664,9 +1664,9 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         checker_request = next(r for r in model.requests if "You are the checker" in r["messages"][0]["content"])
         assert [t["function"]["name"] for t in checker_request["tools"]] == ["read_file"]
         # Per agent work, as the verdict will carry it.
-        from reef.harness.tasks.trajectory import agent_work
+        from reef.harness.tasks.trajectory import NativeSessionReader
 
-        assert agent_work(result.trajectory) == {
+        assert NativeSessionReader().agent_work(result.trajectory) == {
             "checker": {
                 "turns": 1,
                 "steps": 1,

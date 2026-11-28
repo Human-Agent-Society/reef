@@ -39,9 +39,9 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskResult, TaskRunError, run_task
 from reef.harness.tasks.trajectory import (
     TrajectoryError,
-    agent_work,
     failed_trial_error,
     final_assistant_text,
+    reader_for,
     root_header,
     stage_path,
 )
@@ -157,7 +157,8 @@ class TaskEvaluationWorker:
     def score_result(self, result: TaskResult, task: str, models: ModelBindings) -> ScoredRun:
         """The score and the observations of a run that completed."""
         residue = len(result.residue)
-        agents = agent_work(result.trajectory)
+        # The run's own format: another format's lines can look alike (a pi session also starts with a session line).
+        agents = reader_for(self.descriptor.trajectory_format).agent_work(result.trajectory)
         path = stage_path(result.trajectory)
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
