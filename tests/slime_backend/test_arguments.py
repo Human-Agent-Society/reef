@@ -360,3 +360,10 @@ def test_slime_parses_tensor_parallel_arguments_without_the_workers_cuda_variabl
     monkeypatch.setattr(slime_arguments, "finalize_reef_slime_args", lambda args, arguments: None)
     startup.parse_slime_args(["--tensor-model-parallel-size=4"])
     assert seen == ["1"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("size", [None, 0, -1, True])
+def test_fixed_batching_requires_a_positive_microbatch_size(size) -> None:
+    with pytest.raises(ValueError, match="Fixed batching needs a positive micro_batch_size"):
+        SlimeArguments(use_dynamic_batch_size=False, micro_batch_size=size)

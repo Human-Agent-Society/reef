@@ -16,6 +16,9 @@ Malformed options fail startup. Worker-specific errors fail the first job.
 - With ``colocate``, ``offload``, ``offload-train`` or ``advantage-estimator: ppo``, the workers keep no CPU copy of their buffers while they sleep, so Reef refuses expandable segments (``expandable_segments:True`` in ``PYTORCH_CUDA_ALLOC_CONF`` or ``PYTORCH_ALLOC_CONF``, or ``SLIME_ENABLE_EXPANDABLE_SEGMENTS=1``): their optimizer step can then write zeros into the weights. A critic enabled with ``use-critic`` is not refused.
 - For multi-node training, use a checkpoint directory readable by the training host. See `checkpoint cadence <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 
+For sample jobs, Slime checks every unstarted optimizer step against the workers' data-parallel and virtual pipeline layout before training.
+When a partial step cannot fill the required microbatches, the error reports its row count and the required minimum or alignment.
+
 Train without an inference engine
 ---------------------------------
 
