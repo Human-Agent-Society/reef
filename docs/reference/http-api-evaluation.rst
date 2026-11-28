@@ -139,6 +139,8 @@ Given-back attempts increase ``stopped_attempt_count`` but do not consume the at
 
 Rate-limited calls retry up to five attempts in the same sandbox, honoring
 ``Retry-After``, within 60 seconds and the inference timeout.
+Calls that the provider answers with 502, 503 or 504, or whose answer ends
+before its first byte, retry up to four attempts under the same limits.
 Final rate/payment refusals leave null scores. Auxiliary title calls cannot
 mask main-loop refusals; a refused trailing auxiliary call fails only an errored trial.
 HTTP 5xx failures invalidate an attempt when the last call fails or failed calls

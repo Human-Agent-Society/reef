@@ -22,10 +22,13 @@ import threading
 import time
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+import aiohttp
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailableError, ReefError, UpstreamLimit, UpstreamStatusError
@@ -55,6 +58,24 @@ RATE_LIMIT_SECONDS = 60.0
 #: wait is a random 50 % to 100 % of that, so that the rollouts that one limit refused do not try again together.
 RATE_LIMIT_FIRST_WAIT_SECONDS = 1.0
 RATE_LIMIT_MAX_WAIT_SECONDS = 16.0
+#: The HTTP statuses and bounded jittered retry parameters for transient upstream failures (provider 502/503/504 and
+#: exact body-read EOF/disconnect errors before any bytes are sent to the caller).
+TRANSIENT_HTTP_STATUSES = (502, 503, 504)
+TRANSIENT_ERROR_TRIES = 4
+#: The latest start of a transient retry, in seconds after the call arrived, matching ``RATE_LIMIT_SECONDS``.
+TRANSIENT_RETRY_SECONDS = 60.0
+TRANSIENT_FIRST_WAIT_SECONDS = 1.0
+TRANSIENT_MAX_WAIT_SECONDS = 16.0
+#: Minimum time left before ``inference_timeout_s`` to start another transient retry; skips a doomed retry that would
+#: otherwise time out and hide the previous transient refusal.
+TRANSIENT_MIN_RETRY_WINDOW_SECONDS = 1.0
+TRANSIENT_TRANSPORT_ERRORS = (
+    aiohttp.ClientPayloadError,
+    aiohttp.ServerDisconnectedError,
+    IncompleteRead,
+    ConnectionResetError,
+    EOFError,
+)
 #: How often, in seconds, a wait between two tries checks whether the endpoint closed.
 CLOSE_CHECK_SECONDS = 0.1
 #: The HTTP statuses of a refusal that can name a limit: payment, a spending cap and a rate limit.
@@ -159,6 +180,27 @@ class OpenedStream:
         self.stream = stream
         self.admission: InferenceAdmissionHandle | None = admission
 
+    async def prefetch_first_chunk(self, timeout_seconds: float | None) -> OpenedStream:
+        """Read the first chunk of ``self.stream`` before headers are sent to the client so an early EOF or disconnect
+        can still be retried. Keeps ``self.stream`` and its recording fields intact, replacing only ``chunks``."""
+        iterator = aiter(self.stream.chunks)
+        try:
+            reading = anext(iterator)
+            first = await (
+                reading if timeout_seconds is None else asyncio.wait_for(reading, max(timeout_seconds, 0.0))
+            )
+        except StopAsyncIteration:
+            self.stream.chunks = iterator
+            return self
+
+        async def prefetched_chunks() -> AsyncIterator[bytes]:
+            yield first
+            async for chunk in iterator:
+                yield chunk
+
+        self.stream.chunks = prefetched_chunks()
+        return self
+
     async def close(self) -> None:
         try:
             await self.stream.close()
@@ -217,12 +259,18 @@ class ArtifactEndpoint:
         Each try waits first for its route (``ProviderCooldowns``). A call that a rate limit refused
         (``UpstreamLimit.RATE``) is sent again unchanged, after a jittered wait that doubles from
         ``RATE_LIMIT_FIRST_WAIT_SECONDS`` and is never shorter than the provider's ``Retry-After``; that wait also
-        holds the route. Tries start at most ``RATE_LIMIT_TRIES`` times, within ``RATE_LIMIT_SECONDS`` and the
-        runtime's ``inference_timeout_s`` of the call's arrival; a try after a wait gets only the time left, also when
-        its admission comes late (``call_handler``). When a wait would pass these limits, the endpoint answers at once
-        (``refused``). It sends no other failure again. The error body of a refusal names the limit as its ``code``
-        (``call_limit``). No try starts once ``closed`` is set: the call then gets its last refusal, or 503 with
-        ``CLOSED_ERROR`` when the provider refused none.
+        holds the route. Rate-limit tries start at most ``RATE_LIMIT_TRIES`` times, within ``RATE_LIMIT_SECONDS`` and
+        the runtime's ``inference_timeout_s`` of the call's arrival; a try after a wait gets only the time left, also
+        when its admission comes late (``call_handler``). A transient upstream status in ``TRANSIENT_HTTP_STATUSES``
+        (502, 503, 504, except an ``is_unusable_answer`` error) or a body-read EOF/disconnect in
+        ``TRANSIENT_TRANSPORT_ERRORS`` before any bytes reach the caller retries at most ``TRANSIENT_ERROR_TRIES``
+        times after ``max(retry_after_seconds or 0.0, backoff_seconds)``, within ``TRANSIENT_RETRY_SECONDS`` and
+        ``inference_timeout_s`` (skipping a retry that would leave less than ``TRANSIENT_MIN_RETRY_WINDOW_SECONDS``),
+        without holding ``ProviderCooldowns`` for peer calls. When a wait would pass these limits, or a transient
+        retry times out, the endpoint returns the last refusal (``refused``) or transport error at once. It sends no
+        other failure again. The error body of a refusal names the limit as its ``code`` (``call_limit``). No try
+        starts once ``closed`` is set: the call then gets its last refusal, or 503 with ``CLOSED_ERROR`` when the
+        provider refused none.
         """
         if self.log_probs:
             payload = log_prob_request(path, payload)
@@ -233,15 +281,25 @@ class ArtifactEndpoint:
             return 502, {"error": {"message": f"the runtime could not answer from the artifact: {exc}"}}
         model = str(sent.get("model", ""))
         arrived = time.monotonic()
-        latest_start, deadline = arrived + RATE_LIMIT_SECONDS, arrived + self.runtime.inference_timeout_s
+        latest_start = arrived + RATE_LIMIT_SECONDS
+        transient_latest_start = arrived + TRANSIENT_RETRY_SECONDS
+        deadline = arrived + self.runtime.inference_timeout_s
         refusal: UpstreamStatusError | None = None
         limit: UpstreamLimit | None = None
+        transport_error: Exception | None = None
         refused_at = own_resume_at = arrived
-        tries, wait_seconds, waited = 0, RATE_LIMIT_FIRST_WAIT_SECONDS, False
+        rate_tries, rate_wait_seconds = 0, RATE_LIMIT_FIRST_WAIT_SECONDS
+        transient_tries, transient_wait_seconds = 0, TRANSIENT_FIRST_WAIT_SECONDS
+        total_tries, waited, waiting_on_rate_limit = 0, False, False
         while True:
-            resume_at = max(own_resume_at, self.cooldowns.resume_at(handler, model))
+            route_resume_at = self.cooldowns.resume_at(handler, model)
+            resume_at = max(own_resume_at, route_resume_at)
+            rate_bounded = waiting_on_rate_limit or route_resume_at > own_resume_at
+            start_limit = latest_start if rate_bounded else transient_latest_start
             if resume_at > time.monotonic():
-                if resume_at > latest_start or resume_at >= deadline:
+                too_late = resume_at > start_limit or resume_at >= deadline
+                too_short = not rate_bounded and deadline - resume_at < TRANSIENT_MIN_RETRY_WINDOW_SECONDS
+                if too_late or too_short:
                     break
                 waited = True
                 while not self.closed.is_set() and (left_seconds := resume_at - time.monotonic()) > 0:
@@ -251,39 +309,97 @@ class ArtifactEndpoint:
                 # Read the route again: another call can have made it wait longer.
                 continue
             now = time.monotonic()
-            plain_first_try = tries == 0 and not waited
+            plain_first_try = total_tries == 0 and not waited
             # The rollout can have ended, and the loop can wake late: check both just before each try.
-            if self.closed.is_set() or (not plain_first_try and (now > latest_start or now >= deadline)):
+            if self.closed.is_set() or (
+                not plain_first_try
+                and (
+                    now > start_limit
+                    or now >= deadline
+                    or (not rate_bounded and deadline - now < TRANSIENT_MIN_RETRY_WINDOW_SECONDS)
+                )
+            ):
                 break
-            tries += 1
-            bounds = None if plain_first_try else (latest_start, deadline)
+            total_tries += 1
+            bounds = None if plain_first_try else (start_limit, deadline)
             try:
                 reply = await self.call_handler(handler, path, sent, bounds, streams=streams)
             except InferenceUnavailableError as exc:
                 return 503, {"error": {"message": str(exc)}}
             except UpstreamStatusError as exc:
-                refusal, limit, refused_at = exc, call_limit(exc), time.monotonic()
-            except (ValueError, TimeoutError, OSError) as exc:
+                refusal, limit, transport_error, refused_at = exc, call_limit(exc), None, time.monotonic()
+            except TRANSIENT_TRANSPORT_ERRORS as exc:
+                transport_error, refusal, limit, refused_at = exc, None, None, time.monotonic()
+            except TimeoutError as exc:
+                if transient_tries > 0 and not waiting_on_rate_limit:
+                    break
+                return 502, {"error": {"message": f"the runtime could not answer from the artifact: {exc}"}}
+            except (ValueError, OSError, aiohttp.ClientError) as exc:
                 return 502, {"error": {"message": f"the runtime could not answer from the artifact: {exc}"}}
             else:
                 if reply is None:
                     # The try sent nothing: the rollout ended, or its time ran out while it waited for its admission.
                     break
                 return 200, reply
-            if limit is not UpstreamLimit.RATE:
-                break
-            # The route waits for the later of the jittered backoff and the provider's Retry-After, also after the
-            # last try, so that no peer call reaches the provider before it.
-            backoff_seconds = wait_seconds * random.uniform(0.5, 1.0)
-            own_resume_at = refused_at + max(refusal.retry_after_seconds or 0.0, backoff_seconds)
-            self.cooldowns.hold(handler, model, own_resume_at)
-            wait_seconds = min(2 * wait_seconds, RATE_LIMIT_MAX_WAIT_SECONDS)
-            logger.info("a rate limit refused try %d of a call to artifact %s", tries, self.artifact.artifact_id)
-            if tries == RATE_LIMIT_TRIES:
-                break
-        if refusal is None and self.closed.is_set():
+            if limit is UpstreamLimit.RATE:
+                rate_refusal = refusal
+                if rate_refusal is None:
+                    break
+                rate_tries += 1
+                waiting_on_rate_limit = True
+                # The route waits for the later of the jittered backoff and the provider's Retry-After, also after the
+                # last try, so that no peer call reaches the provider before it.
+                backoff_seconds = rate_wait_seconds * random.uniform(0.5, 1.0)
+                own_resume_at = refused_at + max(rate_refusal.retry_after_seconds or 0.0, backoff_seconds)
+                self.cooldowns.hold(handler, model, own_resume_at)
+                rate_wait_seconds = min(2 * rate_wait_seconds, RATE_LIMIT_MAX_WAIT_SECONDS)
+                logger.info(
+                    "a rate limit refused try %d of a call to artifact %s", rate_tries, self.artifact.artifact_id
+                )
+                if rate_tries >= RATE_LIMIT_TRIES:
+                    break
+                continue
+            is_transient_status = (
+                refusal is not None and not refusal.is_unusable_answer and refusal.status in TRANSIENT_HTTP_STATUSES
+            )
+            if is_transient_status or transport_error is not None:
+                transient_tries += 1
+                waiting_on_rate_limit = False
+                if transient_tries >= TRANSIENT_ERROR_TRIES:
+                    break
+                backoff_seconds = transient_wait_seconds * random.uniform(0.5, 1.0)
+                provider_wait = 0.0 if refusal is None else (refusal.retry_after_seconds or 0.0)
+                wait_seconds = max(provider_wait, backoff_seconds)
+                own_resume_at = refused_at + wait_seconds
+                transient_wait_seconds = min(2 * transient_wait_seconds, TRANSIENT_MAX_WAIT_SECONDS)
+                if (
+                    own_resume_at > transient_latest_start
+                    or own_resume_at >= deadline
+                    or deadline - own_resume_at < TRANSIENT_MIN_RETRY_WINDOW_SECONDS
+                ):
+                    break
+                logger.warning(
+                    "transient error on try %d/%d of a call to artifact %s (%s); retrying in %.2f s",
+                    transient_tries,
+                    TRANSIENT_ERROR_TRIES,
+                    self.artifact.artifact_id,
+                    transport_error if transport_error is not None else refusal,
+                    wait_seconds,
+                )
+                continue
+            break
+        if refusal is None and transport_error is None and self.closed.is_set():
             return 503, {"error": {"message": CLOSED_ERROR}}
-        return self.refused(refusal, limit, refused_at, handler, model)
+        if transport_error is not None:
+            return 502, {
+                "error": {
+                    "message": (
+                        f"the runtime could not answer from the artifact after {transient_tries} attempts: "
+                        f"{transport_error}"
+                    )
+                }
+            }
+        return self.refused(refusal, limit, refused_at, handler, model, transient_tries=transient_tries)
 
     def route(self, payload: dict[str, Any]) -> tuple[InferenceHandler, dict[str, Any]]:
         """The handler that answers the call ``payload``, and the payload that it sends: the runtime's own handler and
@@ -337,8 +453,13 @@ class ArtifactEndpoint:
                     return await (call if bounds is None else asyncio.wait_for(call, bounds[1] - now))
                 opening = handler.inference_stream(artifact, path, payload)
                 stream = await (opening if bounds is None else asyncio.wait_for(opening, bounds[1] - now))
+                opened = OpenedStream(stream, admission)
                 held = None
-                return OpenedStream(stream, admission)
+                try:
+                    return await opened.prefetch_first_chunk(None if bounds is None else bounds[1] - time.monotonic())
+                except BaseException:
+                    await opened.close()
+                    raise
             finally:
                 REQUEST_SESSION_KEY.reset(session)
         finally:
@@ -352,6 +473,8 @@ class ArtifactEndpoint:
         refused_at: float,
         handler: InferenceHandler,
         model: str,
+        *,
+        transient_tries: int = 0,
     ) -> tuple[int, Mapping[str, Any]]:
         """The answer to a call that ``refusal`` refused at the ``time.monotonic()`` time ``refused_at``, for
         ``limit`` (``call_limit``): its ``retry_after_seconds`` is what is left of the provider's ``Retry-After``, in
@@ -364,7 +487,11 @@ class ArtifactEndpoint:
         else:
             status, wait = refusal.status, refusal.retry_after_seconds
             until = None if wait is None else refused_at + wait
-            error = {"message": str(refusal)}
+            if status in TRANSIENT_HTTP_STATUSES and transient_tries > 1:
+                message = f"{refusal} (after {transient_tries} attempts)"
+            else:
+                message = str(refusal)
+            error = {"message": message}
         if limit is not None:
             error["code"] = limit.value
         if until is not None:

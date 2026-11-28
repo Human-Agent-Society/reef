@@ -125,7 +125,7 @@ def test_a_successful_status_with_an_unusable_body_is_a_provider_failure(body: b
             with pytest.raises(UpstreamStatusError) as error:
                 await handler.inference(ARTIFACT, CHAT_PATH, {"model": "student"})
             # 502: the provider failed on its own account, so the caller's request is not blamed.
-            assert error.value.status == 502
+            assert error.value.status == 502 and error.value.is_unusable_answer
 
     asyncio.run(run())
 

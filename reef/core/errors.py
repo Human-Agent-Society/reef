@@ -90,7 +90,8 @@ class UpstreamLimit(Enum):
 
 
 class UpstreamStatusError(ReefError):
-    """An upstream service answered an inference request with an error status.
+    """An upstream service failed an inference request: it answered with an error status, or with a 2xx status
+    whose body is not one JSON object.
 
     Carries ``status`` so the service can hand the caller the upstream's own
     4xx and message rather than collapsing both into an opaque 500. That
@@ -103,6 +104,13 @@ class UpstreamStatusError(ReefError):
     header: a finite number of seconds of at least 0, or None when the upstream named no valid wait. ``limit`` is the
     limit that refused the request (``UpstreamLimit``), or None when the reply names none. The constructor raises
     ``ValueError`` for another ``retry_after_seconds`` and ``TypeError`` for another ``limit``.
+
+    ``status`` is the status that the service hands its caller. ``is_unusable_answer`` tells which of the two
+    failures this is. When it is False, the upstream answered with an error status and ``status`` is that status.
+    When it is True, the upstream answered with a 2xx status whose body is not one JSON object: ``status`` is 502,
+    and ``retry_after_seconds`` and ``limit`` are None. The upstream processed that request, so a caller that sends
+    a refused request again does not send this one again. The constructor raises ``ValueError`` for another
+    combination. ``HttpInferenceHandler.post_json`` makes both kinds, and the evaluation endpoint reads the flag.
     """
 
     def __init__(
@@ -112,15 +120,19 @@ class UpstreamStatusError(ReefError):
         status: int,
         retry_after_seconds: float | None = None,
         limit: UpstreamLimit | None = None,
+        is_unusable_answer: bool = False,
     ) -> None:
         super().__init__(message)
         if retry_after_seconds is not None and not (math.isfinite(retry_after_seconds) and retry_after_seconds >= 0):
             raise ValueError("retry_after_seconds is a finite number of seconds of at least 0, or None")
         if limit is not None and not isinstance(limit, UpstreamLimit):
             raise TypeError("limit is an UpstreamLimit or None")
+        if is_unusable_answer and (status != 502 or retry_after_seconds is not None or limit is not None):
+            raise ValueError("an unusable answer has status 502, no retry_after_seconds and no limit")
         self.status = status
         self.retry_after_seconds = retry_after_seconds
         self.limit = limit
+        self.is_unusable_answer = is_unusable_answer
 
 
 class RuntimeConfigError(ConfigError):

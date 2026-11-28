@@ -330,25 +330,40 @@ def test_a_template_start_that_fails_otherwise_never_starts_the_image_cold(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("answer", "raised"),
+    ("answer", "raised", "expected_calls"),
     [
         # AgentENV's own answer, which ends with a newline.
         (
             (503, '{"code":503,"message":"no nodes available","error_code":"sandbox_capacity_unavailable"}\n'),
             SandboxCapacityError,
+            3,
         ),
-        ((504, "<html>Gateway Time-out</html>"), ColdSandboxError),
-        ((401, {"message": "invalid API key"}), ColdSandboxError),
-        ((500, {"message": "image pull failed"}), ColdSandboxError),
-        ("drop", ColdSandboxError),
+        ((502, "<html>Bad Gateway</html>"), ColdSandboxError, 1),
+        ((504, "<html>Gateway Time-out</html>"), ColdSandboxError, 1),
+        ((401, {"message": "invalid API key"}), ColdSandboxError, 1),
+        ((500, {"message": "image pull failed"}), ColdSandboxError, 1),
+        ("drop", ColdSandboxError, 1),
     ],
-    ids=["busy", "gateway", "unauthorized", "service", "dropped"],
+    ids=["busy", "bad-gateway", "gateway", "unauthorized", "service", "dropped"],
 )
-def test_a_cold_start_that_fails_is_sent_once_and_keeps_its_meaning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: ColdAnswer, raised: type[Exception]
+def test_a_cold_start_failure_keeps_its_meaning_and_only_503_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: ColdAnswer,
+    raised: type[Exception],
+    expected_calls: int,
 ) -> None:
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox.agentenv import images as agentenv_images
     from reef.execution.sandbox.process import SANDBOX_CAPACITY_ERRORS
 
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(seconds: float) -> None:
+        if seconds == 0:
+            await real_sleep(0)
+
+    monkeypatch.setattr(agentenv_images.asyncio, "sleep", fast_sleep)
     environment = prepared_environment(tmp_path, [prepared_image(template_id=None, start="/usr/local/bin/serve")])
     if raised is not SandboxCapacityError:
         # A separate verifier waits for capacity, but it does not ask again after another failure either.
@@ -357,8 +372,8 @@ def test_a_cold_start_that_fails_is_sent_once_and_keeps_its_meaning(
     api = FakeAgentEnvApi([answer])
     with pytest.raises(raised) as failed:
         created_sandbox(environment, api, monkeypatch)
-    # Harbor's retry does not send it again; a full worker waits in the queue as for a template's start.
-    assert (len(api.cold_bodies), steps) == (1, [])
+    # Only 503 proves no sandbox was allocated and retries inside ColdSandbox.create; every other failure is sent once.
+    assert (len(api.cold_bodies), steps) == (expected_calls, [])
     assert (type(failed.value).__name__ in SANDBOX_CAPACITY_ERRORS) == (raised is SandboxCapacityError)
     # The message becomes the queue item's error, which has no surrounding spaces.
     assert str(failed.value) == str(failed.value).strip()
