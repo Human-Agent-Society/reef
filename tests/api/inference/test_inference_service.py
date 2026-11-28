@@ -581,6 +581,105 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
 
 
 @pytest.mark.unit
+def test_inference_reuses_provider_connections_and_closes_them_at_shutdown(tmp_path: Path) -> None:
+    async def check() -> None:
+        coordinator = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        storage.open("math").append_commit(expected_commit_number=0, commit=commit("artifact-1"))
+        table = coordinator.served_models
+        lease = coordinator.control_lease.acquire("control")
+        transport_by_call: list[asyncio.Transport] = []
+        provider_cancelled = asyncio.Event()
+
+        async def provider(request: web.Request) -> web.StreamResponse:
+            assert request.transport is not None
+            transport_by_call.append(request.transport)
+            assert "provider" not in request.cookies
+            body = await request.json()
+            text = body["messages"][0]["content"]
+            if text == "redirect" and request.path != "/follow":
+                redirect = web.HTTPTemporaryRedirect(location="/follow")
+                redirect.set_cookie("provider", "redirect")
+                raise redirect
+            if text == "error":
+                return web.json_response({"error": "test rejection"}, status=400)
+            if not body.get("stream"):
+                response = web.json_response({"choices": [{"message": {"role": "assistant", "content": "4"}}]})
+                response.set_cookie("provider", "local")
+                return response
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(b'data: {"choices":[{"delta":{"content":"4"}}]}\n\n')
+            if text == "wait":
+                try:
+                    await asyncio.Future()
+                finally:
+                    provider_cancelled.set()
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        engine_app = web.Application()
+        engine_app.router.add_post("/v1/chat/completions", provider)
+        engine_app.router.add_post("/follow", provider)
+        try:
+            async with TestServer(engine_app, handler_cancellation=True) as engine:
+                table.write(
+                    ScenarioModel("math", ACTIVE),
+                    ServedArtifact("artifact-1", str(engine.make_url("/").with_host("localhost")), "math-v1"),
+                    control_lease_number=lease.number,
+                )
+                app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+                async with TestClient(TestServer(app, handler_cancellation=True)) as client:
+
+                    async def ask(text: str, *, stream: bool = False):
+                        return await client.post(
+                            "/v1/chat/completions",
+                            headers=HEADERS,
+                            json={"model": "any", "messages": [{"role": "user", "content": text}], "stream": stream},
+                        )
+
+                    assert (await (await ask("first")).json())["choices"]
+                    assert "[DONE]" in await (await ask("stream", stream=True)).text()
+                    refused = await ask("error", stream=True)
+                    assert refused.status == 400
+                    assert "test rejection" in await refused.text()
+                    assert (await (await ask("again")).json())["choices"]
+                    assert (await (await ask("redirect")).json())["choices"]
+                    assert len(set(transport_by_call)) == 1
+
+                    pending = await ask("wait", stream=True)
+                    assert b"delta" in await pending.content.readline()
+                    assert (await (await ask("while streaming")).json())["choices"]
+                    assert transport_by_call[-1] is not transport_by_call[-2]
+                    idle = transport_by_call[-1]
+                    pending.close()
+                    await asyncio.wait_for(provider_cancelled.wait(), timeout=2)
+                    assert (await (await ask("after cancellation")).json())["choices"]
+                    assert transport_by_call[-1] is idle
+                    assert not idle.is_closing()
+
+                    other_app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+                    async with TestClient(TestServer(other_app)) as other:
+                        response = await other.post(
+                            "/v1/chat/completions",
+                            headers=HEADERS,
+                            json={"model": "any", "messages": [{"role": "user", "content": "other"}]},
+                        )
+                        assert (await response.json())["choices"]
+                        assert transport_by_call[-1] is not idle
+                    assert not idle.is_closing()
+
+                async with asyncio.timeout(2):
+                    while not idle.is_closing():
+                        await asyncio.sleep(0.01)
+        finally:
+            storage.close()
+            coordinator.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "change",
     [
