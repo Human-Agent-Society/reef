@@ -28,10 +28,7 @@ from reef.train.slime_backend.harbor_rollouts import GENERATE_FUNCTION_PATH, Tas
 
 
 class ReefDatasetSource(RolloutDataSourceWithBuffer):
-    """Serve the prompts of the job in the save root's ``DATASET_FILE``.
-
-    ``get_samples`` fills task batches across epochs and delegates dataset-job batches to Slime's data source.
-    """
+    """Serve the prompts of the job in the save root's ``DATASET_FILE``, as Slime's own data source does."""
 
     def __init__(self, args: Any) -> None:
         super().__init__(args)
