@@ -2746,6 +2746,69 @@ def test_an_item_of_another_owner_and_automatic_settings_are_refused(tmp_path: P
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("environment", ["docker", "e2b"])
+def test_settlement_reads_scores_only_after_the_failure_check_can_stop_the_run(
+    tmp_path: Path, monkeypatch, environment: str
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    try:
+        dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
+        results = ArtifactEvaluations(dispatcher).results
+        queue = dispatcher.queue
+        request = ArtifactEvaluationRequest(
+            "a1",
+            "weights",
+            harness={"name": "terminus-2"},
+            task_names=("add",),
+            rollouts_per_task=12,
+            environment=environment,
+            max_failed_fraction=0.5,
+        )
+        with dispatcher.locked_scenario("s") as current:
+            current.store.evaluations.create(
+                evaluation_id="eval", owner="test", request=request, created_at=time.time()
+            )
+        for repeat in range(request.rollouts_per_task):
+            rollout = EvaluationRollout(
+                "s",
+                "eval",
+                "a1",
+                "weights",
+                0,
+                "add",
+                repeat,
+                PolicyModel("m"),
+                {"name": "terminus-2"},
+                environment,
+                {},
+            )
+            queue.append(rollout_work(rollout))
+        bulk_reads: list[tuple[int, bool]] = []
+        items = queue.items
+
+        def read_items(*args, **kwargs):
+            rows = items(*args, **kwargs)
+            bulk_reads.append((len(rows), kwargs.get("payload", True)))
+            return rows
+
+        monkeypatch.setattr(queue, "items", read_items)
+        for ended in range(1, FAILURE_CHECK_ROLLOUTS + 1):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            queue.start(EVALUATIONS_QUEUE, item.id, "w")
+            if ended == 1:
+                results.settle("s", "eval")
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(None).to_json()})
+            results.settle("s", "eval")
+            if ended < FAILURE_CHECK_ROLLOUTS:
+                assert bulk_reads == []
+        with dispatcher.locked_scenario("s") as current:
+            assert current.store.evaluations.read("eval").state == "failed"
+        assert any(size == 12 for size, _ in bulk_reads)
+        assert all(not payload for _, payload in bulk_reads)
+    finally:
+        dispatcher.close()
+
+
 def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_reports_its_progress(
     tmp_path: Path,
 ) -> None:
