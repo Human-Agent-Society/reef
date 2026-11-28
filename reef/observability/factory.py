@@ -8,7 +8,7 @@ from typing import Any
 from reef.observability.base import ExperimentTracker, NullExperimentTracker
 from reef.observability.tracing import TracingSettings
 from reef.observability.wandb import WandbExperimentTracker, WandbSettings
-from reef.storage.observer import RecordObserver
+from reef.storage.scenario.observer import RecordObserver
 
 
 def build_experiment_tracker(

@@ -35,8 +35,8 @@ from recipes.beta.autoenvscaling.designer import ModelReplies
 from reef.core.prompts import untrusted_text
 from reef.core.tasks import HarborTask
 from reef.harness.harbor.rollouts import TaskRollout, rewards_of
-from reef.record2sample.generator.client import Generator, GeneratorError, WrittenTask
-from reef.record2sample.generator.designer import DesignerError
+from reef.samples.generator.client import Generator, GeneratorError, WrittenTask
+from reef.samples.generator.designer import DesignerError
 
 # A check that is off does not run; one that measures records its result; one that refuses also keeps a task out.
 CHECK_MODES = ("off", "measure", "refuse")

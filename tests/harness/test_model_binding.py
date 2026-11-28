@@ -14,6 +14,7 @@ from urllib.request import Request
 import pytest
 from tests.support.harness_jobs import evolution_config
 
+from reef.control.scenario.live_objects import LiveObjects, harness_models
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import (
@@ -28,7 +29,6 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
-from reef.scenario.live_objects import LiveObjects, harness_models
 
 
 class _Response(io.BytesIO):

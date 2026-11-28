@@ -52,6 +52,7 @@ class SlimeArguments(Namespace):
     custom_rollout_data_keys: tuple[str, ...] | list[str] | None = ()
     rollout_data_transport: str
     megatron_config_path: str | None
+    disable_grad_buffers_cpu_backup: bool
     disable_param_buffers_cpu_backup: bool
     override_opt_param_scheduler: bool
     no_load_optim: bool
@@ -60,6 +61,8 @@ class SlimeArguments(Namespace):
     ckpt_step: int | None
     reef_executor_backend: str
     reef_train_executor_options: dict[str, object]
+    # Slime's --train-env-vars: environment variables of the training workers, over the Ray cluster's.
+    train_env_vars: dict[str, str]
     advantage_estimator: str
     # Slime's native options that a task job reads (reef.train.slime_backend.harbor_rollouts).
     rewards_normalization: bool

@@ -1,0 +1,1060 @@
+"""The inference service: answers model requests and reports artifact startup.
+
+An inference replica holds no scenario. For each request it reads the ``ServedArtifact`` of the request's
+``ScenarioModel`` from ``served_models``, keeps it for the whole request, sends the request to the engine at its URL
+under its model name (``EngineClients``), appends the request's ``AgentRecord`` to the scenario's record store, and
+returns the answer with the record's ID. The request that it sends and records is the body that the engine's handler
+gives for the client's body (``InferenceHandler.request_payload``). Control selects artifacts; the inference
+worker starts them and writes ``served_models``. The one-process layout runs the same routes.
+
+Routes:
+
+- ``/v1/chat/completions``, ``/v1/responses``, ``/v1/messages`` and ``/v1/messages/count_tokens``: a recorded call.
+  ``x-reef-scenario`` names the scenario; the request's ``model`` names a row of the scenario (an artifact served
+  beside the active one), and any other ``model`` means ``active``. ``x-reef-tag-*`` pairs go to the record's
+  metadata. With ``x-reef-rollout``, the call is one of Reef's own rollouts: no record.
+- ``/reef/scenarios/{s}/evaluation/v1/...`` and ``/reef/scenarios/{s}/components/{c}/evaluation/v1/...``: an
+  evaluation rollout's call to the active model; no record.
+- ``/reef/scenarios/{s}/artifacts/{a}/v1/...``: a recorded call to the row named ``a``;
+  ``/reef/scenarios/{s}/artifacts/{a}/evaluation/v1/...``: the same call, unrecorded.
+- ``GET /reef/scenarios/{s}/inference/status?model=active``: the current artifact's startup state.
+- ``GET /reef/scenarios/{s}/inference/target?model=active``: an exact binding for one non-streaming artifact chat call.
+  Both binding headers opt in to strict validation and disable replica retries; other calls keep the existing rules.
+
+Rules:
+
+- A body that the engine's handler refuses (``request_payload``): 400.
+- No row: 503 while its artifact starts or after startup fails; 404 for an unknown model.
+  A replica that cannot read ``served_models`` and has no recent cached read answers 503.
+- An engine that refuses the request with a 4xx: that status and the engine's message, which an agent reads to
+  repair its next call; an engine that fails otherwise or cannot be reached: 502; one that does not answer within
+  the timeout: 504. A refusal of the selected model name (HTTP 421) is the exception: the next rule retries it.
+- A non-streaming answer that the engine aborted, and an engine's refusal of the selected model name (HTTP 421)
+  before any output, are retried once after the replica reads the row again, without running the split again. A
+  request that selected its artifact keeps it: the split's artifact, the named row, or the artifact whose ID is the
+  request's ``model``. When no row serves that artifact at the retry: 503 with ``Retry-After``. Any other request
+  reads the row for its model again, so its retry can reach a new active artifact. A second abort: 409; a second
+  refusal: 503 with ``Retry-After``. A stream is never retried after its response started.
+- A scenario's traffic split (``TrafficWeights``) selects the row of a request that means ``active``: the replica puts
+  the conversation in a bucket, and each bucket belongs to one artifact. A request without an identified conversation,
+  a rollout's call and a request that names a row skip the split. The replica selects the model. The engine of the
+  artifact selects its own replica.
+- A record that cannot be appended: 503. A replica never answers a recorded request without its record. A stream goes
+  out as the engine sends it, so its record is appended when it ends, and its receipt is the stream's last frame.
+  A stream that fails after its headers went out gets no terminal event and no receipt: the replica closes the
+  connection, so the client reads a transport error, and the record keeps the incomplete delivery. A stream that the
+  engine aborted keeps its terminal event, without a receipt.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+import time
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+import aiohttp
+from aiohttp import web
+from sqlalchemy.exc import SQLAlchemyError
+
+from reef.api.streaming import (
+    chat_completion_chunk_identity,
+    frame_for_codex,
+    is_terminal_sse_event,
+    receipt_sse_events,
+    sse_failure,
+    stream_record,
+)
+from reef.api.web import service_application
+from reef.api.wire import HeaderError, RequestHeaders, parse_request_headers, with_request_tags
+from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
+from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
+from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.values import JsonValue
+from reef.inference.interfaces import (
+    EngineClients,
+    EngineReplicas,
+    EngineState,
+    InferenceArtifact,
+    InferenceHandler,
+    RuntimeLoadMismatchError,
+    StartupSteps,
+)
+from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data
+from reef.inference.startup import STARTUP_FAILED_PREFIX, reported_steps
+from reef.storage.coordination.served_models import ServedModels
+from reef.storage.scenario.store import ScenarioStorage
+
+logger = logging.getLogger(__name__)
+#: A client's identifier of a conversation, which keeps the conversation on one artifact of a traffic split.
+SESSION_KEY_HEADER = "x-reef-session-key"
+#: The number of buckets for conversations. A weight is a number of buckets.
+BUCKET_COUNT = 100
+
+#: The header that carries the ID of the request's record.
+RECORD_HEADER = "x-reef-agent-record-id"
+#: The header that carries the ID of the artifact that answered.
+ARTIFACT_HEADER = "x-reef-artifact-id"
+#: Optional strict-call headers: the selected binding and the caller's attempt identifier.
+BINDING_HEADER = "x-reef-binding-id"
+ATTEMPT_HEADER = "x-reef-attempt-id"
+#: The model routes that an inference replica answers.
+INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
+
+
+def startup_error(error: str | None) -> str:
+    """What a failed startup status says: the message of a runtime's ``StartupFailedError`` (RFC #1299), else a fixed
+    text, since other errors can hold paths or secrets."""
+    if error is not None and error.startswith(STARTUP_FAILED_PREFIX):
+        return error.removeprefix(STARTUP_FAILED_PREFIX)
+    return "The inference engine did not start. Check the service logs."
+
+
+class NotServedError(ReefError):
+    """The scenario serves no model under the request's name."""
+
+
+class StaleServedModelsError(ReefError):
+    """The replica could not read ``served_models`` for longer than it may serve from its cache."""
+
+
+@dataclass(frozen=True)
+class TrafficWeights:
+    """The number of buckets that each artifact of one scenario's traffic split gets.
+
+    Values: ``by_artifact`` maps an artifact ID, a non-empty string, to an integer from 0 to ``BUCKET_COUNT``. It is
+    empty, which means no split, or its values sum to ``BUCKET_COUNT``. Construction checks these conditions.
+
+    Purpose: ``from_json`` makes it from a client's value, and the replica makes it from a stored value. ``is_split`` is
+    true exactly when ``by_artifact`` is not empty. For a split, ``artifact_for`` gives the artifact of a bucket from 0
+    to ``BUCKET_COUNT`` - 1. Artifact IDs in sorted order get consecutive buckets. So a changed weight moves only the
+    buckets that go to another artifact.
+    """
+
+    by_artifact: Mapping[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for artifact_id, weight in self.by_artifact.items():
+            if not isinstance(artifact_id, str) or not artifact_id:
+                raise ValueError("a traffic weight must name an artifact ID")
+            if type(weight) is not int or not 0 <= weight <= BUCKET_COUNT:
+                raise ValueError(f"the traffic weight of {artifact_id!r} must be an integer from 0 to {BUCKET_COUNT}")
+        if self.by_artifact and sum(self.by_artifact.values()) != BUCKET_COUNT:
+            raise ValueError(f"the traffic weights must sum to {BUCKET_COUNT}")
+
+    @classmethod
+    def from_json(cls, value: object) -> TrafficWeights:
+        """The weights of ``value``: a mapping, or None for no split. Raise ``ValueError`` for any other value."""
+        if value is None:
+            return cls()
+        if not isinstance(value, Mapping):
+            raise ValueError("the traffic weights must map each artifact ID to its weight")
+        return cls(dict(value))
+
+    @property
+    def is_split(self) -> bool:
+        return bool(self.by_artifact)
+
+    def artifact_for(self, bucket: int) -> str:
+        buckets = [
+            artifact_id for artifact_id in sorted(self.by_artifact) for _ in range(self.by_artifact[artifact_id])
+        ]
+        return buckets[bucket]
+
+
+@dataclass(frozen=True)
+class TrafficChoice:
+    """The artifact that a traffic split gives one request.
+
+    Values: ``artifact_id`` is the artifact of ``bucket`` under ``weights``, which are a split. Purpose:
+    ``InferenceReplica.route`` makes it, and ``InferenceReplica.record`` stores ``bucket`` and ``weights``.
+    """
+
+    artifact_id: str
+    bucket: int
+    weights: TrafficWeights
+
+
+def message_text(content: object) -> str:
+    """The text of a message's ``content``: a string, or the ``text`` of each of its blocks.
+
+    Clients change other block fields between turns, for example ``cache_control``, so only the text counts.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        block["text"] for block in content if isinstance(block, Mapping) and isinstance(block.get("text"), str)
+    )
+
+
+def conversation_bucket(scenario: str, payload: Mapping[str, object], session_key: str | None = None) -> int | None:
+    """The bucket of a provider-native request, or None when Reef cannot identify its conversation.
+
+    With ``session_key``, the bucket is a hash of ``scenario`` and that key. Without it, the bucket is a hash of
+    ``scenario``, the system text, the first message and the first user message. The later turns of a conversation
+    repeat these messages.
+
+    The result is None for a request without a message. It is also None for a request with ``previous_response_id``
+    and no ``session_key``, because that request holds only its new input. The system text comes from ``system``,
+    ``instructions`` or the first system or developer message. The messages come from ``messages`` or ``input``.
+    """
+    if session_key:
+        head = [scenario, session_key]
+    else:
+        if payload.get("previous_response_id"):
+            return None
+        entries = payload.get("messages", payload.get("input"))
+        if isinstance(entries, str):
+            entries = [{"role": "user", "content": entries}]
+        messages = [entry for entry in entries if isinstance(entry, Mapping)] if isinstance(entries, list) else []
+        if not messages:
+            return None
+
+        def first_text(*roles: str) -> str:
+            found = next((message for message in messages if message.get("role") in roles), None)
+            return "" if found is None else message_text(found.get("content"))
+
+        system = message_text(payload.get("system", payload.get("instructions"))) or first_text("system", "developer")
+        head = [scenario, system, message_text(messages[0].get("content")), first_text("user")]
+    digest = hashlib.sha256(json.dumps(head, ensure_ascii=False).encode()).digest()
+    return int.from_bytes(digest[:8], "big") % BUCKET_COUNT
+
+
+@dataclass(frozen=True)
+class ScenarioServing:
+    """What a replica read of one scenario's serving state.
+
+    Values: ``read_at`` is a ``time.monotonic`` reading and ``sequence`` is the table's ``changed_sequence`` at the
+    read. ``rows``, ``serving_config`` and ``traffic_weights`` are the scenario's values at the read. Purpose:
+    ``ServedModelsCache`` makes and keeps it.
+    """
+
+    read_at: float
+    sequence: int
+    rows: Mapping[str, ServedArtifact]
+    serving_config: Mapping[str, JsonValue]
+    traffic_weights: TrafficWeights
+
+
+def row_for_model(scenario: str, rows: Mapping[str, ServedArtifact], model: object) -> ServedArtifact:
+    """The row that answers a request for ``model``: the row of that name, else the active row. Raise
+    ``NotServedError`` when that row does not exist."""
+    name = model if isinstance(model, str) and model in rows else ACTIVE
+    served = rows.get(name)
+    if served is None:
+        raise NotServedError(f"scenario {scenario!r} serves no model {name!r}")
+    return served
+
+
+@dataclass
+class ServedModelsCache:
+    """A replica's cache of ``served_models``, by scenario.
+
+    Values: ``table`` is the table; ``cache_seconds`` is how long a read stays fresh while the table's
+    ``changed_sequence`` stays the same, so a change reaches the next request at once; ``max_cache_age_seconds`` is
+    how long the replica serves from an old read while the table cannot be read; ``reads`` holds the last read of
+    each scenario.
+
+    Purpose: each request of a replica reads its ``ServedArtifact`` (``read``) and the serving config that its
+    handler applies (``serving_config``) through it.
+    """
+
+    table: ServedModels
+    cache_seconds: float = CACHE_SECONDS
+    max_cache_age_seconds: float = 300.0
+    reads: dict[str, ScenarioServing] = field(default_factory=dict)
+
+    def serving(self, scenario: str, *, refresh: bool = False) -> ScenarioServing:
+        """The serving state of ``scenario``, from the cache while it is fresh."""
+        now = time.monotonic()
+        held = self.reads.get(scenario)
+        try:
+            sequence = self.table.changed_sequence()
+            if (
+                held is not None
+                and not refresh
+                and now - held.read_at < self.cache_seconds
+                and sequence == held.sequence
+            ):
+                return held
+            rows = self.table.read_scenario(scenario)
+            serving_config = self.table.read_serving_config(scenario)
+            weights = TrafficWeights(self.table.read_traffic_weights(scenario))
+        except (SQLAlchemyError, ReefError, OSError) as exc:
+            if held is not None and now - held.read_at < self.max_cache_age_seconds:
+                logger.warning("serving %s from a cached read of served_models: %s", scenario, exc)
+                return held
+            raise StaleServedModelsError(f"served_models cannot be read: {exc}") from exc
+        self.reads[scenario] = ScenarioServing(now, sequence, rows, serving_config, weights)
+        return self.reads[scenario]
+
+    def scenario_rows(self, scenario: str, *, refresh: bool = False) -> Mapping[str, ServedArtifact]:
+        return self.serving(scenario, refresh=refresh).rows
+
+    def serving_config(self, scenario: str) -> Mapping[str, JsonValue]:
+        """The override that ``scenario``'s routes serve with (``ServedModels.read_serving_config``)."""
+        return self.serving(scenario).serving_config
+
+    def read(self, scenario: str, model: object, *, refresh: bool = False) -> ServedArtifact:
+        """The ``ServedArtifact`` that answers a request for ``model`` of ``scenario``."""
+        return row_for_model(scenario, self.scenario_rows(scenario, refresh=refresh), model)
+
+    def read_named(self, scenario: str, name: str, *, refresh: bool = False) -> ServedArtifact:
+        """The ``ServedArtifact`` of the row ``name`` of ``scenario``; ``NotServedError`` when there is none."""
+        served = self.scenario_rows(scenario, refresh=refresh).get(name)
+        if served is None:
+            raise NotServedError(f"scenario {scenario!r} serves no artifact {name!r}")
+        return served
+
+
+async def read_object(request: web.Request) -> dict[str, Any]:
+    """The request's JSON object; 400 for a body that is not one."""
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as exc:
+        raise web.HTTPBadRequest(text="request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be a JSON object")
+    return payload
+
+
+def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
+    """``response`` as the client gets it and the record keeps it: without a ``training`` block, which an engine
+    handler may return. Serving returns no training tensors; a training component computes the ones it needs. The
+    record names the artifact that answered by its ``artifact_id``."""
+    return {key: value for key, value in response.items() if key != "training"}
+
+
+class SSERelay:
+    """Relays an engine's SSE frames to the client, holding back the terminal event.
+
+    Values: ``path`` is the route; ``response`` the client's stream; ``for_codex`` whether frames are rewritten for
+    a Codex client; ``chat_identity`` the chat-completion identity of the first frame that carries one; ``terminal``
+    the held-back terminal frame, once it arrived. ``captured_stream`` requires consuming and checking bytes
+    after that frame; an opaque proxy instead ends at the first terminal frame, regardless of chunk boundaries.
+    ``error`` is None until a decoded frame reports failure, then retains the first failure description.
+
+    Purpose: the replica writes the record's receipt frames before the terminal event.
+    """
+
+    def __init__(self, path: str, response: web.StreamResponse, *, for_codex: bool, captured_stream: bool) -> None:
+        self.path = path
+        self.response = response
+        self.for_codex = for_codex
+        self.captured_stream = captured_stream
+        self.decoder = SSEFrameDecoder()
+        self.chat_identity: dict[str, Any] = {}
+        self.terminal: bytes | None = None
+        self.error: str | None = None
+
+    async def feed(self, chunk: bytes) -> bool:
+        """Write the frames that ``chunk`` completes; return whether the terminal event arrived."""
+        return await self.write(self.decoder.feed(chunk))
+
+    async def finish(self) -> bool:
+        """Write what the decoder still holds; return whether the terminal event arrived."""
+        frames, remainder = self.decoder.finalize()
+        await self.write(frames)
+        if remainder:
+            if self.terminal is not None and remainder.strip():
+                raise ValueError("the engine sent data after its terminal event")
+            await self.response.write(remainder)
+        return self.terminal is not None
+
+    async def write(self, frames: Iterable[bytes]) -> bool:
+        for frame in frames:
+            if self.terminal is not None:
+                if not self.captured_stream:
+                    return True
+                if frame_data(frame) == SSE_DONE or all(
+                    not line or line.startswith(b":") for line in frame.splitlines()
+                ):
+                    continue
+                raise ValueError("the engine sent data after its terminal event")
+            self.error = self.error or sse_failure(frame)
+            if self.for_codex:
+                frame = frame_for_codex(frame)
+            if is_terminal_sse_event(self.path, frame):
+                self.terminal = frame
+                continue
+            if not self.chat_identity:
+                self.chat_identity = chat_completion_chunk_identity(frame)
+            await self.response.write(frame)
+        return self.terminal is not None
+
+
+@dataclass
+class InferenceReplica:
+    """One inference replica.
+
+    Values: ``cache`` reads ``served_models``; ``storage`` holds each scenario's records and commit history;
+    ``engines`` gives the handler of each row's engine; ``timeout_seconds`` is the positive time that the replica
+    waits for an engine; ``for_codex`` is whether streams are rewritten for a Codex client.
+
+    Purpose: ``add_inference_routes`` routes model requests to ``answer`` and status reads to ``startup_status``.
+    """
+
+    cache: ServedModelsCache
+    storage: ScenarioStorage
+    engines: EngineClients
+    timeout_seconds: float = 300.0
+    for_codex: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.timeout_seconds > 0:
+            raise ValueError("timeout_seconds is positive")
+
+    def route(
+        self, scenario: str, payload: Mapping[str, Any], session_key: str | None, *, refresh: bool
+    ) -> tuple[ServedArtifact, TrafficChoice | None]:
+        """The row that answers ``payload``, with the choice of the scenario's traffic split.
+
+        The choice is None when the scenario has no split, the request names another row, Reef cannot identify the
+        conversation, or the selected artifact has no route, as while it starts. Then ``row_for_model`` gives the row. Only a split computes
+        a bucket.
+        """
+        serving = self.cache.serving(scenario, refresh=refresh)
+        weights = serving.traffic_weights
+        model = payload.get("model")
+        names_row = isinstance(model, str) and model != ACTIVE and model in serving.rows
+        bucket = conversation_bucket(scenario, payload, session_key) if weights.is_split and not names_row else None
+        if bucket is not None:
+            artifact_id = weights.artifact_for(bucket)
+            selected = serving.rows.get(artifact_id)
+            if selected is not None:
+                return selected, TrafficChoice(artifact_id, bucket, weights)
+            # The artifact has no route yet, or the scenario stopped serving it: the active artifact answers.
+        return row_for_model(scenario, serving.rows, model), None
+
+    def record(
+        self,
+        parsed: RequestHeaders,
+        payload: Mapping[str, Any],
+        response: Mapping[str, Any],
+        artifact_id: str,
+        traffic: TrafficChoice | None = None,
+    ) -> str:
+        """Append the record of one request that the artifact ``artifact_id`` answered; return its ID.
+
+        The stored payload also names ``artifact_id``. With ``traffic``, ``metadata.traffic`` holds the bucket and the
+        weights.
+        """
+        recorded = with_request_tags(payload, parsed)
+        if traffic is not None:
+            metadata = {
+                **(recorded.get("metadata") or {}),
+                "traffic": {"bucket": traffic.bucket, "weights": dict(traffic.weights.by_artifact)},
+            }
+            recorded = {**recorded, "metadata": metadata}
+        item = AgentRecord.create(
+            scenario=parsed.scenario,
+            request_type=RequestType.INFERENCE,
+            payload={
+                **recorded,
+                "artifact_id": artifact_id,
+                "response": provider_response(response),
+            },
+            artifact_id=artifact_id,
+        )
+        store = self.storage.open(parsed.scenario)
+        try:
+            store.records.append(item)
+        finally:
+            store.close()
+        return item.agent_record_id
+
+    def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, JsonValue]:
+        """Read the current serving work's artifact, state, and safe error without changing it, and for a ready
+        artifact its engine's state (``engine_state``, RFC #1269).
+
+        The model is ``active``, an active artifact alias, or an artifact served beside it. An artifact that a
+        published route of the model serves already is ``ready``, whatever the state of the work: one request serves
+        the active artifact and each beside one, and the start of one does not change the others.
+        Unknown models answer 404; an unreadable or invalid work item answers 503.
+        """
+        try:
+            item = self.cache.table.current_request(scenario)
+        except (SQLAlchemyError, ReefError, OSError) as exc:
+            logger.warning("Could not read inference startup status for %s: %s", scenario, type(exc).__name__)
+            raise web.HTTPServiceUnavailable(text="Inference startup status is unavailable.") from exc
+        if item is None or not item.payload:
+            raise web.HTTPNotFound(text=f"scenario {scenario!r} has no inference startup request")
+        artifact_id = item.payload.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise web.HTTPServiceUnavailable(text="Inference startup status is unavailable.")
+        aliases = item.payload.get("aliases", [])
+        beside = item.payload.get("beside", {})
+        if model not in (ACTIVE, artifact_id) and (not isinstance(aliases, list) or model not in aliases):
+            if not isinstance(beside, dict) or model not in beside:
+                raise web.HTTPNotFound(text=f"scenario {scenario!r} serves no model {model!r}")
+            artifact_id = model
+        try:
+            route = self.cache.read(scenario, model)
+        except (NotServedError, StaleServedModelsError, LookupError):
+            route = None
+        if item.state == "finished" or (route is not None and route.artifact_id == artifact_id):
+            # A published route serves the artifact already: the request that starts another artifact beside it, or
+            # its failure, does not change this artifact's state.
+            state = "ready"
+        elif item.state == "failed":
+            state = "failed"
+        elif item.state == "queued" and item.started_at is None and not item.metadata.get("recovery"):
+            state = "pending"
+        else:
+            state = "starting"
+        engine, detail, steps, replicas = (
+            self.engine_state(scenario, model) if state == "ready" else (None, None, None, None)
+        )
+        if state in ("pending", "starting"):
+            steps = reported_steps(item.progress, artifact_id, item.created_at, None)
+        return {
+            "artifact_id": artifact_id,
+            "state": state,
+            "error": startup_error(item.error) if state == "failed" else None,
+            "engine": engine,
+            "engine_detail": detail,
+            "engine_replicas": None if replicas is None else replicas.to_json(),
+            "startup": None if steps is None else steps.to_json(),
+        }
+
+    def engine_state(
+        self, scenario: str, model: str
+    ) -> tuple[EngineState | None, str | None, StartupSteps | None, EngineReplicas | None]:
+        """The state of the engine of ``model``'s route (``InferenceHandler.engine_state``), for a starting engine or
+        one with starting replicas what it does now (``engine_detail``) and its phases (``engine_steps``), and its
+        replicas (``engine_replicas``); None without a route or a handler."""
+        try:
+            served = self.cache.read(scenario, model)
+            handler = self.engines.handler(served)
+        except (NotServedError, StaleServedModelsError, LookupError):
+            return None, None, None, None
+        engine, replicas = handler.engine_state(served), handler.engine_replicas(served)
+        # A warm engine that adds replicas also says how the replicas that start go on.
+        if engine != "starting" and (replicas is None or replicas.starting == 0):
+            return engine, None, None, replicas
+        return engine, handler.engine_detail(served), handler.engine_steps(served), replicas
+
+    async def resolve(
+        self,
+        scenario: str,
+        payload: Mapping[str, Any],
+        *,
+        name: str | None,
+        refresh: bool,
+        use_split: bool = False,
+        session_key: str | None = None,
+    ) -> tuple[ServedArtifact, TrafficChoice | None]:
+        """The serving row for ``name``, else for ``payload``, read off the event loop, with the choice of the traffic
+        split when ``use_split`` is true. A missing route answers 503 during startup or after failure, and 404 for an
+        unknown model."""
+        try:
+            if name is not None:
+                return await asyncio.to_thread(self.cache.read_named, scenario, name, refresh=refresh), None
+            if use_split:
+                return await asyncio.to_thread(self.route, scenario, payload, session_key, refresh=refresh)
+            return await asyncio.to_thread(self.cache.read, scenario, payload.get("model"), refresh=refresh), None
+        except NotServedError as exc:
+            status = await asyncio.to_thread(self.startup_status, scenario, ACTIVE if name is None else name)
+            if status["state"] in ("pending", "starting"):
+                raise web.HTTPServiceUnavailable(
+                    text=json.dumps(
+                        {"error": {"type": "inference_starting", "message": "The inference engine is starting."}}
+                    ),
+                    content_type="application/json",
+                    headers={"Retry-After": "30"},
+                ) from exc
+            if status["state"] == "failed":
+                raise web.HTTPServiceUnavailable(
+                    text=json.dumps({"error": {"type": "inference_start_failed", "message": status["error"]}}),
+                    content_type="application/json",
+                ) from exc
+            raise web.HTTPServiceUnavailable(text="The inference route is unavailable.") from exc
+        except StaleServedModelsError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+
+    async def row_for_retry(
+        self, scenario: str, payload: Mapping[str, Any], *, kept_row: str | None, kept_artifact: str | None
+    ) -> ServedArtifact:
+        """The row for the retry of a request to ``scenario``, read again without running the split.
+
+        At most one of ``kept_row`` and ``kept_artifact`` is set. ``kept_row`` is the row that the request selected:
+        the artifact of a split's choice, or a named route's row. ``kept_artifact`` is the artifact that the
+        request's ``model`` named and that was selected for the first attempt. Such a request keeps its artifact:
+        the retry reads the row ``kept_row``, or the row for ``payload``'s model, which must still serve
+        ``kept_artifact``. When that row is gone, or serves another artifact, the retry answers 503 with
+        ``Retry-After``; a new request selects again. Any other request reads the row for its model again, as
+        ``resolve`` reads it without a split, so its retry can reach a new active artifact.
+        """
+        if kept_row is None and kept_artifact is None:
+            return (await self.resolve(scenario, payload, name=None, refresh=True))[0]
+        gone = f"artifact {kept_row or kept_artifact!r} of scenario {scenario!r} has no route any more"
+        try:
+            if kept_row is not None:
+                return await asyncio.to_thread(self.cache.read_named, scenario, kept_row, refresh=True)
+            # The row of the model's name, else the active row, as at the first read.
+            served = await asyncio.to_thread(self.cache.read, scenario, kept_artifact, refresh=True)
+        except NotServedError as exc:
+            raise web.HTTPServiceUnavailable(text=gone, headers={"Retry-After": "1"}) from exc
+        except StaleServedModelsError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        if served.artifact_id != kept_artifact:
+            # The artifact lost its row: the model now reaches the active artifact, which is another one.
+            raise web.HTTPServiceUnavailable(text=gone, headers={"Retry-After": "1"})
+        return served
+
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        try:
+            return self.engines.handler(served)
+        except LookupError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+
+    def request_payload(self, scenario: str, served: ServedArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The body that the engine of ``served`` receives for the client's ``payload`` to ``scenario``, with the
+        scenario's serving config; 400 when its handler refuses it."""
+        try:
+            serving_config = self.cache.serving_config(scenario)
+        except StaleServedModelsError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        try:
+            return self.handler(served).request_payload(payload, serving_config=serving_config)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name. An engine's 4xx keeps its
+        status and message; a 5xx, an unreachable engine or an answer that is no JSON object is 502, and an engine
+        that does not answer in time 504. ``RuntimeLoadMismatchError`` when the engine refuses the row's model name
+        (421); ``answer`` then retries once."""
+        handler = self.handler(served)
+        try:
+            return await asyncio.wait_for(
+                handler.inference(
+                    InferenceArtifact(served.artifact_id, served_model=served.model_name),
+                    path,
+                    handler.address_model(payload, served.model_name),
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except UpstreamStatusError as exc:
+            if exc.status == 421:
+                raise RuntimeLoadMismatchError("the engine refused the selected binding") from exc
+            raise
+        except (aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
+            raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
+        except TimeoutError as exc:
+            raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
+
+    def bound_target(self, scenario: str, name: str) -> tuple[ServedArtifact, Mapping[str, JsonValue], str]:
+        """Read one exact serving row and its settings without the stale-read fallback.
+
+        Return the row, settings and their scenario-scoped SHA-256 binding ID. Refuse missing or changing state.
+        The ID identifies configuration, not a lease, credential, reservation or idempotency key.
+        """
+        table = self.cache.table
+        try:
+            sequence = table.changed_sequence()
+            served = table.read_scenario(scenario).get(name)
+            config = table.read_serving_config(scenario)
+            if sequence != table.changed_sequence():
+                raise web.HTTPServiceUnavailable(text="The serving state changed during target resolution.")
+        except (SQLAlchemyError, ReefError, OSError) as exc:
+            raise web.HTTPServiceUnavailable(text="The serving state could not be read.") from exc
+        if served is None:
+            raise web.HTTPNotFound(text="The requested model has no serving route.")
+        value = [1, scenario, name, served.to_json(), config]
+        binding_id = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return served, config, binding_id
+
+    async def answer(
+        self,
+        request: web.Request,
+        path: str,
+        *,
+        scenario: str | None = None,
+        name: str | None = None,
+        record: bool,
+        rollout: bool = False,
+        single_attempt: bool = False,
+    ) -> web.StreamResponse:
+        """Answer one model request; see the module rules. ``scenario`` overrides the scenario header (a route
+        names it), ``name`` the row; ``record`` keeps a record; ``rollout`` marks a call of Reef's own rollouts, which
+        does not stream."""
+        headers = dict(request.headers) if scenario is None else {**dict(request.headers), "x-reef-scenario": scenario}
+        try:
+            parsed = parse_request_headers(headers, RequestType.INFERENCE)
+        except HeaderError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        payload = await read_object(request)
+        binding_id = request.headers.get(BINDING_HEADER)
+        attempt_id = request.headers.get(ATTEMPT_HEADER)
+        strict = single_attempt
+        if not strict and (binding_id is not None or attempt_id is not None):
+            raise web.HTTPBadRequest(text="Use the chat completions attempt route with binding headers.")
+        strict_config: Mapping[str, JsonValue] = {}
+        if strict:
+            if (
+                name is None
+                or path != "/v1/chat/completions"
+                or payload.get("stream", False) is not False
+                or binding_id is None
+                or re.fullmatch(r"[0-9a-f]{64}", binding_id) is None
+                or attempt_id is None
+                or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", attempt_id) is None
+            ):
+                raise web.HTTPBadRequest(text="Use both binding headers on a non-streaming artifact chat call.")
+            served, strict_config, current_binding = await asyncio.to_thread(self.bound_target, parsed.scenario, name)
+            if binding_id != current_binding:
+                raise web.HTTPConflict(text="The serving binding changed. Resolve the target again.")
+            traffic = None
+        else:
+            served, traffic = await self.resolve(
+                parsed.scenario,
+                payload,
+                name=name,
+                refresh=False,
+                use_split=not rollout,
+                session_key=request.headers.get(SESSION_KEY_HEADER),
+            )
+        streaming = payload.get("stream") is True
+        if streaming and rollout:
+            raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
+        # A retry keeps an artifact that the request selected: a split's choice, a named route's row, or the artifact
+        # whose ID the body's model is. Any other request reads its row again, which can name a new active artifact.
+        kept_row = name if traffic is None else traffic.artifact_id
+        model = payload.get("model")
+        body_names_artifact = kept_row is None and model != ACTIVE and model == served.artifact_id
+        kept_artifact = served.artifact_id if body_names_artifact else None
+        # Each attempt builds its body and handler from its row: a row read again can name another engine.
+        attempts = 1 if strict else 2
+        for attempt in range(attempts):
+            if strict:
+                try:
+                    sent = self.handler(served).request_payload(payload, serving_config=strict_config)
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from exc
+            else:
+                sent = self.request_payload(parsed.scenario, served, payload)
+            try:
+                if streaming:
+                    return await self.relay_stream(request, path, parsed, sent, served, record=record, traffic=traffic)
+                response = await self.forward(served, path, sent)
+            except RuntimeLoadMismatchError as exc:
+                if attempt == attempts - 1:
+                    raise web.HTTPServiceUnavailable(text=str(exc), headers={"Retry-After": "1"}) from exc
+                served = await self.row_for_retry(
+                    parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact
+                )
+                continue
+            if not inference_aborted(response):
+                break
+            if attempt == attempts - 1:
+                raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
+            served = await self.row_for_retry(parsed.scenario, payload, kept_row=kept_row, kept_artifact=kept_artifact)
+        reply_headers = {ARTIFACT_HEADER: served.artifact_id}
+        if binding_id is not None and attempt_id is not None:
+            reply_headers.update({BINDING_HEADER: binding_id, ATTEMPT_HEADER: attempt_id})
+        if record:
+            try:
+                reply_headers[RECORD_HEADER] = await asyncio.to_thread(
+                    self.record, parsed, sent, response, served.artifact_id, traffic
+                )
+            except Exception as exc:
+                logger.exception("could not append the record of a request to %s", parsed.scenario)
+                raise web.HTTPServiceUnavailable(text="the record store cannot take the request's record") from exc
+        return web.json_response(provider_response(response), headers=reply_headers)
+
+    async def relay_stream(
+        self,
+        request: web.Request,
+        path: str,
+        parsed: RequestHeaders,
+        payload: Mapping[str, Any],
+        served: ServedArtifact,
+        *,
+        record: bool,
+        traffic: TrafficChoice | None = None,
+    ) -> web.StreamResponse:
+        """Stream the engine's answer to the client and, for a recorded call, append its record at the end, once. An
+        SSE stream gets the record's receipt before its terminal event.
+
+        The stream is complete when the engine answered with a 2xx status, reported no error or abort, ended an SSE
+        stream with a successful terminal event, and delivered a promised capture
+        (``InferenceStream.record_response_pending``). After the client response started, a failure (the engine's
+        error, a transport error, a handler's ``RuntimeLoadMismatchError``, the timeout, a missing capture or
+        terminal event) ends it without its terminal event and closes the connection, so the client reads a
+        transport error and no receipt.
+        An engine abort keeps its terminal event, without a receipt.
+        An exception before the client response started is raised again: an engine's 4xx keeps its status and
+        message, and its refusal of the row's model name (421) is ``RuntimeLoadMismatchError``. That error leaves
+        this method only then, so the caller can retry the refusal without a second response.
+        """
+        handler = self.handler(served)
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        try:
+            upstream = await asyncio.wait_for(
+                handler.inference_stream(
+                    InferenceArtifact(served.artifact_id, served_model=served.model_name),
+                    path,
+                    handler.address_model(payload, served.model_name),
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except UpstreamStatusError as exc:
+            if exc.status == 421:
+                raise RuntimeLoadMismatchError("the engine refused the selected binding") from exc
+            raise
+        except aiohttp.ClientError as exc:
+            raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
+        except TimeoutError as exc:
+            raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
+        body = bytearray()
+        complete = False
+        error: str | None = None
+        recorded = False
+        response: web.StreamResponse | None = None
+        captured_stream = upstream.record_response_pending or upstream.record_response is not None
+        try:
+            headers = {
+                key: value
+                for key, value in upstream.headers.items()
+                if key.lower() not in (RECORD_HEADER, ARTIFACT_HEADER, "content-length", "transfer-encoding")
+            }
+            headers[ARTIFACT_HEADER] = served.artifact_id
+            content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
+            response = web.StreamResponse(status=upstream.status, headers=headers)
+            await response.prepare(request)
+            relay = (
+                SSERelay(path, response, for_codex=self.for_codex, captured_stream=captured_stream)
+                if "text/event-stream" in content_type.lower()
+                else None
+            )
+            async with asyncio.timeout_at(deadline):
+                async for chunk in upstream.chunks:
+                    body.extend(chunk)
+                    if relay is None:
+                        await response.write(chunk)
+                    else:
+                        terminal = await relay.feed(chunk)
+                        if terminal and not captured_stream:
+                            # Ordinary opaque proxies keep their terminal-frame contract; they are not qualified pins.
+                            break
+                if relay is not None and (captured_stream or relay.terminal is None):
+                    await relay.finish()
+            if not 200 <= upstream.status < 300:
+                error = f"the engine's stream returned HTTP {upstream.status}"
+            elif upstream.record_response_pending and upstream.record_response is None:
+                error = "the engine's stream ended without its promised capture"
+            elif upstream.record_response is not None and inference_aborted(upstream.record_response):
+                error = INFERENCE_ABORT_ERROR
+            elif relay is not None and relay.error is not None:
+                error = relay.error
+            elif relay is not None and relay.terminal is None:
+                error = "the engine's SSE stream ended without a terminal event"
+            else:
+                complete = True
+            if relay is not None and relay.terminal is not None:
+                if complete:
+                    frames: tuple[bytes, ...] = (relay.terminal,)
+                    if record:
+                        recorded = True
+                        captured = stream_record(upstream, bytes(body), complete=True)
+                        record_id = await asyncio.to_thread(
+                            self.record,
+                            parsed,
+                            payload,
+                            captured,
+                            served.artifact_id,
+                            traffic,
+                        )
+                        frames = receipt_sse_events(path, relay.chat_identity, relay.terminal, record_id)
+                    for frame in frames:
+                        await response.write(frame)
+                elif error == INFERENCE_ABORT_ERROR:
+                    await response.write(relay.terminal)
+        except ConnectionResetError:
+            if response is None:
+                raise
+            complete = False
+            error = "the client disconnected"
+        except (aiohttp.ClientError, ValueError, RuntimeLoadMismatchError, TimeoutError) as exc:
+            if response is None or not response.prepared:
+                # Setup failed before the client response started: the error is the answer.
+                raise
+            complete = False
+            error = "the engine's stream timed out" if isinstance(exc, TimeoutError) else str(exc)
+        except asyncio.CancelledError:
+            complete = False
+            error = "the stream was cancelled"
+            raise
+        finally:
+            await upstream.close()
+            if error is not None:
+                logger.warning("stream of %s for %s ended early: %s", path, parsed.scenario, error)
+            if record and not recorded:
+                captured = stream_record(upstream, bytes(body), complete=complete, error=error)
+                try:
+                    await asyncio.to_thread(
+                        self.record,
+                        parsed,
+                        payload,
+                        captured,
+                        served.artifact_id,
+                        traffic,
+                    )
+                except Exception:
+                    logger.exception("could not append the record of a stream of %s", parsed.scenario)
+        if response.prepared and 200 <= upstream.status < 300 and not complete and error != INFERENCE_ABORT_ERROR:
+            # Standard SDKs accept a clean HTTP EOF even without an SSE terminal event.
+            transport = request.transport
+            if transport is not None:
+                transport.abort()
+        return response
+
+
+def add_inference_routes(app: web.Application, replica: InferenceReplica) -> None:
+    """Add the model routes of ``replica`` (see the module rules) to ``app``."""
+
+    def checked(route: str) -> str:
+        path = "/v1/" + route
+        if path not in INFERENCE_PATHS:
+            raise web.HTTPNotFound(text=f"{path} is not an inference route")
+        return path
+
+    def recorded(path: str) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
+        async def inference(request: web.Request) -> web.StreamResponse:
+            rollout = request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true")
+            return await replica.answer(request, path, record=not rollout, rollout=rollout)
+
+        return inference
+
+    async def startup_status(request: web.Request) -> web.Response:
+        status = await asyncio.to_thread(
+            replica.startup_status, request.match_info["scenario"], request.query.get("model", ACTIVE)
+        )
+        return web.json_response(status, headers={"Cache-Control": "no-store"})
+
+    async def target(request: web.Request) -> web.Response:
+        name = request.query.get("model", ACTIVE)
+        if not name or len(name) > 256:
+            raise web.HTTPBadRequest(text="model must contain 1 to 256 characters.")
+        served, _, binding_id = await asyncio.to_thread(replica.bound_target, request.match_info["scenario"], name)
+        return web.json_response(
+            {
+                "contract_version": 1,
+                "model": name,
+                "artifact_id": served.artifact_id,
+                "binding_id": binding_id,
+                "protocol": "openai_chat_completions",
+                "streaming": False,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def scenario_inference(request: web.Request) -> web.StreamResponse:
+        """A call to ``/v1/*`` with the scenario in the path, answered and recorded as the same call to ``/v1/*``.
+
+        A harness that a client installed sends no scenario header: its model binding names the scenario in its
+        base URL (``reef.harness.sync``).
+        """
+        path = checked(request.match_info["route"])
+        rollout = request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true")
+        return await replica.answer(
+            request, path, scenario=request.match_info["scenario"], record=not rollout, rollout=rollout
+        )
+
+    async def evaluation(request: web.Request) -> web.StreamResponse:
+        path = checked(request.match_info["route"])
+        return await replica.answer(request, path, scenario=request.match_info["scenario"], record=False, rollout=True)
+
+    async def artifact(request: web.Request) -> web.StreamResponse:
+        path = checked(request.match_info["route"])
+        return await replica.answer(
+            request,
+            path,
+            scenario=request.match_info["scenario"],
+            name=request.match_info["artifact_id"],
+            record=True,
+            single_attempt="attempt" in request.match_info,
+        )
+
+    async def artifact_evaluation(request: web.Request) -> web.StreamResponse:
+        path = checked(request.match_info["route"])
+        return await replica.answer(
+            request,
+            path,
+            scenario=request.match_info["scenario"],
+            name=request.match_info["artifact_id"],
+            record=False,
+            rollout=True,
+            single_attempt="attempt" in request.match_info,
+        )
+
+    for path in INFERENCE_PATHS:
+        app.router.add_post(path, recorded(path))
+    app.router.add_get("/reef/scenarios/{scenario}/inference/status", startup_status)
+    app.router.add_get("/reef/scenarios/{scenario}/inference/target", target)
+    app.router.add_post("/reef/scenarios/{scenario}/v1/{route:.+}", scenario_inference)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
+    app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
+    # Register before the broad routes. Older replicas reject these suffixes before executing a model.
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:chat/completions}/{attempt:attempt}", artifact
+    )
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:chat/completions}/{attempt:attempt}",
+        artifact_evaluation,
+    )
+    app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", artifact)
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:.+}", artifact_evaluation
+    )
+
+
+def build_inference_app(
+    served_models: ServedModels,
+    storage: ScenarioStorage,
+    engines: EngineClients,
+    *,
+    tokens: str | tuple[str, ...] | None,
+    evaluation_tokens: str | tuple[str, ...] | None = None,
+    max_cache_age_seconds: float = 300.0,
+    timeout_seconds: float = 300.0,
+    for_codex: bool = False,
+) -> web.Application:
+    """The inference HTTP app: model routes, startup status, and ``/healthz`` behind the service tokens."""
+    replica = InferenceReplica(
+        ServedModelsCache(served_models, max_cache_age_seconds=max_cache_age_seconds),
+        storage,
+        engines,
+        timeout_seconds,
+        for_codex,
+    )
+    app = service_application(tokens, evaluation_tokens=evaluation_tokens)
+    add_inference_routes(app, replica)
+    return app
+
+
+__all__ = [
+    "ARTIFACT_HEADER",
+    "ATTEMPT_HEADER",
+    "BINDING_HEADER",
+    "INFERENCE_PATHS",
+    "RECORD_HEADER",
+    "SESSION_KEY_HEADER",
+    "InferenceReplica",
+    "NotServedError",
+    "ServedModelsCache",
+    "StaleServedModelsError",
+    "TrafficChoice",
+    "TrafficWeights",
+    "add_inference_routes",
+    "build_inference_app",
+    "provider_response",
+]

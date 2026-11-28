@@ -42,6 +42,35 @@ Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) through Reef'
 
 No checkpoint differs from the base model by more than the noise, so this run does not show that the recipe improves Terminal-Bench.
 
+On Slime, Qwen3.5-9B trained all its weights with the training settings of `examples/tmax_seeds/serve.yaml`. The runs trained on 6,748 of the 6,844 TMax v1.1 seeds and held out the other 96. Two runs trained the seeds only: they imported them as train tasks and ran no generator (`rounds: 0`). One run gave the seeds to the example's generator, so Claude Code's variants trained too. Each run kept one GPU for the evaluation, so Slime had 2 rollout engines, not 3.
+
+Each checkpoint ran the held-out tasks (4 attempts each, avg@4) and Terminal-Bench 2.0 (89 tasks, 5 attempts each, avg@5) in E2B, on an SGLang engine of its own, with the training agent and sampling. In parentheses is the difference to the base model, paired over tasks, with a bootstrap 95% interval over tasks. The base model, scored three more times, shows the noise between evaluations of the same weights: up to 4.7 points on the held-out tasks and 2.9 points on Terminal-Bench 2.0. Run 1 stopped after step 50, before the Terminal-Bench 2.0 evaluation of its step 48.
+
+| Run | Checkpoint | Held-out tasks, avg@4 | Terminal-Bench 2.0, avg@5 |
+| --- | --- | --- | --- |
+| Base model | base | 49.7 | 18.2 |
+| Base model, scored again during the seeds only runs | base | 50.3 (+0.5 [-4.9, +6.0]) | 21.1 (+2.9 [+0.0, +5.8]) |
+| Base model, scored again before the run with variants | base | 50.3 (+0.5 [-4.9, +6.2]) | 18.7 (+0.4 [-3.1, +3.8]) |
+| Base model, scored again after step 48 of the run with variants | base | 45.6 (-4.2 [-9.1, +0.8]) | 20.7 (+2.5 [-0.7, +5.6]) |
+| Seeds only, run 1 (50 steps) | step 16 | 50.0 (+0.3 [-4.9, +5.5]) | 19.1 (+0.9 [-2.2, +4.0]) |
+| | step 32 | 53.1 (+3.4 [-1.8, +8.9]) | 19.1 (+0.9 [-2.2, +4.0]) |
+| | step 48 | 57.3 (+7.6 [+1.8, +13.5]) | not run |
+| Seeds only, run 2 (81 steps) | step 16 | 50.5 (+0.8 [-3.9, +5.2]) | 19.8 (+1.6 [-1.6, +4.5]) |
+| | step 32 | 49.0 (-0.8 [-6.0, +4.7]) | 20.2 (+2.0 [-1.8, +5.8]) |
+| | step 48 | 53.9 (+4.2 [-1.0, +9.9]) | 20.4 (+2.2 [-1.6, +5.8]) |
+| | step 64 | 58.3 (+8.6 [+2.3, +15.1]) | 20.4 (+2.2 [-0.4, +5.2]) |
+| | step 80 | 57.6 (+7.8 [+1.8, +14.1]) | 19.8 (+1.6 [-1.1, +4.3]) |
+| Seeds and Claude Code's variants, one run | step 16 | 53.1 (+3.4 [-1.6, +8.6]) | 19.6 (+1.3 [-2.2, +4.7]) |
+| | step 32 | 52.9 (+3.1 [-2.6, +8.9]) | 18.7 (+0.4 [-2.2, +3.1]) |
+| | step 48 | 56.0 (+6.2 [+0.5, +12.2]) | 17.3 (-0.9 [-4.7, +2.7]) |
+| | step 64 | 57.0 (+7.3 [+0.5, +14.1]) | 21.1 (+2.9 [-0.2, +6.1]) |
+
+The held-out difference clears zero in run 1 at step 48, in run 2 at steps 64 and 80, in the two seeds only runs pooled at step 48 (each task's mean over both runs), +5.9 [+0.8, +11.3], and in the run with variants at steps 48 and 64. Run 2 alone at step 48 does not clear zero, and the intervals are not corrected for the several steps each run was scored at. No Terminal-Bench 2.0 difference of a trained checkpoint clears zero, and each stays within the 2.9 points between two scorings of the base model.
+
+Against the mean of the two scorings of the base model inside its own run, the run with variants is +8.1 [+3.5, +12.5] on the held-out tasks at step 48 (41 tasks up, 16 down, sign test p = 0.001) and +9.1 [+3.5, +14.7] at step 64 (45 up, 18 down, p = 0.001). On Terminal-Bench 2.0 it is -2.4 [-6.2, +1.1] at step 48 and +1.5 [-1.2, +4.4] at step 64.
+
+The run with variants is one run, and no difference from seeds only clears zero. Against the mean of both seeds only runs, the held-out difference is +2.9 [-1.2, +7.2] at step 16, +1.8 [-2.5, +6.2] at step 32 and +0.4 [-4.2, +4.8] at step 48; against run 2, the only seeds only run that reached step 64, it is -1.3 [-7.3, +4.4] at step 64. On Terminal-Bench 2.0 it is +0.1 [-2.8, +3.3] at step 16 and -1.0 [-3.8, +1.6] at step 32, and against run 2, the only seeds only run scored there, -3.1 [-7.2, +0.7] at step 48 and +0.7 [-2.5, +3.8] at step 64. Variants were 104 of the 512 tasks that trained through step 64 (20%), though `variant_share` is 0.5: the Designer varies each parent once, and calibration kept 114 of the 306 variants it measured in the first 50 generations (37%). The run restarted once from its step 37 checkpoint, on the same software.
+
 ## Layout
 
 ```text
@@ -63,7 +92,7 @@ beta/autoenvscaling/
   examples/tmax_seeds/serve.yaml                 on Slime, the same seed tasks: all weights of the policy train, on one node of 8 GPUs
 ```
 
-AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks).
 
 ## The generator
 
@@ -213,7 +242,7 @@ By default, the band does not decide what trains. The recipe trains each valid t
 
 ## The training pool review
 
-By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration.rst#generated-tasks) explains each key, its default and the reasons a review gives:
+By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration-generated-tasks.rst#generated-tasks) explains each key, its default and the reasons a review gives:
 
 ```yaml
 pipeline:
@@ -317,7 +346,7 @@ unzip tasks.zip -d tmax-tasks
 python -m recipes.beta.autoenvscaling.tmax --tasks tmax-tasks --out /data/tmax-seeds --select ids.json
 ```
 
-`--select` names a JSON list of task ids, or upstream's selection file (a list of objects with a `task_id`; the other keys come from each task's `task.json`); without it, every task directory with a `task.json` is converted. The command makes no network call. It exits with 1 when it refuses a task, and `conversion.json` in the output directory lists the converted tasks, with the `container.def` sections each leaves out, and each refused task with the reason. A second run keeps the tasks it wrote before. The conversion is reimplemented from upstream's `baselines/tmax.py`:
+`--select` names a JSON list of task ids, or upstream's selection file (a list of objects with a `task_id`; the other keys come from each task's `task.json`); without it, every task directory with a `task.json` is converted. The command makes no network call. It exits with 1 when it refuses a task, and `conversion.json` in the output directory lists the converted tasks, with the `container.def` sections each leaves out, and each refused task with the reason. A second run into the same directory keeps the tasks it wrote before. A seed directory that an earlier version of Reef wrote can fail its digest check: the generator refuses it, and a second run into it refuses each task. Then convert the tasks again into a new directory. The conversion is reimplemented from upstream's `baselines/tmax.py`:
 
 - `container.def` becomes the Dockerfile: `From:` becomes `FROM`, each `%environment` export an `ENV` line, each `%files` entry a `COPY` of its file in the task directory, and `%post` the build script `tmax_build.sh`. Of the files with the entry's name, its file is the one whose path ends with the most parts of the entry's source path. The file goes under `fixtures/` by the last three parts of that path, with each run of characters that a task's file name cannot hold made an underscore, so a variant's task can keep it. The Dockerfile then installs tmux, which the solver's agent needs, and pytest, which the verifier needs, since neither has network.
 - `task.json`'s `description` becomes `instruction.md`, and `test_final_state.py` becomes `tests/test_outputs.py`. The verifier, `tmax_verifier.sh`, scores the fraction of those tests that pass with pytest's own JUnit report. It scores 0 when the report is missing or holds no test, never counts a skipped test as passed, removes reports and rewards left before it runs, and reads no pytest config file or `conftest.py` above the tests.
@@ -465,17 +494,18 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
 ```
 
-Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Slime's rollout engines, and 1 runs Reef's serving engine. Each job is one Slime rollout of 16 tasks with 16 rollouts each, trained as one optimizer step (`objective: slime_dataset`, GRPO without the division by the standard deviation). With `jobs_per_round: 0`, the next generation starts while fewer than 16 saved tasks wait, so the Designer works ahead of training. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reaches the trainer, which runs out of memory on a long sample without it, as it does without the 64K window. Plan the disk before a long run: Reef keeps every step's weights as an artifact, about 18 GB in the artifact repository and as much again in its cache, and each Megatron checkpoint takes about 135 GB.
+Slime trains all weights of the policy. 4 GPUs hold the Megatron actor, 3 run Slime's rollout engines, and 1 runs Reef's serving engine. Each job is one Slime rollout of 8 tasks with 32 rollouts each, trained as one optimizer step (`objective: slime_dataset`, GRPO without the division by the standard deviation). The loss is Slime's own for Qwen3.5: REINFORCE on each sampled token, truncated importance sampling against the rollout engines' log-probs, score centering over their 128 most likely tokens, and the same weight for each token. With `jobs_per_round: 0`, the next generation starts while fewer than 16 saved tasks wait, so the Designer works ahead of training. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reaches the trainer, which runs out of memory on a long sample without it, as it does without the 64K window. Plan the disk before a long run: Reef keeps every step's weights as an artifact, about 18 GB in the artifact repository and as much again in its cache, and each Megatron checkpoint takes about 135 GB.
 
 ### Settings the examples depend on
 
 The examples need each of these settings, on Tinker and on Slime:
 
-- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
+- **The agent.** `generator.agent` and the training agent (`rollout.agent` on Tinker, `harbor.agent` on Slime) are `VerifiedTerminus2` (`import_path: reef.samples.generator.terminus:VerifiedTerminus2`). When a training rollout fills the model's context, it ends the run, and the verifier scores the workspace. terminus-2 fails the run instead, and a rollout without a reward trains as 0.
 - **The reply cap.** `max_tokens` in `llm_kwargs` caps each reply at 16384 tokens, as the official AutoEnvScaling solver. Tinker takes a prompt whose length plus `max_tokens` passes the context, so on Tinker the cap does not shorten a rollout's history. SGLang refuses such a prompt, so on Slime a rollout ends at a history of 65536 - 16384 = 49152 tokens. On the chat completions route, `model_info` caps nothing: Harbor only names its `max_output_tokens` to the model after a cut reply.
 - **No compaction, no thinking.** `enable_summarize: false`, as the official solver, and `enable_thinking: false`. Reef trains a rollout as one sample: a summarized history does not assemble into one, and in a thinking history only the last turn trains.
 - **No recording.** `record_terminal_session: false`: the tasks have no network, and on `e2b` the recorder's install hangs the rollout.
 - **The pace of the rounds.** On Tinker, a generation of `count` 8 fills one job of `buffer_size` 8, and `jobs_per_round: 1` starts the next round after that job. On Slime, `jobs_per_round: 0` starts the next round when the last one ends, while fewer than `refill_tasks` saved tasks wait, and `validation_concurrency` checks the candidates of one generation at the same time.
+- **Full jobs.** On Slime, `job_samples` and `buffer_size` in `pipeline.sample2job.config` equal `rollout-batch-size`, so each job holds one full Slime rollout of tasks. A job of fewer tasks fills its rollout with its first tasks again, and they train more than once in one step.
 - **The deadline.** `generation_deadline_seconds` covers the Designer's runs and the calibration of one generation. In the Tinker run of [training runs](#training-runs), a generation with 4 variants and 4 seeds took about 93 minutes: about 20 for Claude Code's runs and the rest for the calibration of the variants. The default 1800 s ends such a generation during the calibration.
 
 With compaction on, terminus-2's default, terminus-2 summarizes its history before the model's context window only when it knows the window, and it counts tokens with LiteLLM's tokenizer, which runs about 8 to 10% under a Qwen model's own count. On Tinker it knows neither, so a long episode keeps overflowing the window. In a harness with compaction on, set `model_info` in its `kwargs` with `max_input_tokens` well under the window: for a 65536-token window, `{max_input_tokens: 48000, max_output_tokens: 8192, input_cost_per_token: 0.0, output_cost_per_token: 0.0}`.
@@ -493,13 +523,13 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
    from pathlib import Path
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
-   from reef.pipeline_context import PipelineContext
+   from reef.samples.context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings, StoredGeneratorState
    from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, GenerationJob, next_generation
-   from reef.storage.samples import SampleStore
-   from reef.storage.sql_data import SQLiteDataStore
-   from reef.storage.sqlite import SQLiteScenarioStorage
-   from reef.storage.tasks import LocalTaskFileStore
+   from reef.storage.scenario.samples import SampleStore
+   from reef.storage.sql.data import SQLiteDataStore
+   from reef.storage.sql.sqlite import SQLiteScenarioStorage
+   from reef.storage.data.tasks import LocalTaskFileStore
 
 
    async def save_tasks(generator_config: dict[str, object], rounds: int, state_dir: str) -> None:

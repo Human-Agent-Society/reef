@@ -9,9 +9,9 @@ import pytest
 import yaml
 from tests.support.config_helpers import deployment_layout
 
+from reef.deploy.execution import validate_services
+from reef.deploy.orchestrator import _Stack
 from reef.execution.executor.ray import RayExecutor
-from reef.service.deploy.execution import validate_services
-from reef.service.deploy.orchestrator import _Stack
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 

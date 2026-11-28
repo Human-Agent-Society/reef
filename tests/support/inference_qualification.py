@@ -20,13 +20,13 @@ from uuid import uuid4
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from reef.api.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.artifact import Artifact
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, InferenceRuntime, RuntimeContractError
-from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 
 class OutputOracle(ABC):

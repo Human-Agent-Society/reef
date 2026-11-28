@@ -12,19 +12,19 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import live_objects
 from tests.support.sse_streams import FakeStream
 
+from reef.api.streaming import stream_record
 from reef.artifact import InMemoryRepositoryBackend
+from reef.control.dispatcher import Dispatcher
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.snapshot import SnapshotRef
-from reef.dispatcher import Dispatcher
+from reef.deploy.service_config import service_config_from_mapping
 from reef.observability import TracingSettings, build_record_observer
-from reef.service.deploy.service_config import service_config_from_mapping
-from reef.service.streaming import stream_record
-from reef.storage.commits import CommitRecord
-from reef.storage.observer import ObservedScenarioStorage, RecordObserver
-from reef.storage.samples import consumed_sample_id, stage_item_id
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario.commits import CommitRecord
+from reef.storage.scenario.observer import ObservedScenarioStorage, RecordObserver
+from reef.storage.scenario.samples import consumed_sample_id, stage_item_id
+from reef.storage.sql.coordination import memory_coordination
+from reef.storage.sql.sqlite import SQLiteScenarioStorage
 
 # -- configuration -----------------------------------------------------------
 
